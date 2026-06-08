@@ -55,6 +55,22 @@ Do not install or expect Claude Code, OpenCode, or other agent CLIs on this acco
 keys for runtime slots are managed through `opsctl runtime-secret`; Gemini CLI authentication is a
 separate operating-account credential.
 
+Runtime provider secrets are separate from handoff credentials. For OpenClaw slots, the gateway
+handoff token is in `/home/SLOT/.openclaw/openclaw.json` at JSON path `gateway.auth.token`.
+`/home/SLOT/.openclaw-auth-profile-secrets` is an auth/profile config directory, not the gateway
+token location. For Hermes slots, the workspace handoff password is in
+`/srv/openclaw-ops/handoff/hermes-workspace-SLOT.env` under key `password`.
+
+Handoff credential value retrieval is a current `opsctl` gap. If an authorized operator needs the
+value in their own terminal, the retained baseline exact command is:
+
+```bash
+sudo /opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh handoff-credential SLOT
+```
+
+It prints the OpenClaw gateway token or Hermes workspace password. Do not replace it with broad
+secret-file discovery commands.
+
 This guidance is intentionally global for Codex and Gemini CLI sessions under the `svcops` Unix
 account only.
 

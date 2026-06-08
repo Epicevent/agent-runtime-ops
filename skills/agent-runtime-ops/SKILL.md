@@ -24,6 +24,13 @@ Use this skill to keep natural-language operations tied to the real repository a
 - If asked for the exact location of a token, password, credential, session, or other secret, do not
   mix verified structure with guesses. If the exact file and field are not known, say that briefly.
   A mounted config/auth/profile directory is not proof of the exact token location.
+- Runtime provider secrets and handoff credentials are different. OpenClaw gateway handoff tokens
+  live in `/home/SLOT/.openclaw/openclaw.json` at JSON path `gateway.auth.token`. Hermes workspace
+  handoff passwords live in `/srv/openclaw-ops/handoff/hermes-workspace-SLOT.env` under key
+  `password`.
+- Handoff credential value retrieval is a current `opsctl` gap. For an authorized operator's own
+  terminal, use the retained baseline exact command:
+  `sudo /opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh handoff-credential SLOT`.
 - Do not put customer state, NAS passwords, API keys, gateway tokens, or real slot assignment details
   in the repo.
 - Do not pass raw secret values in MCP tool arguments. Use allowed files or terminal stdin.

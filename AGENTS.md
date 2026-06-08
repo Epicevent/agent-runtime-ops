@@ -227,6 +227,17 @@ heartbeat_config_every=0m
 heartbeat_config_enabled=no
 ```
 
+Current known gap: handoff credential value retrieval is not yet exposed through `opsctl`. The
+retained baseline wrapper has the exact handoff command and structure. For an authorized operator
+who needs the value in their own terminal, provide the exact manual command and warn that it prints
+the OpenClaw gateway token or Hermes workspace password:
+
+```bash
+ssh svcops "sudo /opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh handoff-credential SLOT"
+```
+
+Record this as a legacy exception until the operation is migrated into `agent-runtime-ops`.
+
 ## Secrets
 
 Never print, paste, commit, or log secret values. Do not pass secret values as MCP JSON arguments.
@@ -246,6 +257,33 @@ Status check:
 ```bash
 sudo /usr/local/bin/opsctl runtime-secret status SLOT
 ```
+
+Runtime provider secrets are not handoff credentials. Do not use
+`opsctl runtime-secret status` to answer where an OpenClaw gateway token or Hermes workspace
+password is stored.
+
+Known handoff credential structure, learned from the retained baseline handoff command:
+
+```text
+OpenClaw gateway token:
+  host file: /home/SLOT/.openclaw/openclaw.json
+  JSON path: gateway.auth.token
+  container path: /home/node/.openclaw/openclaw.json
+
+OpenClaw auth/profile directory:
+  host directory: /home/SLOT/.openclaw-auth-profile-secrets
+  container path in current agent-runtime profile: /home/node/.config/openclaw
+  meaning: auth/profile config directory, not proof of the gateway token location
+
+Hermes workspace password:
+  host file: /srv/openclaw-ops/handoff/hermes-workspace-SLOT.env
+  key: password
+  legacy source, if migrated by baseline: /srv/openclaw-ops/reports/hermes-workspace-SLOT.password
+```
+
+If an authorized operator asks to retrieve the value, give an exact-field manual command for their
+own terminal. Do not give broad `cat`, `less`, or recursive `grep` commands over secret directories
+when the exact field is known.
 
 ## MCP
 
