@@ -123,6 +123,7 @@ copy_tree() {
   install -d -o root -g "$OPS_GROUP" -m 0755 "$dst"
   rsync -a --delete \
     --exclude '.git' \
+    --exclude '.venv' \
     --exclude '__pycache__' \
     --exclude '*.pyc' \
     "$src"/ "$dst"/
