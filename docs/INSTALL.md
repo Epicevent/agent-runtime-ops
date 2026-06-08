@@ -8,7 +8,7 @@
 실행 주체: **sudo 가능한 관리자 계정**
 
 ```bash
-curl -L https://raw.github.com/Epicevent/agent-runtime-ops/main/go | sudo bash
+sudo -v && curl -fsSL https://raw.githubusercontent.com/Epicevent/agent-runtime-ops/main/go | sudo bash
 ```
 
 같은 명령을 다시 실행하면 `main` 기준 최신 설치본으로 갱신된다.
