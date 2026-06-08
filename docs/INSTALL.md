@@ -45,7 +45,14 @@ sudo opsctl self-update --ref FULL_40_CHARACTER_COMMIT_SHA
 
 ```bash
 sudo bash /opt/agent-runtime-ops/install.sh --check
-sudo -u svcops opsctl profile list
+sudo -iu svcops -- opsctl profile list
+```
+
+`svcops`로 이미 로그인한 상태에서는 `sudo -u svcops`를 붙이지 않는다.
+
+```bash
+opsctl profile list
+opsctl check oc1
 ```
 
 ## 설치 계정과 운영계정
