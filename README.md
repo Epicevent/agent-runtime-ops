@@ -19,29 +19,35 @@ curl -fsSL "https://raw.githubusercontent.com/Epicevent/agent-runtime-ops/$OPS_R
 이 명령은 서버에 `opsctl`이 아직 없을 때 쓰는 bootstrap이다. `OPS_REF`에는
 검토한 commit 전체 SHA를 넣는다. branch 이름은 허용하지 않는다.
 
+## 업데이트 승인
+
+실행 주체: **root 관리자**
+
+업데이트할 commit을 먼저 승인한다. 이 명령은 서버 private 상태인
+`/srv/openclaw-ops/ops-update.yaml`만 갱신한다.
+
+```bash
+sudo opsctl update approve FULL_40_CHARACTER_COMMIT_SHA
+```
+
+승인 상태 확인:
+
+```bash
+opsctl update status
+```
+
 ## 이후 갱신
 
-첫 설치가 끝난 뒤 갱신 실행은 아래 명령으로 한다.
+실행 주체: **sudo 가능한 관리자 계정**
+
+승인이 끝난 뒤 실제 갱신은 아래 명령만 사용한다.
 
 ```bash
 sudo opsctl self-update
 ```
 
-이 명령은 `main` 같은 움직이는 branch를 설치하지 않는다. 서버 private 상태의
+이 명령은 `main` 같은 움직이는 branch를 설치하지 않는다. 오직
 `/srv/openclaw-ops/ops-update.yaml`에 승인된 full commit만 설치한다.
-
-```yaml
-updates:
-  agent-runtime-ops:
-    repo_url: "https://github.com/Epicevent/agent-runtime-ops.git"
-    approved_ref: "FULL_40_CHARACTER_COMMIT_SHA"
-```
-
-긴급히 commit을 직접 지정할 때도 branch 이름은 허용하지 않는다.
-
-```bash
-sudo opsctl self-update --ref FULL_40_CHARACTER_COMMIT_SHA
-```
 
 설치 확인:
 

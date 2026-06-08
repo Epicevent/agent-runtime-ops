@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import os
 import re
@@ -14,7 +15,7 @@ from .paths import DEFAULT_STATE_ROOT
 from .profiles import list_profile_names, load_profile
 from .renderer import render_compose
 from .state import load_desired_slot
-from .yamlio import load_yaml
+from .yamlio import dump_yaml, load_yaml
 
 DEFAULT_REPO_URL = "https://github.com/Epicevent/agent-runtime-ops.git"
 UPDATE_POLICY_NAME = "ops-update.yaml"
@@ -52,6 +53,48 @@ def _validate_update_target(repo_url: str, ref: str) -> None:
         raise ValueError("self-update requires an approved full 40-character commit sha")
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def _write_update_policy(state_root: Path, ref: str) -> Path:
+    _validate_update_target(DEFAULT_REPO_URL, ref)
+    if not state_root.is_dir():
+        raise FileNotFoundError(state_root)
+
+    policy_path = state_root / UPDATE_POLICY_NAME
+    data = {
+        "meta": {
+            "schema_version": 1,
+            "updated_at": _now_iso(),
+            "scope": "private_server_state",
+        },
+        "updates": {
+            "agent-runtime-ops": {
+                "repo_url": DEFAULT_REPO_URL,
+                "approved_ref": ref,
+                "approved_at": _now_iso(),
+                "approved_by": os.environ.get("SUDO_USER") or os.environ.get("USER") or "",
+            }
+        },
+    }
+
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=state_root, delete=False) as fh:
+        tmp_path = Path(fh.name)
+        fh.write(dump_yaml(data))
+        fh.flush()
+        os.fsync(fh.fileno())
+    try:
+        if hasattr(os, "chown"):
+            os.chown(tmp_path, 0, state_root.stat().st_gid)
+        os.chmod(tmp_path, 0o640)
+        os.replace(tmp_path, policy_path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    return policy_path
+
+
 def cmd_profile_list(args: argparse.Namespace) -> int:
     for name in list_profile_names():
         profile = load_profile(name)
@@ -71,13 +114,8 @@ def cmd_self_update(args: argparse.Namespace) -> int:
         return 2
 
     try:
-        if args.ref:
-            repo_url = DEFAULT_REPO_URL
-            ref = args.ref
-            policy_source = "cli_ref"
-        else:
-            repo_url, ref = _approved_update_from_policy(_state_root(args))
-            policy_source = str(_state_root(args) / UPDATE_POLICY_NAME)
+        repo_url, ref = _approved_update_from_policy(_state_root(args))
+        policy_source = str(_state_root(args) / UPDATE_POLICY_NAME)
         _validate_update_target(repo_url, ref)
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -103,6 +141,34 @@ def cmd_self_update(args: argparse.Namespace) -> int:
             subprocess.run(["bash", str(repo / "install.sh"), "install"], check=True)
         except subprocess.CalledProcessError as exc:
             return exc.returncode or 1
+    return 0
+
+
+def cmd_update_approve(args: argparse.Namespace) -> int:
+    if not _is_root():
+        print("error: run as root/admin: sudo opsctl update approve FULL_SHA", file=sys.stderr)
+        return 2
+    try:
+        policy_path = _write_update_policy(_state_root(args), args.ref)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(f"approved_ref={args.ref}")
+    print(f"policy_file={policy_path}")
+    return 0
+
+
+def cmd_update_status(args: argparse.Namespace) -> int:
+    try:
+        repo_url, ref = _approved_update_from_policy(_state_root(args))
+        _validate_update_target(repo_url, ref)
+    except Exception as exc:
+        print("update_status=not_ready")
+        print(f"reason={exc}")
+        return 1
+    print("update_status=ready")
+    print(f"repo_url={repo_url}")
+    print(f"approved_ref={ref}")
     return 0
 
 
@@ -305,8 +371,15 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     self_update = sub.add_parser("self-update")
-    self_update.add_argument("--ref", help="approved full 40-character commit sha")
     self_update.set_defaults(func=cmd_self_update)
+
+    update = sub.add_parser("update")
+    update_sub = update.add_subparsers(dest="update_command", required=True)
+    update_approve = update_sub.add_parser("approve")
+    update_approve.add_argument("ref", help="approved full 40-character commit sha")
+    update_approve.set_defaults(func=cmd_update_approve)
+    update_status = update_sub.add_parser("status")
+    update_status.set_defaults(func=cmd_update_status)
 
     profile = sub.add_parser("profile")
     profile_sub = profile.add_subparsers(dest="profile_command", required=True)
