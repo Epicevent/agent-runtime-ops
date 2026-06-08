@@ -192,11 +192,12 @@ install_self_update_sudoers() {
 }
 
 activate_release() {
-  local commit="$1"
-  local release_dir="$RELEASES_DIR/$commit"
+  local release_dir="$1"
+  local release_name
+  release_name="$(basename "$release_dir")"
   local next_link="$INSTALL_ROOT/.current.next"
   [[ -d "$release_dir" ]] || die "missing release dir: $release_dir"
-  ln -sfn "releases/$commit" "$next_link"
+  ln -sfn "releases/$release_name" "$next_link"
   mv -Tf "$next_link" "$CURRENT_LINK"
   rm -f "$BIN_LINK"
   cat >"$BIN_LINK" <<EOF
@@ -211,7 +212,7 @@ EOF
 }
 
 install_package() {
-  local src commit tmp_release release_dir
+  local src commit release_name tmp_release release_dir
   if ! src="$(repo_root)"; then
     bootstrap_from_git
   fi
@@ -230,17 +231,20 @@ install_package() {
   fi
 
   install -d -o root -g "$OPS_GROUP" -m 0755 "$INSTALL_ROOT" "$RELEASES_DIR"
-  release_dir="$RELEASES_DIR/$commit"
-  tmp_release="$RELEASES_DIR/.tmp.$commit.$$"
+  release_name="$commit.$(date +%Y%m%d%H%M%S).$$"
+  release_dir="$RELEASES_DIR/$release_name"
+  tmp_release="$RELEASES_DIR/.tmp.$release_name"
   rm -rf "$tmp_release"
   copy_tree "$src" "$tmp_release"
-  install_python_env "$tmp_release"
-  rm -rf "$release_dir"
   mv "$tmp_release" "$release_dir"
-  chown -R root:"$OPS_GROUP" "$release_dir"
+  if ! install_python_env "$release_dir"; then
+    rm -rf "$release_dir"
+    die "failed to build release python environment"
+  fi
   write_manifest "$release_dir" "$src" "$commit"
+  chown -R root:"$OPS_GROUP" "$release_dir"
 
-  activate_release "$commit"
+  activate_release "$release_dir"
   install_self_update_sudoers
 
   if [[ -d "$STATE_ROOT" ]]; then
