@@ -160,6 +160,7 @@ class McpServer:
             },
             "instructions": (
                 "Use these tools to inspect and operate the svcops runtime through opsctl. "
+                "Use selector arguments such as slot_class for group queries instead of parallel per-slot calls. "
                 "Do not pass raw secret values as tool arguments."
             ),
         }
@@ -205,7 +206,10 @@ class McpServer:
             {
                 "name": "runtime_secret_status",
                 "title": "Runtime Secret Status",
-                "description": "Check whether supported provider secret keys exist for a slot without printing values.",
+                "description": (
+                    "Check whether supported provider secret keys exist without printing values. "
+                    "For dev or customer groups, prefer slot_class over parallel per-slot calls."
+                ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {

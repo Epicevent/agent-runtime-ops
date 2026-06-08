@@ -49,6 +49,7 @@ class McpServerTests(unittest.TestCase):
             }
         )
         self.assertEqual(response["result"]["protocolVersion"], "2025-06-18")
+        self.assertIn("slot_class", response["result"]["instructions"])
 
         tools = server.handle_message({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
         names = {item["name"] for item in tools["result"]["tools"]}
@@ -59,6 +60,7 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("nas_remove", names)
         self.assertIn("nas_credential_status", names)
         status_tool = next(item for item in tools["result"]["tools"] if item["name"] == "runtime_secret_status")
+        self.assertIn("slot_class", status_tool["description"])
         status_schema = status_tool["inputSchema"]["properties"]
         self.assertEqual(status_schema["slot_class"]["enum"], ["customer", "dev"])
         self.assertEqual(status_schema["family"]["enum"], ["hermes", "openclaw"])
