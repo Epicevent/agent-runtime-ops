@@ -64,6 +64,10 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("deploy_update", names)
         self.assertIn("nas_remove", names)
         self.assertIn("nas_credential_status", names)
+        slot_check_tool = next(item for item in tools["result"]["tools"] if item["name"] == "slot_check")
+        self.assertIn("slot_class", slot_check_tool["description"])
+        slot_check_schema = slot_check_tool["inputSchema"]["properties"]
+        self.assertEqual(slot_check_schema["slot_class"]["enum"], ["customer", "dev"])
         status_tool = next(item for item in tools["result"]["tools"] if item["name"] == "runtime_secret_status")
         self.assertIn("slot_class", status_tool["description"])
         status_schema = status_tool["inputSchema"]["properties"]
@@ -149,6 +153,40 @@ class McpServerTests(unittest.TestCase):
         self.assertFalse(result["isError"])
         self.assertEqual(payload["returncode"], 1)
         self.assertIn("check_status=fail", payload["stdout"])
+
+    def test_slot_check_accepts_slot_class_selector(self) -> None:
+        runner = FakeRunner(
+            [
+                (
+                    0,
+                    "\n".join(
+                        [
+                            "slot=dev-hermess lane=dev-hermes family=hermes slot_class=dev runtime_profile=hermes-dev",
+                            "slot=dev-oc lane=dev-openclaw family=openclaw slot_class=dev runtime_profile=openclaw-dev",
+                            "slot=oc1 lane=openclaw family=openclaw slot_class=customer runtime_profile=openclaw-customer",
+                        ]
+                    )
+                    + "\n",
+                    "",
+                ),
+                (0, "slot=dev-hermess\n", ""),
+                (0, '{"mutates": false}\n', ""),
+                (0, "PASS dev-hermess\n", ""),
+                (0, "slot=dev-oc\n", ""),
+                (0, '{"mutates": false}\n', ""),
+                (1, "FAIL dev-oc\ncheck_status=fail failed=1\n", ""),
+            ]
+        )
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        result = call_tool_result(server, "slot_check", {"slot_class": "dev"})
+        payload = result["structuredContent"]
+        self.assertFalse(payload["ok"])
+        self.assertFalse(result["isError"])
+        self.assertIn("PASS dev-hermess", payload["stdout"])
+        self.assertIn("check_status=fail", payload["stdout"])
+        self.assertEqual(runner.calls[0]["argv"], ["opsctl", "slot", "list"])
+        self.assertEqual(runner.calls[1]["argv"], ["opsctl", "status", "dev-hermess"])
+        self.assertEqual(runner.calls[4]["argv"], ["opsctl", "status", "dev-oc"])
 
     def test_secret_raw_argument_is_rejected_and_redacted(self) -> None:
         secret = "AIza" + "A" * 32

@@ -183,14 +183,20 @@ class McpServer:
             {
                 "name": "slot_check",
                 "title": "Check Slot",
-                "description": "Run status, plan, contract check, and optionally live check for a slot.",
+                "description": (
+                    "Run status, plan, contract check, and optionally live check. "
+                    "For dev or customer groups, prefer slot_class over repeated per-slot calls."
+                ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "slot": {"type": "string"},
+                        "slots": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                        "slot_class": {"type": "string", "enum": ["customer", "dev"]},
+                        "family": {"type": "string", "enum": ["hermes", "openclaw"]},
                         "live": {"type": "boolean", "default": False},
                     },
-                    "required": ["slot"],
+                    "oneOf": [{"required": ["slot"]}, {"required": ["slots"]}, {"required": ["slot_class"]}],
                     "additionalProperties": False,
                 },
             },
@@ -438,16 +444,19 @@ class McpServer:
         return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
 
     def _tool_slot_check(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"slot", "live"})
-        slot = self._slot(args.get("slot"))
+        self._reject_unknown(args, {"slot", "slots", "slot_class", "family", "live"})
         live = bool(args.get("live", False))
-        runs = [
-            self._run([self.opsctl, "status", slot]),
-            self._run([self.opsctl, "plan", slot]),
-            self._run([self.opsctl, "check", slot]),
-        ]
-        if live:
-            runs.append(self._run([self.sudo, self.opsctl, "check", "--live", slot], timeout=120))
+        slots, runs = self._resolve_slots(args)
+        for slot in slots:
+            runs.extend(
+                [
+                    self._run([self.opsctl, "status", slot]),
+                    self._run([self.opsctl, "plan", slot]),
+                    self._run([self.opsctl, "check", slot]),
+                ]
+            )
+            if live:
+                runs.append(self._run([self.sudo, self.opsctl, "check", "--live", slot], timeout=120))
         ok = all(item["returncode"] == 0 for item in runs)
         return self._common_response(ok=ok, mutated=False, runs=runs)
 
