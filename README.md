@@ -1,45 +1,96 @@
 # Agent Runtime Ops
 
-Public runtime operations tooling for JI TECH agent services.
+JI TECH AI 에이전트 서비스의 런타임 운영 도구 저장소다.
 
-This repository does not store live server state. Live state stays on the
-server under `/srv/openclaw-ops`.
+이 저장소는 실제 서버 운영 상태를 저장하지 않는다. 실제 상태는 서버의
+`/srv/openclaw-ops`에 둔다.
 
-## Repository Boundaries
+## 설치
+
+실행 주체: **관리자/root 권한을 가진 계정**
+
+서버에서 아래 한 줄을 실행한다. `sudo` 비밀번호를 요구할 수 있다.
+
+```bash
+curl -L https://raw.github.com/Epicevent/agent-runtime-ops/main/go | sudo bash
+```
+
+설치 확인:
+
+```bash
+sudo bash /opt/agent-runtime-ops/install.sh --check
+sudo -u svcops opsctl profile list
+```
+
+같은 명령을 다시 실행하면 `main` 기준 최신 설치본으로 갱신된다.
+
+설치 후 역할은 이렇게 나뉜다.
+
+```text
+관리자/root:
+  /opt/agent-runtime-ops 설치
+  /usr/local/bin/opsctl 배치
+  서버 패키지와 권한 정리
+
+svcops:
+  설치된 opsctl 실행
+  /srv/openclaw-ops 운영 상태 조회
+  허용된 운영 명령 실행
+```
+
+## 저장소 책임
 
 ```text
 Epicevent/openclaw-jitech
-  OpenClaw product source and product image.
+  OpenClaw 제품 소스와 제품 이미지
 
 Epicevent/hermes-jitech
-  Hermes product source and product image.
+  Hermes 제품 소스와 제품 이미지
 
 Epicevent/agent-runtime-ops
-  Runtime profiles, wrapper image recipes, apply/check/rollback tooling,
-  NAS policy logic, admin console, and schema definitions.
+  runtime profile
+  wrapper image recipe
+  opsctl
+  admin console
+  apply/check/rollback/rollout 도구
+  NAS grant 판정 로직
+  schema 정의
 
 /srv/openclaw-ops
-  Private server state: slots, lanes, releases, NAS policy, action logs,
-  drift reports, and applied manifests.
+  실제 서버 운영 상태
+  slots.yaml
+  lanes.yaml
+  releases.yaml
+  nas-policy.yaml
+  actions.log
+  drift report
 ```
 
-This repository must not contain customer names, NAS passwords, API keys,
-gateway tokens, customer documents, or real slot assignment state.
+이 저장소에 넣지 않는 것:
 
-## Core Rule
+```text
+고객명
+NAS password
+API key
+gateway token
+고객 문서
+실제 slot 배정 상세
+```
 
-Slots are described by two deployment identities:
+## 핵심 기준
+
+slot은 두 가지 기준으로 실행한다.
 
 ```text
 image release + runtime profile
 ```
 
-The image release describes what is inside the container. The runtime profile
-describes how the image is executed on the server.
+`image release`는 컨테이너 안에 무엇이 들어있는지를 정한다.
 
-Runtime profiles live in `profiles/runtime/`. Compose files are rendered from
-profile templates only. Operational commands must not invent compose fragments
-or include compose files merely because they happen to exist.
+`runtime profile`은 그 이미지를 서버에서 어떻게 실행할지를 정한다.
+
+운영 명령은 compose 조각을 즉석에서 만들지 않는다. compose는
+`profiles/runtime/*/compose.yml.tpl`에서만 렌더링한다.
 
 ## Runtime Profiles
 
@@ -51,12 +102,20 @@ profiles/runtime/
   hermes-dev/
 ```
 
-Profile names do not include `v1`. The profile name is the semantic role; the
-profile digest and ops repository commit are the version identity.
+profile 이름에는 `v1` 같은 숫자를 붙이지 않는다.
 
-## CLI Shape
+```text
+profile name:
+  의미
 
-The CLI entrypoint is `opsctl`.
+profile digest:
+  실제 버전
+
+ops repo commit:
+  변경 이력
+```
+
+## opsctl 명령 형태
 
 ```text
 opsctl status SLOT
@@ -64,34 +123,24 @@ opsctl plan SLOT
 opsctl apply SLOT
 opsctl rollback SLOT
 opsctl check SLOT
+
 opsctl rollout LANE
+
 opsctl release add NAME IMAGE
 opsctl release promote NAME LANE
+
 opsctl nas requests
 opsctl nas approve-auto
 opsctl nas policy-check SLOT SHARE
+
 opsctl admin serve
 ```
 
-`status`, `plan`, `check`, and `nas policy-check` are non-mutating. Mutating
-commands are intentionally guarded in the initial skeleton until the full apply
-engine is implemented and reviewed.
+현재 초기 골격에서는 `status`, `plan`, `check`, `nas policy-check`가
+비쓰기 명령이다. `apply`, `rollback`, `rollout`은 적용 엔진과 감사 로그가
+완성된 뒤 열어야 한다.
 
-## Install Shape
-
-An administrator installs the tool package with sudo. The installer may ask for
-the administrator password. After installation, the existing `svcops` operating
-account runs `opsctl`.
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Epicevent/agent-runtime-ops/main/install.sh | sudo bash
-sudo bash /opt/agent-runtime-ops/install.sh --check
-sudo -u svcops opsctl profile list
-```
-
-Live state remains outside this repository under `/srv/openclaw-ops`.
-
-## Development Check
+## 개발 확인
 
 ```bash
 python -m compileall opsctl
