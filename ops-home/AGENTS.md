@@ -1,6 +1,6 @@
 # svcops Operating Account
 
-Use `agent-runtime-ops` first for natural-language operations.
+Use Codex with `agent-runtime-ops` for natural-language operations.
 
 Primary references:
 
@@ -17,6 +17,10 @@ Primary commands:
 /usr/local/bin/opsctl profile list
 codex mcp list
 ```
+
+Do not install or expect Claude Code, Gemini CLI, OpenCode, or other agent CLIs on this account.
+Gemini/API keys are runtime slot secrets managed through `opsctl runtime-secret`, not CLI
+credentials.
 
 Baseline scripts are retained legacy artifacts, not a secondary operating path. Use them only as
 urgent exceptions when `agent-runtime-ops` cannot yet handle the operation, and record the exception.

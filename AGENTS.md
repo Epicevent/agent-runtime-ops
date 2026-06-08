@@ -17,6 +17,18 @@ The normal operating account is:
 ssh svcops
 ```
 
+## Standard Operating Agent
+
+The standard natural-language operating harness for `svcops` is Codex. This repo installs and
+maintains the Codex skill plus the `agent-runtime-ops` MCP registration for that account.
+
+Do not install Claude Code, Gemini CLI, OpenCode, or other agent CLIs as part of `install.sh`,
+`self-update`, or routine server operations. If another CLI is needed later, treat it as a separate
+approved project with its own install, auth, rollback, and verification plan.
+
+Gemini/API keys in this repo are runtime slot secrets only. They are injected into managed runtime
+profiles with `opsctl runtime-secret`; they are not credentials for a Gemini CLI installation.
+
 ## First Move
 
 When work may affect the server, do all of the following before claiming completion:
@@ -193,6 +205,8 @@ codex mcp add agent-runtime-ops -- /usr/local/bin/agent-runtime-ops-mcp
 
 The MCP server wraps `opsctl`; it does not reimplement operations policy. It may run runbook-backed
 mutations, but it must reject raw secret values and use `opsctl` with argv lists, not shell strings.
+
+No Claude/Gemini/OpenCode MCP registration is managed by this repo.
 
 ## Remote Commands
 

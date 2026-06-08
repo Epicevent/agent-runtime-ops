@@ -3,6 +3,9 @@
 Runtime secrets are provider/API keys that must stay outside the public repo and
 outside `/srv/openclaw-ops` desired state.
 
+Gemini/API keys here are runtime slot secrets. They are not used to install or
+authenticate a Gemini CLI on the `svcops` account.
+
 The supported path follows the baseline rule:
 
 ```text

@@ -19,6 +19,23 @@ approved_matches_installed=yes
 If PowerShell is the local shell, avoid `$(...)` inside double-quoted SSH commands because it expands
 locally before SSH runs.
 
+## Standard Operating Agent
+
+Codex is the only standard natural-language operating CLI for `svcops`.
+
+This repo currently installs:
+
+```text
+/home/svcops/AGENTS.md
+/home/svcops/.codex/skills/agent-runtime-ops
+/usr/local/bin/agent-runtime-ops-mcp
+Codex MCP registration: agent-runtime-ops
+```
+
+This repo does not install or manage Claude Code, Gemini CLI, OpenCode, or other agent CLIs. Do not
+add them during routine `self-update` work. If a non-Codex CLI becomes necessary, handle it as a
+separate approved project with an explicit install and rollback plan.
+
 ## Deploy an Approved Repo Update
 
 After committing and pushing, get the full SHA:
@@ -68,6 +85,9 @@ ssh svcops "sudo /usr/local/bin/opsctl check --live SLOT"
 Use live checks after update, apply, rollback, NAS mount/unmount, or runtime secret changes.
 
 ## Runtime Secret Injection
+
+Gemini/API keys here are runtime slot secrets, not Gemini CLI credentials. Do not install Gemini CLI
+or configure CLI auth for this flow.
 
 Never print the secret value. Preferred terminal stdin pattern:
 
