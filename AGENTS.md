@@ -93,7 +93,6 @@ sudo /usr/local/bin/opsctl check --live SLOT
 /usr/local/bin/opsctl nas mounted SLOT
 /usr/local/bin/opsctl nas policy-check SLOT //HOST/SHARE
 sudo /usr/local/bin/opsctl runtime-secret status SLOT
-sudo /opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh heartbeat-status SLOT
 ```
 
 These mutate runtime or server state:
@@ -106,25 +105,45 @@ sudo /usr/local/bin/opsctl runtime-secret set SLOT --key KEY --value-stdin --che
 sudo /usr/local/bin/opsctl nas mount SLOT //HOST/SHARE
 sudo /usr/local/bin/opsctl nas unmount SLOT //HOST/SHARE
 sudo /usr/local/bin/opsctl nas approve-auto
-sudo /opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh heartbeat-disable SLOT
 ```
 
 Use `opsctl`; do not directly edit rendered Docker compose files. `opsctl apply` renders from the
 runtime profiles in this repo. NAS changes are child CIFS mounts under `/home/ocN/nas_docs`; do not
 turn NAS shares into compose volumes.
 
-## Baseline Wrapper Priority
+## Retained Legacy Artifact
 
-Some legacy/customer runtime operations still live in the baseline repo and wrapper. That baseline
-is the source of truth for those operations. Do not treat this repo as primary for them; use this
-section only as a pointer when the operator asks from inside `agent-runtime-ops` or when the baseline
-docs are not already in context.
+This repo is the operating source for runtime profiles, desired state, render/apply/check,
+runtime manifests, NAS convergence, and rollout/release mechanics. The operating agent should use
+this repo, `opsctl`, and the `agent-runtime-ops` MCP first.
+
+The baseline scripts are retained legacy artifacts, not a secondary operating path. They remain on
+the server because deleting them abruptly is operationally risky. Do not use them for normal
+operations.
+
+Use a baseline script only as an urgent exception when both are true:
+
+```text
+agent-runtime-ops does not yet expose the needed operation
+production operation cannot safely wait for that gap to be implemented here
+```
+
+When a baseline script is used, record it in the operator report:
+
+```text
+legacy_exception_used=yes
+reason=<why opsctl/MCP could not handle it>
+command=<exact baseline command>
+verification=<post-check result>
+migration_gap=<what should be moved into agent-runtime-ops>
+```
 
 ```bash
 /opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh
 ```
 
-For example, OpenClaw heartbeat is controlled there, not in `opsctl` and not by this repo:
+Current known gap: OpenClaw heartbeat is not yet exposed through `opsctl`, so the retained baseline
+wrapper may be used as an exception:
 
 ```bash
 ssh svcops "sudo /opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh heartbeat-status dev-oc"

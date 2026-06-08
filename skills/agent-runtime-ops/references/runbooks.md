@@ -96,10 +96,12 @@ secret root. Do not send the key value as a JSON argument.
 
 ## Heartbeat Operations
 
-OpenClaw heartbeat control is baseline-owned. First use the baseline repo/docs when they are
-available, especially `/opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh` and
-`docs/SVCOPS.md` in that repo. Use this section only as a fallback pointer from `agent-runtime-ops`;
-do not move heartbeat ownership into this repo.
+Use `agent-runtime-ops` first. Baseline scripts are retained legacy artifacts, not a secondary
+operating path. They should not be used for normal operations.
+
+OpenClaw heartbeat is a current gap because it is not yet exposed through `opsctl`. Use the retained
+baseline wrapper only as an urgent exception, then record the exception and the migration gap in the
+operator report.
 
 Check heartbeat:
 
@@ -131,6 +133,16 @@ ssh svcops "sudo /usr/local/bin/opsctl check --live SLOT"
 
 Known note: `HEARTBEAT.md` files are optional checklist files. The scheduler is controlled by
 `agents.defaults.heartbeat.every` in the OpenClaw config.
+
+Record any use like this:
+
+```text
+legacy_exception_used=yes
+reason=heartbeat is not yet exposed through opsctl
+command=sudo /opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh heartbeat-disable SLOT
+verification=heartbeat_config_every=0m heartbeat_config_enabled=no
+migration_gap=bring heartbeat status/disable into agent-runtime-ops
+```
 
 ## Apply and Rollback
 
