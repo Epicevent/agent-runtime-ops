@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -32,6 +33,13 @@ from .nas import (
 )
 from .profiles import list_profile_names, load_profile
 from .renderer import render_compose
+from .runtime_secrets import (
+    PROVIDER_SECRET_KEYS,
+    parse_secret_env_text,
+    primary_profile_secret_file,
+    render_upserted_secret_env,
+    validate_provider_secret_values,
+)
 from .state import load_desired_slot
 from .yamlio import dump_yaml, load_yaml
 
@@ -360,10 +368,18 @@ def _parse_findmnt_pairs(output: str) -> list[dict[str, str]]:
             if "=" not in part:
                 continue
             key, value = part.split("=", 1)
-            item[key.lower()] = value
+            item[key.lower()] = _decode_findmnt_value(value)
         if item:
             rows.append(item)
     return rows
+
+
+def _decode_findmnt_value(value: str) -> str:
+    def replace_hex(match: re.Match[str]) -> str:
+        raw = match.group(0).encode("latin1").decode("unicode_escape").encode("latin1")
+        return raw.decode("utf-8", errors="replace")
+
+    return re.sub(r"(?:\\x[0-9A-Fa-f]{2})+", replace_hex, value)
 
 
 def _decode_mountinfo_field(value: str) -> str:
@@ -1304,6 +1320,216 @@ def cmd_rollback(args: argparse.Namespace) -> int:
     return 0
 
 
+def _slot_home(slot: str) -> Path:
+    return Path(_passwd_record(slot).pw_dir)
+
+
+def _assert_secret_path_safe(slot: str, path: Path, *, create_parent: bool = False) -> None:
+    if not path.is_absolute():
+        raise ValueError(f"secret file path must be absolute: {path}")
+    home = _slot_home(slot).resolve(strict=False)
+    resolved = path.resolve(strict=False)
+    if resolved != home and not str(resolved).startswith(str(home) + os.sep):
+        raise ValueError(f"secret file path outside slot home: {path}")
+    _ensure_not_symlink_chain(path.parent, home)
+    if create_parent:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_not_symlink_chain(path, home)
+    if path.exists() and not path.is_file():
+        raise ValueError(f"secret file path is not a regular file: {path}")
+    if path.is_symlink():
+        raise ValueError(f"secret file must not be a symlink: {path}")
+
+
+def _read_root_secret_env_file(path: Path) -> dict[str, str]:
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    if path.is_symlink():
+        raise ValueError(f"env file must not be a symlink: {path}")
+    stat_result = path.stat()
+    if not stat.S_ISREG(stat_result.st_mode):
+        raise ValueError(f"env file must be regular: {path}")
+    if stat_result.st_uid != 0 or stat_result.st_gid != 0:
+        raise ValueError(f"env file must be root:root: {path}")
+    if stat_result.st_mode & 0o077:
+        raise ValueError(f"env file must be mode 0600 or stricter: {path}")
+    if stat_result.st_nlink != 1:
+        raise ValueError(f"env file must not be hardlinked: {path}")
+    return parse_secret_env_text(path.read_text(encoding="utf-8", errors="replace"), source=str(path))
+
+
+def _secret_values_from_args(args: argparse.Namespace) -> dict[str, str]:
+    if args.env_file and (args.key or args.value_stdin):
+        raise ValueError("use either --env-file or --key/--value-stdin, not both")
+    if args.env_file:
+        return validate_provider_secret_values(_read_root_secret_env_file(Path(args.env_file)))
+    if not args.key or not args.value_stdin:
+        raise ValueError("use --env-file FILE or --key KEY --value-stdin")
+    key = str(args.key)
+    if key not in PROVIDER_SECRET_KEYS:
+        raise ValueError(f"unsupported runtime secret key: {key}")
+    value = sys.stdin.read().rstrip("\r\n")
+    return validate_provider_secret_values({key: value})
+
+
+def _safe_write_secret_env(path: Path, text: str, uid: int, gid: int) -> None:
+    flags = os.O_WRONLY | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        stat_result = os.fstat(fd)
+        if not stat.S_ISREG(stat_result.st_mode):
+            raise ValueError(f"secret file is not regular: {path}")
+        if stat_result.st_nlink != 1:
+            raise ValueError(f"secret file must not be hardlinked: {path}")
+        os.ftruncate(fd, 0)
+        os.write(fd, text.encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.chown(path, uid, gid)
+    os.chmod(path, 0o600)
+
+
+def _secret_owner_ids(slot: str, owner_mode: str) -> tuple[int, int]:
+    if owner_mode == "runtime":
+        runtime_uid, _, data_gid = _runtime_ids(slot)
+        return runtime_uid, data_gid
+    return 0, 0
+
+
+def _upsert_runtime_secret_file(slot: str, profile, values: dict[str, str]) -> Path:
+    secret_file = primary_profile_secret_file(profile, slot)
+    _assert_secret_path_safe(slot, secret_file.path, create_parent=True)
+    existing_text = secret_file.path.read_text(encoding="utf-8", errors="replace") if secret_file.path.exists() else ""
+    uid, gid = _secret_owner_ids(slot, secret_file.owner_mode)
+    if secret_file.owner_mode == "runtime":
+        secret_file.path.parent.chmod(0o750)
+        os.chown(secret_file.path.parent, uid, gid)
+    _safe_write_secret_env(secret_file.path, render_upserted_secret_env(existing_text, values), uid, gid)
+    return secret_file.path
+
+
+def _restart_runtime_secret_slot(desired, profile, runtime_dir: Path) -> tuple[bool, str]:
+    compose_path = _agent_compose_path(runtime_dir)
+    if not compose_path.is_file():
+        return False, f"agent_runtime_compose_missing:{compose_path}"
+    service = str(profile.metadata.get("service") or "openclaw-gateway")
+    up = _run_text_cwd(
+        _docker_compose_command(desired.slot, compose_path, "up", "-d", "--force-recreate", service),
+        runtime_dir,
+        timeout=240,
+    )
+    if up.returncode != 0:
+        return False, (up.stderr or up.stdout).strip() or "runtime_secret_restart_failed"
+    return True, "restarted"
+
+
+def _secret_status_rows(path: Path) -> tuple[str, dict[str, bool]]:
+    if not path.exists():
+        return "missing", {}
+    if path.is_symlink():
+        return "symlink_refused", {}
+    if not path.is_file():
+        return "not_regular", {}
+    try:
+        values = parse_secret_env_text(path.read_text(encoding="utf-8", errors="replace"), source=str(path))
+    except Exception:
+        return "parse_failed", {}
+    return "present", {key: bool(values.get(key)) for key in sorted(PROVIDER_SECRET_KEYS)}
+
+
+def cmd_runtime_secret_set(args: argparse.Namespace) -> int:
+    if not _is_root():
+        print("error: run as root/admin: sudo /usr/local/bin/opsctl runtime-secret set SLOT", file=sys.stderr)
+        return 2
+    state_root = _state_root(args)
+    try:
+        desired = load_desired_slot(args.slot, state_root)
+        profile = load_profile(desired.runtime_profile)
+        values = _secret_values_from_args(args)
+        secret_path = _upsert_runtime_secret_file(desired.slot, profile, values)
+        runtime_dir = _slot_runtime_dir(desired.slot)
+    except Exception as exc:
+        print(f"slot={args.slot}")
+        print("runtime_secret_status=fail")
+        print(f"reason={exc}")
+        try:
+            _append_action_log(state_root, "runtime_secret_set", args.slot, args.slot, "fail", str(exc))
+        except Exception:
+            pass
+        return 1
+
+    print(f"slot={desired.slot}")
+    print(f"runtime_profile={profile.name}")
+    print(f"secret_file={secret_path}")
+    print("secret_value_printed=no")
+    print("secret_keys_imported=" + ",".join(sorted(values)))
+
+    if args.no_restart:
+        print("restart=skipped")
+        _append_action_log(state_root, "runtime_secret_set", desired.slot, desired.slot, "ok", "restart=skipped keys=" + ",".join(sorted(values)))
+        print("runtime_secret_status=stored")
+        return 0
+
+    restart_ok, restart_reason = _restart_runtime_secret_slot(desired, profile, runtime_dir)
+    print(f"restart_status={'ok' if restart_ok else 'fail'}")
+    print(f"restart_reason={restart_reason}")
+    if not restart_ok:
+        _append_action_log(state_root, "runtime_secret_set", desired.slot, desired.slot, "fail", restart_reason)
+        print("runtime_secret_status=fail")
+        return 1
+
+    if args.check:
+        failed = 0
+        for check_ok, name, detail in _run_live_slot_checks_with_wait(
+            desired,
+            profile,
+            state_root,
+            timeout_seconds=_profile_startup_timeout_seconds(profile),
+        ):
+            _check_line(check_ok, name, detail)
+            if not check_ok:
+                failed += 1
+        if failed:
+            _append_action_log(state_root, "runtime_secret_set", desired.slot, desired.slot, "fail", f"live_failed={failed}")
+            print(f"runtime_secret_status=fail live_failed={failed}")
+            return 1
+
+    _append_action_log(state_root, "runtime_secret_set", desired.slot, desired.slot, "ok", "keys=" + ",".join(sorted(values)))
+    print("runtime_secret_status=stored")
+    return 0
+
+
+def cmd_runtime_secret_status(args: argparse.Namespace) -> int:
+    if not _is_root():
+        print("error: run as root/admin: sudo /usr/local/bin/opsctl runtime-secret status SLOT", file=sys.stderr)
+        return 2
+    try:
+        desired = load_desired_slot(args.slot, _state_root(args))
+        profile = load_profile(desired.runtime_profile)
+        secret_file = primary_profile_secret_file(profile, desired.slot)
+        _assert_secret_path_safe(desired.slot, secret_file.path)
+        file_state, key_state = _secret_status_rows(secret_file.path)
+    except Exception as exc:
+        print(f"slot={args.slot}")
+        print("runtime_secret_status=fail")
+        print(f"reason={exc}")
+        return 1
+
+    print(f"slot={desired.slot}")
+    print(f"runtime_profile={profile.name}")
+    print(f"secret_file={secret_file.path}")
+    print(f"secret_file_state={file_state}")
+    for key in sorted(PROVIDER_SECRET_KEYS):
+        if key in key_state:
+            print(f"{key.lower()}={'present' if key_state[key] else 'absent'}")
+    print("secret_value_printed=no")
+    print("runtime_secret_status=ok")
+    return 0
+
+
 def cmd_blocked_mutation(args: argparse.Namespace) -> int:
     print(f"error: {args.command_name} is intentionally disabled in the initial skeleton", file=sys.stderr)
     print("hint: enable lane rollout only after single-slot apply/rollback migration tests pass", file=sys.stderr)
@@ -2037,6 +2263,20 @@ def build_parser() -> argparse.ArgumentParser:
     release_promote.add_argument("name")
     release_promote.add_argument("lane")
     release_promote.set_defaults(func=cmd_release_promote)
+
+    runtime_secret = sub.add_parser("runtime-secret")
+    runtime_secret_sub = runtime_secret.add_subparsers(dest="runtime_secret_command", required=True)
+    runtime_secret_set = runtime_secret_sub.add_parser("set")
+    runtime_secret_set.add_argument("slot")
+    runtime_secret_set.add_argument("--env-file")
+    runtime_secret_set.add_argument("--key")
+    runtime_secret_set.add_argument("--value-stdin", action="store_true")
+    runtime_secret_set.add_argument("--no-restart", action="store_true")
+    runtime_secret_set.add_argument("--check", action="store_true")
+    runtime_secret_set.set_defaults(func=cmd_runtime_secret_set)
+    runtime_secret_status = runtime_secret_sub.add_parser("status")
+    runtime_secret_status.add_argument("slot")
+    runtime_secret_status.set_defaults(func=cmd_runtime_secret_status)
 
     nas = sub.add_parser("nas")
     nas_sub = nas.add_subparsers(dest="nas_command", required=True)

@@ -94,6 +94,8 @@ opsctl check SLOT
 sudo /usr/local/bin/opsctl check --live SLOT
 sudo /usr/local/bin/opsctl apply SLOT
 sudo /usr/local/bin/opsctl rollback SLOT
+sudo /usr/local/bin/opsctl runtime-secret set SLOT --key GEMINI_API_KEY --value-stdin
+sudo /usr/local/bin/opsctl runtime-secret status SLOT
 opsctl nas request //HOST/SHARE
 opsctl nas credential set //HOST/SHARE --username NAS_USER --password-stdin
 sudo /usr/local/bin/opsctl nas approve-auto

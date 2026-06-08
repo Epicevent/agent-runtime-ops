@@ -10,6 +10,9 @@ JI TECH AI 에이전트 서비스의 런타임 운영 도구 저장소다.
 ```text
 docs/NAS_RUNBOOK.md
   NAS mount/unmount 절차와 host/container 두 층위 확인 기준
+
+docs/RUNTIME_SECRETS.md
+  Gemini/API key 같은 runtime secret 주입과 상태 확인 절차
 ```
 
 ## 첫 설치
@@ -265,6 +268,8 @@ sudo /usr/local/bin/opsctl apply SLOT --allow-first-apply
 sudo /usr/local/bin/opsctl rollback SLOT
 opsctl check SLOT
 sudo /usr/local/bin/opsctl check --live SLOT
+sudo /usr/local/bin/opsctl runtime-secret set SLOT --key GEMINI_API_KEY --value-stdin
+sudo /usr/local/bin/opsctl runtime-secret status SLOT
 
 opsctl rollout LANE
 
@@ -286,9 +291,11 @@ opsctl admin serve
 ```
 
 `status`, `plan`, `check`, `nas policy-check`, `nas mounted`, `nas requests`는
-비쓰기 명령이다.
+비쓰기 명령이다. `runtime-secret status`도 secret 값을 출력하지 않는 상태 확인
+명령이다.
 
-`nas mount`와 `nas unmount`는 쓰기 명령이지만 compose를 수정하지 않는다.
+`runtime-secret set`, `nas mount`, `nas unmount`는 쓰기 명령이지만 compose template을
+수정하지 않는다.
 동적 NAS 변화는 `/home/ocN/nas_docs/*` child mount에서만 처리한다.
 
 고객 요청 경로는 고객 계정이 `opsctl nas request`와 `opsctl nas credential set`을

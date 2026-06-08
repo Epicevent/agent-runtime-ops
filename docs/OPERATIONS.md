@@ -30,6 +30,28 @@ backup을 복구한다. agent-runtime backup이 없는 legacy 상태로 되돌�
 NAS mount/unmount 실전 절차는 `docs/NAS_RUNBOOK.md`를 기준으로 한다. 이 런북은
 Linux host의 CIFS mount와 container 안에서 보이는 child CIFS mount를 분리해서 확인한다.
 
+## Runtime secret 운영
+
+Gemini 같은 provider/API key는 `/srv/openclaw-ops` desired state에 저장하지 않는다.
+각 runtime profile의 `env.contract.yaml`에 선언된 secret file에만 쓴다.
+
+```bash
+read -rsp "GEMINI_API_KEY for dev-oc: " GEMINI_API_KEY
+printf '\n'
+printf '%s' "$GEMINI_API_KEY" | sudo /usr/local/bin/opsctl runtime-secret set \
+  dev-oc \
+  --key GEMINI_API_KEY \
+  --value-stdin \
+  --check
+unset GEMINI_API_KEY
+```
+
+값 자체를 출력하지 않고 존재 여부만 확인한다.
+
+```bash
+sudo /usr/local/bin/opsctl runtime-secret status dev-oc
+```
+
 ## NAS 운영
 
 NAS share 추가/제거는 compose를 바꾸지 않는다. 동적 변화는 host child CIFS mount에서만
