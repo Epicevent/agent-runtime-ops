@@ -248,8 +248,8 @@ ops repo commit:
 ```text
 opsctl status SLOT
 opsctl plan SLOT
-opsctl apply SLOT
-opsctl rollback SLOT
+sudo /usr/local/bin/opsctl apply SLOT
+sudo /usr/local/bin/opsctl rollback SLOT
 opsctl check SLOT
 
 opsctl rollout LANE
@@ -273,4 +273,6 @@ opsctl admin serve
 `nas mount`와 `nas unmount`는 쓰기 명령이지만 compose를 수정하지 않는다.
 동적 NAS 변화는 `/home/ocN/nas_docs/*` child mount에서만 처리한다.
 
-`apply`, `rollback`, `rollout`은 적용 엔진과 감사 로그가 완성된 뒤 열어야 한다.
+`apply`와 `rollback`은 단일 slot 기준으로 동작한다. 기존 legacy 상태에서 첫 적용을
+할 때는 명시적으로 `--allow-first-apply`를 붙인다. `rollout`은 단일 slot migration
+검증 뒤에 연다.
