@@ -13,10 +13,12 @@ services:
       HERMES_DASHBOARD: "1"
       HERMES_DASHBOARD_HOST: 127.0.0.1
       HERMES_DASHBOARD_PORT: "9119"
+      HERMES_DASHBOARD_INSECURE: "1"
       API_SERVER_ENABLED: "true"
       API_SERVER_HOST: 127.0.0.1
       HERMES_API_TOKEN: ${API_SERVER_KEY}
       OPENCLAW_NAS_CONTAINER_PATH: /workspace/nas_docs
+      OPENCLAW_NAS_DATA_GID: "{{ data_gid }}"
       HOME: /opt/data/home
       HOST: 0.0.0.0
       PORT: "3000"
@@ -32,7 +34,6 @@ services:
       agent-runtime.family: "{{ family }}"
       agent-runtime.profile: "{{ runtime_profile }}"
       agent-runtime.service: gateway
-    user: "{{ runtime_uid }}:{{ runtime_gid }}"
     group_add:
       - "{{ data_gid }}"
     volumes:

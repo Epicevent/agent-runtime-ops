@@ -11,6 +11,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from .paths import DEFAULT_STATE_ROOT, REPO_ROOT
@@ -319,6 +322,31 @@ def _run_text_cwd(command: list[str], cwd: Path, timeout: int = 20) -> subproces
         return subprocess.CompletedProcess(command, 127, "", str(exc))
 
 
+def _slot_gateway_port(slot: str) -> int | None:
+    match = re.match(r"^oc([0-9]+)$", slot)
+    if not match:
+        return None
+    return 28789 + (int(match.group(1)) - 1) * 100
+
+
+def _http_backend_smoke(slot: str, path: str) -> tuple[bool, str]:
+    port = _slot_gateway_port(slot)
+    if port is None:
+        return False, "slot_has_no_gateway_port"
+    smoke_path = path if path.startswith("/") else f"/{path}"
+    url = f"http://127.0.0.1:{port}{smoke_path}"
+    request = urllib.request.Request(url, headers={"Host": f"{slot}.ji-tech.co.kr"})
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            status = int(response.getcode())
+            return 200 <= status < 500, f"url={url} status={status}"
+    except urllib.error.HTTPError as exc:
+        status = int(exc.code)
+        return 200 <= status < 500, f"url={url} status={status}"
+    except Exception as exc:
+        return False, f"url={url} reason={exc}"
+
+
 def _parse_findmnt_pairs(output: str) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     for raw_line in output.splitlines():
@@ -502,9 +530,10 @@ def _run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool
     health = str(health_data.get("Status") or "none")
     image = str(config.get("Image") or "")
     user = str(config.get("User") or "")
+    runtime_user_mode = str(profile.metadata.get("runtime_user_mode") or "compose")
     checks.append((running == "true", "live_container_running", f"running={running}"))
     checks.append((pid > 0, "live_container_pid_present", f"pid={pid}"))
-    checks.append((health in {"healthy", "starting", "none", ""}, "live_container_health_ok", f"health={health}"))
+    checks.append((health in {"healthy", "none", ""}, "live_container_health_ok", f"health={health}"))
     checks.append((bool(image), "live_container_image_present", image or None))
     desired_image = str(desired.release_data.get("wrapper_image") or "")
     desired_digest = str(desired.release_data.get("digest") or "")
@@ -514,9 +543,17 @@ def _run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool
         or (desired_digest and (desired_digest in image or desired_digest in image_data or any(desired_digest in item for item in repo_digests)))
     )
     checks.append((image_matches, "live_container_image_matches_release", f"image={image}"))
-    checks.append((bool(user) and user not in {"0", "0:0", "root"}, "live_container_user_non_root", f"user={user or 'empty'}"))
+    if runtime_user_mode == "image-managed":
+        checks.append((user in {"", "0", "0:0", "root"}, "live_container_user_image_managed", f"user={user or 'empty'}"))
+    else:
+        checks.append((bool(user) and user not in {"0", "0:0", "root"}, "live_container_user_non_root", f"user={user or 'empty'}"))
     if pid <= 0:
         return checks
+
+    smoke_path = str(profile.metadata.get("http_smoke_path") or "")
+    if smoke_path:
+        smoke_ok, smoke_detail = _http_backend_smoke(desired.slot, smoke_path)
+        checks.append((smoke_ok, "live_backend_http_smoke_ok", smoke_detail))
 
     host_rc, host_error, host_mounts = _findmnt_under(host_nas_root)
     checks.append((host_rc == 0, "live_host_nas_root_findmnt_ok", host_error if host_rc != 0 else host_nas_root))
@@ -880,6 +917,28 @@ def _print_process_result(prefix: str, proc: subprocess.CompletedProcess[str], l
         print(f"{prefix}={detail[:limit]}")
 
 
+def _run_live_slot_checks_with_wait(desired, profile, state_root: Path, timeout_seconds: int = 90) -> list[tuple[bool, str, str | None]]:
+    deadline = time.monotonic() + timeout_seconds
+    last_checks: list[tuple[bool, str, str | None]] = []
+    wait_names = {
+        "live_container_running",
+        "live_container_pid_present",
+        "live_container_health_ok",
+        "live_backend_http_smoke_ok",
+    }
+    while True:
+        checks = _run_live_slot_checks(desired, profile, state_root)
+        last_checks = checks
+        failed_names = {name for ok, name, _ in checks if not ok}
+        if not failed_names:
+            return checks
+        if not (failed_names & wait_names):
+            return checks
+        if time.monotonic() >= deadline:
+            return checks
+        time.sleep(5)
+
+
 def cmd_apply(args: argparse.Namespace) -> int:
     if not _is_root():
         print("error: run as root/admin: sudo /usr/local/bin/opsctl apply SLOT", file=sys.stderr)
@@ -943,7 +1002,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
         return up.returncode or 1
 
     failed = 0
-    for ok, name, detail in _run_live_slot_checks(desired, profile, _state_root(args)):
+    for ok, name, detail in _run_live_slot_checks_with_wait(desired, profile, _state_root(args)):
         _check_line(ok, name, detail)
         if not ok:
             failed += 1

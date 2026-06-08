@@ -3,13 +3,21 @@ services:
     image: "{{ image_ref }}"
     restart: unless-stopped
     init: true
-    entrypoint: ["openclaw"]
-    command: ["gateway", "run"]
+    command:
+      [
+        "node",
+        "dist/index.js",
+        "gateway",
+        "--bind",
+        "${OPENCLAW_GATEWAY_BIND:-lan}",
+        "--port",
+        "18789",
+      ]
     env_file:
       - .env
     environment:
       HOME: /home/node
-      OPENCLAW_HOME: /home/node/.openclaw
+      OPENCLAW_HOME: /home/node
       OPENCLAW_CONFIG_DIR: /home/node/.openclaw
       OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
       OPENCLAW_STATE_DIR: /home/node/.openclaw
@@ -31,8 +39,8 @@ services:
       - "{{ data_gid }}"
     volumes:
       - "{{ target_home }}/.openclaw:/home/node/.openclaw"
-      - "{{ target_home }}/.config/openclaw:/home/node/.config/openclaw"
-      - "{{ target_home }}/.openclaw-auth-profile-secrets:/home/node/.openclaw-auth-profile-secrets"
+      - "{{ target_home }}/.openclaw/workspace:/home/node/.openclaw/workspace"
+      - "{{ target_home }}/.openclaw-auth-profile-secrets:/home/node/.config/openclaw"
       - type: bind
         source: "{{ target_home }}/nas_docs"
         target: /home/node/nas_docs
@@ -44,7 +52,7 @@ services:
   openclaw-cli:
     image: "{{ image_ref }}"
     init: true
-    entrypoint: ["openclaw"]
+    entrypoint: ["node", "dist/index.js"]
     env_file:
       - .env
     network_mode: "service:openclaw-gateway"
@@ -53,8 +61,8 @@ services:
       - "{{ data_gid }}"
     volumes:
       - "{{ target_home }}/.openclaw:/home/node/.openclaw"
-      - "{{ target_home }}/.config/openclaw:/home/node/.config/openclaw"
-      - "{{ target_home }}/.openclaw-auth-profile-secrets:/home/node/.openclaw-auth-profile-secrets"
+      - "{{ target_home }}/.openclaw/workspace:/home/node/.openclaw/workspace"
+      - "{{ target_home }}/.openclaw-auth-profile-secrets:/home/node/.config/openclaw"
       - type: bind
         source: "{{ target_home }}/nas_docs"
         target: /home/node/nas_docs

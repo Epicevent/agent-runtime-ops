@@ -7,4 +7,5 @@ container_nas_root: /workspace/nas_docs
 allow_source_mount: false
 required_mount_propagation: rslave
 required_read_only_nas: true
-
+runtime_user_mode: image-managed
+http_smoke_path: /

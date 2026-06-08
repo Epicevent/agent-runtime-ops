@@ -8,4 +8,5 @@ allow_source_mount: true
 source_output_target: /opt/hermes-workspace
 required_mount_propagation: rslave
 required_read_only_nas: true
-
+runtime_user_mode: image-managed
+http_smoke_path: /
