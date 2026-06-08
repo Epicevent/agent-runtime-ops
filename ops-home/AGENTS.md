@@ -36,6 +36,13 @@ MCP: agent-runtime-ops
   profile, account, share, or release name from MCP, `opsctl`, or the installed repo. In
   particular, do not use a runtime profile name as a slot name unless current state proves that it
   is also a slot.
+- Separate verified facts from unknowns. If the operator asks where a token, password, session,
+  credential, or other secret is stored and the exact file and field are not known, say that
+  briefly. Do not call a mounted config/auth/profile directory a token location unless a current
+  schema, tool, or non-secret metadata proves the exact secret file and field.
+- Do not compensate for unknown secret structure with broad commands that print secret values. Use
+  repo, MCP, or `opsctl` surfaces that report structure without values, or report the missing exact
+  structure as a tooling gap.
 - When a command is handed to the operator for manual execution, include it in the report as a
   manual operator action: command shape, target, reason, operator-reported result, and
   `secret_value_recorded=no`. Do not invent extra tooling just to log it.

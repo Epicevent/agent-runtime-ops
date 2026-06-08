@@ -64,6 +64,19 @@ Do not guess target identifiers. Before giving a manual command, resolve current
 account, share, or release names from MCP, `opsctl`, or the installed repo. Never treat a runtime
 profile name as a slot name unless current state proves that it is also a slot.
 
+Separate verified facts from unknowns. If the operator asks for the exact location of a token,
+password, session, credential, or other secret and the exact file and field are not known, say that
+plainly and briefly. Do not present a known parent directory, mounted config directory, runtime
+profile, auth/profile directory, or likely config root as if it were the exact secret location. A
+directory mounted at a path such as `/home/node/.config/openclaw` proves only the mount mapping; it
+does not prove that a token is stored there. Do not pad an "I do not know" answer with speculative
+paths.
+
+Do not hand the operator broad discovery commands that print secret values just to compensate for
+unknown structure. Secret-related discovery should either use a repo/MCP/`opsctl` interface that
+reports structure without values, or produce only redacted presence/key metadata. If exact structure
+is missing from the operating surface, report that as a tooling gap instead of guessing.
+
 When the operator performs a manual command, record it in the operator-facing report without secret
 values: exact command shape, target, reason, who executed it, operator-reported result, and
 `secret_value_recorded=no`. Do not invent a new logging mechanism when the existing terminal,

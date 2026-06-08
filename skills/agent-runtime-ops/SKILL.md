@@ -21,6 +21,9 @@ Use this skill to keep natural-language operations tied to the real repository a
 - Do not edit rendered Docker compose files directly.
 - Do not guess target identifiers; resolve slots, profiles, accounts, shares, and releases from MCP,
   `opsctl`, or the installed repo before giving commands.
+- If asked for the exact location of a token, password, credential, session, or other secret, do not
+  mix verified structure with guesses. If the exact file and field are not known, say that briefly.
+  A mounted config/auth/profile directory is not proof of the exact token location.
 - Do not put customer state, NAS passwords, API keys, gateway tokens, or real slot assignment details
   in the repo.
 - Do not pass raw secret values in MCP tool arguments. Use allowed files or terminal stdin.
