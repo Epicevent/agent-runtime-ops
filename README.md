@@ -77,6 +77,18 @@ opsctl admin serve
 commands are intentionally guarded in the initial skeleton until the full apply
 engine is implemented and reviewed.
 
+## Install Shape
+
+Root installs the tool package. The existing `svcops` operating account runs it.
+
+```bash
+sudo bash install.sh
+sudo bash /opt/agent-runtime-ops/install.sh --check
+sudo -u svcops opsctl profile list
+```
+
+Live state remains outside this repository under `/srv/openclaw-ops`.
+
 ## Development Check
 
 ```bash
@@ -84,4 +96,3 @@ python -m compileall opsctl
 python -m agent_runtime_ops.cli --help
 python -m agent_runtime_ops.cli profile list
 ```
-
