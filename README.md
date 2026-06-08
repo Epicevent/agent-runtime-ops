@@ -65,6 +65,18 @@ opsctl profile list
 opsctl check oc1
 ```
 
+`opsctl check SLOT`은 `/srv/openclaw-ops`의 desired state와 runtime profile
+계약만 확인한다. 실제 Docker 컨테이너와 NAS mount 상태까지 보려면 live
+검사를 실행한다.
+
+```bash
+opsctl check --live oc1
+```
+
+live 검사는 파일을 쓰지 않는다. host에는 NAS가 mount되어 있는데 컨테이너
+안에서 child CIFS mount로 보이지 않거나, 컨테이너의 NAS root가 read-only가
+아니면 실패한다.
+
 ## 설치 계정과 운영계정
 
 설치한 계정이 운영계정이 되는 구조가 아니다.

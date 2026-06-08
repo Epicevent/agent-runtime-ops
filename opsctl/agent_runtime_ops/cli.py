@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -233,6 +234,131 @@ def _has_digest_ref(value: object) -> bool:
     return isinstance(value, str) and "@sha256:" in value
 
 
+def _container_name(slot: str, profile) -> str:
+    service = profile.metadata.get("service") or "openclaw-gateway"
+    return f"openclaw-{slot}-{service}-1"
+
+
+def _run_text(command: list[str], timeout: int = 20) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, text=True, capture_output=True, timeout=timeout)
+
+
+def _parse_findmnt_pairs(output: str) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        item: dict[str, str] = {}
+        for part in shlex.split(line):
+            if "=" not in part:
+                continue
+            key, value = part.split("=", 1)
+            item[key.lower()] = value
+        if item:
+            rows.append(item)
+    return rows
+
+
+def _findmnt_tree(path: str, container: str | None = None) -> tuple[int, str, list[dict[str, str]]]:
+    command = ["findmnt", "-R", "-P", "-o", "TARGET,SOURCE,FSTYPE,OPTIONS", path]
+    if container:
+        command = ["docker", "exec", container, *command]
+    proc = _run_text(command)
+    return proc.returncode, (proc.stderr or proc.stdout).strip(), _parse_findmnt_pairs(proc.stdout)
+
+
+def _is_readonly_mount(row: dict[str, str]) -> bool:
+    options = row.get("options", "")
+    return "ro" in {part.strip() for part in options.split(",") if part.strip()}
+
+
+def _run_live_slot_checks(desired, profile) -> list[tuple[bool, str, str | None]]:
+    checks: list[tuple[bool, str, str | None]] = []
+    container = _container_name(desired.slot, profile)
+    target_home = f"/home/{desired.slot}"
+    host_nas_root = f"{target_home}/nas_docs"
+    container_nas_root = str(profile.metadata.get("container_nas_root") or "")
+    required_read_only_nas = profile.metadata.get("required_read_only_nas") is True
+
+    docker = shutil.which("docker")
+    checks.append((bool(docker), "live_docker_cli_available", docker))
+    if not docker:
+        return checks
+
+    inspect = _run_text(["docker", "inspect", container])
+    checks.append((inspect.returncode == 0, "live_container_exists", container))
+    if inspect.returncode != 0:
+        detail = (inspect.stderr or inspect.stdout).strip()
+        checks.append((False, "live_container_inspect_ok", detail[:200] if detail else None))
+        return checks
+
+    try:
+        info = json.loads(inspect.stdout)[0]
+    except Exception as exc:
+        checks.append((False, "live_container_inspect_parse_ok", str(exc)))
+        return checks
+    state = info.get("State") or {}
+    config = info.get("Config") or {}
+    running = str(state.get("Running")).lower()
+    health_data = state.get("Health") or {}
+    health = str(health_data.get("Status") or "none")
+    image = str(config.get("Image") or "")
+    checks.append((running == "true", "live_container_running", f"running={running}"))
+    checks.append((health in {"healthy", "starting", "none", ""}, "live_container_health_ok", f"health={health}"))
+    checks.append((bool(image), "live_container_image_present", image or None))
+
+    host_rc, host_error, host_mounts = _findmnt_tree(host_nas_root)
+    checks.append((host_rc == 0, "live_host_nas_root_findmnt_ok", host_error if host_rc != 0 else host_nas_root))
+    host_cifs = [row for row in host_mounts if row.get("fstype") == "cifs" and row.get("target", "").startswith(host_nas_root + "/")]
+    checks.append((bool(host_cifs), "live_host_child_cifs_present", f"count={len(host_cifs)}"))
+    if required_read_only_nas:
+        host_ro = all(_is_readonly_mount(row) for row in host_cifs)
+        checks.append((bool(host_cifs) and host_ro, "live_host_child_cifs_readonly", f"count={len(host_cifs)}"))
+
+    if not container_nas_root:
+        checks.append((False, "live_container_nas_root_configured", None))
+        return checks
+
+    container_rc, container_error, container_mounts = _findmnt_tree(container_nas_root, container=container)
+    checks.append(
+        (
+            container_rc == 0,
+            "live_container_nas_root_findmnt_ok",
+            container_error if container_rc != 0 else container_nas_root,
+        )
+    )
+    root_rows = [row for row in container_mounts if row.get("target") == container_nas_root]
+    checks.append((bool(root_rows), "live_container_nas_root_mounted", container_nas_root))
+    if required_read_only_nas:
+        checks.append(
+            (
+                bool(root_rows) and _is_readonly_mount(root_rows[0]),
+                "live_container_nas_root_readonly",
+                root_rows[0].get("options") if root_rows else None,
+            )
+        )
+
+    container_cifs = [
+        row for row in container_mounts if row.get("fstype") == "cifs" and row.get("target", "").startswith(container_nas_root + "/")
+    ]
+    checks.append((bool(container_cifs), "live_container_child_cifs_present", f"count={len(container_cifs)}"))
+    if required_read_only_nas:
+        container_ro = all(_is_readonly_mount(row) for row in container_cifs)
+        checks.append((bool(container_cifs) and container_ro, "live_container_child_cifs_readonly", f"count={len(container_cifs)}"))
+
+    host_sources = {row.get("source") for row in host_cifs if row.get("source")}
+    container_sources = {row.get("source") for row in container_cifs if row.get("source")}
+    checks.append(
+        (
+            bool(host_sources) and host_sources.issubset(container_sources),
+            "live_container_sees_host_cifs_sources",
+            f"host={len(host_sources)} container={len(container_sources)}",
+        )
+    )
+    return checks
+
+
 def _run_static_slot_checks(desired, profile) -> list[tuple[bool, str, str | None]]:
     lane_family = desired.lane_data.get("family")
     lane_slot_class = desired.lane_data.get("slot_class")
@@ -306,6 +432,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     print(f"runtime_profile_digest={profile.digest}")
     print(f"compose_sha256={rendered.sha256}")
     print("check_mode=non_mutating")
+    print(f"live_runtime_check={'enabled' if args.live else 'not_run'}")
 
     failed = 0
     for ok, name, detail in _run_static_slot_checks(desired, profile):
@@ -317,10 +444,21 @@ def cmd_check(args: argparse.Namespace) -> int:
     if not rendered.text.strip():
         failed += 1
 
+    if args.live:
+        for ok, name, detail in _run_live_slot_checks(desired, profile):
+            _check_line(ok, name, detail)
+            if not ok:
+                failed += 1
+    else:
+        print("INFO live_runtime_check_not_run use='opsctl check --live SLOT'")
+
     if failed:
         print(f"check_status=fail failed={failed}")
         return 1
-    print("check_status=pass")
+    if args.live:
+        print("check_status=pass scope=contract_and_live")
+    else:
+        print("check_status=pass scope=contract_only")
     return 0
 
 
@@ -389,6 +527,8 @@ def build_parser() -> argparse.ArgumentParser:
     for name, func in (("status", cmd_status), ("plan", cmd_plan), ("check", cmd_check)):
         item = sub.add_parser(name)
         item.add_argument("slot")
+        if name == "check":
+            item.add_argument("--live", action="store_true", help="also inspect Docker and NAS runtime state without writing")
         item.set_defaults(func=func)
 
     for name in ("apply", "rollback"):
