@@ -5,7 +5,7 @@ JI TECH AI 에이전트 서비스의 런타임 운영 도구 저장소다.
 이 저장소는 실제 고객 상태를 저장하지 않는다. 실제 운영 상태는 서버의
 `/srv/openclaw-ops`에 둔다.
 
-## 한 줄 설치
+## 첫 설치
 
 실행 주체: **sudo 가능한 관리자 계정**
 
@@ -13,7 +13,17 @@ JI TECH AI 에이전트 서비스의 런타임 운영 도구 저장소다.
 sudo -v && curl -fsSL https://raw.githubusercontent.com/Epicevent/agent-runtime-ops/main/go | sudo bash
 ```
 
-같은 명령을 다시 실행하면 `main` 기준 최신 설치본으로 갱신된다.
+이 명령은 서버에 `opsctl`이 아직 없을 때 쓰는 bootstrap이다.
+
+## 이후 갱신
+
+첫 설치가 끝난 뒤에는 아래 명령만 사용한다.
+
+```bash
+sudo opsctl self-update
+```
+
+기본값은 `Epicevent/agent-runtime-ops`의 `main`이다.
 
 설치 확인:
 

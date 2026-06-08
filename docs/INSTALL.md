@@ -3,7 +3,7 @@
 `agent-runtime-ops`는 공개 운영 도구 패키지다. 실제 서버 운영 상태는 이
 저장소가 아니라 `/srv/openclaw-ops`에 둔다.
 
-## 한 줄 설치
+## 첫 설치
 
 실행 주체: **sudo 가능한 관리자 계정**
 
@@ -11,7 +11,17 @@
 sudo -v && curl -fsSL https://raw.githubusercontent.com/Epicevent/agent-runtime-ops/main/go | sudo bash
 ```
 
-같은 명령을 다시 실행하면 `main` 기준 최신 설치본으로 갱신된다.
+이 명령은 서버에 `opsctl`이 아직 없을 때 쓰는 bootstrap이다.
+
+## 이후 갱신
+
+첫 설치가 끝난 뒤에는 아래 명령만 사용한다.
+
+```bash
+sudo opsctl self-update
+```
+
+기본값은 `Epicevent/agent-runtime-ops`의 `main`이다.
 
 ## 설치 확인
 
