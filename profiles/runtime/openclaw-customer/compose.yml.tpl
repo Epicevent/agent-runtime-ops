@@ -19,8 +19,13 @@ services:
       LANGUAGE: ko_KR:ko
       LC_ALL: ko_KR.UTF-8
     ports:
-      - "{{ gateway_port }}:18789"
-      - "{{ bridge_port }}:18790"
+      - "127.0.0.1:{{ gateway_port }}:18789"
+      - "127.0.0.1:{{ bridge_port }}:18790"
+    labels:
+      agent-runtime.slot: "{{ slot }}"
+      agent-runtime.family: "{{ family }}"
+      agent-runtime.profile: "{{ runtime_profile }}"
+      agent-runtime.service: gateway
     user: "{{ runtime_uid }}:{{ runtime_gid }}"
     group_add:
       - "{{ data_gid }}"
@@ -57,4 +62,3 @@ services:
         bind:
           propagation: rslave
     working_dir: /home/node/.openclaw/workspace
-

@@ -12,8 +12,10 @@ status -> plan -> apply -> check
 private state, release, and runtime profile can render a valid desired runtime.
 
 `opsctl check --live SLOT` also inspects Docker and NAS mount state. It is still
-non-mutating. It must fail if the running container does not see the host CIFS
-child mounts, or if the NAS bind root is not read-only inside the container.
+non-mutating, but it needs root/admin privileges or an equivalent restricted
+root helper because it reads Docker metadata and mount namespaces. It must fail
+if the running container does not see the host CIFS child mounts, or if the NAS
+bind root is not read-only inside the container.
 
 `apply`, `rollback`, and `rollout` are the only commands allowed to change
 runtime files. In the initial skeleton, mutating commands are intentionally

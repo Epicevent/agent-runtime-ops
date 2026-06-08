@@ -106,10 +106,16 @@ Docker compose 직접 수정
 
 ```text
 /opt/agent-runtime-ops
-  설치된 공개 운영 도구
+  공개 운영 도구 설치 root
+
+/opt/agent-runtime-ops/releases/<commit>
+  commit별 설치본
+
+/opt/agent-runtime-ops/current
+  현재 활성 설치본 symlink
 
 /usr/local/bin/opsctl
-  svcops가 실행할 opsctl 명령
+  current 설치본으로 연결되는 opsctl 명령
 
 /srv/openclaw-ops
   실제 서버 운영 상태
@@ -119,7 +125,7 @@ Docker compose 직접 수정
 
 ```text
 /opt/agent-runtime-ops   root:svcops
-/usr/local/bin/opsctl    /opt/agent-runtime-ops/.venv/bin/opsctl 링크
+/usr/local/bin/opsctl    /opt/agent-runtime-ops/current/.venv/bin/opsctl 링크
 /srv/openclaw-ops        root:svcops
 ```
 

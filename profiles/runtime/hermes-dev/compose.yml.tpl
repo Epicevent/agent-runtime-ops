@@ -26,7 +26,13 @@ services:
       LANGUAGE: ko_KR:ko
       LC_ALL: ko_KR.UTF-8
     ports:
-      - "{{ gateway_port }}:3000"
+      - "127.0.0.1:{{ gateway_port }}:3000"
+    labels:
+      agent-runtime.slot: "{{ slot }}"
+      agent-runtime.family: "{{ family }}"
+      agent-runtime.profile: "{{ runtime_profile }}"
+      agent-runtime.service: gateway
+    user: "{{ runtime_uid }}:{{ runtime_gid }}"
     group_add:
       - "{{ data_gid }}"
     volumes:
@@ -40,4 +46,3 @@ services:
         bind:
           propagation: rslave
     working_dir: /opt/data/home
-

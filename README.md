@@ -124,10 +124,16 @@ root shell 임의 작업
 
 ```text
 /opt/agent-runtime-ops
-  설치된 공개 운영 도구
+  공개 운영 도구 설치 root
+
+/opt/agent-runtime-ops/releases/<commit>
+  commit별 설치본
+
+/opt/agent-runtime-ops/current
+  현재 활성 설치본 symlink
 
 /usr/local/bin/opsctl
-  svcops가 실행할 명령
+  current 설치본의 opsctl로 연결되는 명령
 
 /srv/openclaw-ops
   서버 private 운영 상태
@@ -137,7 +143,7 @@ root shell 임의 작업
 
 ```text
 /opt/agent-runtime-ops   root:svcops
-/usr/local/bin/opsctl    /opt/agent-runtime-ops/.venv/bin/opsctl 링크
+/usr/local/bin/opsctl    /opt/agent-runtime-ops/current/.venv/bin/opsctl 링크
 /srv/openclaw-ops        root:svcops
 ```
 
@@ -253,11 +259,18 @@ opsctl release promote NAME LANE
 
 opsctl nas requests
 opsctl nas approve-auto
+opsctl nas mounted SLOT
 opsctl nas policy-check SLOT SHARE
+sudo opsctl nas mount SLOT SHARE
+sudo opsctl nas unmount SLOT SHARE
 
 opsctl admin serve
 ```
 
 현재 초기 골격에서는 `status`, `plan`, `check`, `nas policy-check`가 비쓰기
-명령이다. `apply`, `rollback`, `rollout`은 적용 엔진과 감사 로그가 완성된
-뒤 열어야 한다.
+명령이다. `nas mounted`도 비쓰기 명령이다.
+
+`nas mount`와 `nas unmount`는 쓰기 명령이지만 compose를 수정하지 않는다.
+동적 NAS 변화는 `/home/ocN/nas_docs/*` child mount에서만 처리한다.
+
+`apply`, `rollback`, `rollout`은 적용 엔진과 감사 로그가 완성된 뒤 열어야 한다.

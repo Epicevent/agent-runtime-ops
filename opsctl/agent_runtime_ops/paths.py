@@ -6,8 +6,15 @@ from pathlib import Path
 
 def _find_repo_root() -> Path:
     env_root = os.environ.get("AGENT_RUNTIME_OPS_ROOT")
-    if env_root:
+    if env_root and os.environ.get("AGENT_RUNTIME_OPS_DEV") == "1":
         return Path(env_root).resolve()
+
+    installed_current = Path("/opt/agent-runtime-ops/current")
+    try:
+        if (installed_current / "profiles" / "runtime").is_dir():
+            return installed_current
+    except OSError:
+        pass
 
     starts = [Path(__file__).resolve()]
     try:

@@ -13,6 +13,7 @@ import tempfile
 from pathlib import Path
 
 from .paths import DEFAULT_STATE_ROOT
+from .nas import check_nas_policy, mountpoint_for_share, parse_smb_share
 from .profiles import list_profile_names, load_profile
 from .renderer import render_compose
 from .state import load_desired_slot
@@ -139,7 +140,9 @@ def cmd_self_update(args: argparse.Namespace) -> int:
             if resolved != ref:
                 print(f"error: checkout mismatch: expected {ref}, got {resolved}", file=sys.stderr)
                 return 1
-            subprocess.run(["bash", str(repo / "install.sh"), "install"], check=True)
+            env = os.environ.copy()
+            env["AGENT_RUNTIME_OPS_REF"] = ref
+            subprocess.run(["bash", str(repo / "install.sh"), "install"], check=True, env=env)
         except subprocess.CalledProcessError as exc:
             return exc.returncode or 1
     return 0
@@ -234,13 +237,49 @@ def _has_digest_ref(value: object) -> bool:
     return isinstance(value, str) and "@sha256:" in value
 
 
+def _digest_from_image_ref(value: object) -> str | None:
+    if not isinstance(value, str) or "@sha256:" not in value:
+        return None
+    return "sha256:" + value.rsplit("@sha256:", 1)[1]
+
+
+def _allowed_image_ref(family: object, role: str, image_ref: object) -> bool:
+    if not isinstance(family, str) or not isinstance(image_ref, str):
+        return False
+    allowed = {
+        ("openclaw", "wrapper"): (
+            "ghcr.io/epicevent/agent-runtime-openclaw@sha256:",
+            "ghcr.io/epicevent/openclaw-nas-agent@sha256:",
+        ),
+        ("openclaw", "product"): (
+            "ghcr.io/epicevent/openclaw-jitech@sha256:",
+            "ghcr.io/epicevent/openclaw-nas-agent@sha256:",
+        ),
+        ("hermes", "wrapper"): (
+            "ghcr.io/epicevent/agent-runtime-hermes@sha256:",
+            "ghcr.io/epicevent/hermes-jitech@sha256:",
+            "ghcr.io/epicevent/hermes-workspace@sha256:",
+            "ghcr.io/epicevent/openclaw-nas-agent@sha256:",
+        ),
+        ("hermes", "product"): (
+            "ghcr.io/epicevent/hermes-jitech@sha256:",
+            "ghcr.io/epicevent/hermes-workspace@sha256:",
+            "ghcr.io/epicevent/openclaw-nas-agent@sha256:",
+        ),
+    }
+    return image_ref.startswith(allowed.get((family, role), ()))
+
+
 def _container_name(slot: str, profile) -> str:
     service = profile.metadata.get("service") or "openclaw-gateway"
     return f"openclaw-{slot}-{service}-1"
 
 
 def _run_text(command: list[str], timeout: int = 20) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, text=True, capture_output=True, timeout=timeout)
+    try:
+        return subprocess.run(command, text=True, capture_output=True, timeout=timeout)
+    except FileNotFoundError as exc:
+        return subprocess.CompletedProcess(command, 127, "", str(exc))
 
 
 def _parse_findmnt_pairs(output: str) -> list[dict[str, str]]:
@@ -260,10 +299,10 @@ def _parse_findmnt_pairs(output: str) -> list[dict[str, str]]:
     return rows
 
 
-def _findmnt_tree(path: str, container: str | None = None) -> tuple[int, str, list[dict[str, str]]]:
-    command = ["findmnt", "-R", "-P", "-o", "TARGET,SOURCE,FSTYPE,OPTIONS", path]
-    if container:
-        command = ["docker", "exec", container, *command]
+def _findmnt_tree(path: str, container_pid: int | None = None) -> tuple[int, str, list[dict[str, str]]]:
+    command = ["findmnt", "-R", "-P", "-o", "TARGET,SOURCE,FSTYPE,OPTIONS,PROPAGATION", path]
+    if container_pid is not None:
+        command = ["nsenter", "--target", str(container_pid), "--mount", "--", *command]
     proc = _run_text(command)
     return proc.returncode, (proc.stderr or proc.stdout).strip(), _parse_findmnt_pairs(proc.stdout)
 
@@ -273,17 +312,65 @@ def _is_readonly_mount(row: dict[str, str]) -> bool:
     return "ro" in {part.strip() for part in options.split(",") if part.strip()}
 
 
-def _run_live_slot_checks(desired, profile) -> list[tuple[bool, str, str | None]]:
+def _propagation_satisfies(actual: str | None, required: str | None) -> bool:
+    if not required:
+        return True
+    value = (actual or "").lower()
+    if required in {"rslave", "slave"}:
+        return value in {"slave", "rslave", "shared", "rshared"}
+    if required in {"rshared", "shared"}:
+        return value in {"shared", "rshared"}
+    return value == required
+
+
+def _find_gateway_container(slot: str, profile) -> tuple[str | None, str | None]:
+    service_label = "gateway"
+    by_label = _run_text(
+        [
+            "docker",
+            "ps",
+            "-a",
+            "--filter",
+            f"label=agent-runtime.slot={slot}",
+            "--filter",
+            f"label=agent-runtime.profile={profile.name}",
+            "--filter",
+            f"label=agent-runtime.service={service_label}",
+            "--format",
+            "{{.ID}}",
+        ]
+    )
+    if by_label.returncode == 0:
+        ids = [line.strip() for line in by_label.stdout.splitlines() if line.strip()]
+        if len(ids) == 1:
+            return ids[0], "label"
+        if len(ids) > 1:
+            return None, f"multiple_label_matches:{len(ids)}"
+    return _container_name(slot, profile), "fallback_name"
+
+
+def _run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool, str, str | None]]:
     checks: list[tuple[bool, str, str | None]] = []
-    container = _container_name(desired.slot, profile)
+    if not _is_root():
+        return [(False, "live_check_requires_root", "run as root/admin or a restricted root helper")]
+
+    container, container_lookup = _find_gateway_container(desired.slot, profile)
+    checks.append((bool(container), "live_container_lookup", container_lookup))
+    if not container:
+        return checks
     target_home = f"/home/{desired.slot}"
     host_nas_root = f"{target_home}/nas_docs"
     container_nas_root = str(profile.metadata.get("container_nas_root") or "")
     required_read_only_nas = profile.metadata.get("required_read_only_nas") is True
+    required_propagation = str(profile.metadata.get("required_mount_propagation") or "")
 
     docker = shutil.which("docker")
     checks.append((bool(docker), "live_docker_cli_available", docker))
     if not docker:
+        return checks
+    nsenter = shutil.which("nsenter")
+    checks.append((bool(nsenter), "live_nsenter_available", nsenter))
+    if not nsenter:
         return checks
 
     inspect = _run_text(["docker", "inspect", container])
@@ -300,19 +387,43 @@ def _run_live_slot_checks(desired, profile) -> list[tuple[bool, str, str | None]
         return checks
     state = info.get("State") or {}
     config = info.get("Config") or {}
+    image_data = info.get("Image") or ""
+    repo_digests = info.get("RepoDigests") or []
     running = str(state.get("Running")).lower()
+    pid = int(state.get("Pid") or 0)
     health_data = state.get("Health") or {}
     health = str(health_data.get("Status") or "none")
     image = str(config.get("Image") or "")
+    user = str(config.get("User") or "")
     checks.append((running == "true", "live_container_running", f"running={running}"))
+    checks.append((pid > 0, "live_container_pid_present", f"pid={pid}"))
     checks.append((health in {"healthy", "starting", "none", ""}, "live_container_health_ok", f"health={health}"))
     checks.append((bool(image), "live_container_image_present", image or None))
+    desired_image = str(desired.release_data.get("wrapper_image") or "")
+    desired_digest = str(desired.release_data.get("digest") or "")
+    image_matches = bool(desired_image) and (
+        image == desired_image
+        or desired_image in repo_digests
+        or (desired_digest and (desired_digest in image or desired_digest in image_data or any(desired_digest in item for item in repo_digests)))
+    )
+    checks.append((image_matches, "live_container_image_matches_release", f"image={image}"))
+    checks.append((bool(user) and user not in {"0", "0:0", "root"}, "live_container_user_non_root", f"user={user or 'empty'}"))
+    if pid <= 0:
+        return checks
 
     host_rc, host_error, host_mounts = _findmnt_tree(host_nas_root)
     checks.append((host_rc == 0, "live_host_nas_root_findmnt_ok", host_error if host_rc != 0 else host_nas_root))
     host_cifs = [row for row in host_mounts if row.get("fstype") == "cifs" and row.get("target", "").startswith(host_nas_root + "/")]
-    checks.append((bool(host_cifs), "live_host_child_cifs_present", f"count={len(host_cifs)}"))
-    if required_read_only_nas:
+    checks.append((True, "live_host_child_cifs_count", f"count={len(host_cifs)}"))
+    for row in host_cifs:
+        source = row.get("source") or ""
+        if source.startswith("//"):
+            try:
+                decision = check_nas_policy(desired.slot, source, state_root)
+                checks.append((decision.allowed, "live_host_child_cifs_allowed_by_policy", f"source={source} reason={decision.reason}"))
+            except Exception as exc:
+                checks.append((False, "live_host_child_cifs_policy_check_ok", f"source={source} reason={exc}"))
+    if required_read_only_nas and host_cifs:
         host_ro = all(_is_readonly_mount(row) for row in host_cifs)
         checks.append((bool(host_cifs) and host_ro, "live_host_child_cifs_readonly", f"count={len(host_cifs)}"))
 
@@ -320,7 +431,7 @@ def _run_live_slot_checks(desired, profile) -> list[tuple[bool, str, str | None]
         checks.append((False, "live_container_nas_root_configured", None))
         return checks
 
-    container_rc, container_error, container_mounts = _findmnt_tree(container_nas_root, container=container)
+    container_rc, container_error, container_mounts = _findmnt_tree(container_nas_root, container_pid=pid)
     checks.append(
         (
             container_rc == 0,
@@ -338,24 +449,35 @@ def _run_live_slot_checks(desired, profile) -> list[tuple[bool, str, str | None]
                 root_rows[0].get("options") if root_rows else None,
             )
         )
+    if root_rows and required_propagation:
+        checks.append(
+            (
+                _propagation_satisfies(root_rows[0].get("propagation"), required_propagation),
+                "live_container_nas_root_propagation",
+                f"required={required_propagation} actual={root_rows[0].get('propagation')}",
+            )
+        )
 
     container_cifs = [
         row for row in container_mounts if row.get("fstype") == "cifs" and row.get("target", "").startswith(container_nas_root + "/")
     ]
-    checks.append((bool(container_cifs), "live_container_child_cifs_present", f"count={len(container_cifs)}"))
-    if required_read_only_nas:
+    checks.append((True, "live_container_child_cifs_count", f"count={len(container_cifs)}"))
+    if required_read_only_nas and container_cifs:
         container_ro = all(_is_readonly_mount(row) for row in container_cifs)
         checks.append((bool(container_cifs) and container_ro, "live_container_child_cifs_readonly", f"count={len(container_cifs)}"))
 
     host_sources = {row.get("source") for row in host_cifs if row.get("source")}
     container_sources = {row.get("source") for row in container_cifs if row.get("source")}
-    checks.append(
-        (
-            bool(host_sources) and host_sources.issubset(container_sources),
-            "live_container_sees_host_cifs_sources",
-            f"host={len(host_sources)} container={len(container_sources)}",
+    if host_sources:
+        checks.append(
+            (
+                host_sources.issubset(container_sources),
+                "live_container_sees_host_cifs_sources",
+                f"host={len(host_sources)} container={len(container_sources)}",
+            )
         )
-    )
+    else:
+        checks.append((True, "live_no_host_child_cifs_mounted", None))
     return checks
 
 
@@ -369,6 +491,8 @@ def _run_static_slot_checks(desired, profile) -> list[tuple[bool, str, str | Non
     wrapper_image = desired.release_data.get("wrapper_image")
     product_image = desired.release_data.get("product_image")
     release_digest = desired.release_data.get("digest")
+    wrapper_digest = _digest_from_image_ref(wrapper_image)
+    product_digest = _digest_from_image_ref(product_image)
     allow_source_mount = profile.metadata.get("allow_source_mount")
 
     checks: list[tuple[bool, str, str | None]] = [
@@ -386,10 +510,26 @@ def _run_static_slot_checks(desired, profile) -> list[tuple[bool, str, str | Non
         (bool(wrapper_image), "wrapper_image_present", str(wrapper_image) if wrapper_image else None),
         (bool(product_image), "product_image_present", str(product_image) if product_image else None),
         (_has_digest_ref(wrapper_image), "wrapper_image_pinned_by_digest", str(wrapper_image) if wrapper_image else None),
+        (_has_digest_ref(product_image), "product_image_pinned_by_digest", str(product_image) if product_image else None),
         (
             isinstance(release_digest, str) and release_digest.startswith("sha256:"),
             "release_digest_present",
             str(release_digest) if release_digest else None,
+        ),
+        (
+            bool(wrapper_digest) and wrapper_digest == release_digest,
+            "wrapper_image_digest_matches_release",
+            f"wrapper={wrapper_digest} release={release_digest}",
+        ),
+        (
+            _allowed_image_ref(lane_family, "wrapper", wrapper_image),
+            "wrapper_image_repository_allowed",
+            str(wrapper_image) if wrapper_image else None,
+        ),
+        (
+            _allowed_image_ref(lane_family, "product", product_image),
+            "product_image_repository_allowed",
+            str(product_image) if product_image else None,
         ),
     ]
 
@@ -445,7 +585,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         failed += 1
 
     if args.live:
-        for ok, name, detail in _run_live_slot_checks(desired, profile):
+        for ok, name, detail in _run_live_slot_checks(desired, profile, _state_root(args)):
             _check_line(ok, name, detail)
             if not ok:
                 failed += 1
@@ -490,10 +630,189 @@ def cmd_nas_approve_auto(args: argparse.Namespace) -> int:
 
 
 def cmd_nas_policy_check(args: argparse.Namespace) -> int:
-    print(f"slot={args.slot}")
-    print(f"share={args.share}")
-    print("policy_check_status=skeleton")
+    try:
+        decision = check_nas_policy(args.slot, args.share, _state_root(args))
+    except Exception as exc:
+        print(f"slot={args.slot}")
+        print(f"share={args.share}")
+        print("policy_check_status=fail")
+        print(f"reason={exc}")
+        print("mutates=false")
+        return 1
+    print(f"slot={decision.slot}")
+    print(f"share={decision.share.source}")
+    print(f"mountpoint={decision.mountpoint}")
+    print(f"matched_grant={decision.matched_grant or ''}")
+    print(f"max_mounts={decision.max_mounts if decision.max_mounts is not None else ''}")
+    print(f"policy_check_status={'pass' if decision.allowed else 'fail'}")
+    print(f"reason={decision.reason}")
     print("mutates=false")
+    return 0 if decision.allowed else 1
+
+
+def _findmnt_one(path: Path) -> tuple[int, str, list[dict[str, str]]]:
+    command = ["findmnt", "-M", str(path), "-P", "-o", "TARGET,SOURCE,FSTYPE,OPTIONS,PROPAGATION"]
+    proc = _run_text(command)
+    return proc.returncode, (proc.stderr or proc.stdout).strip(), _parse_findmnt_pairs(proc.stdout)
+
+
+def _safe_mountpoint_path(mountpoint: Path) -> None:
+    for candidate in [mountpoint.parent.parent, mountpoint.parent, mountpoint]:
+        if candidate.exists() and candidate.is_symlink():
+            raise ValueError(f"mount path component must not be symlink: {candidate}")
+
+
+def _mounted_child_cifs_count(slot: str) -> int:
+    root = Path("/home") / slot / "nas_docs"
+    rc, _, rows = _findmnt_tree(str(root))
+    if rc != 0:
+        return 0
+    return len([row for row in rows if row.get("fstype") == "cifs" and row.get("target", "").startswith(str(root) + "/")])
+
+
+def _max_mounts_allows(value: object, current_count: int) -> bool:
+    if value in {None, "", "unlimited"}:
+        return True
+    try:
+        return current_count < int(value)
+    except (TypeError, ValueError):
+        return False
+
+
+def _print_mount_row(prefix: str, row: dict[str, str]) -> None:
+    print(f"{prefix}_target={row.get('target', '')}")
+    print(f"{prefix}_source={row.get('source', '')}")
+    print(f"{prefix}_fstype={row.get('fstype', '')}")
+    print(f"{prefix}_readonly={'yes' if _is_readonly_mount(row) else 'no'}")
+    if row.get("propagation"):
+        print(f"{prefix}_propagation={row.get('propagation')}")
+
+
+def cmd_nas_mounted(args: argparse.Namespace) -> int:
+    try:
+        desired = load_desired_slot(args.slot, _state_root(args))
+    except Exception as exc:
+        print(f"slot={args.slot}")
+        print("mounted_status=fail")
+        print(f"reason={exc}")
+        return 1
+    root = Path("/home") / desired.slot / "nas_docs"
+    rc, error, rows = _findmnt_tree(str(root))
+    print(f"slot={desired.slot}")
+    print(f"nas_root={root}")
+    print("mutates=false")
+    if rc != 0:
+        print("mounted_status=fail")
+        print(f"reason={error}")
+        return 1
+    child_rows = [row for row in rows if row.get("fstype") == "cifs" and row.get("target", "").startswith(str(root) + "/")]
+    print(f"mounted_child_cifs_count={len(child_rows)}")
+    for index, row in enumerate(child_rows, start=1):
+        _print_mount_row(f"mount_{index}", row)
+    print("mounted_status=ok")
+    return 0
+
+
+def cmd_nas_mount(args: argparse.Namespace) -> int:
+    if not _is_root():
+        print("error: run as root/admin: sudo opsctl nas mount SLOT //HOST/SHARE", file=sys.stderr)
+        return 2
+    try:
+        decision = check_nas_policy(args.slot, args.share, _state_root(args))
+        if not decision.allowed:
+            raise ValueError(f"policy denied: {decision.reason}")
+        _safe_mountpoint_path(decision.mountpoint)
+        decision.mountpoint.mkdir(parents=True, exist_ok=True)
+        _safe_mountpoint_path(decision.mountpoint)
+        current_count = _mounted_child_cifs_count(decision.slot)
+        existing_rc, _, existing_rows = _findmnt_one(decision.mountpoint)
+        already_same_mount = existing_rc == 0 and bool(existing_rows) and existing_rows[0].get("source") == decision.share.source
+        if not already_same_mount and not _max_mounts_allows(decision.max_mounts, current_count):
+            raise ValueError(f"max_mounts_exceeded: current={current_count} max={decision.max_mounts}")
+    except Exception as exc:
+        print(f"slot={args.slot}")
+        print(f"share={args.share}")
+        print("mount_status=fail")
+        print(f"reason={exc}")
+        return 1
+
+    rc, _, rows = _findmnt_one(decision.mountpoint)
+    if rc == 0 and rows:
+        row = rows[0]
+        _print_mount_row("existing_mount", row)
+        ok = row.get("source") == decision.share.source and row.get("fstype") == "cifs" and _is_readonly_mount(row)
+        print(f"mount_status={'already_mounted' if ok else 'fail'}")
+        if not ok:
+            print("reason=mountpoint_has_unexpected_existing_mount")
+        return 0 if ok else 1
+
+    proc = _run_text(["mount", str(decision.mountpoint)], timeout=60)
+    if proc.returncode != 0:
+        print(f"slot={decision.slot}")
+        print(f"share={decision.share.source}")
+        print(f"mountpoint={decision.mountpoint}")
+        print("mount_status=fail")
+        print(f"reason={(proc.stderr or proc.stdout).strip()}")
+        return proc.returncode or 1
+
+    rc, error, rows = _findmnt_one(decision.mountpoint)
+    ok = rc == 0 and bool(rows) and rows[0].get("source") == decision.share.source and rows[0].get("fstype") == "cifs" and _is_readonly_mount(rows[0])
+    print(f"slot={decision.slot}")
+    print(f"share={decision.share.source}")
+    print(f"mountpoint={decision.mountpoint}")
+    if rows:
+        _print_mount_row("mounted", rows[0])
+    print(f"mount_status={'ok' if ok else 'fail'}")
+    if not ok:
+        print(f"reason={error or 'mounted_state_did_not_match_expected_cifs_ro'}")
+    return 0 if ok else 1
+
+
+def cmd_nas_unmount(args: argparse.Namespace) -> int:
+    if not _is_root():
+        print("error: run as root/admin: sudo opsctl nas unmount SLOT //HOST/SHARE", file=sys.stderr)
+        return 2
+    try:
+        share = parse_smb_share(args.share)
+        mountpoint = mountpoint_for_share(args.slot, share)
+        _safe_mountpoint_path(mountpoint)
+    except Exception as exc:
+        print(f"slot={args.slot}")
+        print(f"share={args.share}")
+        print("unmount_status=fail")
+        print(f"reason={exc}")
+        return 1
+
+    rc, _, rows = _findmnt_one(mountpoint)
+    if rc != 0 or not rows:
+        print(f"slot={args.slot}")
+        print(f"share={share.source}")
+        print(f"mountpoint={mountpoint}")
+        print("unmount_status=already_unmounted")
+        return 0
+    row = rows[0]
+    _print_mount_row("existing_mount", row)
+    if row.get("source") != share.source:
+        print("unmount_status=fail")
+        print("reason=mountpoint_source_does_not_match_requested_share")
+        return 1
+
+    command = ["umount"]
+    if args.lazy:
+        command.append("--lazy")
+    command.append(str(mountpoint))
+    proc = _run_text(command, timeout=60)
+    if proc.returncode != 0:
+        print("unmount_status=fail")
+        print(f"reason={(proc.stderr or proc.stdout).strip()}")
+        return proc.returncode or 1
+    if args.delete_empty_dir:
+        try:
+            mountpoint.rmdir()
+            print("empty_dir_removed=yes")
+        except OSError:
+            print("empty_dir_removed=no")
+    print("unmount_status=ok")
     return 0
 
 
@@ -557,10 +876,23 @@ def build_parser() -> argparse.ArgumentParser:
     nas_requests.set_defaults(func=cmd_nas_requests)
     nas_auto = nas_sub.add_parser("approve-auto")
     nas_auto.set_defaults(func=cmd_nas_approve_auto)
+    nas_mounted = nas_sub.add_parser("mounted")
+    nas_mounted.add_argument("slot")
+    nas_mounted.set_defaults(func=cmd_nas_mounted)
     nas_policy = nas_sub.add_parser("policy-check")
     nas_policy.add_argument("slot")
     nas_policy.add_argument("share")
     nas_policy.set_defaults(func=cmd_nas_policy_check)
+    nas_mount = nas_sub.add_parser("mount")
+    nas_mount.add_argument("slot")
+    nas_mount.add_argument("share")
+    nas_mount.set_defaults(func=cmd_nas_mount)
+    nas_unmount = nas_sub.add_parser("unmount")
+    nas_unmount.add_argument("slot")
+    nas_unmount.add_argument("share")
+    nas_unmount.add_argument("--lazy", action="store_true")
+    nas_unmount.add_argument("--delete-empty-dir", action="store_true")
+    nas_unmount.set_defaults(func=cmd_nas_unmount)
 
     admin = sub.add_parser("admin")
     admin_sub = admin.add_subparsers(dest="admin_command", required=True)

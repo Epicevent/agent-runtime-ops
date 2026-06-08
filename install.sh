@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-INSTALL_DIR="${AGENT_RUNTIME_OPS_DIR:-/opt/agent-runtime-ops}"
+INSTALL_ROOT="${AGENT_RUNTIME_OPS_DIR:-/opt/agent-runtime-ops}"
+RELEASES_DIR="$INSTALL_ROOT/releases"
+CURRENT_LINK="$INSTALL_ROOT/current"
 STATE_ROOT="${AGENT_RUNTIME_STATE_ROOT:-/srv/openclaw-ops}"
 OPS_USER="${AGENT_RUNTIME_OPS_USER:-svcops}"
 OPS_GROUP="${AGENT_RUNTIME_OPS_GROUP:-svcops}"
 BIN_LINK="${AGENT_RUNTIME_OPS_BIN:-/usr/local/bin/opsctl}"
-MANIFEST="${AGENT_RUNTIME_OPS_MANIFEST:-$INSTALL_DIR/.agent-runtime-ops-manifest}"
+MANIFEST="${AGENT_RUNTIME_OPS_MANIFEST:-$INSTALL_ROOT/.agent-runtime-ops-manifest}"
 REPO_URL="${AGENT_RUNTIME_OPS_REPO_URL:-https://github.com/Epicevent/agent-runtime-ops.git}"
-REPO_REF="${AGENT_RUNTIME_OPS_REF:-main}"
+REPO_REF="${AGENT_RUNTIME_OPS_REF:-}"
 SUDOERS_FILE="${AGENT_RUNTIME_OPS_SUDOERS_FILE:-/etc/sudoers.d/agent-runtime-ops-self-update}"
+LOCK_FILE="${AGENT_RUNTIME_OPS_LOCK_FILE:-/run/lock/agent-runtime-ops.install.lock}"
+FULL_SHA_RE='^[0-9a-f]{40}$'
 
 info() {
   printf '%s\n' "$*"
@@ -18,6 +22,11 @@ info() {
 die() {
   printf 'error: %s\n' "$*" >&2
   exit 1
+}
+
+require_full_sha() {
+  local value="$1"
+  [[ "$value" =~ $FULL_SHA_RE ]] || die "AGENT_RUNTIME_OPS_REF must be a full 40-character commit sha"
 }
 
 repo_root() {
@@ -34,12 +43,28 @@ require_root() {
   [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "run as root/admin; svcops runs opsctl after install"
 }
 
+validate_install_root() {
+  local resolved
+  resolved="$(realpath -m "$INSTALL_ROOT")"
+  [[ -n "$resolved" && "$resolved" != "/" ]] || die "unsafe install root: $INSTALL_ROOT"
+}
+
+with_install_lock() {
+  command -v flock >/dev/null || die "missing command: flock"
+  install -d -o root -g root -m 0755 "$(dirname "$LOCK_FILE")"
+  exec 9>"$LOCK_FILE"
+  flock -n 9 || die "another agent-runtime-ops install is already running"
+}
+
 ensure_base_packages() {
   local packages=()
   command -v git >/dev/null || packages+=(git)
   command -v rsync >/dev/null || packages+=(rsync)
   command -v python3 >/dev/null || packages+=(python3)
   command -v runuser >/dev/null || packages+=(util-linux)
+  command -v flock >/dev/null || packages+=(util-linux)
+  command -v nsenter >/dev/null || packages+=(util-linux)
+  command -v findmnt >/dev/null || packages+=(util-linux)
   command -v mktemp >/dev/null || packages+=(coreutils)
 
   if command -v python3 >/dev/null && command -v mktemp >/dev/null; then
@@ -75,21 +100,24 @@ require_commands() {
 
 bootstrap_from_git() {
   require_root
+  validate_install_root
+  require_full_sha "$REPO_REF"
   ensure_base_packages
   require_ops_account
   require_commands
-  command -v mktemp >/dev/null || die "missing command: mktemp"
 
-  local tmp repo
+  local tmp repo resolved
   tmp="$(mktemp -d)"
   repo="$tmp/agent-runtime-ops"
   info "bootstrap_repo=$REPO_URL"
   info "bootstrap_ref=$REPO_REF"
-  git clone --depth 1 --branch "$REPO_REF" "$REPO_URL" "$repo" >/dev/null 2>&1 || {
-    git clone "$REPO_URL" "$repo" >/dev/null
-    git -C "$repo" checkout "$REPO_REF" >/dev/null
-  }
-  exec bash "$repo/install.sh" install
+  git init "$repo" >/dev/null
+  git -C "$repo" remote add origin "$REPO_URL"
+  git -C "$repo" fetch --depth 1 origin "$REPO_REF" >/dev/null
+  git -C "$repo" checkout --detach FETCH_HEAD >/dev/null
+  resolved="$(git -C "$repo" rev-parse HEAD)"
+  [[ "$resolved" == "$REPO_REF" ]] || die "checkout mismatch: expected $REPO_REF got $resolved"
+  exec env AGENT_RUNTIME_OPS_REF="$resolved" bash "$repo/install.sh" install
 }
 
 source_commit() {
@@ -102,19 +130,22 @@ source_commit() {
 }
 
 write_manifest() {
-  local src="$1"
-  local tmp
-  tmp="$(mktemp)"
+  local release_dir="$1"
+  local src="$2"
+  local commit="$3"
+  local tmp="$release_dir/.agent-runtime-ops-manifest.tmp"
   {
-    printf 'source_commit=%s\n' "$(source_commit "$src")"
+    printf 'source_commit=%s\n' "$commit"
     printf 'installed_at=%s\n' "$(date -Iseconds)"
-    printf 'installed_dir=%s\n' "$INSTALL_DIR"
+    printf 'installed_dir=%s\n' "$release_dir"
+    printf 'install_root=%s\n' "$INSTALL_ROOT"
     printf 'ops_user=%s\n' "$OPS_USER"
     printf 'ops_group=%s\n' "$OPS_GROUP"
     printf 'state_root=%s\n' "$STATE_ROOT"
     printf 'opsctl=%s\n' "$BIN_LINK"
+    printf 'source_path=%s\n' "$src"
   } >"$tmp"
-  install -o root -g "$OPS_GROUP" -m 0644 "$tmp" "$MANIFEST"
+  install -o root -g "$OPS_GROUP" -m 0644 "$tmp" "$release_dir/.agent-runtime-ops-manifest"
   rm -f "$tmp"
 }
 
@@ -134,18 +165,16 @@ copy_tree() {
   chmod 0755 "$dst/install.sh"
 }
 
-reset_venv() {
-  local venv resolved_install resolved_venv
-  venv="$INSTALL_DIR/.venv"
-  [[ -e "$venv" ]] || return 0
-
-  resolved_install="$(realpath -m "$INSTALL_DIR")"
-  resolved_venv="$(realpath -m "$venv")"
-  [[ -n "$resolved_install" && "$resolved_install" != "/" ]] || die "unsafe install dir: $INSTALL_DIR"
-  [[ "$resolved_venv" == "$resolved_install/.venv" ]] || die "unsafe venv path: $venv"
-
-  rm -rf "$resolved_venv"
-  info "venv=recreated"
+install_python_env() {
+  local release_dir="$1"
+  python3 -m venv "$release_dir/.venv"
+  "$release_dir/.venv/bin/pip" install \
+    --no-cache-dir \
+    --only-binary=:all: \
+    --require-hashes \
+    -r "$release_dir/requirements.lock" >/dev/null
+  "$release_dir/.venv/bin/pip" install --no-deps "$release_dir" >/dev/null
+  "$release_dir/.venv/bin/opsctl" profile list >/dev/null
 }
 
 install_self_update_sudoers() {
@@ -162,30 +191,49 @@ install_self_update_sudoers() {
   rm -f "$tmp"
 }
 
+activate_release() {
+  local commit="$1"
+  local release_dir="$RELEASES_DIR/$commit"
+  local next_link="$INSTALL_ROOT/.current.next"
+  [[ -d "$release_dir" ]] || die "missing release dir: $release_dir"
+  ln -sfn "releases/$commit" "$next_link"
+  mv -Tf "$next_link" "$CURRENT_LINK"
+  ln -sfn "$CURRENT_LINK/.venv/bin/opsctl" "$BIN_LINK"
+  ln -sfn "current/.agent-runtime-ops-manifest" "$MANIFEST"
+  chown -h root:"$OPS_GROUP" "$BIN_LINK" "$CURRENT_LINK" "$MANIFEST" 2>/dev/null || true
+}
+
 install_package() {
-  local src
+  local src commit tmp_release release_dir
   if ! src="$(repo_root)"; then
     bootstrap_from_git
   fi
 
   require_root
+  validate_install_root
   ensure_base_packages
+  with_install_lock
   require_ops_account
   require_commands
 
-  if [[ "$(realpath "$src")" == "$(realpath "$INSTALL_DIR" 2>/dev/null || printf '%s' "$INSTALL_DIR")" ]]; then
-    info "copy_tree=skipped_same_source_and_destination"
-  else
-    copy_tree "$src" "$INSTALL_DIR"
+  commit="$(source_commit "$src")"
+  require_full_sha "$commit"
+  if [[ -n "$REPO_REF" && "$REPO_REF" != "$commit" ]]; then
+    die "source commit does not match AGENT_RUNTIME_OPS_REF: $commit != $REPO_REF"
   fi
 
-  reset_venv
-  python3 -m venv "$INSTALL_DIR/.venv"
-  "$INSTALL_DIR/.venv/bin/pip" install --upgrade pip >/dev/null
-  "$INSTALL_DIR/.venv/bin/pip" install "$INSTALL_DIR" >/dev/null
+  install -d -o root -g "$OPS_GROUP" -m 0755 "$INSTALL_ROOT" "$RELEASES_DIR"
+  release_dir="$RELEASES_DIR/$commit"
+  tmp_release="$RELEASES_DIR/.tmp.$commit.$$"
+  rm -rf "$tmp_release"
+  copy_tree "$src" "$tmp_release"
+  install_python_env "$tmp_release"
+  write_manifest "$tmp_release" "$src" "$commit"
+  rm -rf "$release_dir"
+  mv "$tmp_release" "$release_dir"
+  chown -R root:"$OPS_GROUP" "$release_dir"
 
-  ln -sfn "$INSTALL_DIR/.venv/bin/opsctl" "$BIN_LINK"
-  chown -h root:"$OPS_GROUP" "$BIN_LINK" 2>/dev/null || true
+  activate_release "$commit"
   install_self_update_sudoers
 
   if [[ -d "$STATE_ROOT" ]]; then
@@ -193,9 +241,8 @@ install_package() {
     chmod 0750 "$STATE_ROOT" 2>/dev/null || true
   fi
 
-  write_manifest "$src"
-
-  info "installed_dir=$INSTALL_DIR"
+  info "installed_dir=$release_dir"
+  info "current=$CURRENT_LINK"
   info "manifest=$MANIFEST"
   info "ops_user=$OPS_USER"
   info "ops_group=$OPS_GROUP"
@@ -222,15 +269,17 @@ state_file_status() {
 check_install() {
   require_ops_account
   command -v runuser >/dev/null || die "missing command: runuser"
+  [[ -L "$CURRENT_LINK" && -d "$CURRENT_LINK" ]] || die "missing current release link: $CURRENT_LINK"
   [[ -x "$BIN_LINK" ]] || die "opsctl is not executable: $BIN_LINK"
-  [[ -d "$INSTALL_DIR" ]] || die "missing install dir: $INSTALL_DIR"
+  [[ -d "$INSTALL_ROOT" ]] || die "missing install root: $INSTALL_ROOT"
   [[ -d "$STATE_ROOT" ]] || die "missing state root: $STATE_ROOT"
   [[ -r "$MANIFEST" ]] || die "missing manifest: $MANIFEST"
   [[ -r "$SUDOERS_FILE" ]] || die "missing sudoers file: $SUDOERS_FILE"
 
   info "ops_user=present"
   info "ops_group=present"
-  info "install_dir=present"
+  info "install_root=present"
+  info "current_release=present"
   info "state_root=present"
   info "manifest=present"
   info "sudoers=present"
