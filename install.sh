@@ -11,6 +11,7 @@ OPS_HOME="${AGENT_RUNTIME_OPS_HOME:-/home/$OPS_USER}"
 CODEX_HOME="${AGENT_RUNTIME_CODEX_HOME:-$OPS_HOME/.codex}"
 CODEX_SKILL_NAME="agent-runtime-ops"
 CODEX_SKILL_DIR="$CODEX_HOME/skills/$CODEX_SKILL_NAME"
+CODEX_AGENTS_LINK="${AGENT_RUNTIME_CODEX_AGENTS:-$CODEX_HOME/AGENTS.md}"
 OPS_HOME_AGENTS_LINK="${AGENT_RUNTIME_OPS_HOME_AGENTS:-$OPS_HOME/AGENTS.md}"
 BIN_LINK="${AGENT_RUNTIME_OPS_BIN:-/usr/local/bin/opsctl}"
 MCP_BIN_LINK="${AGENT_RUNTIME_OPS_MCP_BIN:-/usr/local/bin/agent-runtime-ops-mcp}"
@@ -260,6 +261,32 @@ install_ops_home_agents() {
   info "ops_home_agents=linked"
 }
 
+install_codex_agents() {
+  local release_dir="$1"
+  local target="$release_dir/ops-home/AGENTS.md"
+  local link_target="$CURRENT_LINK/ops-home/AGENTS.md"
+  if [[ ! -f "$target" ]]; then
+    info "codex_agents=missing_source"
+    return 0
+  fi
+  if [[ ! -d "$CODEX_HOME" ]]; then
+    install -d -o "$OPS_USER" -g "$OPS_GROUP" -m 0700 "$CODEX_HOME"
+  fi
+  if [[ -L "$CODEX_AGENTS_LINK" ]]; then
+    ln -sfn "$link_target" "$CODEX_AGENTS_LINK"
+    chown -h "$OPS_USER:$OPS_GROUP" "$CODEX_AGENTS_LINK" 2>/dev/null || true
+    info "codex_agents=linked"
+    return 0
+  fi
+  if [[ -e "$CODEX_AGENTS_LINK" ]]; then
+    info "codex_agents=skipped_existing_file path=$CODEX_AGENTS_LINK"
+    return 0
+  fi
+  ln -s "$link_target" "$CODEX_AGENTS_LINK"
+  chown -h "$OPS_USER:$OPS_GROUP" "$CODEX_AGENTS_LINK" 2>/dev/null || true
+  info "codex_agents=linked"
+}
+
 install_codex_skill() {
   local release_dir="$1"
   local src="$release_dir/skills/$CODEX_SKILL_NAME"
@@ -334,6 +361,7 @@ install_package() {
   activate_release "$release_dir"
   install_ops_sudoers
   install_ops_home_agents "$release_dir"
+  install_codex_agents "$release_dir"
   install_codex_skill "$release_dir"
   register_codex_mcp
 
@@ -350,6 +378,7 @@ install_package() {
   info "opsctl=$BIN_LINK"
   info "mcp=$MCP_BIN_LINK"
   info "ops_home_agents=$OPS_HOME_AGENTS_LINK"
+  info "codex_agents=$CODEX_AGENTS_LINK"
   info "sudoers=$SUDOERS_FILE"
   info "state_root=$STATE_ROOT"
 }
@@ -399,6 +428,13 @@ check_install() {
     info "ops_home_agents=existing_non_symlink"
   else
     info "ops_home_agents=missing"
+  fi
+  if [[ -L "$CODEX_AGENTS_LINK" && -r "$CODEX_AGENTS_LINK" ]]; then
+    info "codex_agents=present"
+  elif [[ -e "$CODEX_AGENTS_LINK" ]]; then
+    info "codex_agents=existing_non_symlink"
+  else
+    info "codex_agents=missing"
   fi
   runuser -u "$OPS_USER" -- bash -lc "cd / && exec '$BIN_LINK' profile list"
 

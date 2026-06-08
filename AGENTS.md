@@ -20,7 +20,9 @@ ssh svcops
 ## Standard Operating Agent
 
 The standard natural-language operating harness for `svcops` is Codex. This repo installs and
-maintains the Codex skill plus the `agent-runtime-ops` MCP registration for that account.
+maintains the Codex global `AGENTS.md`, operation skill, and `agent-runtime-ops` MCP registration
+for that account. This affects all Codex sessions under the `svcops` Unix account, and does not
+touch other Unix accounts or a developer's local Codex account.
 
 Normal operator entry:
 

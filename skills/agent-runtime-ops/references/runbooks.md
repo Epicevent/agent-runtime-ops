@@ -34,10 +34,15 @@ This repo currently installs:
 
 ```text
 /home/svcops/AGENTS.md
+/home/svcops/.codex/AGENTS.md
 /home/svcops/.codex/skills/agent-runtime-ops
 /usr/local/bin/agent-runtime-ops-mcp
 Codex MCP registration: agent-runtime-ops
 ```
+
+The `/home/svcops/.codex/AGENTS.md` link is intentionally global for every Codex session that runs
+as the `svcops` Unix account. It must not affect other server accounts or a developer's local Codex
+account.
 
 This repo does not install or manage Claude Code, Gemini CLI, OpenCode, or other agent CLIs. Do not
 add them during routine `self-update` work. If a non-Codex CLI becomes necessary, handle it as a
