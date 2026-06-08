@@ -23,6 +23,13 @@ locally before SSH runs.
 
 Codex is the only standard natural-language operating CLI for `svcops`.
 
+Normal entry:
+
+```bash
+ssh svcops
+codex
+```
+
 This repo currently installs:
 
 ```text

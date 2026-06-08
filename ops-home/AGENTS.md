@@ -13,6 +13,7 @@ MCP: agent-runtime-ops
 Primary commands:
 
 ```bash
+codex
 /usr/local/bin/opsctl update status
 /usr/local/bin/opsctl profile list
 codex mcp list

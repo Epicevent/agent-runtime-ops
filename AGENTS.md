@@ -22,6 +22,13 @@ ssh svcops
 The standard natural-language operating harness for `svcops` is Codex. This repo installs and
 maintains the Codex skill plus the `agent-runtime-ops` MCP registration for that account.
 
+Normal operator entry:
+
+```bash
+ssh svcops
+codex
+```
+
 Do not install Claude Code, Gemini CLI, OpenCode, or other agent CLIs as part of `install.sh`,
 `self-update`, or routine server operations. If another CLI is needed later, treat it as a separate
 approved project with its own install, auth, rollback, and verification plan.
