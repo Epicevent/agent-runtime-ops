@@ -94,6 +94,9 @@ opsctl check SLOT
 sudo /usr/local/bin/opsctl check --live SLOT
 sudo /usr/local/bin/opsctl apply SLOT
 sudo /usr/local/bin/opsctl rollback SLOT
+opsctl nas request //HOST/SHARE
+opsctl nas credential set //HOST/SHARE --username NAS_USER --password-stdin
+sudo /usr/local/bin/opsctl nas approve-auto
 sudo /usr/local/bin/opsctl nas mount SLOT //HOST/SHARE
 sudo /usr/local/bin/opsctl nas unmount SLOT //HOST/SHARE
 ```

@@ -13,6 +13,7 @@ from .yamlio import load_yaml
 SMB_SHARE_RE = re.compile(r"^//([^/\\]+)/([^/\\]+)$")
 CUSTOMER_SLOT_RE = re.compile(r"^oc[0-9]+$")
 SAFE_SHARE_COMPONENT_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
+AGENT_NAS_DIR = ".agent-runtime-nas"
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,30 @@ def mountpoint_for_share(slot: str, share: SmbShare) -> Path:
     if resolved_parent != resolved_root / host_component(share.host):
         raise ValueError(f"mountpoint escaped NAS root: {mountpoint}")
     return mountpoint
+
+
+def agent_nas_dir(slot: str) -> Path:
+    return Path("/home") / slot / AGENT_NAS_DIR
+
+
+def request_dir(slot: str) -> Path:
+    return agent_nas_dir(slot) / "requests"
+
+
+def history_dir(slot: str, status: str) -> Path:
+    return agent_nas_dir(slot) / "history" / status
+
+
+def customer_credential_path(slot: str, share: SmbShare) -> Path:
+    return agent_nas_dir(slot) / "credentials" / host_component(share.host) / f"{share_component(share.share)}.cred"
+
+
+def root_credential_path(slot: str, share: SmbShare) -> Path:
+    return Path("/root") / "agent-runtime-ops" / "nas-credentials" / slot / host_component(share.host) / f"{share_component(share.share)}.cred"
+
+
+def request_path(slot: str, share: SmbShare) -> Path:
+    return request_dir(slot) / f"{host_component(share.host)}--{share_component(share.share)}.env"
 
 
 def _grant_patterns(policy_data: dict, slot: str) -> tuple[bool, list[str], str | int | None]:

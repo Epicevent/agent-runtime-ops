@@ -265,19 +265,32 @@ opsctl release add NAME IMAGE
 opsctl release promote NAME LANE
 
 opsctl nas requests
-opsctl nas approve-auto
+sudo /usr/local/bin/opsctl nas approve-auto
+sudo /usr/local/bin/opsctl nas approve-auto --watch --interval 15
+opsctl nas request //HOST/SHARE
+opsctl nas credential set //HOST/SHARE --username NAS_USER --password-stdin
 opsctl nas mounted SLOT
 opsctl nas policy-check SLOT //HOST/SHARE
 sudo /usr/local/bin/opsctl nas mount SLOT //HOST/SHARE
+printf '%s' "$NAS_PASSWORD" | sudo /usr/local/bin/opsctl nas mount SLOT //HOST/SHARE --username NAS_USER --password-stdin
 sudo /usr/local/bin/opsctl nas unmount SLOT //HOST/SHARE
 
 opsctl admin serve
 ```
 
-`status`, `plan`, `check`, `nas policy-check`, `nas mounted`는 비쓰기 명령이다.
+`status`, `plan`, `check`, `nas policy-check`, `nas mounted`, `nas requests`는
+비쓰기 명령이다.
 
 `nas mount`와 `nas unmount`는 쓰기 명령이지만 compose를 수정하지 않는다.
 동적 NAS 변화는 `/home/ocN/nas_docs/*` child mount에서만 처리한다.
+
+고객 요청 경로는 고객 계정이 `opsctl nas request`와 `opsctl nas credential set`을
+실행하고, root 권한의 `nas approve-auto`가 grant, credential, fstab, mount를
+수렴한다.
+
+운영자가 NAS credential까지 알고 있는 실험/긴급 경로에서는
+`opsctl nas mount SLOT //HOST/SHARE --username ... --password-stdin` 한 번으로
+root 전용 credential, managed fstab entry, child CIFS mount를 만든다.
 
 `apply`와 `rollback`은 단일 slot 기준으로 동작한다. 기존 legacy 상태에서 첫 적용을
 할 때는 명시적으로 `--allow-first-apply`를 붙인다. `rollout`은 단일 slot migration

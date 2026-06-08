@@ -1,6 +1,6 @@
 # 운영
 
-운영 루프는 다음 순서다.
+기본 운영 루프는 다음 순서다.
 
 ```text
 status -> plan -> apply -> check
@@ -8,25 +8,62 @@ status -> plan -> apply -> check
 
 `status`, `plan`, `check`는 파일을 쓰지 않는다.
 
-`opsctl check SLOT`은 desired contract만 확인한다. private state, release,
-runtime profile이 유효한 runtime을 렌더링할 수 있는지 본다.
+`opsctl check SLOT`은 private state, release, runtime profile이 유효한 compose를
+렌더링할 수 있는지 확인한다.
 
-`sudo /usr/local/bin/opsctl check --live SLOT`은 Docker와 NAS mount 상태까지
-확인한다. 이 명령도 파일을 쓰지 않는다. 다만 Docker metadata와 mount namespace를
-읽으므로 제한된 root helper가 필요하다.
+`sudo /usr/local/bin/opsctl check --live SLOT`은 Docker metadata와 mount namespace를
+읽어서 실제 container, image digest, runtime user, NAS root bind, child CIFS mount를
+검사한다. 이 명령도 파일을 쓰지 않는다.
 
-`sudo /usr/local/bin/opsctl apply SLOT`은 runtime profile compose를 렌더링하고,
-agent-runtime manifest를 쓰고, slot container를 재생성한 뒤 live check를 실행한다.
-NAS child mount는 수정하지 않는다.
+`sudo /usr/local/bin/opsctl apply SLOT`은 runtime profile에서 compose를 렌더링하고
+manifest를 쓴 뒤 slot container를 재생성한다. NAS child mount는 수정하지 않는다.
 
-legacy slot에서 처음 넘어올 때는 명시 플래그가 필요하다.
+legacy slot에 처음 적용할 때만 명시 플래그가 필요하다.
 
 ```bash
 sudo /usr/local/bin/opsctl apply SLOT --allow-first-apply
 ```
 
 `sudo /usr/local/bin/opsctl rollback SLOT`은 직전 agent-runtime compose와 manifest
-backup을 복원한다. agent-runtime compose가 없던 slot은 legacy runtime을 복원할 수
-없다.
+backup을 복구한다. agent-runtime backup이 없는 legacy 상태로 되돌리는 명령은 아니다.
+
+## NAS 운영
+
+NAS share 추가/제거는 compose를 바꾸지 않는다. 동적 변화는 host child CIFS mount에서만
+처리한다.
+
+운영자가 credential까지 알고 있으면 바로 mount한다.
+
+```bash
+printf '%s' "$NAS_PASSWORD" | sudo /usr/local/bin/opsctl nas mount \
+  oc3 //192.168.0.222/hanpass \
+  --username NAS_USER \
+  --password-stdin
+```
+
+고객이 직접 요청하는 흐름은 다음이다.
+
+```bash
+opsctl nas request //192.168.0.222/hanpass
+printf '%s' "$NAS_PASSWORD" | opsctl nas credential set \
+  //192.168.0.222/hanpass \
+  --username NAS_USER \
+  --password-stdin
+```
+
+root 권한의 승인 루프가 pending request를 처리한다.
+
+```bash
+sudo /usr/local/bin/opsctl nas approve-auto
+sudo /usr/local/bin/opsctl nas approve-auto --watch --interval 15
+```
+
+상태 확인과 해제는 항상 `//HOST/SHARE` 기준으로 한다.
+
+```bash
+opsctl nas requests
+opsctl nas mounted oc3
+sudo /usr/local/bin/opsctl nas unmount oc3 //192.168.0.222/hanpass
+```
 
 `rollout`은 단일 slot apply/rollback migration 검증이 끝날 때까지 닫아 둔다.

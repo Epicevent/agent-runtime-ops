@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import getpass
 import json
 import os
 import re
@@ -13,7 +14,17 @@ import tempfile
 from pathlib import Path
 
 from .paths import DEFAULT_STATE_ROOT, REPO_ROOT
-from .nas import check_nas_policy, mountpoint_for_share, parse_smb_share
+from .nas import (
+    agent_nas_dir,
+    check_nas_policy,
+    customer_credential_path,
+    history_dir,
+    mountpoint_for_share,
+    parse_smb_share,
+    request_dir,
+    request_path,
+    root_credential_path,
+)
 from .profiles import list_profile_names, load_profile
 from .renderer import render_compose
 from .state import load_desired_slot
@@ -986,15 +997,414 @@ def cmd_release_promote(args: argparse.Namespace) -> int:
     return 2
 
 
+def _read_key_value_file(path: Path) -> dict[str, str]:
+    data: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+            continue
+        data[key] = value
+    return data
+
+
+def _atomic_write_key_value(path: Path, data: dict[str, str], mode: int, uid: int | None = None, gid: int | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            for key, value in data.items():
+                handle.write(f"{key}={value}\n")
+        os.chmod(tmp_path, mode)
+        if uid is not None and gid is not None:
+            os.chown(tmp_path, uid, gid)
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _passwd_record(name: str):
+    import pwd
+
+    return pwd.getpwnam(name)
+
+
+def _group_gid(name: str) -> int:
+    import grp
+
+    return grp.getgrnam(name).gr_gid
+
+
+def _slot_uid_gid(slot: str) -> tuple[int, int]:
+    record = _passwd_record(slot)
+    return int(record.pw_uid), int(record.pw_gid)
+
+
+def _runtime_ids(slot: str) -> tuple[int, int, int]:
+    runtime = _passwd_record(f"{slot}_rt")
+    data_gid = _group_gid(f"{slot}_data")
+    return int(runtime.pw_uid), int(runtime.pw_gid), data_gid
+
+
+def _ensure_not_symlink_chain(path: Path, stop_at: Path) -> None:
+    current = path
+    checked: list[Path] = []
+    while True:
+        checked.append(current)
+        if current == stop_at:
+            break
+        if current.parent == current:
+            break
+        current = current.parent
+    for candidate in reversed(checked):
+        if candidate.exists() and candidate.is_symlink():
+            raise ValueError(f"path component must not be symlink: {candidate}")
+
+
+def _ensure_customer_agent_dirs(slot: str) -> None:
+    uid, gid = _slot_uid_gid(slot)
+    base = agent_nas_dir(slot)
+    home = Path("/home") / slot
+    _ensure_not_symlink_chain(base, home)
+    for path, mode in [
+        (base, 0o700),
+        (request_dir(slot), 0o700),
+        (base / "credentials", 0o700),
+        (base / "history", 0o700),
+        (history_dir(slot, "approved"), 0o700),
+        (history_dir(slot, "rejected"), 0o700),
+    ]:
+        path.mkdir(parents=True, exist_ok=True)
+        os.chown(path, uid, gid)
+        os.chmod(path, mode)
+
+
+def _read_password_from_stdin() -> str:
+    password = sys.stdin.read()
+    if password.endswith("\n"):
+        password = password[:-1]
+    if password.endswith("\r"):
+        password = password[:-1]
+    if not password:
+        raise ValueError("password stdin is empty")
+    return password
+
+
+def _write_credential_file(path: Path, username: str, password: str, domain: str | None, uid: int, gid: int) -> None:
+    if not username:
+        raise ValueError("username is required")
+    if not password:
+        raise ValueError("password is required")
+    _ensure_not_symlink_chain(path.parent, path.parents[2] if len(path.parents) > 2 else path.parent)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.chown(path.parent, uid, gid)
+    os.chmod(path.parent, 0o700)
+    data = {"username": username, "password": password}
+    if domain:
+        data["domain"] = domain
+    _atomic_write_key_value(path, data, 0o600, uid, gid)
+
+
+def _credential_file_is_safe(path: Path, uid: int | None = None) -> None:
+    if path.is_symlink():
+        raise ValueError(f"credential file must not be symlink: {path}")
+    stat_result = path.stat()
+    if not path.is_file():
+        raise ValueError(f"credential path is not a regular file: {path}")
+    if stat_result.st_mode & 0o077:
+        raise ValueError(f"credential file must be 0600: {path}")
+    if uid is not None and stat_result.st_uid != uid:
+        raise ValueError(f"credential file owner mismatch: {path}")
+
+
+def _credential_file_is_safe_for_slot(slot: str, path: Path, uid: int | None = None) -> None:
+    customer_root = agent_nas_dir(slot) / "credentials"
+    root_credential_root = Path("/root") / "agent-runtime-ops" / "nas-credentials" / slot
+    resolved = path.resolve(strict=False)
+    if str(resolved).startswith(str(customer_root.resolve(strict=False)) + os.sep):
+        _ensure_not_symlink_chain(path.parent, Path("/home") / slot)
+    elif str(resolved).startswith(str(root_credential_root.resolve(strict=False)) + os.sep):
+        _ensure_not_symlink_chain(path.parent, Path("/root"))
+    else:
+        raise ValueError(f"credential path outside managed roots: {path}")
+    _credential_file_is_safe(path, uid=uid)
+
+
+def _fstab_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace(" ", "\\040").replace("\t", "\\011").replace("\n", "")
+
+
+def _managed_fstab_marker(slot: str, share: str) -> str:
+    return f"# agent-runtime-ops nas slot={slot} source={share}"
+
+
+def _write_managed_fstab_entry(slot: str, share: str, mountpoint: Path, credential_path: Path) -> None:
+    slot_uid, _ = _slot_uid_gid(slot)
+    _, _, data_gid = _runtime_ids(slot)
+    escaped_target = _fstab_escape(str(mountpoint))
+    escaped_source = _fstab_escape(share)
+    options = ",".join(
+        [
+            f"credentials={_fstab_escape(str(credential_path))}",
+            "ro",
+            "nosuid",
+            "nodev",
+            "vers=3.1.1",
+            "iocharset=utf8",
+            "noserverino",
+            f"uid={slot_uid}",
+            "forceuid",
+            f"gid={data_gid}",
+            "forcegid",
+            "file_mode=0440",
+            "dir_mode=0550",
+            "soft",
+            "nofail",
+            "_netdev",
+        ]
+    )
+    marker = _managed_fstab_marker(slot, share)
+    entry = f"{escaped_source} {escaped_target} cifs {options} 0 0"
+
+    lock_path = Path("/run/agent-runtime-ops-fstab.lock")
+    lock_path.touch(exist_ok=True)
+    with lock_path.open("r+") as lock_handle:
+        import fcntl
+
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        fstab = Path("/etc/fstab")
+        lines = fstab.read_text(encoding="utf-8").splitlines()
+        new_lines: list[str] = []
+        skip_next = False
+        replaced = False
+        for index, line in enumerate(lines):
+            if skip_next:
+                skip_next = False
+                continue
+            if line == marker:
+                skip_next = True
+                if not replaced:
+                    new_lines.extend([marker, entry])
+                    replaced = True
+                continue
+            columns = line.split()
+            if columns and not line.lstrip().startswith("#") and len(columns) >= 2 and columns[1] == escaped_target:
+                raise ValueError(f"non-managed fstab entry already owns mountpoint: {mountpoint}")
+            new_lines.append(line)
+        if not replaced:
+            if new_lines and new_lines[-1] != "":
+                new_lines.append("")
+            new_lines.extend([marker, entry])
+        tmp = fstab.with_name("fstab.agent-runtime-ops.tmp")
+        tmp.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, fstab)
+
+
+def _append_action_log(state_root: Path, action: str, slot: str, share: str, status: str, detail: str = "") -> None:
+    log_path = state_root / "actions.log"
+    record = {
+        "timestamp": _now_iso(),
+        "action": action,
+        "slot": slot,
+        "share": share,
+        "status": status,
+        "detail": detail[:500],
+    }
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def _prepare_mount_entry(slot: str, share_source: str, credential_path: Path, state_root: Path) -> tuple[object, Path]:
+    decision = check_nas_policy(slot, share_source, state_root)
+    if not decision.allowed:
+        raise ValueError(f"policy denied: {decision.reason}")
+    _safe_mountpoint_path(decision.mountpoint)
+    decision.mountpoint.mkdir(parents=True, exist_ok=True)
+    _safe_mountpoint_path(decision.mountpoint)
+    _credential_file_is_safe_for_slot(slot, credential_path)
+    current_count = _mounted_child_cifs_count(decision.slot)
+    existing_rc, _, existing_rows = _findmnt_one(decision.mountpoint)
+    already_same_mount = (
+        existing_rc == 0
+        and bool(existing_rows)
+        and existing_rows[0].get("source") == decision.share.source
+    )
+    if not already_same_mount and not _max_mounts_allows(decision.max_mounts, current_count):
+        raise ValueError(f"max_mounts_exceeded: current={current_count} max={decision.max_mounts}")
+    _write_managed_fstab_entry(decision.slot, decision.share.source, decision.mountpoint, credential_path)
+    return decision, decision.mountpoint
+
+
+def _mount_prepared_share(decision, state_root: Path) -> tuple[bool, str]:
+    rc, _, rows = _findmnt_one(decision.mountpoint)
+    if rc == 0 and rows:
+        row = rows[0]
+        ok = row.get("source") == decision.share.source and row.get("fstype") == "cifs" and _is_readonly_mount(row)
+        return ok, "already_mounted" if ok else "mountpoint_has_unexpected_existing_mount"
+
+    proc = _run_text(["mount", str(decision.mountpoint)], timeout=60)
+    if proc.returncode != 0:
+        return False, (proc.stderr or proc.stdout).strip()
+
+    rc, error, rows = _findmnt_one(decision.mountpoint)
+    ok = (
+        rc == 0
+        and bool(rows)
+        and rows[0].get("source") == decision.share.source
+        and rows[0].get("fstype") == "cifs"
+        and _is_readonly_mount(rows[0])
+    )
+    return ok, "ok" if ok else (error or "mounted_state_did_not_match_expected_cifs_ro")
+
+
+def _move_request(path: Path, slot: str, status: str) -> Path:
+    target_dir = history_dir(slot, status)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"{datetime.now().strftime('%Y%m%dT%H%M%S')}.{path.name}"
+    os.replace(path, target)
+    return target
+
+
+def _safe_request_file(path: Path, slot: str) -> None:
+    uid, _ = _slot_uid_gid(slot)
+    if path.is_symlink():
+        raise ValueError(f"request file must not be symlink: {path}")
+    stat_result = path.stat()
+    if stat_result.st_uid != uid:
+        raise ValueError(f"request file owner mismatch: {path}")
+    if stat_result.st_mode & 0o022:
+        raise ValueError(f"request file must not be group/world writable: {path}")
+
+
+def _approve_auto_once(state_root: Path) -> dict[str, int]:
+    result = {"checked": 0, "approved": 0, "pending": 0, "rejected": 0, "failed": 0}
+    slots = load_yaml(state_root / "slots.yaml").get("slots") or {}
+    for slot in sorted(slots):
+        try:
+            desired = load_desired_slot(slot, state_root)
+        except Exception:
+            continue
+        if desired.lane_data.get("slot_class") != "customer":
+            continue
+        pending_dir = request_dir(slot)
+        if not pending_dir.is_dir():
+            continue
+        for path in sorted(pending_dir.glob("*.env")):
+            result["checked"] += 1
+            try:
+                _safe_request_file(path, slot)
+                data = _read_key_value_file(path)
+                share_source = data.get("requested_share") or ""
+                decision = check_nas_policy(slot, share_source, state_root)
+                if not decision.allowed:
+                    _move_request(path, slot, "rejected")
+                    _append_action_log(state_root, "nas_approve_auto", slot, share_source, "rejected", decision.reason)
+                    result["rejected"] += 1
+                    continue
+                credential_path = customer_credential_path(slot, decision.share)
+                if not credential_path.exists():
+                    print(f"pending slot={slot} share={decision.share.source} reason=credential_missing")
+                    result["pending"] += 1
+                    continue
+                slot_uid, _ = _slot_uid_gid(slot)
+                _credential_file_is_safe_for_slot(slot, credential_path, uid=slot_uid)
+                decision, _ = _prepare_mount_entry(slot, decision.share.source, credential_path, state_root)
+                ok, reason = _mount_prepared_share(decision, state_root)
+                if ok:
+                    _move_request(path, slot, "approved")
+                    _append_action_log(state_root, "nas_approve_auto", slot, decision.share.source, "approved", reason)
+                    result["approved"] += 1
+                else:
+                    _move_request(path, slot, "rejected")
+                    _append_action_log(state_root, "nas_approve_auto", slot, decision.share.source, "rejected", reason)
+                    result["rejected"] += 1
+                    result["failed"] += 1
+            except Exception as exc:
+                try:
+                    share_source = _read_key_value_file(path).get("requested_share", "")
+                    _move_request(path, slot, "rejected")
+                    _append_action_log(state_root, "nas_approve_auto", slot, share_source, "rejected", str(exc))
+                except Exception:
+                    pass
+                print(f"rejected slot={slot} file={path} reason={exc}")
+                result["rejected"] += 1
+                result["failed"] += 1
+    return result
+
+
 def cmd_nas_requests(args: argparse.Namespace) -> int:
-    print("nas_requests_status=skeleton")
+    state_root = _state_root(args)
+    slots_data = load_yaml(state_root / "slots.yaml").get("slots") or {}
+    total = 0
+    for slot in sorted(slots_data):
+        try:
+            desired = load_desired_slot(slot, state_root)
+        except Exception:
+            continue
+        if desired.lane_data.get("slot_class") != "customer":
+            continue
+        pending_dir = request_dir(slot)
+        if not pending_dir.is_dir():
+            continue
+        for path in sorted(pending_dir.glob("*.env")):
+            if path.is_symlink():
+                continue
+            try:
+                data = _read_key_value_file(path)
+            except Exception as exc:
+                print(f"request slot={slot} file={path.name} status=unreadable reason={exc}")
+                total += 1
+                continue
+            share = data.get("requested_share") or ""
+            created_at = data.get("created_at") or ""
+            print(f"request slot={slot} share={share} created_at={created_at} file={path}")
+            total += 1
+    print(f"pending_request_count={total}")
+    print("nas_requests_status=ok")
     print("mutates=false")
     return 0
 
 
 def cmd_nas_approve_auto(args: argparse.Namespace) -> int:
-    print("error: nas approve-auto is intentionally disabled in the initial skeleton", file=sys.stderr)
-    return 2
+    if not _is_root():
+        print("error: run as root/admin: sudo /usr/local/bin/opsctl nas approve-auto", file=sys.stderr)
+        return 2
+
+    def run_once() -> int:
+        result = _approve_auto_once(_state_root(args))
+        print(f"checked_request_count={result['checked']}")
+        print(f"approved_request_count={result['approved']}")
+        print(f"pending_request_count={result['pending']}")
+        print(f"rejected_request_count={result['rejected']}")
+        print(f"approve_auto_status={'ok' if result['failed'] == 0 else 'fail'}")
+        return 0 if result["failed"] == 0 else 1
+
+    if not args.watch:
+        return run_once()
+
+    interval = max(5, int(args.interval))
+    while True:
+        tick_started = _now_iso()
+        result = _approve_auto_once(_state_root(args))
+        print(
+            "nas_request_watch_tick "
+            f"checked={result['checked']} approved={result['approved']} "
+            f"pending={result['pending']} rejected={result['rejected']} failed={result['failed']} "
+            f"tick_at={tick_started}",
+            flush=True,
+        )
+        import time
+
+        time.sleep(interval)
 
 
 def cmd_nas_policy_check(args: argparse.Namespace) -> int:
@@ -1016,6 +1426,70 @@ def cmd_nas_policy_check(args: argparse.Namespace) -> int:
     print(f"reason={decision.reason}")
     print("mutates=false")
     return 0 if decision.allowed else 1
+
+
+def _caller_customer_slot() -> str:
+    user = getpass.getuser()
+    if not CUSTOMER_SLOT_RE.match(user):
+        raise ValueError(f"this command must be run by an ocN customer slot account, got {user}")
+    return user
+
+
+def cmd_nas_request(args: argparse.Namespace) -> int:
+    try:
+        slot = _caller_customer_slot()
+        decision = check_nas_policy(slot, args.share, _state_root(args))
+        if not decision.allowed:
+            raise ValueError(f"policy denied: {decision.reason}")
+        _ensure_customer_agent_dirs(slot)
+        path = request_path(slot, decision.share)
+        uid, gid = _slot_uid_gid(slot)
+        _atomic_write_key_value(
+            path,
+            {
+                "slot": slot,
+                "requested_share": decision.share.source,
+                "mountpoint": str(decision.mountpoint),
+                "created_at": _now_iso(),
+            },
+            0o600,
+            uid,
+            gid,
+        )
+    except Exception as exc:
+        print("request_status=fail")
+        print(f"reason={exc}")
+        return 1
+    print(f"slot={slot}")
+    print(f"requested_share={decision.share.source}")
+    print(f"request_file={path}")
+    print(f"mountpoint={decision.mountpoint}")
+    print("request_status=pending")
+    print("next_action=run opsctl nas credential set //HOST/SHARE --username NAS_USER --password-stdin")
+    return 0
+
+
+def cmd_nas_credential_set(args: argparse.Namespace) -> int:
+    try:
+        slot = _caller_customer_slot()
+        decision = check_nas_policy(slot, args.share, _state_root(args))
+        if not decision.allowed:
+            raise ValueError(f"policy denied: {decision.reason}")
+        password = _read_password_from_stdin()
+        _ensure_customer_agent_dirs(slot)
+        credential_path = customer_credential_path(slot, decision.share)
+        uid, gid = _slot_uid_gid(slot)
+        _write_credential_file(credential_path, args.username, password, args.domain, uid, gid)
+    except Exception as exc:
+        print("credential_status=fail")
+        print(f"reason={exc}")
+        return 1
+    print(f"slot={slot}")
+    print(f"share={decision.share.source}")
+    print(f"credential_file={credential_path}")
+    print("credential_status=stored")
+    print("secret_value_printed=no")
+    return 0
 
 
 def _findmnt_one(path: Path) -> tuple[int, str, list[dict[str, str]]]:
@@ -1087,16 +1561,19 @@ def cmd_nas_mount(args: argparse.Namespace) -> int:
         return 2
     try:
         decision = check_nas_policy(args.slot, args.share, _state_root(args))
-        if not decision.allowed:
-            raise ValueError(f"policy denied: {decision.reason}")
-        _safe_mountpoint_path(decision.mountpoint)
-        decision.mountpoint.mkdir(parents=True, exist_ok=True)
-        _safe_mountpoint_path(decision.mountpoint)
-        current_count = _mounted_child_cifs_count(decision.slot)
-        existing_rc, _, existing_rows = _findmnt_one(decision.mountpoint)
-        already_same_mount = existing_rc == 0 and bool(existing_rows) and existing_rows[0].get("source") == decision.share.source
-        if not already_same_mount and not _max_mounts_allows(decision.max_mounts, current_count):
-            raise ValueError(f"max_mounts_exceeded: current={current_count} max={decision.max_mounts}")
+        if args.username or args.password_stdin:
+            if not args.username or not args.password_stdin:
+                raise ValueError("--username and --password-stdin must be used together")
+            password = _read_password_from_stdin()
+            credential_path = root_credential_path(args.slot, decision.share)
+            _write_credential_file(credential_path, args.username, password, args.domain, 0, 0)
+        else:
+            credential_path = root_credential_path(args.slot, decision.share)
+            if not credential_path.exists():
+                credential_path = customer_credential_path(args.slot, decision.share)
+            if not credential_path.exists():
+                raise ValueError("credential_missing: pass --username USER --password-stdin or create a customer credential")
+        decision, _ = _prepare_mount_entry(args.slot, args.share, credential_path, _state_root(args))
     except Exception as exc:
         print(f"slot={args.slot}")
         print(f"share={args.share}")
@@ -1112,19 +1589,11 @@ def cmd_nas_mount(args: argparse.Namespace) -> int:
         print(f"mount_status={'already_mounted' if ok else 'fail'}")
         if not ok:
             print("reason=mountpoint_has_unexpected_existing_mount")
+        _append_action_log(_state_root(args), "nas_mount", decision.slot, decision.share.source, "already_mounted" if ok else "fail")
         return 0 if ok else 1
 
-    proc = _run_text(["mount", str(decision.mountpoint)], timeout=60)
-    if proc.returncode != 0:
-        print(f"slot={decision.slot}")
-        print(f"share={decision.share.source}")
-        print(f"mountpoint={decision.mountpoint}")
-        print("mount_status=fail")
-        print(f"reason={(proc.stderr or proc.stdout).strip()}")
-        return proc.returncode or 1
-
+    ok, reason = _mount_prepared_share(decision, _state_root(args))
     rc, error, rows = _findmnt_one(decision.mountpoint)
-    ok = rc == 0 and bool(rows) and rows[0].get("source") == decision.share.source and rows[0].get("fstype") == "cifs" and _is_readonly_mount(rows[0])
     print(f"slot={decision.slot}")
     print(f"share={decision.share.source}")
     print(f"mountpoint={decision.mountpoint}")
@@ -1132,7 +1601,8 @@ def cmd_nas_mount(args: argparse.Namespace) -> int:
         _print_mount_row("mounted", rows[0])
     print(f"mount_status={'ok' if ok else 'fail'}")
     if not ok:
-        print(f"reason={error or 'mounted_state_did_not_match_expected_cifs_ro'}")
+        print(f"reason={reason or error or 'mounted_state_did_not_match_expected_cifs_ro'}")
+    _append_action_log(_state_root(args), "nas_mount", decision.slot, decision.share.source, "ok" if ok else "fail", reason)
     return 0 if ok else 1
 
 
@@ -1248,7 +1718,20 @@ def build_parser() -> argparse.ArgumentParser:
     nas_requests = nas_sub.add_parser("requests")
     nas_requests.set_defaults(func=cmd_nas_requests)
     nas_auto = nas_sub.add_parser("approve-auto")
+    nas_auto.add_argument("--watch", action="store_true")
+    nas_auto.add_argument("--interval", type=int, default=15)
     nas_auto.set_defaults(func=cmd_nas_approve_auto)
+    nas_request = nas_sub.add_parser("request")
+    nas_request.add_argument("share")
+    nas_request.set_defaults(func=cmd_nas_request)
+    nas_credential = nas_sub.add_parser("credential")
+    nas_credential_sub = nas_credential.add_subparsers(dest="credential_command", required=True)
+    nas_credential_set = nas_credential_sub.add_parser("set")
+    nas_credential_set.add_argument("share")
+    nas_credential_set.add_argument("--username", required=True)
+    nas_credential_set.add_argument("--password-stdin", action="store_true", required=True)
+    nas_credential_set.add_argument("--domain")
+    nas_credential_set.set_defaults(func=cmd_nas_credential_set)
     nas_mounted = nas_sub.add_parser("mounted")
     nas_mounted.add_argument("slot")
     nas_mounted.set_defaults(func=cmd_nas_mounted)
@@ -1259,6 +1742,9 @@ def build_parser() -> argparse.ArgumentParser:
     nas_mount = nas_sub.add_parser("mount")
     nas_mount.add_argument("slot")
     nas_mount.add_argument("share")
+    nas_mount.add_argument("--username")
+    nas_mount.add_argument("--password-stdin", action="store_true")
+    nas_mount.add_argument("--domain")
     nas_mount.set_defaults(func=cmd_nas_mount)
     nas_unmount = nas_sub.add_parser("unmount")
     nas_unmount.add_argument("slot")
