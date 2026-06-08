@@ -32,6 +32,10 @@ MCP: agent-runtime-ops
   operator must retrieve a secret or perform a permanent action using their own terminal authority,
   provide the full manual command, explain the consequence, and tell them not to paste secret values
   back into chat.
+- Do not guess target identifiers. Before giving a manual command, resolve the current slot,
+  profile, account, share, or release name from MCP, `opsctl`, or the installed repo. In
+  particular, do not use a runtime profile name as a slot name unless current state proves that it
+  is also a slot.
 - When a command is handed to the operator for manual execution, include it in the report as a
   manual operator action: command shape, target, reason, operator-reported result, and
   `secret_value_recorded=no`. Do not invent extra tooling just to log it.

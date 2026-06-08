@@ -19,6 +19,8 @@ Use this skill to keep natural-language operations tied to the real repository a
 - Do not install or depend on Claude Code, OpenCode, or other agent CLIs for routine operations.
 - Do not claim a server change is complete after local tests only.
 - Do not edit rendered Docker compose files directly.
+- Do not guess target identifiers; resolve slots, profiles, accounts, shares, and releases from MCP,
+  `opsctl`, or the installed repo before giving commands.
 - Do not put customer state, NAS passwords, API keys, gateway tokens, or real slot assignment details
   in the repo.
 - Do not pass raw secret values in MCP tool arguments. Use allowed files or terminal stdin.

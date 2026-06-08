@@ -60,6 +60,10 @@ their own terminal and authority. In that case, do not run the sensitive command
 ask for the secret value. Provide the full command for the operator to type manually, explain what it
 will expose or mutate, and ask them to report only non-secret status.
 
+Do not guess target identifiers. Before giving a manual command, resolve current slot, profile,
+account, share, or release names from MCP, `opsctl`, or the installed repo. Never treat a runtime
+profile name as a slot name unless current state proves that it is also a slot.
+
 When the operator performs a manual command, record it in the operator-facing report without secret
 values: exact command shape, target, reason, who executed it, operator-reported result, and
 `secret_value_recorded=no`. Do not invent a new logging mechanism when the existing terminal,
