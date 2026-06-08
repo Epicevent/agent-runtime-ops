@@ -35,5 +35,6 @@ success only when the account grant allows that source.
 
 `opsctl nas mounted SLOT` lists observed host child CIFS mounts.
 
-`opsctl nas mount SLOT //HOST/SHARE` and `opsctl nas unmount SLOT //HOST/SHARE`
+`sudo /usr/local/bin/opsctl nas mount SLOT //HOST/SHARE` and
+`sudo /usr/local/bin/opsctl nas unmount SLOT //HOST/SHARE`
 are root/admin commands. They do not edit compose, env, or image state.

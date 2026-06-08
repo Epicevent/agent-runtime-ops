@@ -25,7 +25,7 @@ curl -fsSL "https://raw.githubusercontent.com/Epicevent/agent-runtime-ops/$OPS_R
 `/srv/openclaw-ops/ops-update.yaml`만 갱신한다.
 
 ```bash
-sudo opsctl update approve FULL_40_CHARACTER_COMMIT_SHA
+sudo /usr/local/bin/opsctl update approve FULL_40_CHARACTER_COMMIT_SHA
 ```
 
 승인 상태 확인:

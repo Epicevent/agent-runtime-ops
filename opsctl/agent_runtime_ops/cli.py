@@ -118,7 +118,7 @@ def cmd_profile_list(args: argparse.Namespace) -> int:
 
 def cmd_self_update(args: argparse.Namespace) -> int:
     if not _is_root():
-        print("error: run as root/admin: sudo opsctl self-update", file=sys.stderr)
+        print("error: run as root/admin: sudo /usr/local/bin/opsctl self-update", file=sys.stderr)
         return 2
     if shutil.which("git") is None:
         print("error: missing command: git", file=sys.stderr)
@@ -162,7 +162,7 @@ def cmd_self_update(args: argparse.Namespace) -> int:
 
 def cmd_update_approve(args: argparse.Namespace) -> int:
     if not _is_root():
-        print("error: run as root/admin: sudo opsctl update approve FULL_SHA", file=sys.stderr)
+        print("error: run as root/admin: sudo /usr/local/bin/opsctl update approve FULL_SHA", file=sys.stderr)
         return 2
     try:
         policy_path = _write_update_policy(_state_root(args), args.ref)
@@ -747,7 +747,7 @@ def cmd_nas_mounted(args: argparse.Namespace) -> int:
 
 def cmd_nas_mount(args: argparse.Namespace) -> int:
     if not _is_root():
-        print("error: run as root/admin: sudo opsctl nas mount SLOT //HOST/SHARE", file=sys.stderr)
+        print("error: run as root/admin: sudo /usr/local/bin/opsctl nas mount SLOT //HOST/SHARE", file=sys.stderr)
         return 2
     try:
         decision = check_nas_policy(args.slot, args.share, _state_root(args))
@@ -802,9 +802,10 @@ def cmd_nas_mount(args: argparse.Namespace) -> int:
 
 def cmd_nas_unmount(args: argparse.Namespace) -> int:
     if not _is_root():
-        print("error: run as root/admin: sudo opsctl nas unmount SLOT //HOST/SHARE", file=sys.stderr)
+        print("error: run as root/admin: sudo /usr/local/bin/opsctl nas unmount SLOT //HOST/SHARE", file=sys.stderr)
         return 2
     try:
+        load_desired_slot(args.slot, _state_root(args))
         share = parse_smb_share(args.share)
         mountpoint = mountpoint_for_share(args.slot, share)
         _safe_mountpoint_path(mountpoint)

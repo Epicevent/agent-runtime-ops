@@ -11,7 +11,8 @@ BIN_LINK="${AGENT_RUNTIME_OPS_BIN:-/usr/local/bin/opsctl}"
 MANIFEST="${AGENT_RUNTIME_OPS_MANIFEST:-$INSTALL_ROOT/.agent-runtime-ops-manifest}"
 REPO_URL="${AGENT_RUNTIME_OPS_REPO_URL:-https://github.com/Epicevent/agent-runtime-ops.git}"
 REPO_REF="${AGENT_RUNTIME_OPS_REF:-}"
-SUDOERS_FILE="${AGENT_RUNTIME_OPS_SUDOERS_FILE:-/etc/sudoers.d/agent-runtime-ops-self-update}"
+SUDOERS_FILE="${AGENT_RUNTIME_OPS_SUDOERS_FILE:-/etc/sudoers.d/agent-runtime-ops}"
+LEGACY_SUDOERS_FILE="/etc/sudoers.d/agent-runtime-ops-self-update"
 LOCK_FILE="${AGENT_RUNTIME_OPS_LOCK_FILE:-/run/lock/agent-runtime-ops.install.lock}"
 FULL_SHA_RE='^[0-9a-f]{40}$'
 
@@ -177,18 +178,24 @@ install_python_env() {
   "$release_dir/.venv/bin/opsctl" profile list >/dev/null
 }
 
-install_self_update_sudoers() {
+install_ops_sudoers() {
   local tmp
   command -v visudo >/dev/null || die "missing command: visudo"
   tmp="$(mktemp)"
   {
     printf 'Defaults:%s env_reset, !setenv, use_pty\n' "$OPS_USER"
     printf '%s ALL=(root) NOPASSWD: %s self-update\n' "$OPS_USER" "$BIN_LINK"
+    printf '%s ALL=(root) NOPASSWD: %s check --live *\n' "$OPS_USER" "$BIN_LINK"
+    printf '%s ALL=(root) NOPASSWD: %s nas mount *\n' "$OPS_USER" "$BIN_LINK"
+    printf '%s ALL=(root) NOPASSWD: %s nas unmount *\n' "$OPS_USER" "$BIN_LINK"
   } >"$tmp"
   chmod 0440 "$tmp"
   visudo -cf "$tmp" >/dev/null
   install -o root -g root -m 0440 "$tmp" "$SUDOERS_FILE"
   rm -f "$tmp"
+  if [[ "$SUDOERS_FILE" != "$LEGACY_SUDOERS_FILE" && -e "$LEGACY_SUDOERS_FILE" ]]; then
+    rm -f "$LEGACY_SUDOERS_FILE"
+  fi
 }
 
 activate_release() {
@@ -245,7 +252,7 @@ install_package() {
   chown -R root:"$OPS_GROUP" "$release_dir"
 
   activate_release "$release_dir"
-  install_self_update_sudoers
+  install_ops_sudoers
 
   if [[ -d "$STATE_ROOT" ]]; then
     chgrp "$OPS_GROUP" "$STATE_ROOT" 2>/dev/null || true

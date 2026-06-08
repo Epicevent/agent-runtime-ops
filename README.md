@@ -27,7 +27,7 @@ curl -fsSL "https://raw.githubusercontent.com/Epicevent/agent-runtime-ops/$OPS_R
 `/srv/openclaw-ops/ops-update.yaml`만 갱신한다.
 
 ```bash
-sudo opsctl update approve FULL_40_CHARACTER_COMMIT_SHA
+sudo /usr/local/bin/opsctl update approve FULL_40_CHARACTER_COMMIT_SHA
 ```
 
 승인 상태 확인:
@@ -70,7 +70,7 @@ opsctl check oc1
 검사를 실행한다.
 
 ```bash
-opsctl check --live oc1
+sudo /usr/local/bin/opsctl check --live oc1
 ```
 
 live 검사는 파일을 쓰지 않는다. host에는 NAS가 mount되어 있는데 컨테이너
@@ -261,8 +261,8 @@ opsctl nas requests
 opsctl nas approve-auto
 opsctl nas mounted SLOT
 opsctl nas policy-check SLOT SHARE
-sudo opsctl nas mount SLOT SHARE
-sudo opsctl nas unmount SLOT SHARE
+sudo /usr/local/bin/opsctl nas mount SLOT SHARE
+sudo /usr/local/bin/opsctl nas unmount SLOT SHARE
 
 opsctl admin serve
 ```

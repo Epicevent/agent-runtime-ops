@@ -11,7 +11,7 @@ status -> plan -> apply -> check
 `opsctl check SLOT` checks the desired contract only. It confirms that the
 private state, release, and runtime profile can render a valid desired runtime.
 
-`opsctl check --live SLOT` also inspects Docker and NAS mount state. It is still
+`sudo /usr/local/bin/opsctl check --live SLOT` also inspects Docker and NAS mount state. It is still
 non-mutating, but it needs root/admin privileges or an equivalent restricted
 root helper because it reads Docker metadata and mount namespaces. It must fail
 if the running container does not see the host CIFS child mounts, or if the NAS
