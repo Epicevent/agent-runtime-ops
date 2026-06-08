@@ -19,6 +19,8 @@ from .yamlio import load_yaml
 DEFAULT_REPO_URL = "https://github.com/Epicevent/agent-runtime-ops.git"
 UPDATE_POLICY_NAME = "ops-update.yaml"
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+CUSTOMER_SLOT_RE = re.compile(r"^oc[0-9]+$")
+DEV_SLOT_RE = re.compile(r"^dev-[a-z0-9-]+$")
 
 
 def _state_root(args: argparse.Namespace) -> Path:
@@ -139,9 +141,13 @@ def cmd_plan(args: argparse.Namespace) -> int:
     plan = {
         "slot": desired.slot,
         "lane": desired.lane,
+        "family": desired.lane_data.get("family"),
+        "slot_class": desired.lane_data.get("slot_class"),
         "release": desired.release_name,
         "runtime_profile": profile.name,
         "runtime_profile_digest": profile.digest,
+        "wrapper_image": desired.release_data.get("wrapper_image"),
+        "product_image": desired.release_data.get("product_image"),
         "compose_sha256": rendered.sha256,
         "mutates": False,
     }
@@ -149,20 +155,106 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _check_line(ok: bool, name: str, detail: str | None = None) -> None:
+    status = "PASS" if ok else "FAIL"
+    if detail:
+        print(f"{status} {name} {detail}")
+    else:
+        print(f"{status} {name}")
+
+
+def _has_digest_ref(value: object) -> bool:
+    return isinstance(value, str) and "@sha256:" in value
+
+
+def _run_static_slot_checks(desired, profile) -> list[tuple[bool, str, str | None]]:
+    lane_family = desired.lane_data.get("family")
+    lane_slot_class = desired.lane_data.get("slot_class")
+    profile_family = profile.metadata.get("family")
+    profile_slot_class = profile.metadata.get("slot_class")
+    profile_mode = profile.metadata.get("mode")
+    release_family = desired.release_data.get("family")
+    wrapper_image = desired.release_data.get("wrapper_image")
+    product_image = desired.release_data.get("product_image")
+    release_digest = desired.release_data.get("digest")
+    allow_source_mount = profile.metadata.get("allow_source_mount")
+
+    checks: list[tuple[bool, str, str | None]] = [
+        (lane_family == profile_family, "lane_family_matches_profile", f"lane={lane_family} profile={profile_family}"),
+        (
+            lane_slot_class == profile_slot_class,
+            "lane_slot_class_matches_profile",
+            f"lane={lane_slot_class} profile={profile_slot_class}",
+        ),
+        (
+            release_family == lane_family == profile_family,
+            "release_family_matches_lane",
+            f"release={release_family} lane={lane_family}",
+        ),
+        (bool(wrapper_image), "wrapper_image_present", str(wrapper_image) if wrapper_image else None),
+        (bool(product_image), "product_image_present", str(product_image) if product_image else None),
+        (_has_digest_ref(wrapper_image), "wrapper_image_pinned_by_digest", str(wrapper_image) if wrapper_image else None),
+        (
+            isinstance(release_digest, str) and release_digest.startswith("sha256:"),
+            "release_digest_present",
+            str(release_digest) if release_digest else None,
+        ),
+    ]
+
+    if lane_slot_class == "customer":
+        checks.extend(
+            [
+                (bool(CUSTOMER_SLOT_RE.match(desired.slot)), "customer_slot_name_ok", desired.slot),
+                (profile_mode == "image", "customer_profile_mode_image", f"mode={profile_mode}"),
+                (allow_source_mount is False, "customer_source_mount_disabled", f"allow_source_mount={allow_source_mount}"),
+            ]
+        )
+    elif lane_slot_class == "dev":
+        checks.extend(
+            [
+                (bool(DEV_SLOT_RE.match(desired.slot)), "dev_slot_name_ok", desired.slot),
+                (profile_mode == "source", "dev_profile_mode_source", f"mode={profile_mode}"),
+                (allow_source_mount is True, "dev_source_mount_enabled", f"allow_source_mount={allow_source_mount}"),
+            ]
+        )
+    else:
+        checks.append((False, "known_slot_class", f"slot_class={lane_slot_class}"))
+
+    return checks
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     try:
         desired = load_desired_slot(args.slot, _state_root(args))
         profile = load_profile(desired.runtime_profile)
+        rendered = render_compose(profile, desired)
     except Exception as exc:
         print(f"slot={args.slot}")
         print("check_status=not_ready")
         print(f"reason={exc}")
         return 1
     print(f"slot={desired.slot}")
+    print(f"lane={desired.lane}")
+    print(f"release={desired.release_name}")
     print(f"runtime_profile={profile.name}")
     print(f"runtime_profile_digest={profile.digest}")
+    print(f"compose_sha256={rendered.sha256}")
     print("check_mode=non_mutating")
-    print("check_status=skeleton")
+
+    failed = 0
+    for ok, name, detail in _run_static_slot_checks(desired, profile):
+        _check_line(ok, name, detail)
+        if not ok:
+            failed += 1
+
+    _check_line(bool(rendered.text.strip()), "compose_rendered")
+    if not rendered.text.strip():
+        failed += 1
+
+    if failed:
+        print(f"check_status=fail failed={failed}")
+        return 1
+    print("check_status=pass")
     return 0
 
 
