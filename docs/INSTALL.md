@@ -46,8 +46,8 @@ sudo /usr/local/bin/opsctl self-update
 
 이 명령은 `main` 같은 움직이는 branch를 설치하지 않는다. 오직
 `/srv/openclaw-ops/ops-update.yaml`에 승인된 full commit만 설치한다.
-설치 스크립트는 `svcops`에 이 명령만 비밀번호 없이 열어 둔다. `update approve`
-권한은 열지 않는다.
+설치 스크립트는 `svcops`에 정해진 운영 명령만 비밀번호 없이 열어 둔다.
+`update approve` 권한은 열지 않는다.
 
 ## 설치 확인
 
@@ -91,6 +91,11 @@ opsctl profile list
 opsctl status SLOT
 opsctl plan SLOT
 opsctl check SLOT
+sudo /usr/local/bin/opsctl check --live SLOT
+sudo /usr/local/bin/opsctl apply SLOT
+sudo /usr/local/bin/opsctl rollback SLOT
+sudo /usr/local/bin/opsctl nas mount SLOT //HOST/SHARE
+sudo /usr/local/bin/opsctl nas unmount SLOT //HOST/SHARE
 ```
 
 `svcops`가 하지 않는 일:
@@ -101,6 +106,9 @@ opsctl check SLOT
 고객 secret 원문 열람
 Docker compose 직접 수정
 ```
+
+`apply`는 runtime profile에서 생성한 compose만 쓴다. 운영자가 compose 파일을 직접
+수정하는 작업은 운영 기준이 아니다.
 
 ## 설치 후 위치
 

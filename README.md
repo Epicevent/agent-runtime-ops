@@ -48,8 +48,8 @@ sudo /usr/local/bin/opsctl self-update
 
 이 명령은 `main` 같은 움직이는 branch를 설치하지 않는다. 오직
 `/srv/openclaw-ops/ops-update.yaml`에 승인된 full commit만 설치한다.
-설치 스크립트는 `svcops`에 이 명령만 비밀번호 없이 열어 둔다. `update approve`
-권한은 열지 않는다.
+설치 스크립트는 `svcops`에 정해진 운영 명령만 비밀번호 없이 열어 둔다.
+`update approve` 권한은 열지 않는다.
 
 설치 확인:
 
@@ -104,6 +104,7 @@ live 검사는 파일을 쓰지 않는다. host에는 NAS가 mount되어 있는�
 ```text
 /srv/openclaw-ops를 운영자가 읽을 수 있음
 root shell 없이 상태 조회와 점검을 수행함
+제한된 root helper로 live check, 단일 slot apply/rollback, NAS mount/unmount를 수행함
 고객 계정과 운영 권한을 분리함
 ```
 
@@ -116,6 +117,9 @@ root shell 없이 상태 조회와 점검을 수행함
 Docker compose 파일 직접 수정
 root shell 임의 작업
 ```
+
+`opsctl apply`는 runtime profile에서 렌더링한 compose 파일만 쓴다. 운영자가
+compose를 직접 고치는 작업과는 다른 층위다.
 
 운영계정을 바꾸려면 설치 전에 의도적으로 정해야 한다. 기본 운영 기준은
 `svcops`다.
@@ -180,7 +184,8 @@ Epicevent/agent-runtime-ops
   wrapper image recipe
   opsctl
   admin console
-  apply/check/rollback/rollout 도구
+  단일 slot apply/check/rollback 도구
+  lane rollout 도구
   NAS grant 판정 로직
   schema 정의
 
@@ -249,8 +254,10 @@ ops repo commit:
 opsctl status SLOT
 opsctl plan SLOT
 sudo /usr/local/bin/opsctl apply SLOT
+sudo /usr/local/bin/opsctl apply SLOT --allow-first-apply
 sudo /usr/local/bin/opsctl rollback SLOT
 opsctl check SLOT
+sudo /usr/local/bin/opsctl check --live SLOT
 
 opsctl rollout LANE
 
@@ -260,15 +267,14 @@ opsctl release promote NAME LANE
 opsctl nas requests
 opsctl nas approve-auto
 opsctl nas mounted SLOT
-opsctl nas policy-check SLOT SHARE
-sudo /usr/local/bin/opsctl nas mount SLOT SHARE
-sudo /usr/local/bin/opsctl nas unmount SLOT SHARE
+opsctl nas policy-check SLOT //HOST/SHARE
+sudo /usr/local/bin/opsctl nas mount SLOT //HOST/SHARE
+sudo /usr/local/bin/opsctl nas unmount SLOT //HOST/SHARE
 
 opsctl admin serve
 ```
 
-현재 초기 골격에서는 `status`, `plan`, `check`, `nas policy-check`가 비쓰기
-명령이다. `nas mounted`도 비쓰기 명령이다.
+`status`, `plan`, `check`, `nas policy-check`, `nas mounted`는 비쓰기 명령이다.
 
 `nas mount`와 `nas unmount`는 쓰기 명령이지만 compose를 수정하지 않는다.
 동적 NAS 변화는 `/home/ocN/nas_docs/*` child mount에서만 처리한다.
@@ -276,3 +282,12 @@ opsctl admin serve
 `apply`와 `rollback`은 단일 slot 기준으로 동작한다. 기존 legacy 상태에서 첫 적용을
 할 때는 명시적으로 `--allow-first-apply`를 붙인다. `rollout`은 단일 slot migration
 검증 뒤에 연다.
+
+아직 열지 않은 명령:
+
+```text
+opsctl rollout LANE
+opsctl release add NAME IMAGE
+opsctl release promote NAME LANE
+opsctl nas approve-auto
+```

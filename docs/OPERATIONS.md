@@ -1,35 +1,32 @@
-# Operations
+# 운영
 
-The operating loop is:
+운영 루프는 다음 순서다.
 
 ```text
 status -> plan -> apply -> check
 ```
 
-`status`, `plan`, and `check` do not write files.
+`status`, `plan`, `check`는 파일을 쓰지 않는다.
 
-`opsctl check SLOT` checks the desired contract only. It confirms that the
-private state, release, and runtime profile can render a valid desired runtime.
+`opsctl check SLOT`은 desired contract만 확인한다. private state, release,
+runtime profile이 유효한 runtime을 렌더링할 수 있는지 본다.
 
-`sudo /usr/local/bin/opsctl check --live SLOT` also inspects Docker and NAS mount state. It is still
-non-mutating, but it needs root/admin privileges or an equivalent restricted
-root helper because it reads Docker metadata and mount namespaces. It must fail
-if the running container does not see the host CIFS child mounts, or if the NAS
-bind root is not read-only inside the container.
+`sudo /usr/local/bin/opsctl check --live SLOT`은 Docker와 NAS mount 상태까지
+확인한다. 이 명령도 파일을 쓰지 않는다. 다만 Docker metadata와 mount namespace를
+읽으므로 제한된 root helper가 필요하다.
 
-`sudo /usr/local/bin/opsctl apply SLOT` renders the runtime profile compose,
-writes the agent-runtime manifest, recreates the slot container, and runs a live
-check. It does not edit NAS child mounts.
+`sudo /usr/local/bin/opsctl apply SLOT`은 runtime profile compose를 렌더링하고,
+agent-runtime manifest를 쓰고, slot container를 재생성한 뒤 live check를 실행한다.
+NAS child mount는 수정하지 않는다.
 
-The first migration from a legacy slot requires:
+legacy slot에서 처음 넘어올 때는 명시 플래그가 필요하다.
 
 ```bash
 sudo /usr/local/bin/opsctl apply SLOT --allow-first-apply
 ```
 
-`sudo /usr/local/bin/opsctl rollback SLOT` restores the previous
-agent-runtime compose and manifest backup. If a slot has never had an
-agent-runtime compose, rollback cannot recreate the legacy runtime.
+`sudo /usr/local/bin/opsctl rollback SLOT`은 직전 agent-runtime compose와 manifest
+backup을 복원한다. agent-runtime compose가 없던 slot은 legacy runtime을 복원할 수
+없다.
 
-`rollout` remains disabled until single-slot apply/rollback has passed server
-migration tests.
+`rollout`은 단일 slot apply/rollback migration 검증이 끝날 때까지 닫아 둔다.
