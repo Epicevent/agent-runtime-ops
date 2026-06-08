@@ -943,6 +943,15 @@ def _run_live_slot_checks_with_wait(desired, profile, state_root: Path, timeout_
         time.sleep(5)
 
 
+def _profile_startup_timeout_seconds(profile) -> int:
+    raw_value = profile.metadata.get("startup_timeout_seconds", 90)
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return 90
+    return max(30, min(value, 600))
+
+
 def cmd_apply(args: argparse.Namespace) -> int:
     if not _is_root():
         print("error: run as root/admin: sudo /usr/local/bin/opsctl apply SLOT", file=sys.stderr)
@@ -1010,7 +1019,12 @@ def cmd_apply(args: argparse.Namespace) -> int:
         return up.returncode or 1
 
     failed = 0
-    for ok, name, detail in _run_live_slot_checks_with_wait(desired, profile, _state_root(args)):
+    for ok, name, detail in _run_live_slot_checks_with_wait(
+        desired,
+        profile,
+        _state_root(args),
+        timeout_seconds=_profile_startup_timeout_seconds(profile),
+    ):
         _check_line(ok, name, detail)
         if not ok:
             failed += 1

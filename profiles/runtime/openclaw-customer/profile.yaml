@@ -9,3 +9,4 @@ required_mount_propagation: rslave
 required_read_only_nas: true
 runtime_user_mode: compose
 http_smoke_path: /healthz
+startup_timeout_seconds: 90

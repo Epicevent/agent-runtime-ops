@@ -10,3 +10,4 @@ required_mount_propagation: rslave
 required_read_only_nas: true
 runtime_user_mode: image-managed
 http_smoke_path: /
+startup_timeout_seconds: 240

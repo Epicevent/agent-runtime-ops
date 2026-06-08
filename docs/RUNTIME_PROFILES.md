@@ -296,6 +296,18 @@ Hermes:
 
 이 smoke가 실패하면 Apache port가 맞아도 slot은 운영 가능 상태가 아니다.
 
+제품별 초기화 시간도 profile 계약이다. OpenClaw는 짧은 gateway 초기화로 충분하지만,
+Hermes는 s6 init, user/group 정리, dashboard/API 준비 시간이 더 길다. 그래서 apply는
+고정된 전역 timeout이 아니라 profile의 `startup_timeout_seconds`를 사용한다.
+
+```text
+OpenClaw:
+  startup_timeout_seconds=90
+
+Hermes:
+  startup_timeout_seconds=240
+```
+
 ## 금지되는 단순화
 
 다음 변경은 금지한다.
