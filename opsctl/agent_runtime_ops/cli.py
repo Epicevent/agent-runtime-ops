@@ -1914,10 +1914,24 @@ def _safe_request_file(path: Path, slot: str) -> None:
         raise ValueError(f"request file must not be group/world writable: {path}")
 
 
+def _slot_names_from_config(slots_data: object) -> list[str]:
+    if isinstance(slots_data, dict):
+        return sorted(str(slot) for slot in slots_data)
+    if isinstance(slots_data, list):
+        names = []
+        for item in slots_data:
+            if isinstance(item, dict) and item.get("slot"):
+                names.append(str(item["slot"]))
+            elif isinstance(item, str):
+                names.append(item)
+        return sorted(names)
+    return []
+
+
 def _approve_auto_once(state_root: Path) -> dict[str, int]:
     result = {"checked": 0, "approved": 0, "pending": 0, "rejected": 0, "failed": 0}
     slots = load_yaml(state_root / "slots.yaml").get("slots") or {}
-    for slot in sorted(slots):
+    for slot in _slot_names_from_config(slots):
         try:
             desired = load_desired_slot(slot, state_root)
         except Exception:
@@ -1974,7 +1988,7 @@ def cmd_nas_requests(args: argparse.Namespace) -> int:
     state_root = _state_root(args)
     slots_data = load_yaml(state_root / "slots.yaml").get("slots") or {}
     total = 0
-    for slot in sorted(slots_data):
+    for slot in _slot_names_from_config(slots_data):
         try:
             desired = load_desired_slot(slot, state_root)
         except Exception:
