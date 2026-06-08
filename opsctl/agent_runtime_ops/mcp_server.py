@@ -211,7 +211,7 @@ class McpServer:
                     "type": "object",
                     "properties": {
                         "slot": {"type": "string"},
-                        "key": {"type": "string"},
+                        "key": {"type": "string", "enum": sorted(PROVIDER_SECRET_KEYS)},
                         "secret_file": {"type": "string"},
                         "check": {"type": "boolean", "default": True},
                         "no_restart": {"type": "boolean", "default": False},

@@ -58,6 +58,10 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("deploy_update", names)
         self.assertIn("nas_remove", names)
         self.assertIn("nas_credential_status", names)
+        secret_tool = next(item for item in tools["result"]["tools"] if item["name"] == "runtime_secret_set_from_file")
+        key_schema = secret_tool["inputSchema"]["properties"]["key"]
+        self.assertIn("GEMINI_API_KEY", key_schema["enum"])
+        self.assertNotIn("API_KEY", key_schema["enum"])
 
     def test_unknown_tool_and_malformed_json(self) -> None:
         server = McpServer(runner=FakeRunner(), opsctl="opsctl", sudo="sudo")
