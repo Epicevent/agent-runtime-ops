@@ -198,9 +198,15 @@ activate_release() {
   [[ -d "$release_dir" ]] || die "missing release dir: $release_dir"
   ln -sfn "releases/$commit" "$next_link"
   mv -Tf "$next_link" "$CURRENT_LINK"
-  ln -sfn "$CURRENT_LINK/.venv/bin/opsctl" "$BIN_LINK"
+  cat >"$BIN_LINK" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+exec "$CURRENT_LINK/.venv/bin/opsctl" "\$@"
+EOF
+  chmod 0755 "$BIN_LINK"
   ln -sfn "current/.agent-runtime-ops-manifest" "$MANIFEST"
-  chown -h root:"$OPS_GROUP" "$BIN_LINK" "$CURRENT_LINK" "$MANIFEST" 2>/dev/null || true
+  chown root:"$OPS_GROUP" "$BIN_LINK" 2>/dev/null || true
+  chown -h root:"$OPS_GROUP" "$CURRENT_LINK" "$MANIFEST" 2>/dev/null || true
 }
 
 install_package() {
@@ -228,10 +234,10 @@ install_package() {
   rm -rf "$tmp_release"
   copy_tree "$src" "$tmp_release"
   install_python_env "$tmp_release"
-  write_manifest "$tmp_release" "$src" "$commit"
   rm -rf "$release_dir"
   mv "$tmp_release" "$release_dir"
   chown -R root:"$OPS_GROUP" "$release_dir"
+  write_manifest "$release_dir" "$src" "$commit"
 
   activate_release "$commit"
   install_self_update_sudoers

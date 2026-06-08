@@ -125,7 +125,7 @@ Docker compose 직접 수정
 
 ```text
 /opt/agent-runtime-ops   root:svcops
-/usr/local/bin/opsctl    /opt/agent-runtime-ops/current/.venv/bin/opsctl 링크
+/usr/local/bin/opsctl    current 설치본을 실행하는 wrapper
 /srv/openclaw-ops        root:svcops
 ```
 
