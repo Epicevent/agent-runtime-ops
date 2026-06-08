@@ -93,6 +93,7 @@ sudo /usr/local/bin/opsctl check --live SLOT
 /usr/local/bin/opsctl nas mounted SLOT
 /usr/local/bin/opsctl nas policy-check SLOT //HOST/SHARE
 sudo /usr/local/bin/opsctl runtime-secret status SLOT
+sudo /opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh heartbeat-status SLOT
 ```
 
 These mutate runtime or server state:
@@ -105,11 +106,37 @@ sudo /usr/local/bin/opsctl runtime-secret set SLOT --key KEY --value-stdin --che
 sudo /usr/local/bin/opsctl nas mount SLOT //HOST/SHARE
 sudo /usr/local/bin/opsctl nas unmount SLOT //HOST/SHARE
 sudo /usr/local/bin/opsctl nas approve-auto
+sudo /opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh heartbeat-disable SLOT
 ```
 
 Use `opsctl`; do not directly edit rendered Docker compose files. `opsctl apply` renders from the
 runtime profiles in this repo. NAS changes are child CIFS mounts under `/home/ocN/nas_docs`; do not
 turn NAS shares into compose volumes.
+
+## Baseline Wrapper Priority
+
+Some legacy/customer runtime operations still live in the baseline repo and wrapper. That baseline
+is the source of truth for those operations. Do not treat this repo as primary for them; use this
+section only as a pointer when the operator asks from inside `agent-runtime-ops` or when the baseline
+docs are not already in context.
+
+```bash
+/opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh
+```
+
+For example, OpenClaw heartbeat is controlled there, not in `opsctl` and not by this repo:
+
+```bash
+ssh svcops "sudo /opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh heartbeat-status dev-oc"
+ssh svcops "sudo /opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh heartbeat-disable dev-oc"
+```
+
+Disabled heartbeat should show:
+
+```text
+heartbeat_config_every=0m
+heartbeat_config_enabled=no
+```
 
 ## Secrets
 

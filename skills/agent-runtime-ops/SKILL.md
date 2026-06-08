@@ -34,6 +34,7 @@ Load only the relevant section:
 - Update or install: "Deploy an Approved Repo Update"
 - Slot verification: "Check a Slot"
 - Gemini/API key injection: "Runtime Secret Injection"
+- Baseline-owned heartbeat fallback: "Heartbeat Operations"
 - Apply or rollback: "Apply and Rollback"
 - NAS work: "NAS Operations"
 - MCP verification: "MCP Setup and Smoke Test"
