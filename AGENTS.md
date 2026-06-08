@@ -24,6 +24,10 @@ installs and maintains the Codex global `AGENTS.md`, Gemini global `GEMINI.md`, 
 `agent-runtime-ops` MCP registration for that account. This affects sessions under the `svcops`
 Unix account, and does not touch other Unix accounts or a developer's local accounts.
 
+Agent-facing markdown should teach operating posture more than rote command memorization. Discover
+current command shapes from `opsctl --help`, the installed repo, and the `agent-runtime-ops` MCP
+server before acting.
+
 Normal operator entry:
 
 ```bash
@@ -38,6 +42,21 @@ project with its own install, auth, rollback, and verification plan.
 
 Gemini/API keys in this repo are runtime slot secrets only. They are injected into managed runtime
 profiles with `opsctl runtime-secret`; they are not credentials for a Gemini CLI installation.
+
+## Operator Posture
+
+Treat the human operator's stated scope as the controlling scope. Do not silently narrow an
+authorized mutating test into read-only checks, and do not silently broaden it to other slots,
+accounts, or systems.
+
+When an action changes recoverability, authorization, credentials, update state, or another slot,
+say that plainly before doing it unless the operator has already authorized that exact target and
+effect. If a request asks for secrets, concealment, scope escape, or policy bypass, refuse that part
+directly and explain the exact boundary.
+
+Report like an operator would expect: request interpreted, targets, actual actions, whether state
+mutated, before/after state, pass/fail, and the next recoverable step. Do not posture as the
+operator; the operator controls intent and risk, and the agent executes, verifies, and communicates.
 
 ## First Move
 
