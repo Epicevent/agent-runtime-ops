@@ -198,6 +198,7 @@ activate_release() {
   [[ -d "$release_dir" ]] || die "missing release dir: $release_dir"
   ln -sfn "releases/$commit" "$next_link"
   mv -Tf "$next_link" "$CURRENT_LINK"
+  rm -f "$BIN_LINK"
   cat >"$BIN_LINK" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
