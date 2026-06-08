@@ -41,8 +41,18 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
-    desired = load_desired_slot(args.slot, _state_root(args))
-    profile = load_profile(desired.runtime_profile)
+    try:
+        desired = load_desired_slot(args.slot, _state_root(args))
+        profile = load_profile(desired.runtime_profile)
+    except Exception as exc:
+        plan = {
+            "slot": args.slot,
+            "status": "not_ready",
+            "reason": str(exc),
+            "mutates": False,
+        }
+        print(json.dumps(plan, ensure_ascii=False, indent=2))
+        return 1
     rendered = render_compose(profile, desired)
     plan = {
         "slot": desired.slot,
@@ -58,8 +68,14 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    desired = load_desired_slot(args.slot, _state_root(args))
-    profile = load_profile(desired.runtime_profile)
+    try:
+        desired = load_desired_slot(args.slot, _state_root(args))
+        profile = load_profile(desired.runtime_profile)
+    except Exception as exc:
+        print(f"slot={args.slot}")
+        print("check_status=not_ready")
+        print(f"reason={exc}")
+        return 1
     print(f"slot={desired.slot}")
     print(f"runtime_profile={profile.name}")
     print(f"runtime_profile_digest={profile.digest}")
