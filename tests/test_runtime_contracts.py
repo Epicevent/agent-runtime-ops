@@ -36,6 +36,8 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertEqual(_slot_ports("oc1"), ("28789", "28790"))
         self.assertEqual(_slot_ports("oc2"), ("28889", "28890"))
         self.assertEqual(_slot_ports("oc15"), ("30189", "30190"))
+        self.assertEqual(_slot_ports("dev-oc"), ("30789", "30790"))
+        self.assertEqual(_slot_ports("dev-hermess"), ("30889", "30890"))
 
     def test_openclaw_customer_contract(self) -> None:
         desired = desired_slot("oc1", "openclaw", "customer", "openclaw-customer")

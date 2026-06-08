@@ -333,6 +333,12 @@ def _run_text_cwd(command: list[str], cwd: Path, timeout: int = 20) -> subproces
 
 
 def _slot_gateway_port(slot: str) -> int | None:
+    dev_ports = {
+        "dev-oc": 30789,
+        "dev-hermess": 30889,
+    }
+    if slot in dev_ports:
+        return dev_ports[slot]
     match = re.match(r"^oc([0-9]+)$", slot)
     if not match:
         return None
@@ -579,12 +585,14 @@ def _run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool
     checks.append((True, "live_host_child_cifs_count", f"count={len(host_cifs)}"))
     for row in host_cifs:
         source = row.get("source") or ""
-        if source.startswith("//"):
+        if source.startswith("//") and desired.lane_data.get("slot_class") == "customer":
             try:
                 decision = check_nas_policy(desired.slot, source, state_root)
                 checks.append((decision.allowed, "live_host_child_cifs_allowed_by_policy", f"source={source} reason={decision.reason}"))
             except Exception as exc:
                 checks.append((False, "live_host_child_cifs_policy_check_ok", f"source={source} reason={exc}"))
+        elif source.startswith("//"):
+            checks.append((True, "live_host_child_cifs_policy_not_required_for_dev", f"source={source}"))
     if required_read_only_nas and host_cifs:
         host_ro = all(_is_readonly_mount(row) for row in host_cifs)
         checks.append((bool(host_cifs) and host_ro, "live_host_child_cifs_readonly", f"count={len(host_cifs)}"))
@@ -1413,17 +1421,87 @@ def _upsert_runtime_secret_file(slot: str, profile, values: dict[str, str]) -> P
 
 def _restart_runtime_secret_slot(desired, profile, runtime_dir: Path) -> tuple[bool, str]:
     compose_path = _agent_compose_path(runtime_dir)
-    if not compose_path.is_file():
-        return False, f"agent_runtime_compose_missing:{compose_path}"
     service = str(profile.metadata.get("service") or "openclaw-gateway")
+    if compose_path.is_file():
+        command = _docker_compose_command(desired.slot, compose_path, "up", "-d", "--force-recreate", service)
+        restart_mode = "agent-runtime-compose"
+    else:
+        legacy_compose = runtime_dir / "docker-compose.yml"
+        if not legacy_compose.is_file():
+            return False, f"compose_missing:{compose_path},{legacy_compose}"
+        compose_files = [legacy_compose]
+        source_compose = runtime_dir / "docker-compose.source.yml"
+        if source_compose.is_file():
+            compose_files.append(source_compose)
+        if profile.metadata.get("family") != "hermes":
+            for name in (
+                "docker-compose.extra.yml",
+                "docker-compose.host-user.yml",
+                "docker-compose.shared-ollama.yml",
+                "docker-compose.sandbox.yml",
+            ):
+                item = runtime_dir / name
+                if item.is_file():
+                    compose_files.append(item)
+        command = ["docker", "compose", "-p", _compose_project_name(desired.slot)]
+        for item in compose_files:
+            command.extend(["-f", str(item)])
+        command.extend(["up", "-d", "--force-recreate", service])
+        restart_mode = "legacy-compose"
     up = _run_text_cwd(
-        _docker_compose_command(desired.slot, compose_path, "up", "-d", "--force-recreate", service),
+        command,
         runtime_dir,
         timeout=240,
     )
     if up.returncode != 0:
         return False, (up.stderr or up.stdout).strip() or "runtime_secret_restart_failed"
-    return True, "restarted"
+    return True, restart_mode
+
+
+def _run_runtime_secret_container_checks(desired, profile, keys: set[str]) -> list[tuple[bool, str, str | None]]:
+    checks: list[tuple[bool, str, str | None]] = []
+    if not _is_root():
+        return [(False, "runtime_secret_check_requires_root", "run as root/admin")]
+    docker = shutil.which("docker")
+    checks.append((bool(docker), "runtime_secret_docker_cli_available", docker))
+    if not docker:
+        return checks
+    container, lookup = _find_gateway_container(desired.slot, profile)
+    checks.append((bool(container), "runtime_secret_container_lookup", lookup))
+    if not container:
+        return checks
+    inspect = _run_text(["docker", "inspect", container])
+    checks.append((inspect.returncode == 0, "runtime_secret_container_exists", container))
+    if inspect.returncode != 0:
+        return checks
+    try:
+        info = json.loads(inspect.stdout)[0]
+    except Exception as exc:
+        checks.append((False, "runtime_secret_container_inspect_parse_ok", str(exc)))
+        return checks
+    state = info.get("State") or {}
+    running = str(state.get("Running")).lower()
+    health_data = state.get("Health") or {}
+    health = str(health_data.get("Status") or "none")
+    checks.append((running == "true", "runtime_secret_container_running", f"running={running}"))
+    checks.append((health in {"healthy", "none", ""}, "runtime_secret_container_health_ok", f"health={health}"))
+    for key in sorted(keys):
+        proc = _run_text(["docker", "exec", container, "sh", "-lc", f'test -n "${{{key}:-}}"'])
+        checks.append((proc.returncode == 0, f"runtime_secret_{key.lower()}_present_in_container", "secret_value_printed=no"))
+    return checks
+
+
+def _run_runtime_secret_container_checks_with_wait(desired, profile, keys: set[str], timeout_seconds: int) -> list[tuple[bool, str, str | None]]:
+    deadline = time.monotonic() + timeout_seconds
+    last_checks: list[tuple[bool, str, str | None]] = []
+    while True:
+        checks = _run_runtime_secret_container_checks(desired, profile, keys)
+        last_checks = checks
+        if not any(not ok for ok, _, _ in checks):
+            return checks
+        if time.monotonic() >= deadline:
+            return last_checks
+        time.sleep(5)
 
 
 def _secret_status_rows(path: Path) -> tuple[str, dict[str, bool]]:
@@ -1483,10 +1561,10 @@ def cmd_runtime_secret_set(args: argparse.Namespace) -> int:
 
     if args.check:
         failed = 0
-        for check_ok, name, detail in _run_live_slot_checks_with_wait(
+        for check_ok, name, detail in _run_runtime_secret_container_checks_with_wait(
             desired,
             profile,
-            state_root,
+            set(values),
             timeout_seconds=_profile_startup_timeout_seconds(profile),
         ):
             _check_line(check_ok, name, detail)

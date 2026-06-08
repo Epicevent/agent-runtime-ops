@@ -24,6 +24,13 @@ class RenderedCompose:
 
 
 def _slot_ports(slot: str) -> tuple[str, str]:
+    dev_ports = {
+        "dev-oc": 30789,
+        "dev-hermess": 30889,
+    }
+    if slot in dev_ports:
+        gateway_port = dev_ports[slot]
+        return str(gateway_port), str(gateway_port + 1)
     match = re.match(r"^oc([0-9]+)$", slot)
     if not match:
         return "${GATEWAY_PORT}", "${BRIDGE_PORT}"
