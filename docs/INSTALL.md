@@ -41,7 +41,7 @@ opsctl update status
 승인이 끝난 뒤 실제 갱신은 아래 명령만 사용한다.
 
 ```bash
-sudo opsctl self-update
+sudo /usr/local/bin/opsctl self-update
 ```
 
 이 명령은 `main` 같은 움직이는 branch를 설치하지 않는다. 오직
