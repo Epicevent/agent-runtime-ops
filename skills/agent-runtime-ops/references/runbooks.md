@@ -74,7 +74,11 @@ umask 077
 printf 'GEMINI_API_KEY=%s\n' "$GEMINI_API_KEY" > ~/.gemini/.env
 unset GEMINI_API_KEY
 gemini --version
+GEMINI_CLI_TRUST_WORKSPACE=true gemini "Reply exactly: OK"
 ```
+
+The managed `/usr/local/bin/gemini` wrapper loads `/home/svcops/.gemini/.env` before starting the
+Gemini CLI. A present file alone is not enough; verify an actual CLI call after setting the key.
 
 Do not put the Codex login token or Gemini API key in chat, command arguments, MCP JSON arguments,
 or repo files.

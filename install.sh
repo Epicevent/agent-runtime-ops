@@ -255,6 +255,13 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 # agent-runtime-ops managed gemini wrapper
+GEMINI_ENV="\${AGENT_RUNTIME_GEMINI_ENV:-$GEMINI_HOME/.env}"
+if [[ -r "\$GEMINI_ENV" ]]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "\$GEMINI_ENV"
+  set +a
+fi
 exec "$CURRENT_LINK/agent-clis/gemini-cli/node_modules/.bin/gemini" "\$@"
 EOF
   chmod 0755 "$GEMINI_BIN_LINK"
