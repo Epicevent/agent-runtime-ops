@@ -12,10 +12,12 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import urllib.error
 import urllib.request
 from pathlib import Path
 
+from .compose_contract import validate_compose_contract
 from .paths import DEFAULT_STATE_ROOT, REPO_ROOT
 from .nas import (
     agent_nas_dir,
@@ -625,7 +627,7 @@ def _run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool
     return checks
 
 
-def _run_static_slot_checks(desired, profile) -> list[tuple[bool, str, str | None]]:
+def _run_static_slot_checks(desired, profile, rendered=None) -> list[tuple[bool, str, str | None]]:
     lane_family = desired.lane_data.get("family")
     lane_slot_class = desired.lane_data.get("slot_class")
     profile_family = profile.metadata.get("family")
@@ -696,6 +698,12 @@ def _run_static_slot_checks(desired, profile) -> list[tuple[bool, str, str | Non
     else:
         checks.append((False, "known_slot_class", f"slot_class={lane_slot_class}"))
 
+    if rendered is not None:
+        checks.extend(
+            (item.ok, item.name, item.detail)
+            for item in validate_compose_contract(profile, desired, rendered.text)
+        )
+
     return checks
 
 
@@ -719,7 +727,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     print(f"live_runtime_check={'enabled' if args.live else 'not_run'}")
 
     failed = 0
-    for ok, name, detail in _run_static_slot_checks(desired, profile):
+    for ok, name, detail in _run_static_slot_checks(desired, profile, rendered):
         _check_line(ok, name, detail)
         if not ok:
             failed += 1
@@ -747,6 +755,8 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 
 def _slot_runtime_dir(slot: str) -> Path:
+    if not CUSTOMER_SLOT_RE.match(slot) and not DEV_SLOT_RE.match(slot):
+        raise ValueError(f"invalid slot name: {slot}")
     target_home = Path("/home") / slot
     runtime_dir = target_home / "openclaw"
     for path in (target_home, runtime_dir):
@@ -820,6 +830,57 @@ def _env_file_keys(path: Path) -> set[str]:
     return keys
 
 
+def _state_runtime_dir(state_root: Path, slot: str, *, create: bool = False) -> Path:
+    runtime_root = state_root / "runtime"
+    slot_dir = runtime_root / slot
+    for path in (state_root, runtime_root, slot_dir):
+        if path.exists() and path.is_symlink():
+            raise ValueError(f"managed state path must not be symlink: {path}")
+    if create:
+        runtime_root.mkdir(mode=0o755, exist_ok=True)
+        slot_dir.mkdir(mode=0o755, exist_ok=True)
+    return slot_dir
+
+
+def _state_manifest_path(state_root: Path, slot: str, *, create_parent: bool = False) -> Path:
+    return _state_runtime_dir(state_root, slot, create=create_parent) / "manifest.yaml"
+
+
+def _manifest_payload(
+    *,
+    desired,
+    profile,
+    rendered,
+    compose_path: Path,
+    applied_at: str,
+    previous_manifest: Path | None,
+) -> dict:
+    wrapper_image = desired.release_data.get("wrapper_image")
+    product_image = desired.release_data.get("product_image")
+    payload = {
+        "schema_version": 1,
+        "slot": desired.slot,
+        "applied_at": applied_at,
+        "ops_commit": _installed_source_commit(),
+        "lane": desired.lane,
+        "release": desired.release_name,
+        "family": desired.lane_data.get("family"),
+        "slot_class": desired.lane_data.get("slot_class"),
+        "runtime_profile": profile.name,
+        "runtime_profile_digest": profile.digest,
+        "wrapper_image": wrapper_image,
+        "wrapper_image_digest": _digest_from_image_ref(wrapper_image),
+        "product_image": product_image,
+        "product_image_digest": _digest_from_image_ref(product_image),
+        "release_digest": desired.release_data.get("digest"),
+        "compose_sha256": rendered.sha256,
+        "compose_path": str(compose_path),
+    }
+    if previous_manifest is not None:
+        payload["previous_manifest"] = str(previous_manifest)
+    return payload
+
+
 def _write_slot_manifest(
     path: Path,
     *,
@@ -847,7 +908,65 @@ def _write_slot_manifest(
     _atomic_write(path, "\n".join(lines) + "\n", 0o644)
 
 
-def _backup_agent_runtime_state(runtime_dir: Path) -> Path:
+def _write_state_slot_manifest(
+    path: Path,
+    *,
+    desired,
+    profile,
+    rendered,
+    compose_path: Path,
+    applied_at: str,
+    previous_manifest: Path | None,
+) -> None:
+    _atomic_write(
+        path,
+        dump_yaml(
+            _manifest_payload(
+                desired=desired,
+                profile=profile,
+                rendered=rendered,
+                compose_path=compose_path,
+                applied_at=applied_at,
+                previous_manifest=previous_manifest,
+            )
+        ),
+        0o644,
+    )
+
+
+def _write_slot_manifests(
+    *,
+    state_root: Path,
+    runtime_dir: Path,
+    desired,
+    profile,
+    rendered,
+    compose_path: Path,
+    applied_at: str,
+    previous_manifest: Path | None,
+) -> tuple[Path, Path]:
+    legacy_path = _agent_manifest_path(runtime_dir)
+    state_path = _state_manifest_path(state_root, desired.slot, create_parent=True)
+    _write_slot_manifest(
+        legacy_path,
+        desired=desired,
+        profile=profile,
+        rendered=rendered,
+        applied_at=applied_at,
+    )
+    _write_state_slot_manifest(
+        state_path,
+        desired=desired,
+        profile=profile,
+        rendered=rendered,
+        compose_path=compose_path,
+        applied_at=applied_at,
+        previous_manifest=previous_manifest,
+    )
+    return legacy_path, state_path
+
+
+def _backup_agent_runtime_state(slot: str, runtime_dir: Path, state_root: Path) -> Path:
     backup_root = _agent_backup_root(runtime_dir)
     if backup_root.exists() and backup_root.is_symlink():
         raise ValueError(f"backup root must not be symlink: {backup_root}")
@@ -862,15 +981,20 @@ def _backup_agent_runtime_state(runtime_dir: Path) -> Path:
 
     compose_path = _agent_compose_path(runtime_dir)
     manifest_path = _agent_manifest_path(runtime_dir)
+    state_manifest_path = _state_manifest_path(state_root, slot)
     metadata = {
         "created_at": _now_iso(),
         "had_compose": compose_path.is_file() and not compose_path.is_symlink(),
         "had_manifest": manifest_path.is_file() and not manifest_path.is_symlink(),
+        "had_state_manifest": state_manifest_path.is_file() and not state_manifest_path.is_symlink(),
+        "state_manifest_path": str(state_manifest_path),
     }
     if metadata["had_compose"]:
         shutil.copy2(compose_path, backup_dir / "docker-compose.agent-runtime.yml")
     if metadata["had_manifest"]:
         shutil.copy2(manifest_path, backup_dir / ".agent-runtime-manifest")
+    if metadata["had_state_manifest"]:
+        shutil.copy2(state_manifest_path, backup_dir / "manifest.yaml")
     (backup_dir / "backup.json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return backup_dir
 
@@ -883,12 +1007,14 @@ def _latest_backup(runtime_dir: Path) -> Path | None:
     return backups[-1] if backups else None
 
 
-def _restore_backup(slot: str, runtime_dir: Path, backup_dir: Path) -> tuple[bool, str]:
+def _restore_backup(slot: str, runtime_dir: Path, backup_dir: Path, state_root: Path) -> tuple[bool, str]:
     metadata = load_yaml(backup_dir / "backup.json")
     compose_path = _agent_compose_path(runtime_dir)
     manifest_path = _agent_manifest_path(runtime_dir)
+    state_manifest_path = _state_manifest_path(state_root, slot, create_parent=True)
     had_compose = bool(metadata.get("had_compose"))
     had_manifest = bool(metadata.get("had_manifest"))
+    had_state_manifest = bool(metadata.get("had_state_manifest"))
 
     if had_compose:
         shutil.copy2(backup_dir / "docker-compose.agent-runtime.yml", compose_path)
@@ -898,6 +1024,10 @@ def _restore_backup(slot: str, runtime_dir: Path, backup_dir: Path) -> tuple[boo
         shutil.copy2(backup_dir / ".agent-runtime-manifest", manifest_path)
     else:
         manifest_path.unlink(missing_ok=True)
+    if had_state_manifest:
+        shutil.copy2(backup_dir / "manifest.yaml", state_manifest_path)
+    else:
+        state_manifest_path.unlink(missing_ok=True)
 
     if not had_compose:
         return False, "no_previous_agent_runtime_compose"
@@ -913,6 +1043,53 @@ def _restore_backup(slot: str, runtime_dir: Path, backup_dir: Path) -> tuple[boo
     if up.returncode != 0:
         return False, (up.stderr or up.stdout).strip() or "rollback_compose_up_failed"
     return True, "rollback_applied"
+
+
+def _read_legacy_slot_manifest(path: Path) -> dict[str, str]:
+    data: dict[str, str] = {}
+    if not path.is_file():
+        return data
+    for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        key, sep, value = raw_line.partition("=")
+        if sep:
+            data[key.strip()] = value.strip()
+    return data
+
+
+def _backup_manifest_data(backup_dir: Path) -> dict:
+    yaml_manifest = backup_dir / "manifest.yaml"
+    if yaml_manifest.is_file():
+        data = load_yaml(yaml_manifest)
+        if isinstance(data, dict):
+            return data
+    return _read_legacy_slot_manifest(backup_dir / ".agent-runtime-manifest")
+
+
+def _desired_from_manifest(slot: str, manifest: dict):
+    manifest_slot = str(manifest.get("slot") or slot)
+    return SimpleNamespace(
+        slot=manifest_slot,
+        lane=str(manifest.get("lane") or ""),
+        release_name=str(manifest.get("release") or ""),
+        runtime_profile=str(manifest.get("runtime_profile") or ""),
+        lane_data={
+            "family": manifest.get("family"),
+            "slot_class": manifest.get("slot_class"),
+        },
+        release_data={
+            "wrapper_image": manifest.get("wrapper_image"),
+            "product_image": manifest.get("product_image"),
+            "digest": manifest.get("release_digest") or manifest.get("wrapper_image_digest"),
+        },
+    )
+
+
+def _load_backup_runtime_contract(slot: str, backup_dir: Path):
+    manifest = _backup_manifest_data(backup_dir)
+    desired = _desired_from_manifest(slot, manifest)
+    if not desired.runtime_profile:
+        raise ValueError("backup manifest is missing runtime_profile")
+    return desired, load_profile(desired.runtime_profile)
 
 
 def _print_process_result(prefix: str, proc: subprocess.CompletedProcess[str], limit: int = 2000) -> None:
@@ -956,41 +1133,46 @@ def cmd_apply(args: argparse.Namespace) -> int:
     if not _is_root():
         print("error: run as root/admin: sudo /usr/local/bin/opsctl apply SLOT", file=sys.stderr)
         return 2
+    state_root = _state_root(args)
     try:
-        desired = load_desired_slot(args.slot, _state_root(args))
+        desired = load_desired_slot(args.slot, state_root)
         profile = load_profile(desired.runtime_profile)
         rendered = render_compose(profile, desired)
+        static_failures = [
+            name for ok, name, _ in _run_static_slot_checks(desired, profile, rendered) if not ok
+        ]
+        if static_failures:
+            raise ValueError(f"static contract check failed: {','.join(static_failures)}")
         runtime_dir = _slot_runtime_dir(desired.slot)
         compose_path = _agent_compose_path(runtime_dir)
         manifest_path = _agent_manifest_path(runtime_dir)
+        state_manifest_path = _state_manifest_path(state_root, desired.slot)
         env_path = runtime_dir / ".env"
         required = _required_compose_variables(rendered.text)
         present = _env_file_keys(env_path)
         missing = sorted(required - present)
         if missing:
             raise ValueError(f"missing required .env keys: {','.join(missing)}")
-        if not manifest_path.exists() and not args.allow_first_apply:
+        if not manifest_path.exists() and not state_manifest_path.exists() and not args.allow_first_apply:
             raise ValueError("first agent-runtime apply requires --allow-first-apply")
-        backup_dir = _backup_agent_runtime_state(runtime_dir)
+        previous_manifest = state_manifest_path if state_manifest_path.exists() else manifest_path if manifest_path.exists() else None
+        backup_dir = _backup_agent_runtime_state(desired.slot, runtime_dir, state_root)
         _atomic_write(compose_path, rendered.text, 0o644)
-        applied_at = _now_iso()
-        _write_slot_manifest(
-            manifest_path,
-            desired=desired,
-            profile=profile,
-            rendered=rendered,
-            applied_at=applied_at,
-        )
     except Exception as exc:
         print(f"slot={args.slot}")
         print("apply_status=fail")
         print(f"reason={exc}")
+        try:
+            _append_action_log(state_root, "apply", args.slot, args.slot, "fail", str(exc))
+        except Exception:
+            pass
         return 1
 
     print(f"slot={desired.slot}")
     print(f"runtime_dir={runtime_dir}")
     print(f"compose_file={compose_path}")
     print(f"manifest={manifest_path}")
+    print(f"state_manifest={state_manifest_path}")
     print(f"backup_dir={backup_dir}")
     print(f"runtime_profile={profile.name}")
     print(f"runtime_profile_digest={profile.digest}")
@@ -998,11 +1180,12 @@ def cmd_apply(args: argparse.Namespace) -> int:
 
     config = _run_text_cwd(_docker_compose_command(desired.slot, compose_path, "config"), runtime_dir, timeout=60)
     if config.returncode != 0:
-        ok, reason = _restore_backup(desired.slot, runtime_dir, backup_dir)
+        ok, reason = _restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
         print("apply_status=fail")
         _print_process_result("compose_config_error", config)
         print(f"rollback_status={'ok' if ok else 'fail'}")
         print(f"rollback_reason={reason}")
+        _append_action_log(state_root, "apply", desired.slot, desired.slot, "fail", "compose_config_failed")
         return config.returncode or 1
 
     up = _run_text_cwd(
@@ -1011,30 +1194,56 @@ def cmd_apply(args: argparse.Namespace) -> int:
         timeout=240,
     )
     if up.returncode != 0:
-        ok, reason = _restore_backup(desired.slot, runtime_dir, backup_dir)
+        ok, reason = _restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
         print("apply_status=fail")
         _print_process_result("compose_up_error", up)
         print(f"rollback_status={'ok' if ok else 'fail'}")
         print(f"rollback_reason={reason}")
+        _append_action_log(state_root, "apply", desired.slot, desired.slot, "fail", "compose_up_failed")
         return up.returncode or 1
 
     failed = 0
     for ok, name, detail in _run_live_slot_checks_with_wait(
         desired,
         profile,
-        _state_root(args),
+        state_root,
         timeout_seconds=_profile_startup_timeout_seconds(profile),
     ):
         _check_line(ok, name, detail)
         if not ok:
             failed += 1
     if failed:
-        ok, reason = _restore_backup(desired.slot, runtime_dir, backup_dir)
+        ok, reason = _restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
         print(f"apply_status=fail live_failed={failed}")
         print(f"rollback_status={'ok' if ok else 'fail'}")
         print(f"rollback_reason={reason}")
+        _append_action_log(state_root, "apply", desired.slot, desired.slot, "fail", f"live_failed={failed}")
         return 1
 
+    applied_at = _now_iso()
+    try:
+        _write_slot_manifests(
+            state_root=state_root,
+            runtime_dir=runtime_dir,
+            desired=desired,
+            profile=profile,
+            rendered=rendered,
+            compose_path=compose_path,
+            applied_at=applied_at,
+            previous_manifest=previous_manifest,
+        )
+        _append_action_log(state_root, "apply", desired.slot, desired.release_name, "ok", rendered.sha256)
+    except Exception as exc:
+        ok, reason = _restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
+        print("apply_status=fail")
+        print(f"reason=manifest_write_failed:{exc}")
+        print(f"rollback_status={'ok' if ok else 'fail'}")
+        print(f"rollback_reason={reason}")
+        try:
+            _append_action_log(state_root, "apply", desired.slot, desired.slot, "fail", f"manifest_write_failed:{exc}")
+        except Exception:
+            pass
+        return 1
     print("apply_status=ok")
     return 0
 
@@ -1043,23 +1252,56 @@ def cmd_rollback(args: argparse.Namespace) -> int:
     if not _is_root():
         print("error: run as root/admin: sudo /usr/local/bin/opsctl rollback SLOT", file=sys.stderr)
         return 2
+    state_root = _state_root(args)
     try:
-        desired = load_desired_slot(args.slot, _state_root(args))
-        runtime_dir = _slot_runtime_dir(desired.slot)
+        runtime_dir = _slot_runtime_dir(args.slot)
         backup_dir = _latest_backup(runtime_dir)
         if backup_dir is None:
             raise FileNotFoundError("no agent-runtime backup")
-        ok, reason = _restore_backup(desired.slot, runtime_dir, backup_dir)
+        ok, reason = _restore_backup(args.slot, runtime_dir, backup_dir, state_root)
     except Exception as exc:
         print(f"slot={args.slot}")
         print("rollback_status=fail")
         print(f"reason={exc}")
+        try:
+            _append_action_log(state_root, "rollback", args.slot, args.slot, "fail", str(exc))
+        except Exception:
+            pass
         return 1
-    print(f"slot={desired.slot}")
+    print(f"slot={args.slot}")
     print(f"backup_dir={backup_dir}")
-    print(f"rollback_status={'ok' if ok else 'fail'}")
     print(f"rollback_reason={reason}")
-    return 0 if ok else 1
+    if not ok:
+        print("rollback_status=fail")
+        _append_action_log(state_root, "rollback", args.slot, str(backup_dir), "fail", reason)
+        return 1
+
+    try:
+        desired, profile = _load_backup_runtime_contract(args.slot, backup_dir)
+    except Exception as exc:
+        print("rollback_status=fail")
+        print(f"reason={exc}")
+        _append_action_log(state_root, "rollback", args.slot, str(backup_dir), "fail", str(exc))
+        return 1
+
+    failed = 0
+    for check_ok, name, detail in _run_live_slot_checks_with_wait(
+        desired,
+        profile,
+        state_root,
+        timeout_seconds=_profile_startup_timeout_seconds(profile),
+    ):
+        _check_line(check_ok, name, detail)
+        if not check_ok:
+            failed += 1
+    if failed:
+        print(f"rollback_status=fail live_failed={failed}")
+        _append_action_log(state_root, "rollback", args.slot, str(backup_dir), "fail", f"live_failed={failed}")
+        return 1
+
+    print("rollback_status=ok")
+    _append_action_log(state_root, "rollback", args.slot, str(backup_dir), "ok", reason)
+    return 0
 
 
 def cmd_blocked_mutation(args: argparse.Namespace) -> int:
@@ -1290,16 +1532,18 @@ def _write_managed_fstab_entry(slot: str, share: str, mountpoint: Path, credenti
         os.replace(tmp, fstab)
 
 
-def _append_action_log(state_root: Path, action: str, slot: str, share: str, status: str, detail: str = "") -> None:
+def _append_action_log(state_root: Path, action: str, slot: str, target: str, status: str, detail: str = "") -> None:
     log_path = state_root / "actions.log"
     record = {
         "timestamp": _now_iso(),
         "action": action,
         "slot": slot,
-        "share": share,
+        "target": target,
         "status": status,
-        "detail": detail[:500],
+        "detail": str(detail or "")[:500],
     }
+    if action.startswith("nas_") or (isinstance(target, str) and target.startswith("//")):
+        record["share"] = target
     with log_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
