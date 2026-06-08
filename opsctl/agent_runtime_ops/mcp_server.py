@@ -198,8 +198,11 @@ class McpServer:
                 "description": "Check whether supported provider secret keys exist for a slot without printing values.",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {"slot": {"type": "string"}},
-                    "required": ["slot"],
+                    "properties": {
+                        "slot": {"type": "string"},
+                        "slots": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                    },
+                    "oneOf": [{"required": ["slot"]}, {"required": ["slots"]}],
                     "additionalProperties": False,
                 },
             },
@@ -483,10 +486,13 @@ class McpServer:
         )
 
     def _tool_runtime_secret_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"slot"})
-        slot = self._slot(args.get("slot"))
-        runs = [self._run([self.sudo, self.opsctl, "runtime-secret", "status", slot], timeout=60)]
-        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
+        self._reject_unknown(args, {"slot", "slots"})
+        slots = self._slots(args)
+        runs = [
+            self._run([self.sudo, self.opsctl, "runtime-secret", "status", slot], timeout=60)
+            for slot in slots
+        ]
+        return self._common_response(ok=all(item["returncode"] == 0 for item in runs), mutated=False, runs=runs)
 
     def _tool_runtime_secret_set_from_file(self, args: dict[str, Any]) -> dict[str, Any]:
         self._reject_unknown(args, {"slot", "key", "secret_file", "check", "no_restart"})
@@ -618,6 +624,18 @@ class McpServer:
         if not SLOT_RE.match(slot):
             raise ToolError("slot must look like ocN or dev-name")
         return slot
+
+    def _slots(self, args: dict[str, Any]) -> list[str]:
+        has_slot = args.get("slot") is not None
+        has_slots = args.get("slots") is not None
+        if has_slot == has_slots:
+            raise ToolError("provide exactly one of slot or slots")
+        if has_slot:
+            return [self._slot(args.get("slot"))]
+        raw_slots = args.get("slots")
+        if not isinstance(raw_slots, list) or not raw_slots:
+            raise ToolError("slots must be a non-empty array")
+        return [self._slot(item) for item in raw_slots]
 
     def _share(self, value: Any) -> str:
         share = str(value or "")

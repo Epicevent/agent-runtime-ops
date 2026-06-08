@@ -171,6 +171,33 @@ class McpServerTests(unittest.TestCase):
         )
         self.assertNotIn(secret, str(payload))
 
+    def test_runtime_secret_status_accepts_multiple_slots(self) -> None:
+        runner = FakeRunner(
+            [
+                (0, "slot=dev-oc\ngemini_api_key=present\nruntime_secret_status=ok\n", ""),
+                (0, "slot=dev-hermess\ngemini_api_key=present\nruntime_secret_status=ok\n", ""),
+            ]
+        )
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        payload = call_tool(server, "runtime_secret_status", {"slots": ["dev-oc", "dev-hermess"]})
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["mutated"])
+        self.assertIn("gemini_api_key=present", payload["stdout"])
+        self.assertEqual(
+            runner.calls[0]["argv"],
+            ["sudo", "opsctl", "runtime-secret", "status", "dev-oc"],
+        )
+        self.assertEqual(
+            runner.calls[1]["argv"],
+            ["sudo", "opsctl", "runtime-secret", "status", "dev-hermess"],
+        )
+
+    def test_runtime_secret_status_requires_one_slot_shape(self) -> None:
+        server = McpServer(runner=FakeRunner(), opsctl="opsctl", sudo="sudo")
+        payload = call_tool(server, "runtime_secret_status", {"slot": "dev-oc", "slots": ["dev-hermess"]})
+        self.assertFalse(payload["ok"])
+        self.assertIn("provide exactly one of slot or slots", payload["next_action"])
+
     def test_deploy_update_without_approval_returns_exact_root_command(self) -> None:
         target = "a" * 40
         runner = FakeRunner([(1, "update_status=not_ready\ninstalled_ref=" + "b" * 40 + "\n", "")])
