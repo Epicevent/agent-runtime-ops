@@ -88,6 +88,7 @@ opsctl check oc1
 
 ```text
 opsctl profile list
+opsctl slot list
 opsctl status SLOT
 opsctl plan SLOT
 opsctl check SLOT

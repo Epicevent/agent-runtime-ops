@@ -7,6 +7,7 @@ Use these commands before server-impacting work:
 ```bash
 git status --short --branch
 ssh svcops "/usr/local/bin/opsctl update status"
+ssh svcops "/usr/local/bin/opsctl slot list"
 ssh svcops "/usr/local/bin/opsctl profile list"
 ```
 
@@ -107,6 +108,7 @@ Verify:
 
 ```bash
 ssh svcops "/usr/local/bin/opsctl update status"
+ssh svcops "/usr/local/bin/opsctl slot list"
 ssh svcops "/usr/local/bin/opsctl profile list"
 ```
 

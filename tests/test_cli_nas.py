@@ -17,6 +17,7 @@ from agent_runtime_ops.cli import (
     _slot_names_from_config,
     cmd_nas_credential_status,
     cmd_nas_requests,
+    cmd_slot_list,
 )
 from agent_runtime_ops.nas import parse_smb_share
 
@@ -77,6 +78,20 @@ class CliNasTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("pending_request_count=0", output.getvalue())
         self.assertIn("nas_requests_status=ok", output.getvalue())
+
+    def test_slot_list_reports_slots_and_profiles_from_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                rc = cmd_slot_list(argparse.Namespace(state_root=str(root)))
+        text = output.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn("slot=dev-oc", text)
+        self.assertIn("slot_class=dev", text)
+        self.assertIn("runtime_profile=openclaw-dev", text)
+        self.assertIn("slot_list_status=ok count=2", text)
 
     def test_approve_auto_accepts_slots_yaml_list(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

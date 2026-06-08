@@ -140,6 +140,39 @@ def cmd_profile_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_slot_list(args: argparse.Namespace) -> int:
+    state_root = _state_root(args)
+    try:
+        slots_data = load_yaml(state_root / "slots.yaml").get("slots") or {}
+    except Exception as exc:
+        print("slot_list_status=fail")
+        print(f"reason={exc}")
+        return 1
+
+    count = 0
+    for slot in _slot_names_from_config(slots_data):
+        count += 1
+        try:
+            desired = load_desired_slot(slot, state_root)
+            profile = load_profile(desired.runtime_profile)
+            family = profile.metadata.get("family") or desired.lane_data.get("family") or ""
+            slot_class = desired.lane_data.get("slot_class") or ""
+            mode = profile.metadata.get("mode") or ""
+            print(
+                f"slot={desired.slot} "
+                f"lane={desired.lane} "
+                f"family={family} "
+                f"slot_class={slot_class} "
+                f"runtime_profile={profile.name} "
+                f"release={desired.release_name} "
+                f"mode={mode}"
+            )
+        except Exception as exc:
+            print(f"slot={slot} status=not_ready reason={exc}")
+    print(f"slot_list_status=ok count={count}")
+    return 0
+
+
 def cmd_self_update(args: argparse.Namespace) -> int:
     if not _is_root():
         print("error: run as root/admin: sudo /usr/local/bin/opsctl self-update", file=sys.stderr)
@@ -2550,6 +2583,11 @@ def build_parser() -> argparse.ArgumentParser:
     profile_sub = profile.add_subparsers(dest="profile_command", required=True)
     profile_list = profile_sub.add_parser("list")
     profile_list.set_defaults(func=cmd_profile_list)
+
+    slot = sub.add_parser("slot")
+    slot_sub = slot.add_subparsers(dest="slot_command", required=True)
+    slot_list = slot_sub.add_parser("list")
+    slot_list.set_defaults(func=cmd_slot_list)
 
     for name, func in (("status", cmd_status), ("plan", cmd_plan), ("check", cmd_check)):
         item = sub.add_parser(name)

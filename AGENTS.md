@@ -80,6 +80,7 @@ When work may affect the server, do all of the following before claiming complet
 ```bash
 git status --short --branch
 ssh svcops "/usr/local/bin/opsctl update status"
+ssh svcops "/usr/local/bin/opsctl slot list"
 ssh svcops "/usr/local/bin/opsctl profile list"
 ```
 

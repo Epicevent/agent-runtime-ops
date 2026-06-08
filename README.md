@@ -262,6 +262,7 @@ ops repo commit:
 
 ```text
 opsctl status SLOT
+opsctl slot list
 opsctl plan SLOT
 sudo /usr/local/bin/opsctl apply SLOT
 sudo /usr/local/bin/opsctl apply SLOT --allow-first-apply

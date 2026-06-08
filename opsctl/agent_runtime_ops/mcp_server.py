@@ -159,7 +159,13 @@ class McpServer:
             {
                 "name": "ops_orientation",
                 "title": "Orient Agent Runtime Ops",
-                "description": "Check installed update status, repository root, and runtime profiles.",
+                "description": "Check installed update status, slots, repository root, and runtime profiles.",
+                "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+            {
+                "name": "slot_list",
+                "title": "List Slots",
+                "description": "List current slots with lane, family, slot class, runtime profile, release, and mode.",
                 "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
             },
             {
@@ -322,6 +328,7 @@ class McpServer:
             raise ProtocolError(-32602, "tool arguments must be an object")
         handlers = {
             "ops_orientation": self._tool_ops_orientation,
+            "slot_list": self._tool_slot_list,
             "slot_check": self._tool_slot_check,
             "deploy_update": self._tool_deploy_update,
             "runtime_secret_status": self._tool_runtime_secret_status,
@@ -397,10 +404,16 @@ class McpServer:
         self._reject_unknown(args, set())
         runs = [
             self._run([self.opsctl, "update", "status"]),
+            self._run([self.opsctl, "slot", "list"]),
             self._run([self.opsctl, "profile", "list"]),
         ]
         ok = all(item["returncode"] == 0 for item in runs)
         return self._common_response(ok=ok, mutated=False, runs=runs, extra={"repo_root": str(REPO_ROOT)})
+
+    def _tool_slot_list(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(args, set())
+        runs = [self._run([self.opsctl, "slot", "list"], timeout=60)]
+        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
 
     def _tool_slot_check(self, args: dict[str, Any]) -> dict[str, Any]:
         self._reject_unknown(args, {"slot", "live"})

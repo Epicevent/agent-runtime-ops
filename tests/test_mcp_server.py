@@ -53,6 +53,7 @@ class McpServerTests(unittest.TestCase):
         tools = server.handle_message({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
         names = {item["name"] for item in tools["result"]["tools"]}
         self.assertIn("ops_orientation", names)
+        self.assertIn("slot_list", names)
         self.assertIn("runtime_secret_set_from_file", names)
         self.assertIn("deploy_update", names)
         self.assertIn("nas_remove", names)
@@ -73,6 +74,30 @@ class McpServerTests(unittest.TestCase):
 
         malformed = server.handle_line("{")
         self.assertEqual(malformed["error"]["code"], -32700)
+
+    def test_ops_orientation_includes_slot_list(self) -> None:
+        runner = FakeRunner(
+            [
+                (0, "update_status=current\n", ""),
+                (0, "slot=dev-oc slot_class=dev runtime_profile=openclaw-dev\n", ""),
+                (0, "openclaw-dev sha256:abc\n", ""),
+            ]
+        )
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        payload = call_tool(server, "ops_orientation")
+        self.assertTrue(payload["ok"])
+        self.assertIn("slot=dev-oc", payload["stdout"])
+        self.assertEqual(runner.calls[0]["argv"], ["opsctl", "update", "status"])
+        self.assertEqual(runner.calls[1]["argv"], ["opsctl", "slot", "list"])
+        self.assertEqual(runner.calls[2]["argv"], ["opsctl", "profile", "list"])
+
+    def test_slot_list_uses_argv_list(self) -> None:
+        runner = FakeRunner([(0, "slot=dev-oc slot_class=dev runtime_profile=openclaw-dev\n", "")])
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        payload = call_tool(server, "slot_list")
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["mutated"])
+        self.assertEqual(runner.calls[0]["argv"], ["opsctl", "slot", "list"])
 
     def test_slot_check_uses_argv_lists(self) -> None:
         runner = FakeRunner(
