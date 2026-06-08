@@ -2,18 +2,18 @@
 
 JI TECH AI 에이전트 서비스의 런타임 운영 도구 저장소다.
 
-이 저장소는 실제 서버 운영 상태를 저장하지 않는다. 실제 상태는 서버의
+이 저장소는 실제 고객 상태를 저장하지 않는다. 실제 운영 상태는 서버의
 `/srv/openclaw-ops`에 둔다.
 
-## 설치
+## 한 줄 설치
 
-실행 주체: **관리자/root 권한을 가진 계정**
-
-서버에서 아래 한 줄을 실행한다. `sudo` 비밀번호를 요구할 수 있다.
+실행 주체: **sudo 가능한 관리자 계정**
 
 ```bash
 curl -L https://raw.github.com/Epicevent/agent-runtime-ops/main/go | sudo bash
 ```
+
+같은 명령을 다시 실행하면 `main` 기준 최신 설치본으로 갱신된다.
 
 설치 확인:
 
@@ -22,43 +22,97 @@ sudo bash /opt/agent-runtime-ops/install.sh --check
 sudo -u svcops opsctl profile list
 ```
 
-같은 명령을 다시 실행하면 `main` 기준 최신 설치본으로 갱신된다.
+## 설치 계정과 운영계정
 
-설치 후 역할은 이렇게 나뉜다.
-
-```text
-관리자/root:
-  /opt/agent-runtime-ops 설치
-  /usr/local/bin/opsctl 배치
-  서버 패키지와 권한 정리
-
-svcops:
-  설치된 opsctl 실행
-  /srv/openclaw-ops 운영 상태 조회
-  허용된 운영 명령 실행
-```
-
-새 계정에서 설치해도 그 계정이 운영계정이 되지는 않는다.
+설치한 계정이 운영계정이 되는 구조가 아니다.
 
 ```text
-설치를 실행한 계정:
+설치 실행 계정:
   sudo 가능한 관리자 계정
 
 운영계정:
   기본값 svcops
 ```
 
+관리자는 패키지를 설치하고 권한을 배치한다. 설치 후 일상 운영 명령은
+`svcops`가 실행한다.
+
+## 왜 svcops를 쓰나
+
+`svcops`라는 이름 자체가 중요한 것이 아니라, **root도 고객 계정도 아닌 제한
+운영계정**이 필요하다.
+
+현재 서버에는 이미 `svcops`가 있으므로 기본 운영계정으로 사용한다.
+
+이 계정으로 얻는 것:
+
+```text
+/srv/openclaw-ops를 운영자가 읽을 수 있음
+root shell 없이 상태 조회와 점검을 수행함
+고객 계정과 운영 권한을 분리함
+```
+
+이 계정으로 하지 않는 것:
+
+```text
+제품 소스 수정
+이미지 직접 빌드
+고객 secret 원문 열람
+Docker compose 파일 직접 수정
+root shell 임의 작업
+```
+
 운영계정을 바꾸려면 설치 전에 의도적으로 정해야 한다. 기본 운영 기준은
 `svcops`다.
+
+## 설치 결과
+
+```text
+/opt/agent-runtime-ops
+  설치된 공개 운영 도구
+
+/usr/local/bin/opsctl
+  svcops가 실행할 명령
+
+/srv/openclaw-ops
+  서버 private 운영 상태
+```
+
+권한 기준:
+
+```text
+/opt/agent-runtime-ops   root:svcops
+/usr/local/bin/opsctl    /opt/agent-runtime-ops/.venv/bin/opsctl 링크
+/srv/openclaw-ops        root:svcops
+```
+
+## 현재 서버에서 추가로 필요한 private state
+
+`opsctl profile list`는 설치 직후 확인할 수 있다.
+
+slot 상태까지 보려면 `/srv/openclaw-ops`에 아래 파일이 있어야 한다.
+
+```text
+slots.yaml
+lanes.yaml
+releases.yaml
+nas-policy.yaml
+```
+
+현재 기존 서버에는 `slots.yaml`, `images.yaml`, `nas-policy.yaml`은 있고,
+`lanes.yaml`, `releases.yaml`은 아직 없을 수 있다. 이 경우 설치는 성공해도
+`opsctl status oc1`은 준비되지 않은 상태가 맞다.
 
 ## 저장소 책임
 
 ```text
 Epicevent/openclaw-jitech
-  OpenClaw 제품 소스와 제품 이미지
+  OpenClaw 제품 소스
+  OpenClaw 제품 이미지
 
 Epicevent/hermes-jitech
-  Hermes 제품 소스와 제품 이미지
+  Hermes 제품 소스
+  Hermes 제품 이미지
 
 Epicevent/agent-runtime-ops
   runtime profile
@@ -149,14 +203,6 @@ opsctl nas policy-check SLOT SHARE
 opsctl admin serve
 ```
 
-현재 초기 골격에서는 `status`, `plan`, `check`, `nas policy-check`가
-비쓰기 명령이다. `apply`, `rollback`, `rollout`은 적용 엔진과 감사 로그가
-완성된 뒤 열어야 한다.
-
-## 개발 확인
-
-```bash
-python -m compileall opsctl
-python -m agent_runtime_ops.cli --help
-python -m agent_runtime_ops.cli profile list
-```
+현재 초기 골격에서는 `status`, `plan`, `check`, `nas policy-check`가 비쓰기
+명령이다. `apply`, `rollback`, `rollout`은 적용 엔진과 감사 로그가 완성된
+뒤 열어야 한다.

@@ -3,26 +3,9 @@
 `agent-runtime-ops`는 공개 운영 도구 패키지다. 실제 서버 운영 상태는 이
 저장소가 아니라 `/srv/openclaw-ops`에 둔다.
 
-## 설치 실행 주체
+## 한 줄 설치
 
-실행 주체: **관리자/root 권한을 가진 계정**
-
-설치 명령은 `sudo` 비밀번호를 요구할 수 있다. 설치가 끝난 뒤 실제 운영
-명령은 기존 운영계정 `svcops`가 실행한다.
-
-새 계정에서 설치해도 그 계정이 운영계정이 되지는 않는다.
-
-```text
-설치를 실행한 계정:
-  sudo 가능한 관리자 계정
-
-운영계정:
-  기본값 svcops
-```
-
-## 설치 명령
-
-서버에서 아래 한 줄을 실행한다.
+실행 주체: **sudo 가능한 관리자 계정**
 
 ```bash
 curl -L https://raw.github.com/Epicevent/agent-runtime-ops/main/go | sudo bash
@@ -35,6 +18,45 @@ curl -L https://raw.github.com/Epicevent/agent-runtime-ops/main/go | sudo bash
 ```bash
 sudo bash /opt/agent-runtime-ops/install.sh --check
 sudo -u svcops opsctl profile list
+```
+
+## 설치 계정과 운영계정
+
+새 계정에서 설치해도 그 계정이 운영계정이 되지는 않는다.
+
+```text
+설치 실행 계정:
+  sudo 가능한 관리자 계정
+
+운영계정:
+  기본값 svcops
+```
+
+관리자는 설치한다. `svcops`는 설치된 `opsctl`을 실행한다.
+
+## svcops를 쓰는 이유
+
+현재 서버는 `/srv/openclaw-ops`를 `root:svcops` 기준으로 운영한다.
+
+따라서 `svcops`는 root shell 없이 운영 상태를 읽고 점검할 수 있다. 고객
+계정과 운영 권한도 분리된다.
+
+`svcops`가 하는 일:
+
+```text
+opsctl profile list
+opsctl status SLOT
+opsctl plan SLOT
+opsctl check SLOT
+```
+
+`svcops`가 하지 않는 일:
+
+```text
+제품 소스 수정
+이미지 직접 빌드
+고객 secret 원문 열람
+Docker compose 직접 수정
 ```
 
 ## 설치 후 위치
@@ -70,5 +92,5 @@ releases.yaml
 nas-policy.yaml
 ```
 
-현재 서버에 `lanes.yaml` 또는 `releases.yaml`이 없으면 설치는 성공해도
-slot 상태 조회는 아직 준비되지 않은 상태다.
+기존 서버에 `lanes.yaml` 또는 `releases.yaml`이 없으면 설치는 성공해도 slot
+상태 조회는 아직 준비되지 않은 상태다.
