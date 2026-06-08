@@ -79,10 +79,12 @@ engine is implemented and reviewed.
 
 ## Install Shape
 
-Root installs the tool package. The existing `svcops` operating account runs it.
+An administrator installs the tool package with sudo. The installer may ask for
+the administrator password. After installation, the existing `svcops` operating
+account runs `opsctl`.
 
 ```bash
-sudo bash install.sh
+curl -fsSL https://raw.githubusercontent.com/Epicevent/agent-runtime-ops/main/install.sh | sudo bash
 sudo bash /opt/agent-runtime-ops/install.sh --check
 sudo -u svcops opsctl profile list
 ```

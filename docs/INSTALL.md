@@ -3,12 +3,13 @@
 `agent-runtime-ops` is the public tooling package. It does not contain live
 server state.
 
-Install on a server after cloning a reviewed release. The operating-account
-model stays in place: root installs the package, and `svcops` runs `opsctl`
-against `/srv/openclaw-ops`.
+Install on a server from an administrator account. The command may ask for the
+administrator sudo password. The operating-account model stays in place:
+administrator installs the package, and `svcops` runs `opsctl` against
+`/srv/openclaw-ops`.
 
 ```bash
-sudo bash install.sh
+curl -fsSL https://raw.githubusercontent.com/Epicevent/agent-runtime-ops/main/install.sh | sudo bash
 sudo bash /opt/agent-runtime-ops/install.sh --check
 ```
 
