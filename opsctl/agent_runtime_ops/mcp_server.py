@@ -364,9 +364,11 @@ class McpServer:
         }
         if name not in handlers:
             raise ProtocolError(-32602, f"unknown tool: {name}")
+        is_error = False
         try:
             payload = handlers[name](args)
         except ToolError as exc:
+            is_error = True
             payload = self._common_response(
                 ok=False,
                 mutated=False,
@@ -378,7 +380,7 @@ class McpServer:
         return {
             "content": [{"type": "text", "text": text}],
             "structuredContent": payload,
-            "isError": not bool(payload.get("ok")),
+            "isError": is_error,
         }
 
     def _run(self, argv: list[str], *, input_text: str | None = None, timeout: int = 60) -> dict[str, Any]:

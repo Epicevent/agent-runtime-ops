@@ -20,7 +20,7 @@ class FakeRunner:
         return CommandResult(argv=argv, returncode=0, stdout="", stderr="")
 
 
-def call_tool(server: McpServer, name: str, arguments: dict[str, object] | None = None) -> dict[str, object]:
+def call_tool_result(server: McpServer, name: str, arguments: dict[str, object] | None = None) -> dict[str, object]:
     response = server.handle_message(
         {
             "jsonrpc": "2.0",
@@ -30,7 +30,11 @@ def call_tool(server: McpServer, name: str, arguments: dict[str, object] | None 
         }
     )
     assert response is not None
-    return response["result"]["structuredContent"]
+    return response["result"]
+
+
+def call_tool(server: McpServer, name: str, arguments: dict[str, object] | None = None) -> dict[str, object]:
+    return call_tool_result(server, name, arguments)["structuredContent"]
 
 
 class McpServerTests(unittest.TestCase):
@@ -129,15 +133,34 @@ class McpServerTests(unittest.TestCase):
         self.assertEqual(runner.calls[3]["argv"], ["sudo", "opsctl", "check", "--live", "oc1"])
         self.assertTrue(all(isinstance(call["argv"], list) for call in runner.calls))
 
+    def test_slot_check_failure_is_structured_result_not_mcp_error(self) -> None:
+        runner = FakeRunner(
+            [
+                (0, "status=ok\n", ""),
+                (0, '{"mutates": false}\n', ""),
+                (0, "PASS contract\n", ""),
+                (1, "FAIL live_container_nas_root_propagation\ncheck_status=fail failed=1\n", ""),
+            ]
+        )
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        result = call_tool_result(server, "slot_check", {"slot": "oc1", "live": True})
+        payload = result["structuredContent"]
+        self.assertFalse(payload["ok"])
+        self.assertFalse(result["isError"])
+        self.assertEqual(payload["returncode"], 1)
+        self.assertIn("check_status=fail", payload["stdout"])
+
     def test_secret_raw_argument_is_rejected_and_redacted(self) -> None:
         secret = "AIza" + "A" * 32
         server = McpServer(runner=FakeRunner(), opsctl="opsctl", sudo="sudo")
-        payload = call_tool(
+        result = call_tool_result(
             server,
             "runtime_secret_set_from_file",
             {"slot": "dev-oc", "key": "GEMINI_API_KEY", "value": secret},
         )
+        payload = result["structuredContent"]
         self.assertFalse(payload["ok"])
+        self.assertTrue(result["isError"])
         self.assertNotIn(secret, str(payload))
         self.assertIn("raw secret argument rejected", payload["next_action"])
 
