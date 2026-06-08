@@ -354,13 +354,14 @@ install_gemini_settings() {
   if [[ ! -d "$GEMINI_HOME" ]]; then
     install -d -o "$OPS_USER" -g "$OPS_GROUP" -m 0700 "$GEMINI_HOME"
   fi
-  python3 - "$settings" "$MCP_BIN_LINK" <<'PY'
+  python3 - "$settings" "$MCP_BIN_LINK" "$CURRENT_LINK" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 path = Path(sys.argv[1])
 mcp_bin = sys.argv[2]
+repo_dir = sys.argv[3]
 if path.exists():
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -381,6 +382,16 @@ for item in ["AGENTS.md", "GEMINI.md", *current]:
     if isinstance(item, str) and item not in ordered:
         ordered.append(item)
 context["fileName"] = ordered
+include_directories = context.get("includeDirectories", [])
+if isinstance(include_directories, str):
+    include_directories = [include_directories]
+elif not isinstance(include_directories, list):
+    include_directories = []
+included = []
+for item in [repo_dir, *include_directories]:
+    if isinstance(item, str) and item not in included:
+        included.append(item)
+context["includeDirectories"] = included
 
 mcp_servers = data.setdefault("mcpServers", {})
 if not isinstance(mcp_servers, dict):

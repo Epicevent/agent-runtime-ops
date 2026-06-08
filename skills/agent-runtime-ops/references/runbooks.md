@@ -41,7 +41,7 @@ This repo currently installs:
 /home/svcops/.codex/skills/agent-runtime-ops
 /usr/local/bin/agent-runtime-ops-mcp
 Codex MCP registration: agent-runtime-ops
-Gemini MCP settings: ~/.gemini/settings.json
+Gemini MCP settings and repo include directory: ~/.gemini/settings.json
 ```
 
 The `/home/svcops/.codex/AGENTS.md` link is intentionally global for every Codex session that runs
