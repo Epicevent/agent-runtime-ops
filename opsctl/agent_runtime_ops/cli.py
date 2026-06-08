@@ -905,7 +905,11 @@ def _restore_backup(slot: str, runtime_dir: Path, backup_dir: Path) -> tuple[boo
     config = _run_text_cwd(_docker_compose_command(slot, compose_path, "config"), runtime_dir, timeout=60)
     if config.returncode != 0:
         return False, (config.stderr or config.stdout).strip() or "rollback_compose_config_failed"
-    up = _run_text_cwd(_docker_compose_command(slot, compose_path, "up", "-d"), runtime_dir, timeout=180)
+    up = _run_text_cwd(
+        _docker_compose_command(slot, compose_path, "up", "-d", "--remove-orphans"),
+        runtime_dir,
+        timeout=180,
+    )
     if up.returncode != 0:
         return False, (up.stderr or up.stdout).strip() or "rollback_compose_up_failed"
     return True, "rollback_applied"
@@ -992,7 +996,11 @@ def cmd_apply(args: argparse.Namespace) -> int:
         print(f"rollback_reason={reason}")
         return config.returncode or 1
 
-    up = _run_text_cwd(_docker_compose_command(desired.slot, compose_path, "up", "-d"), runtime_dir, timeout=240)
+    up = _run_text_cwd(
+        _docker_compose_command(desired.slot, compose_path, "up", "-d", "--remove-orphans"),
+        runtime_dir,
+        timeout=240,
+    )
     if up.returncode != 0:
         ok, reason = _restore_backup(desired.slot, runtime_dir, backup_dir)
         print("apply_status=fail")

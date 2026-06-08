@@ -48,25 +48,3 @@ services:
         bind:
           propagation: rslave
     working_dir: /home/node/.openclaw/workspace
-
-  openclaw-cli:
-    image: "{{ image_ref }}"
-    init: true
-    entrypoint: ["node", "dist/index.js"]
-    env_file:
-      - .env
-    network_mode: "service:openclaw-gateway"
-    user: "{{ runtime_uid }}:{{ runtime_gid }}"
-    group_add:
-      - "{{ data_gid }}"
-    volumes:
-      - "{{ target_home }}/.openclaw:/home/node/.openclaw"
-      - "{{ target_home }}/.openclaw/workspace:/home/node/.openclaw/workspace"
-      - "{{ target_home }}/.openclaw-auth-profile-secrets:/home/node/.config/openclaw"
-      - type: bind
-        source: "{{ target_home }}/nas_docs"
-        target: /home/node/nas_docs
-        read_only: true
-        bind:
-          propagation: rslave
-    working_dir: /home/node/.openclaw/workspace
