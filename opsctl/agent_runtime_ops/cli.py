@@ -318,18 +318,75 @@ def _parse_findmnt_pairs(output: str) -> list[dict[str, str]]:
     return rows
 
 
+def _decode_mountinfo_field(value: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        return chr(int(match.group(0)[1:], 8))
+
+    return re.sub(r"\\[0-7]{3}", replace, value)
+
+
+def _mountinfo_propagation(optional_fields: list[str]) -> str:
+    has_shared = any(field.startswith("shared:") for field in optional_fields)
+    has_master = any(field.startswith("master:") for field in optional_fields)
+    if has_shared:
+        return "shared"
+    if has_master:
+        return "slave"
+    if "unbindable" in optional_fields:
+        return "unbindable"
+    return "private"
+
+
+def _mountinfo_under(container_pid: int, path: str) -> tuple[int, str, list[dict[str, str]]]:
+    mountinfo_path = Path("/proc") / str(container_pid) / "mountinfo"
+    root = path.rstrip("/") or "/"
+    try:
+        lines = mountinfo_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        return 1, str(exc), []
+
+    rows: list[dict[str, str]] = []
+    for line in lines:
+        fields = line.split()
+        try:
+            separator = fields.index("-")
+        except ValueError:
+            continue
+        if len(fields) <= separator + 3 or separator < 6:
+            continue
+        target = _decode_mountinfo_field(fields[4])
+        if target != root and not target.startswith(root + "/"):
+            continue
+        mount_options = fields[5]
+        optional = fields[6:separator]
+        fstype = fields[separator + 1]
+        source = _decode_mountinfo_field(fields[separator + 2])
+        super_options = fields[separator + 3]
+        options = ",".join(part for part in (mount_options, super_options) if part)
+        rows.append(
+            {
+                "target": target,
+                "source": source,
+                "fstype": fstype,
+                "options": options,
+                "propagation": _mountinfo_propagation(optional),
+            }
+        )
+    return 0, "", rows
+
+
 def _findmnt_tree(path: str, container_pid: int | None = None) -> tuple[int, str, list[dict[str, str]]]:
-    command = ["findmnt", "-R", "-P", "-o", "TARGET,SOURCE,FSTYPE,OPTIONS,PROPAGATION", path]
     if container_pid is not None:
-        command = ["nsenter", "--target", str(container_pid), "--mount", "--", *command]
+        return _mountinfo_under(container_pid, path)
+    command = ["findmnt", "-R", "-P", "-o", "TARGET,SOURCE,FSTYPE,OPTIONS,PROPAGATION", path]
     proc = _run_text(command)
     return proc.returncode, (proc.stderr or proc.stdout).strip(), _parse_findmnt_pairs(proc.stdout)
 
 
 def _findmnt_under(path: str, container_pid: int | None = None) -> tuple[int, str, list[dict[str, str]]]:
-    command = ["findmnt", "-P", "-o", "TARGET,SOURCE,FSTYPE,OPTIONS,PROPAGATION"]
     if container_pid is not None:
-        command = ["nsenter", "--target", str(container_pid), "--mount", "--", *command]
+        return _mountinfo_under(container_pid, path)
+    command = ["findmnt", "-P", "-o", "TARGET,SOURCE,FSTYPE,OPTIONS,PROPAGATION"]
     proc = _run_text(command)
     rows = [
         row
