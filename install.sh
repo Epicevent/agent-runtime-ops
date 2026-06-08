@@ -215,7 +215,7 @@ check_install() {
   info "install_dir=present"
   info "state_root=present"
   info "manifest=present"
-  runuser -u "$OPS_USER" -- "$BIN_LINK" profile list
+  runuser -u "$OPS_USER" -- bash -lc "cd / && exec '$BIN_LINK' profile list"
 
   local missing=0
   for name in slots.yaml lanes.yaml releases.yaml nas-policy.yaml; do

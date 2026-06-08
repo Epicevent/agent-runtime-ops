@@ -8,12 +8,26 @@ def _find_repo_root() -> Path:
     env_root = os.environ.get("AGENT_RUNTIME_OPS_ROOT")
     if env_root:
         return Path(env_root).resolve()
-    for start in (Path.cwd(), Path(__file__).resolve()):
-        current = start if start.is_dir() else start.parent
+
+    starts = [Path(__file__).resolve()]
+    try:
+        starts.append(Path.cwd())
+    except OSError:
+        pass
+
+    for start in starts:
+        try:
+            current = start if start.is_dir() else start.parent
+        except OSError:
+            current = start.parent
         for candidate in (current, *current.parents):
-            if (candidate / "profiles" / "runtime").is_dir():
+            try:
+                has_profiles = (candidate / "profiles" / "runtime").is_dir()
+            except OSError:
+                has_profiles = False
+            if has_profiles:
                 return candidate
-    return Path.cwd()
+    return Path(__file__).resolve().parent
 
 
 REPO_ROOT = _find_repo_root()
