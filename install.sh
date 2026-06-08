@@ -127,10 +127,24 @@ copy_tree() {
     --exclude '__pycache__' \
     --exclude '*.pyc' \
     "$src"/ "$dst"/
-  chown -R root:"$OPS_GROUP" "$dst"
-  find "$dst" -type d -exec chmod 0755 {} +
-  find "$dst" -type f -exec chmod 0644 {} +
+  chown root:"$OPS_GROUP" "$dst"
+  find "$dst" -path "$dst/.venv" -prune -o -type d -exec chown root:"$OPS_GROUP" {} + -exec chmod 0755 {} +
+  find "$dst" -path "$dst/.venv" -prune -o -type f -exec chown root:"$OPS_GROUP" {} + -exec chmod 0644 {} +
   chmod 0755 "$dst/install.sh"
+}
+
+reset_venv() {
+  local venv resolved_install resolved_venv
+  venv="$INSTALL_DIR/.venv"
+  [[ -e "$venv" ]] || return 0
+
+  resolved_install="$(realpath -m "$INSTALL_DIR")"
+  resolved_venv="$(realpath -m "$venv")"
+  [[ -n "$resolved_install" && "$resolved_install" != "/" ]] || die "unsafe install dir: $INSTALL_DIR"
+  [[ "$resolved_venv" == "$resolved_install/.venv" ]] || die "unsafe venv path: $venv"
+
+  rm -rf "$resolved_venv"
+  info "venv=recreated"
 }
 
 install_package() {
@@ -150,6 +164,7 @@ install_package() {
     copy_tree "$src" "$INSTALL_DIR"
   fi
 
+  reset_venv
   python3 -m venv "$INSTALL_DIR/.venv"
   "$INSTALL_DIR/.venv/bin/pip" install --upgrade pip >/dev/null
   "$INSTALL_DIR/.venv/bin/pip" install "$INSTALL_DIR" >/dev/null
