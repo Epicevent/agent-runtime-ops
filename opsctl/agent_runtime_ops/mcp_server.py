@@ -86,6 +86,16 @@ def _parse_key_values(text: str) -> dict[str, str]:
     return data
 
 
+def _parse_key_value_tokens(text: str) -> dict[str, str]:
+    data: dict[str, str] = {}
+    for token in shlex.split(text):
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        data[key.strip()] = value.strip()
+    return data
+
+
 def _default_secret_roots() -> list[Path]:
     raw = os.environ.get(
         "AGENT_RUNTIME_OPS_SECRET_ROOTS",
@@ -201,8 +211,10 @@ class McpServer:
                     "properties": {
                         "slot": {"type": "string"},
                         "slots": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                        "slot_class": {"type": "string", "enum": ["customer", "dev"]},
+                        "family": {"type": "string", "enum": ["hermes", "openclaw"]},
                     },
-                    "oneOf": [{"required": ["slot"]}, {"required": ["slots"]}],
+                    "oneOf": [{"required": ["slot"]}, {"required": ["slots"]}, {"required": ["slot_class"]}],
                     "additionalProperties": False,
                 },
             },
@@ -486,12 +498,12 @@ class McpServer:
         )
 
     def _tool_runtime_secret_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"slot", "slots"})
-        slots = self._slots(args)
-        runs = [
+        self._reject_unknown(args, {"slot", "slots", "slot_class", "family"})
+        slots, runs = self._resolve_slots(args)
+        runs.extend(
             self._run([self.sudo, self.opsctl, "runtime-secret", "status", slot], timeout=60)
             for slot in slots
-        ]
+        )
         return self._common_response(ok=all(item["returncode"] == 0 for item in runs), mutated=False, runs=runs)
 
     def _tool_runtime_secret_set_from_file(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -628,14 +640,45 @@ class McpServer:
     def _slots(self, args: dict[str, Any]) -> list[str]:
         has_slot = args.get("slot") is not None
         has_slots = args.get("slots") is not None
-        if has_slot == has_slots:
-            raise ToolError("provide exactly one of slot or slots")
+        has_slot_class = args.get("slot_class") is not None
+        if sum([has_slot, has_slots, has_slot_class]) != 1:
+            raise ToolError("provide exactly one of slot, slots, or slot_class")
         if has_slot:
             return [self._slot(args.get("slot"))]
+        if has_slot_class:
+            raise ToolError("slot_class requires current slot resolution")
         raw_slots = args.get("slots")
         if not isinstance(raw_slots, list) or not raw_slots:
             raise ToolError("slots must be a non-empty array")
         return [self._slot(item) for item in raw_slots]
+
+    def _resolve_slots(self, args: dict[str, Any]) -> tuple[list[str], list[dict[str, Any]]]:
+        if args.get("slot_class") is None:
+            return self._slots(args), []
+        slot_class = str(args.get("slot_class") or "")
+        if slot_class not in {"customer", "dev"}:
+            raise ToolError("slot_class must be customer or dev")
+        family = args.get("family")
+        if family is not None:
+            family = str(family)
+            if family not in {"hermes", "openclaw"}:
+                raise ToolError("family must be hermes or openclaw")
+        slot_list = self._run([self.opsctl, "slot", "list"], timeout=60)
+        if slot_list["returncode"] != 0:
+            return [], [slot_list]
+        slots: list[str] = []
+        for raw_line in slot_list["stdout"].splitlines():
+            row = _parse_key_value_tokens(raw_line)
+            if row.get("slot_class") != slot_class:
+                continue
+            if family and row.get("family") != family:
+                continue
+            slot = row.get("slot")
+            if slot:
+                slots.append(self._slot(slot))
+        if not slots:
+            raise ToolError("no slots matched slot_class/family")
+        return slots, [slot_list]
 
     def _share(self, value: Any) -> str:
         share = str(value or "")
