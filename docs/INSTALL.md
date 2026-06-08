@@ -98,9 +98,11 @@ sudo /usr/local/bin/opsctl runtime-secret set SLOT --key GEMINI_API_KEY --value-
 sudo /usr/local/bin/opsctl runtime-secret status SLOT
 opsctl nas request //HOST/SHARE
 opsctl nas credential set //HOST/SHARE --username NAS_USER --password-stdin
+sudo /usr/local/bin/opsctl nas credential status SLOT //HOST/SHARE
 sudo /usr/local/bin/opsctl nas approve-auto
 sudo /usr/local/bin/opsctl nas mount SLOT //HOST/SHARE
 sudo /usr/local/bin/opsctl nas unmount SLOT //HOST/SHARE
+sudo /usr/local/bin/opsctl nas remove SLOT //HOST/SHARE
 ```
 
 `svcops`가 하지 않는 일:

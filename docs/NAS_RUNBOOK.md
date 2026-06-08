@@ -232,6 +232,28 @@ PASS live_container_child_cifs_count count=0
 PASS live_no_host_child_cifs_mounted
 ```
 
+## NAS remove
+
+`nas unmount` is temporary. It keeps official root/customer credentials and the managed fstab
+entry, so the same share can be mounted again without re-entering the password.
+
+Use `nas remove` for permanent removal or authorization withdrawal:
+
+```bash
+sudo /usr/local/bin/opsctl nas credential status oc3 '//192.168.0.222/한패스'
+sudo /usr/local/bin/opsctl nas remove oc3 '//192.168.0.222/한패스' --delete-empty-dir
+sudo /usr/local/bin/opsctl nas credential status oc3 '//192.168.0.222/한패스'
+```
+
+`nas remove` deletes only official root/customer credentials:
+
+```text
+/root/agent-runtime-ops/nas-credentials/SLOT/...
+/home/SLOT/.agent-runtime-nas/credentials/...
+```
+
+Legacy `.openclaw-nas` credentials are not official credential state and are not removed.
+
 ## Busy mount 처리
 
 기본 unmount는 normal `umount`만 쓴다. Busy 상태를 숨기지 않기 위해 lazy unmount는 기본으로

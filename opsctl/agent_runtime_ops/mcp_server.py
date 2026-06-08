@@ -263,7 +263,7 @@ class McpServer:
             {
                 "name": "nas_unmount",
                 "title": "Unmount NAS Share",
-                "description": "Unmount a managed NAS child CIFS share for a slot.",
+                "description": "Temporarily unmount a managed NAS child CIFS share while keeping official credentials.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -272,6 +272,33 @@ class McpServer:
                         "lazy": {"type": "boolean", "default": False},
                         "delete_empty_dir": {"type": "boolean", "default": False},
                     },
+                    "required": ["slot", "share"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "nas_remove",
+                "title": "Remove NAS Share",
+                "description": "Unmount a NAS share and remove official credentials plus the managed fstab entry.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "slot": {"type": "string"},
+                        "share": {"type": "string"},
+                        "lazy": {"type": "boolean", "default": False},
+                        "delete_empty_dir": {"type": "boolean", "default": False},
+                    },
+                    "required": ["slot", "share"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "nas_credential_status",
+                "title": "NAS Credential Status",
+                "description": "Report official root/customer credential presence for a NAS share without printing secrets.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"slot": {"type": "string"}, "share": {"type": "string"}},
                     "required": ["slot", "share"],
                     "additionalProperties": False,
                 },
@@ -304,6 +331,8 @@ class McpServer:
             "nas_status": self._tool_nas_status,
             "nas_mount": self._tool_nas_mount,
             "nas_unmount": self._tool_nas_unmount,
+            "nas_remove": self._tool_nas_remove,
+            "nas_credential_status": self._tool_nas_credential_status,
             "nas_approve_auto_once": self._tool_nas_approve_auto_once,
         }
         if name not in handlers:
@@ -525,6 +554,31 @@ class McpServer:
         ]
         ok = all(item["returncode"] == 0 for item in runs)
         return self._common_response(ok=ok, mutated=True, runs=runs)
+
+    def _tool_nas_remove(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(args, {"slot", "share", "lazy", "delete_empty_dir"})
+        slot = self._slot(args.get("slot"))
+        share = self._share(args.get("share"))
+        argv = [self.sudo, self.opsctl, "nas", "remove", slot, share]
+        if bool(args.get("lazy", False)):
+            argv.append("--lazy")
+        if bool(args.get("delete_empty_dir", False)):
+            argv.append("--delete-empty-dir")
+        runs = [
+            self._run([self.sudo, self.opsctl, "nas", "credential", "status", slot, share], timeout=60),
+            self._run(argv, timeout=180),
+            self._run([self.sudo, self.opsctl, "nas", "credential", "status", slot, share], timeout=60),
+            self._run([self.opsctl, "nas", "mounted", slot], timeout=60),
+        ]
+        ok = all(item["returncode"] == 0 for item in runs)
+        return self._common_response(ok=ok, mutated=True, runs=runs)
+
+    def _tool_nas_credential_status(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(args, {"slot", "share"})
+        slot = self._slot(args.get("slot"))
+        share = self._share(args.get("share"))
+        runs = [self._run([self.sudo, self.opsctl, "nas", "credential", "status", slot, share], timeout=60)]
+        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
 
     def _tool_nas_approve_auto_once(self, args: dict[str, Any]) -> dict[str, Any]:
         self._reject_unknown(args, set())

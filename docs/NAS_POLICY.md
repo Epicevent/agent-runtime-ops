@@ -68,7 +68,9 @@ credential이 아직 없으면 request는 pending으로 남는다. grant가 맞�
 opsctl nas requests
 opsctl nas policy-check oc3 //192.168.0.222/hanpass
 opsctl nas mounted oc3
+sudo /usr/local/bin/opsctl nas credential status oc3 //192.168.0.222/hanpass
 sudo /usr/local/bin/opsctl nas unmount oc3 //192.168.0.222/hanpass --delete-empty-dir
+sudo /usr/local/bin/opsctl nas remove oc3 //192.168.0.222/hanpass
 ```
 
 `nas unmount`도 `//HOST/SHARE`를 입력으로 받는다. mountpoint 이름만으로 해제하지

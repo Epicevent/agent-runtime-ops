@@ -281,11 +281,13 @@ sudo /usr/local/bin/opsctl nas approve-auto
 sudo /usr/local/bin/opsctl nas approve-auto --watch --interval 15
 opsctl nas request //HOST/SHARE
 opsctl nas credential set //HOST/SHARE --username NAS_USER --password-stdin
+sudo /usr/local/bin/opsctl nas credential status SLOT //HOST/SHARE
 opsctl nas mounted SLOT
 opsctl nas policy-check SLOT //HOST/SHARE
 sudo /usr/local/bin/opsctl nas mount SLOT //HOST/SHARE
 printf '%s' "$NAS_PASSWORD" | sudo /usr/local/bin/opsctl nas mount SLOT //HOST/SHARE --username NAS_USER --password-stdin
 sudo /usr/local/bin/opsctl nas unmount SLOT //HOST/SHARE
+sudo /usr/local/bin/opsctl nas remove SLOT //HOST/SHARE
 
 opsctl admin serve
 ```

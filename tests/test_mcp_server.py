@@ -55,6 +55,8 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("ops_orientation", names)
         self.assertIn("runtime_secret_set_from_file", names)
         self.assertIn("deploy_update", names)
+        self.assertIn("nas_remove", names)
+        self.assertIn("nas_credential_status", names)
 
     def test_unknown_tool_and_malformed_json(self) -> None:
         server = McpServer(runner=FakeRunner(), opsctl="opsctl", sudo="sudo")
@@ -148,6 +150,44 @@ class McpServerTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertFalse(payload["mutated"])
         self.assertEqual(payload["next_action"], f"sudo opsctl update approve {target}")
+
+    def test_nas_credential_status_uses_sudo_and_is_non_mutating(self) -> None:
+        runner = FakeRunner([(0, "official_credential_present=yes\nsecret_value_printed=no\n", "")])
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        payload = call_tool(
+            server,
+            "nas_credential_status",
+            {"slot": "oc3", "share": "//192.168.0.222/hanpass"},
+        )
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["mutated"])
+        self.assertEqual(
+            runner.calls[0]["argv"],
+            ["sudo", "opsctl", "nas", "credential", "status", "oc3", "//192.168.0.222/hanpass"],
+        )
+
+    def test_nas_remove_uses_argv_lists_and_reports_mutation(self) -> None:
+        runner = FakeRunner(
+            [
+                (0, "official_credential_present=yes\n", ""),
+                (0, "remove_status=ok\nofficial_credential_present=no\n", ""),
+                (0, "official_credential_present=no\n", ""),
+                (0, "mounted_child_cifs_count=0\n", ""),
+            ]
+        )
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        payload = call_tool(
+            server,
+            "nas_remove",
+            {"slot": "oc3", "share": "//192.168.0.222/hanpass", "delete_empty_dir": True},
+        )
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["mutated"])
+        self.assertEqual(
+            runner.calls[1]["argv"],
+            ["sudo", "opsctl", "nas", "remove", "oc3", "//192.168.0.222/hanpass", "--delete-empty-dir"],
+        )
+        self.assertTrue(all(isinstance(call["argv"], list) for call in runner.calls))
 
 
 if __name__ == "__main__":

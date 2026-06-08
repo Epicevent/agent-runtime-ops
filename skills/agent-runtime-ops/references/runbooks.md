@@ -244,6 +244,7 @@ Read-only status:
 ssh svcops "/usr/local/bin/opsctl nas requests"
 ssh svcops "/usr/local/bin/opsctl nas mounted SLOT"
 ssh svcops "/usr/local/bin/opsctl nas policy-check SLOT //HOST/SHARE"
+ssh svcops "sudo /usr/local/bin/opsctl nas credential status SLOT //HOST/SHARE"
 ```
 
 Mount an already-credentialed and policy-allowed share:
@@ -255,11 +256,24 @@ ssh svcops "/usr/local/bin/opsctl nas mounted SLOT"
 ssh svcops "sudo /usr/local/bin/opsctl check --live SLOT"
 ```
 
-Unmount:
+Temporary unmount. This keeps official root/customer credentials and the managed fstab entry, so
+the share can be mounted again without re-entering the password:
 
 ```bash
 ssh svcops "/usr/local/bin/opsctl nas mounted SLOT"
 ssh svcops "sudo /usr/local/bin/opsctl nas unmount SLOT //HOST/SHARE"
+ssh svcops "/usr/local/bin/opsctl nas mounted SLOT"
+ssh svcops "sudo /usr/local/bin/opsctl check --live SLOT"
+```
+
+Permanent removal. Use this for authorization withdrawal or share removal. It unmounts the share,
+removes the managed fstab entry, and deletes only official root/customer credentials. Legacy
+`.openclaw-nas` credentials are not counted as official credentials and are not removed:
+
+```bash
+ssh svcops "sudo /usr/local/bin/opsctl nas credential status SLOT //HOST/SHARE"
+ssh svcops "sudo /usr/local/bin/opsctl nas remove SLOT //HOST/SHARE"
+ssh svcops "sudo /usr/local/bin/opsctl nas credential status SLOT //HOST/SHARE"
 ssh svcops "/usr/local/bin/opsctl nas mounted SLOT"
 ssh svcops "sudo /usr/local/bin/opsctl check --live SLOT"
 ```
