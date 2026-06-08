@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -13,9 +14,11 @@ from .paths import DEFAULT_STATE_ROOT
 from .profiles import list_profile_names, load_profile
 from .renderer import render_compose
 from .state import load_desired_slot
+from .yamlio import load_yaml
 
 DEFAULT_REPO_URL = "https://github.com/Epicevent/agent-runtime-ops.git"
-DEFAULT_REPO_REF = "main"
+UPDATE_POLICY_NAME = "ops-update.yaml"
+FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _state_root(args: argparse.Namespace) -> Path:
@@ -27,6 +30,24 @@ def _is_root() -> bool:
     if geteuid is None:
         return False
     return geteuid() == 0
+
+
+def _approved_update_from_policy(state_root: Path) -> tuple[str, str]:
+    policy_path = state_root / UPDATE_POLICY_NAME
+    data = load_yaml(policy_path)
+    item = (data.get("updates") or {}).get("agent-runtime-ops")
+    if not isinstance(item, dict):
+        raise ValueError(f"missing updates.agent-runtime-ops in {policy_path}")
+    repo_url = item.get("repo_url", DEFAULT_REPO_URL)
+    ref = item.get("approved_ref")
+    return str(repo_url), str(ref or "")
+
+
+def _validate_update_target(repo_url: str, ref: str) -> None:
+    if repo_url != DEFAULT_REPO_URL:
+        raise ValueError(f"unapproved update repository: {repo_url}")
+    if not FULL_SHA_RE.match(ref):
+        raise ValueError("self-update requires an approved full 40-character commit sha")
 
 
 def cmd_profile_list(args: argparse.Namespace) -> int:
@@ -47,13 +68,36 @@ def cmd_self_update(args: argparse.Namespace) -> int:
         print("error: missing command: bash", file=sys.stderr)
         return 2
 
+    try:
+        if args.ref:
+            repo_url = DEFAULT_REPO_URL
+            ref = args.ref
+            policy_source = "cli_ref"
+        else:
+            repo_url, ref = _approved_update_from_policy(_state_root(args))
+            policy_source = str(_state_root(args) / UPDATE_POLICY_NAME)
+        _validate_update_target(repo_url, ref)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        print(f"hint: approve a full commit in {_state_root(args) / UPDATE_POLICY_NAME}", file=sys.stderr)
+        return 2
+
     with tempfile.TemporaryDirectory(prefix="agent-runtime-ops-update.") as tmp:
         repo = Path(tmp) / "agent-runtime-ops"
-        print(f"update_repo={args.repo_url}")
-        print(f"update_ref={args.ref}")
+        print(f"update_repo={repo_url}")
+        print(f"approved_ref={ref}")
+        print(f"policy_source={policy_source}")
         try:
-            subprocess.run(["git", "clone", args.repo_url, str(repo)], check=True)
-            subprocess.run(["git", "-C", str(repo), "checkout", args.ref], check=True)
+            subprocess.run(["git", "clone", "--no-checkout", repo_url, str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "fetch", "--depth", "1", "origin", ref], check=True)
+            subprocess.run(["git", "-C", str(repo), "checkout", "--detach", ref], check=True)
+            resolved = subprocess.check_output(
+                ["git", "-C", str(repo), "rev-parse", "HEAD"],
+                text=True,
+            ).strip()
+            if resolved != ref:
+                print(f"error: checkout mismatch: expected {ref}, got {resolved}", file=sys.stderr)
+                return 1
             subprocess.run(["bash", str(repo / "install.sh"), "install"], check=True)
         except subprocess.CalledProcessError as exc:
             return exc.returncode or 1
@@ -169,8 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     self_update = sub.add_parser("self-update")
-    self_update.add_argument("--repo-url", default=DEFAULT_REPO_URL)
-    self_update.add_argument("--ref", default=DEFAULT_REPO_REF)
+    self_update.add_argument("--ref", help="approved full 40-character commit sha")
     self_update.set_defaults(func=cmd_self_update)
 
     profile = sub.add_parser("profile")

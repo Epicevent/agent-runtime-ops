@@ -8,20 +8,38 @@
 실행 주체: **sudo 가능한 관리자 계정**
 
 ```bash
-sudo -v && curl -fsSL https://raw.githubusercontent.com/Epicevent/agent-runtime-ops/main/go | sudo bash
+OPS_REF="FULL_40_CHARACTER_COMMIT_SHA"
+sudo -v
+curl -fsSL "https://raw.githubusercontent.com/Epicevent/agent-runtime-ops/$OPS_REF/go" \
+  | sudo bash -s -- "$OPS_REF"
 ```
 
-이 명령은 서버에 `opsctl`이 아직 없을 때 쓰는 bootstrap이다.
+이 명령은 서버에 `opsctl`이 아직 없을 때 쓰는 bootstrap이다. `OPS_REF`에는
+검토한 commit 전체 SHA를 넣는다. branch 이름은 허용하지 않는다.
 
 ## 이후 갱신
 
-첫 설치가 끝난 뒤에는 아래 명령만 사용한다.
+첫 설치가 끝난 뒤 갱신 실행은 아래 명령으로 한다.
 
 ```bash
 sudo opsctl self-update
 ```
 
-기본값은 `Epicevent/agent-runtime-ops`의 `main`이다.
+이 명령은 `main` 같은 움직이는 branch를 설치하지 않는다. 서버 private 상태의
+`/srv/openclaw-ops/ops-update.yaml`에 승인된 full commit만 설치한다.
+
+```yaml
+updates:
+  agent-runtime-ops:
+    repo_url: "https://github.com/Epicevent/agent-runtime-ops.git"
+    approved_ref: "FULL_40_CHARACTER_COMMIT_SHA"
+```
+
+긴급히 commit을 직접 지정할 때도 branch 이름은 허용하지 않는다.
+
+```bash
+sudo opsctl self-update --ref FULL_40_CHARACTER_COMMIT_SHA
+```
 
 ## 설치 확인
 
