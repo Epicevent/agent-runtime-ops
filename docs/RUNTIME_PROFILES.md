@@ -162,6 +162,10 @@ OPENCLAW_WORKSPACE_DIR=/home/node/.openclaw/workspace
 OPENCLAW_NAS_CONTAINER_PATH=/home/node/nas_docs
 ```
 
+Gateway process의 current working directory는 image가 정한 애플리케이션 디렉터리여야 한다.
+`node dist/index.js`는 image 안의 `dist/index.js`를 기준으로 실행된다. Workspace는
+`working_dir`로 바꾸는 것이 아니라 `OPENCLAW_WORKSPACE_DIR`로 전달한다.
+
 Host mount는 다음 위치를 따른다.
 
 ```text

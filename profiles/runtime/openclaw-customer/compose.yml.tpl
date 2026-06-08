@@ -47,4 +47,3 @@ services:
         read_only: true
         bind:
           propagation: rslave
-    working_dir: /home/node/.openclaw/workspace
