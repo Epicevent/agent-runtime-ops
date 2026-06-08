@@ -27,6 +27,9 @@ sudo /usr/local/bin/opsctl apply SLOT --allow-first-apply
 `sudo /usr/local/bin/opsctl rollback SLOT`은 직전 agent-runtime compose와 manifest
 backup을 복구한다. agent-runtime backup이 없는 legacy 상태로 되돌리는 명령은 아니다.
 
+NAS mount/unmount 실전 절차는 `docs/NAS_RUNBOOK.md`를 기준으로 한다. 이 런북은
+Linux host의 CIFS mount와 container 안에서 보이는 child CIFS mount를 분리해서 확인한다.
+
 ## NAS 운영
 
 NAS share 추가/제거는 compose를 바꾸지 않는다. 동적 변화는 host child CIFS mount에서만

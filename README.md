@@ -5,6 +5,13 @@ JI TECH AI 에이전트 서비스의 런타임 운영 도구 저장소다.
 이 저장소는 실제 고객 상태를 저장하지 않는다. 실제 운영 상태는 서버의
 `/srv/openclaw-ops`에 둔다.
 
+## Runbooks
+
+```text
+docs/NAS_RUNBOOK.md
+  NAS mount/unmount 절차와 host/container 두 층위 확인 기준
+```
+
 ## 첫 설치
 
 실행 주체: **sudo 가능한 관리자 계정**
