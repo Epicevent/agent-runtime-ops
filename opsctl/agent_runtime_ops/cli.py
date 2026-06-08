@@ -12,7 +12,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from .paths import DEFAULT_STATE_ROOT
+from .paths import DEFAULT_STATE_ROOT, REPO_ROOT
 from .nas import check_nas_policy, mountpoint_for_share, parse_smb_share
 from .profiles import list_profile_names, load_profile
 from .renderer import render_compose
@@ -57,6 +57,18 @@ def _validate_update_target(repo_url: str, ref: str) -> None:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def _installed_source_commit() -> str:
+    manifest_path = REPO_ROOT / ".agent-runtime-ops-manifest"
+    try:
+        for raw_line in manifest_path.read_text(encoding="utf-8").splitlines():
+            key, _, value = raw_line.partition("=")
+            if key == "source_commit":
+                return value.strip()
+    except OSError:
+        return ""
+    return ""
 
 
 def _write_update_policy(state_root: Path, ref: str) -> Path:
@@ -163,16 +175,23 @@ def cmd_update_approve(args: argparse.Namespace) -> int:
 
 
 def cmd_update_status(args: argparse.Namespace) -> int:
+    installed_ref = _installed_source_commit()
     try:
         repo_url, ref = _approved_update_from_policy(_state_root(args))
         _validate_update_target(repo_url, ref)
     except Exception as exc:
         print("update_status=not_ready")
+        if installed_ref:
+            print(f"installed_ref={installed_ref}")
         print(f"reason={exc}")
         return 1
-    print("update_status=ready")
+    matches = bool(installed_ref) and installed_ref == ref
+    print(f"update_status={'current' if matches else 'ready'}")
+    if installed_ref:
+        print(f"installed_ref={installed_ref}")
     print(f"repo_url={repo_url}")
     print(f"approved_ref={ref}")
+    print(f"approved_matches_installed={'yes' if matches else 'no'}")
     return 0
 
 
@@ -307,6 +326,19 @@ def _findmnt_tree(path: str, container_pid: int | None = None) -> tuple[int, str
     return proc.returncode, (proc.stderr or proc.stdout).strip(), _parse_findmnt_pairs(proc.stdout)
 
 
+def _findmnt_under(path: str, container_pid: int | None = None) -> tuple[int, str, list[dict[str, str]]]:
+    command = ["findmnt", "-P", "-o", "TARGET,SOURCE,FSTYPE,OPTIONS,PROPAGATION"]
+    if container_pid is not None:
+        command = ["nsenter", "--target", str(container_pid), "--mount", "--", *command]
+    proc = _run_text(command)
+    rows = [
+        row
+        for row in _parse_findmnt_pairs(proc.stdout)
+        if row.get("target") == path or row.get("target", "").startswith(path.rstrip("/") + "/")
+    ]
+    return proc.returncode, (proc.stderr or proc.stdout).strip(), rows
+
+
 def _is_readonly_mount(row: dict[str, str]) -> bool:
     options = row.get("options", "")
     return "ro" in {part.strip() for part in options.split(",") if part.strip()}
@@ -411,7 +443,7 @@ def _run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool
     if pid <= 0:
         return checks
 
-    host_rc, host_error, host_mounts = _findmnt_tree(host_nas_root)
+    host_rc, host_error, host_mounts = _findmnt_under(host_nas_root)
     checks.append((host_rc == 0, "live_host_nas_root_findmnt_ok", host_error if host_rc != 0 else host_nas_root))
     host_cifs = [row for row in host_mounts if row.get("fstype") == "cifs" and row.get("target", "").startswith(host_nas_root + "/")]
     checks.append((True, "live_host_child_cifs_count", f"count={len(host_cifs)}"))
@@ -664,7 +696,7 @@ def _safe_mountpoint_path(mountpoint: Path) -> None:
 
 def _mounted_child_cifs_count(slot: str) -> int:
     root = Path("/home") / slot / "nas_docs"
-    rc, _, rows = _findmnt_tree(str(root))
+    rc, _, rows = _findmnt_under(str(root))
     if rc != 0:
         return 0
     return len([row for row in rows if row.get("fstype") == "cifs" and row.get("target", "").startswith(str(root) + "/")])
@@ -697,13 +729,13 @@ def cmd_nas_mounted(args: argparse.Namespace) -> int:
         print(f"reason={exc}")
         return 1
     root = Path("/home") / desired.slot / "nas_docs"
-    rc, error, rows = _findmnt_tree(str(root))
+    rc, error, rows = _findmnt_under(str(root))
     print(f"slot={desired.slot}")
     print(f"nas_root={root}")
     print("mutates=false")
     if rc != 0:
         print("mounted_status=fail")
-        print(f"reason={error}")
+        print(f"reason={error or 'findmnt_failed'}")
         return 1
     child_rows = [row for row in rows if row.get("fstype") == "cifs" and row.get("target", "").startswith(str(root) + "/")]
     print(f"mounted_child_cifs_count={len(child_rows)}")
