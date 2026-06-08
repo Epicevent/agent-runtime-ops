@@ -160,6 +160,7 @@ class McpServer:
             },
             "instructions": (
                 "Use these tools to inspect and operate the svcops runtime through opsctl. "
+                "Call one MCP tool at a time and wait for its response before calling another tool. "
                 "Use selector arguments such as slot_class for group queries instead of parallel per-slot calls. "
                 "Do not pass raw secret values as tool arguments."
             ),

@@ -49,6 +49,7 @@ class McpServerTests(unittest.TestCase):
             }
         )
         self.assertEqual(response["result"]["protocolVersion"], "2025-06-18")
+        self.assertIn("one MCP tool at a time", response["result"]["instructions"])
         self.assertIn("slot_class", response["result"]["instructions"])
 
         tools = server.handle_message({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
