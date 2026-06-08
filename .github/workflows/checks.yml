@@ -1,0 +1,32 @@
+name: Checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package
+        run: python -m pip install .
+
+      - name: Compile Python
+        run: python -m compileall opsctl
+
+      - name: List runtime profiles
+        run: python -m agent_runtime_ops.cli profile list
+
+      - name: Verify no legacy compose repair path
+        run: |
+          set -euo pipefail
+          ! grep -RInE 'docker-compose\.nas\.yml|svcops-control\.sh|cat > .*docker-compose' \
+            --exclude-dir=.git \
+            --exclude=checks.yml .

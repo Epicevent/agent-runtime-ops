@@ -1,0 +1,62 @@
+name: Publish OpenClaw Wrapper
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Public tag to publish
+        required: true
+      product_image:
+        description: OpenClaw product image digest
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_REPOSITORY: ghcr.io/epicevent/agent-runtime-openclaw
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${{ inputs.image_tag }}" =~ ^openclaw-[A-Za-z0-9._-]+$ ]]
+          [[ "${{ inputs.product_image }}" =~ ^[A-Za-z0-9._:/-]+@sha256:[0-9a-f]{64}$ ]]
+
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build wrapper
+        run: |
+          set -euo pipefail
+          image_ref="$IMAGE_REPOSITORY:${{ inputs.image_tag }}"
+          docker build \
+            --build-arg BASE_IMAGE="${{ inputs.product_image }}" \
+            --build-arg PRODUCT_IMAGE="${{ inputs.product_image }}" \
+            --build-arg OPS_REPO_COMMIT="${{ github.sha }}" \
+            -t "$image_ref" \
+            -f images/openclaw-wrapper/Dockerfile .
+
+      - name: Verify manifest
+        run: |
+          set -euo pipefail
+          image_ref="$IMAGE_REPOSITORY:${{ inputs.image_tag }}"
+          cid="$(docker create "$image_ref")"
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          docker cp "$cid:/usr/local/share/agent-runtime-ops/wrapper.manifest" ./wrapper.manifest
+          grep -Fx "family=openclaw" ./wrapper.manifest
+          grep -Fx "product_image=${{ inputs.product_image }}" ./wrapper.manifest
+
+      - name: Push wrapper
+        run: docker push "$IMAGE_REPOSITORY:${{ inputs.image_tag }}"
+
+      - name: Show digest
+        run: docker buildx imagetools inspect "$IMAGE_REPOSITORY:${{ inputs.image_tag }}"
+

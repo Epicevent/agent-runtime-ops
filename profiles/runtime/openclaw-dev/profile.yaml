@@ -1,0 +1,11 @@
+id: openclaw-dev
+family: openclaw
+mode: source
+slot_class: dev
+service: openclaw-gateway
+container_nas_root: /home/node/nas_docs
+allow_source_mount: true
+source_output_target: /app/dist/control-ui
+required_mount_propagation: rslave
+required_read_only_nas: true
+

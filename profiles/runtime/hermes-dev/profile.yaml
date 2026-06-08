@@ -1,0 +1,11 @@
+id: hermes-dev
+family: hermes
+mode: source
+slot_class: dev
+service: openclaw-gateway
+container_nas_root: /workspace/nas_docs
+allow_source_mount: true
+source_output_target: /opt/hermes-workspace
+required_mount_propagation: rslave
+required_read_only_nas: true
+

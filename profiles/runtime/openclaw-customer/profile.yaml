@@ -1,0 +1,10 @@
+id: openclaw-customer
+family: openclaw
+mode: image
+slot_class: customer
+service: openclaw-gateway
+container_nas_root: /home/node/nas_docs
+allow_source_mount: false
+required_mount_propagation: rslave
+required_read_only_nas: true
+
