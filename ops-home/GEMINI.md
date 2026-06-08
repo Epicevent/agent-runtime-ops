@@ -59,18 +59,8 @@ Gemini/API keys for runtime slots are managed through `opsctl runtime-secret`. G
 authentication for this account must use `~/.gemini/.env` or the CLI's normal auth flow, and secret
 values must not be pasted into chat, MCP arguments, or logs.
 
-Runtime provider secrets are separate from handoff credentials. For OpenClaw slots, the gateway
-handoff token is in `/home/SLOT/.openclaw/openclaw.json` at JSON path `gateway.auth.token`.
-`/home/SLOT/.openclaw-auth-profile-secrets` is an auth/profile config directory, not the gateway
-token location. For Hermes slots, the workspace handoff password is in
-`/srv/openclaw-ops/handoff/hermes-workspace-SLOT.env` under key `password`.
-
-Handoff credential value retrieval is a current `opsctl` gap. If an authorized operator needs the
-value in their own terminal, the retained baseline exact command is:
-
-```bash
-sudo /opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh handoff-credential SLOT
-```
-
-It prints the OpenClaw gateway token or Hermes workspace password. Do not replace it with broad
-secret-file discovery commands.
+Runtime provider secrets are separate from handoff credentials. Use `opsctl handoff status SLOT`
+or MCP `handoff_status` to discover exact handoff credential file/field structure and presence
+without printing values. If value retrieval is needed by an authorized operator, use only the exact
+legacy value command reported by `handoff status`; do not replace it with broad secret-file
+discovery commands.

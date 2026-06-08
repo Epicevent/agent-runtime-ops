@@ -247,6 +247,25 @@ class McpServer:
                 },
             },
             {
+                "name": "handoff_status",
+                "title": "Handoff Credential Status",
+                "description": (
+                    "Report handoff credential structure and presence without printing values. "
+                    "Use this for gateway tokens or workspace passwords instead of runtime_secret_status."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "slot": {"type": "string"},
+                        "slots": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                        "slot_class": {"type": "string", "enum": ["customer", "dev"]},
+                        "family": {"type": "string", "enum": ["hermes", "openclaw"]},
+                    },
+                    "oneOf": [{"required": ["slot"]}, {"required": ["slots"]}, {"required": ["slot_class"]}],
+                    "additionalProperties": False,
+                },
+            },
+            {
                 "name": "slot_apply",
                 "title": "Apply Slot",
                 "description": "Pre-check, apply one slot, and run a live check.",
@@ -359,6 +378,7 @@ class McpServer:
             "deploy_update": self._tool_deploy_update,
             "runtime_secret_status": self._tool_runtime_secret_status,
             "runtime_secret_set_from_file": self._tool_runtime_secret_set_from_file,
+            "handoff_status": self._tool_handoff_status,
             "slot_apply": self._tool_slot_apply,
             "slot_rollback": self._tool_slot_rollback,
             "nas_status": self._tool_nas_status,
@@ -537,6 +557,15 @@ class McpServer:
             argv.append("--check")
         runs = [self._run(argv, input_text=value, timeout=240)]
         return self._common_response(ok=runs[0]["returncode"] == 0, mutated=True, runs=runs)
+
+    def _tool_handoff_status(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(args, {"slot", "slots", "slot_class", "family"})
+        slots, runs = self._resolve_slots(args)
+        runs.extend(
+            self._run([self.sudo, self.opsctl, "handoff", "status", slot], timeout=60)
+            for slot in slots
+        )
+        return self._common_response(ok=all(item["returncode"] == 0 for item in runs), mutated=False, runs=runs)
 
     def _tool_slot_apply(self, args: dict[str, Any]) -> dict[str, Any]:
         self._reject_unknown(args, {"slot", "allow_first_apply"})

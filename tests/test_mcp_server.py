@@ -62,6 +62,7 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("slot_list", names)
         self.assertIn("runtime_secret_set_from_file", names)
         self.assertIn("deploy_update", names)
+        self.assertIn("handoff_status", names)
         self.assertIn("nas_remove", names)
         self.assertIn("nas_credential_status", names)
         slot_check_tool = next(item for item in tools["result"]["tools"] if item["name"] == "slot_check")
@@ -73,6 +74,10 @@ class McpServerTests(unittest.TestCase):
         status_schema = status_tool["inputSchema"]["properties"]
         self.assertEqual(status_schema["slot_class"]["enum"], ["customer", "dev"])
         self.assertEqual(status_schema["family"]["enum"], ["hermes", "openclaw"])
+        handoff_tool = next(item for item in tools["result"]["tools"] if item["name"] == "handoff_status")
+        self.assertIn("gateway tokens", handoff_tool["description"])
+        handoff_schema = handoff_tool["inputSchema"]["properties"]
+        self.assertEqual(handoff_schema["slot_class"]["enum"], ["customer", "dev"])
         secret_tool = next(item for item in tools["result"]["tools"] if item["name"] == "runtime_secret_set_from_file")
         key_schema = secret_tool["inputSchema"]["properties"]["key"]
         self.assertIn("GEMINI_API_KEY", key_schema["enum"])
@@ -323,6 +328,34 @@ class McpServerTests(unittest.TestCase):
         payload = call_tool(server, "runtime_secret_status", {"slot": "dev-oc", "slots": ["dev-hermess"]})
         self.assertFalse(payload["ok"])
         self.assertIn("provide exactly one of slot, slots, or slot_class", payload["next_action"])
+
+    def test_handoff_status_accepts_slot_class_selector(self) -> None:
+        runner = FakeRunner(
+            [
+                (
+                    0,
+                    "\n".join(
+                        [
+                            "slot=dev-hermess lane=dev-hermes family=hermes slot_class=dev runtime_profile=hermes-dev",
+                            "slot=dev-oc lane=dev-openclaw family=openclaw slot_class=dev runtime_profile=openclaw-dev",
+                        ]
+                    )
+                    + "\n",
+                    "",
+                ),
+                (0, "slot=dev-hermess\nhandoff_password=present\nhandoff_value_printed=no\nhandoff_status=ok\n", ""),
+                (0, "slot=dev-oc\nhandoff_token=present\nhandoff_value_printed=no\nhandoff_status=ok\n", ""),
+            ]
+        )
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        payload = call_tool(server, "handoff_status", {"slot_class": "dev"})
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["mutated"])
+        self.assertIn("handoff_token=present", payload["stdout"])
+        self.assertIn("handoff_password=present", payload["stdout"])
+        self.assertEqual(runner.calls[0]["argv"], ["opsctl", "slot", "list"])
+        self.assertEqual(runner.calls[1]["argv"], ["sudo", "opsctl", "handoff", "status", "dev-hermess"])
+        self.assertEqual(runner.calls[2]["argv"], ["sudo", "opsctl", "handoff", "status", "dev-oc"])
 
     def test_deploy_update_without_approval_returns_exact_root_command(self) -> None:
         target = "a" * 40

@@ -1641,6 +1641,117 @@ def cmd_runtime_secret_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _json_path_present(path: Path, keys: list[str]) -> tuple[str, str]:
+    if not path.exists():
+        return "missing", "absent"
+    if path.is_symlink():
+        return "symlink_refused", "unknown"
+    if not path.is_file():
+        return "not_regular", "unknown"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return "parse_failed", "unknown"
+    value = data
+    for key in keys:
+        if not isinstance(value, dict) or key not in value:
+            return "present", "absent"
+        value = value[key]
+    return "present", "present" if isinstance(value, str) and bool(value) else "absent"
+
+
+def _env_key_present(path: Path, key: str) -> tuple[str, str]:
+    if not path.exists():
+        return "missing", "absent"
+    if path.is_symlink():
+        return "symlink_refused", "unknown"
+    if not path.is_file():
+        return "not_regular", "unknown"
+    try:
+        values = parse_secret_env_text(path.read_text(encoding="utf-8", errors="replace"), source=str(path))
+    except Exception:
+        return "parse_failed", "unknown"
+    return "present", "present" if values.get(key) else "absent"
+
+
+def cmd_handoff_status(args: argparse.Namespace) -> int:
+    if not _is_root():
+        print("error: run as root/admin: sudo /usr/local/bin/opsctl handoff status SLOT", file=sys.stderr)
+        return 2
+    try:
+        desired = load_desired_slot(args.slot, _state_root(args))
+        profile = load_profile(desired.runtime_profile)
+        family = str(profile.metadata.get("family") or desired.lane_data.get("family") or "")
+    except Exception as exc:
+        print(f"slot={args.slot}")
+        print("handoff_status=fail")
+        print(f"reason={exc}")
+        return 1
+
+    print(f"slot={desired.slot}")
+    print(f"runtime_profile={profile.name}")
+    print(f"family={family}")
+    print("handoff_value_printed=no")
+
+    if family == "openclaw":
+        config_path = _slot_home(desired.slot) / ".openclaw" / "openclaw.json"
+        try:
+            _assert_secret_path_safe(desired.slot, config_path)
+            file_state, token_state = _json_path_present(config_path, ["gateway", "auth", "token"])
+        except Exception as exc:
+            file_state, token_state = "invalid", "unknown"
+            print(f"reason={exc}")
+        print("handoff_kind=openclaw_gateway_token")
+        print(f"handoff_secret_file={config_path}")
+        print("handoff_secret_json_path=gateway.auth.token")
+        print("handoff_container_file=/home/node/.openclaw/openclaw.json")
+        print(f"handoff_file_state={file_state}")
+        print(f"handoff_token={token_state}")
+        print("handoff_value_retrieval=legacy_exception")
+        print(
+            "handoff_value_command="
+            + shlex.join(
+                [
+                    "sudo",
+                    "/opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh",
+                    "handoff-credential",
+                    desired.slot,
+                ]
+            )
+        )
+        print(f"handoff_status={'ok' if file_state == 'present' and token_state == 'present' else 'fail'}")
+        return 0 if file_state == "present" and token_state == "present" else 1
+
+    if family == "hermes":
+        secret_file = _state_root(args) / "handoff" / f"hermes-workspace-{desired.slot}.env"
+        legacy_file = _state_root(args) / "reports" / f"hermes-workspace-{desired.slot}.password"
+        file_state, password_state = _env_key_present(secret_file, "password")
+        print("handoff_kind=hermes_workspace_password")
+        print(f"handoff_secret_file={secret_file}")
+        print("handoff_secret_key=password")
+        print(f"handoff_legacy_secret_file={legacy_file}")
+        print(f"handoff_file_state={file_state}")
+        print(f"handoff_password={password_state}")
+        print("handoff_value_retrieval=legacy_exception")
+        print(
+            "handoff_value_command="
+            + shlex.join(
+                [
+                    "sudo",
+                    "/opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh",
+                    "handoff-credential",
+                    desired.slot,
+                ]
+            )
+        )
+        print(f"handoff_status={'ok' if file_state == 'present' and password_state == 'present' else 'fail'}")
+        return 0 if file_state == "present" and password_state == "present" else 1
+
+    print("handoff_status=fail")
+    print("reason=unsupported_runtime_family")
+    return 1
+
+
 def cmd_blocked_mutation(args: argparse.Namespace) -> int:
     print(f"error: {args.command_name} is intentionally disabled in the initial skeleton", file=sys.stderr)
     print("hint: enable lane rollout only after single-slot apply/rollback migration tests pass", file=sys.stderr)
@@ -2633,6 +2744,12 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_secret_status = runtime_secret_sub.add_parser("status")
     runtime_secret_status.add_argument("slot")
     runtime_secret_status.set_defaults(func=cmd_runtime_secret_status)
+
+    handoff = sub.add_parser("handoff")
+    handoff_sub = handoff.add_subparsers(dest="handoff_command", required=True)
+    handoff_status = handoff_sub.add_parser("status")
+    handoff_status.add_argument("slot")
+    handoff_status.set_defaults(func=cmd_handoff_status)
 
     nas = sub.add_parser("nas")
     nas_sub = nas.add_subparsers(dest="nas_command", required=True)

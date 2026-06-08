@@ -1,0 +1,116 @@
+from __future__ import annotations
+
+import argparse
+import contextlib
+import io
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from agent_runtime_ops.cli import cmd_handoff_status
+
+
+def write_state(root: Path) -> None:
+    digest = "sha256:" + "2" * 64
+    (root / "slots.yaml").write_text(
+        """
+slots:
+  - slot: dev-oc
+    lane: dev-openclaw
+  - slot: dev-hermess
+    lane: dev-hermes
+""".lstrip(),
+        encoding="utf-8",
+    )
+    (root / "lanes.yaml").write_text(
+        """
+lanes:
+  dev-openclaw:
+    family: openclaw
+    slot_class: dev
+    release: openclaw-current
+    runtime_profile: openclaw-dev
+  dev-hermes:
+    family: hermes
+    slot_class: dev
+    release: hermes-current
+    runtime_profile: hermes-dev
+""".lstrip(),
+        encoding="utf-8",
+    )
+    (root / "releases.yaml").write_text(
+        f"""
+releases:
+  openclaw-current:
+    family: openclaw
+    wrapper_image: ghcr.io/epicevent/openclaw-nas-agent@{digest}
+    product_image: ghcr.io/epicevent/openclaw-nas-agent@{digest}
+    digest: {digest}
+  hermes-current:
+    family: hermes
+    wrapper_image: ghcr.io/epicevent/openclaw-nas-agent@{digest}
+    product_image: ghcr.io/epicevent/openclaw-nas-agent@{digest}
+    digest: {digest}
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+
+class CliHandoffTests(unittest.TestCase):
+    def test_openclaw_handoff_status_reports_token_structure_without_value(self) -> None:
+        token = "secret-token-value"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            home = root / "home" / "dev-oc"
+            config = home / ".openclaw" / "openclaw.json"
+            config.parent.mkdir(parents=True)
+            config.write_text(
+                '{"gateway":{"auth":{"mode":"token","token":"' + token + '"}}}\n',
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.cli._slot_home", return_value=home),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_handoff_status(argparse.Namespace(slot="dev-oc", state_root=str(root)))
+        text = output.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn("handoff_kind=openclaw_gateway_token", text)
+        self.assertIn(f"handoff_secret_file={config}", text)
+        self.assertIn("handoff_secret_json_path=gateway.auth.token", text)
+        self.assertIn("handoff_token=present", text)
+        self.assertIn("handoff_value_printed=no", text)
+        self.assertIn("handoff_status=ok", text)
+        self.assertNotIn(token, text)
+
+    def test_hermes_handoff_status_reports_password_structure_without_value(self) -> None:
+        password = "secret-password-value"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            handoff = root / "handoff" / "hermes-workspace-dev-hermess.env"
+            handoff.parent.mkdir()
+            handoff.write_text(f"password={password}\n", encoding="utf-8")
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_handoff_status(argparse.Namespace(slot="dev-hermess", state_root=str(root)))
+        text = output.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn("handoff_kind=hermes_workspace_password", text)
+        self.assertIn(f"handoff_secret_file={handoff}", text)
+        self.assertIn("handoff_secret_key=password", text)
+        self.assertIn("handoff_password=present", text)
+        self.assertIn("handoff_value_printed=no", text)
+        self.assertIn("handoff_status=ok", text)
+        self.assertNotIn(password, text)
+
+
+if __name__ == "__main__":
+    unittest.main()
