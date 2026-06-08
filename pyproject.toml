@@ -14,10 +14,10 @@ dependencies = [
 
 [project.scripts]
 opsctl = "agent_runtime_ops.cli:main"
+agent-runtime-ops-mcp = "agent_runtime_ops.mcp_server:main"
 
 [tool.setuptools]
 package-dir = {"" = "opsctl"}
 
 [tool.setuptools.packages.find]
 where = ["opsctl"]
-

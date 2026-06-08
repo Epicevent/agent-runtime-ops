@@ -7,7 +7,12 @@ CURRENT_LINK="$INSTALL_ROOT/current"
 STATE_ROOT="${AGENT_RUNTIME_STATE_ROOT:-/srv/openclaw-ops}"
 OPS_USER="${AGENT_RUNTIME_OPS_USER:-svcops}"
 OPS_GROUP="${AGENT_RUNTIME_OPS_GROUP:-svcops}"
+OPS_HOME="${AGENT_RUNTIME_OPS_HOME:-/home/$OPS_USER}"
+CODEX_HOME="${AGENT_RUNTIME_CODEX_HOME:-$OPS_HOME/.codex}"
+CODEX_SKILL_NAME="agent-runtime-ops"
+CODEX_SKILL_DIR="$CODEX_HOME/skills/$CODEX_SKILL_NAME"
 BIN_LINK="${AGENT_RUNTIME_OPS_BIN:-/usr/local/bin/opsctl}"
+MCP_BIN_LINK="${AGENT_RUNTIME_OPS_MCP_BIN:-/usr/local/bin/agent-runtime-ops-mcp}"
 MANIFEST="${AGENT_RUNTIME_OPS_MANIFEST:-$INSTALL_ROOT/.agent-runtime-ops-manifest}"
 REPO_URL="${AGENT_RUNTIME_OPS_REPO_URL:-https://github.com/Epicevent/agent-runtime-ops.git}"
 REPO_REF="${AGENT_RUNTIME_OPS_REF:-}"
@@ -144,6 +149,7 @@ write_manifest() {
     printf 'ops_group=%s\n' "$OPS_GROUP"
     printf 'state_root=%s\n' "$STATE_ROOT"
     printf 'opsctl=%s\n' "$BIN_LINK"
+    printf 'mcp=%s\n' "$MCP_BIN_LINK"
     printf 'source_path=%s\n' "$src"
   } >"$tmp"
   install -o root -g "$OPS_GROUP" -m 0644 "$tmp" "$release_dir/.agent-runtime-ops-manifest"
@@ -217,9 +223,55 @@ set -euo pipefail
 exec "$CURRENT_LINK/.venv/bin/opsctl" "\$@"
 EOF
   chmod 0755 "$BIN_LINK"
+  rm -f "$MCP_BIN_LINK"
+  cat >"$MCP_BIN_LINK" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+exec "$CURRENT_LINK/.venv/bin/agent-runtime-ops-mcp" "\$@"
+EOF
+  chmod 0755 "$MCP_BIN_LINK"
   ln -sfn "current/.agent-runtime-ops-manifest" "$MANIFEST"
   chown root:"$OPS_GROUP" "$BIN_LINK" 2>/dev/null || true
+  chown root:"$OPS_GROUP" "$MCP_BIN_LINK" 2>/dev/null || true
   chown -h root:"$OPS_GROUP" "$CURRENT_LINK" "$MANIFEST" 2>/dev/null || true
+}
+
+install_codex_skill() {
+  local release_dir="$1"
+  local src="$release_dir/skills/$CODEX_SKILL_NAME"
+  if [[ ! -d "$src" ]]; then
+    info "codex_skill=missing_source"
+    return 0
+  fi
+  if [[ ! -d "$CODEX_HOME" ]]; then
+    install -d -o "$OPS_USER" -g "$OPS_GROUP" -m 0700 "$CODEX_HOME"
+  fi
+  if [[ ! -d "$CODEX_HOME/skills" ]]; then
+    install -d -o "$OPS_USER" -g "$OPS_GROUP" -m 0700 "$CODEX_HOME/skills"
+  fi
+  install -d -o "$OPS_USER" -g "$OPS_GROUP" -m 0700 "$CODEX_SKILL_DIR"
+  rsync -a --delete "$src"/ "$CODEX_SKILL_DIR"/
+  chown -R "$OPS_USER:$OPS_GROUP" "$CODEX_SKILL_DIR"
+  find "$CODEX_SKILL_DIR" -type d -exec chmod 0700 {} +
+  find "$CODEX_SKILL_DIR" -type f -exec chmod 0600 {} +
+  info "codex_skill=$CODEX_SKILL_DIR"
+}
+
+run_as_ops() {
+  runuser -u "$OPS_USER" -- env HOME="$OPS_HOME" USER="$OPS_USER" LOGNAME="$OPS_USER" CODEX_HOME="$CODEX_HOME" "$@"
+}
+
+register_codex_mcp() {
+  if ! command -v codex >/dev/null 2>&1; then
+    info "codex_mcp=codex_missing"
+    return 0
+  fi
+  run_as_ops codex mcp remove "$CODEX_SKILL_NAME" >/dev/null 2>&1 || true
+  if run_as_ops codex mcp add "$CODEX_SKILL_NAME" -- "$MCP_BIN_LINK" >/dev/null 2>&1; then
+    info "codex_mcp=registered"
+  else
+    info "codex_mcp=register_failed"
+  fi
 }
 
 install_package() {
@@ -257,6 +309,8 @@ install_package() {
 
   activate_release "$release_dir"
   install_ops_sudoers
+  install_codex_skill "$release_dir"
+  register_codex_mcp
 
   if [[ -d "$STATE_ROOT" ]]; then
     chgrp "$OPS_GROUP" "$STATE_ROOT" 2>/dev/null || true
@@ -269,6 +323,7 @@ install_package() {
   info "ops_user=$OPS_USER"
   info "ops_group=$OPS_GROUP"
   info "opsctl=$BIN_LINK"
+  info "mcp=$MCP_BIN_LINK"
   info "sudoers=$SUDOERS_FILE"
   info "state_root=$STATE_ROOT"
 }
@@ -293,6 +348,7 @@ check_install() {
   command -v runuser >/dev/null || die "missing command: runuser"
   [[ -L "$CURRENT_LINK" && -d "$CURRENT_LINK" ]] || die "missing current release link: $CURRENT_LINK"
   [[ -x "$BIN_LINK" ]] || die "opsctl is not executable: $BIN_LINK"
+  [[ -x "$MCP_BIN_LINK" ]] || die "agent-runtime-ops-mcp is not executable: $MCP_BIN_LINK"
   [[ -d "$INSTALL_ROOT" ]] || die "missing install root: $INSTALL_ROOT"
   [[ -d "$STATE_ROOT" ]] || die "missing state root: $STATE_ROOT"
   [[ -r "$MANIFEST" ]] || die "missing manifest: $MANIFEST"
@@ -302,9 +358,15 @@ check_install() {
   info "ops_group=present"
   info "install_root=present"
   info "current_release=present"
+  info "mcp=present"
   info "state_root=present"
   info "manifest=present"
   info "sudoers=present"
+  if [[ -r "$CODEX_SKILL_DIR/SKILL.md" ]]; then
+    info "codex_skill=present"
+  else
+    info "codex_skill=missing"
+  fi
   runuser -u "$OPS_USER" -- bash -lc "cd / && exec '$BIN_LINK' profile list"
 
   local missing=0

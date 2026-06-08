@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Runtime Ops"
+  short_description: "Operate agent-runtime-ops safely"
+  default_prompt: "Use this skill when operating the agent-runtime-ops repository or svcops server runtime."
