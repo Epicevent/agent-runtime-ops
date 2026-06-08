@@ -9,6 +9,7 @@ BIN_LINK="${AGENT_RUNTIME_OPS_BIN:-/usr/local/bin/opsctl}"
 MANIFEST="${AGENT_RUNTIME_OPS_MANIFEST:-$INSTALL_DIR/.agent-runtime-ops-manifest}"
 REPO_URL="${AGENT_RUNTIME_OPS_REPO_URL:-https://github.com/Epicevent/agent-runtime-ops.git}"
 REPO_REF="${AGENT_RUNTIME_OPS_REF:-main}"
+SUDOERS_FILE="${AGENT_RUNTIME_OPS_SUDOERS_FILE:-/etc/sudoers.d/agent-runtime-ops-self-update}"
 
 info() {
   printf '%s\n' "$*"
@@ -147,6 +148,20 @@ reset_venv() {
   info "venv=recreated"
 }
 
+install_self_update_sudoers() {
+  local tmp
+  command -v visudo >/dev/null || die "missing command: visudo"
+  tmp="$(mktemp)"
+  {
+    printf 'Defaults:%s env_reset, !setenv, use_pty\n' "$OPS_USER"
+    printf '%s ALL=(root) NOPASSWD: %s self-update\n' "$OPS_USER" "$BIN_LINK"
+  } >"$tmp"
+  chmod 0440 "$tmp"
+  visudo -cf "$tmp" >/dev/null
+  install -o root -g root -m 0440 "$tmp" "$SUDOERS_FILE"
+  rm -f "$tmp"
+}
+
 install_package() {
   local src
   if ! src="$(repo_root)"; then
@@ -171,6 +186,7 @@ install_package() {
 
   ln -sfn "$INSTALL_DIR/.venv/bin/opsctl" "$BIN_LINK"
   chown -h root:"$OPS_GROUP" "$BIN_LINK" 2>/dev/null || true
+  install_self_update_sudoers
 
   if [[ -d "$STATE_ROOT" ]]; then
     chgrp "$OPS_GROUP" "$STATE_ROOT" 2>/dev/null || true
@@ -184,6 +200,7 @@ install_package() {
   info "ops_user=$OPS_USER"
   info "ops_group=$OPS_GROUP"
   info "opsctl=$BIN_LINK"
+  info "sudoers=$SUDOERS_FILE"
   info "state_root=$STATE_ROOT"
 }
 
@@ -209,12 +226,14 @@ check_install() {
   [[ -d "$INSTALL_DIR" ]] || die "missing install dir: $INSTALL_DIR"
   [[ -d "$STATE_ROOT" ]] || die "missing state root: $STATE_ROOT"
   [[ -r "$MANIFEST" ]] || die "missing manifest: $MANIFEST"
+  [[ -r "$SUDOERS_FILE" ]] || die "missing sudoers file: $SUDOERS_FILE"
 
   info "ops_user=present"
   info "ops_group=present"
   info "install_dir=present"
   info "state_root=present"
   info "manifest=present"
+  info "sudoers=present"
   runuser -u "$OPS_USER" -- bash -lc "cd / && exec '$BIN_LINK' profile list"
 
   local missing=0

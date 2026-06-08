@@ -38,7 +38,7 @@ opsctl update status
 
 ## 이후 갱신
 
-실행 주체: **sudo 가능한 관리자 계정**
+실행 주체: **svcops 또는 sudo 가능한 관리자 계정**
 
 승인이 끝난 뒤 실제 갱신은 아래 명령만 사용한다.
 
@@ -48,6 +48,8 @@ sudo opsctl self-update
 
 이 명령은 `main` 같은 움직이는 branch를 설치하지 않는다. 오직
 `/srv/openclaw-ops/ops-update.yaml`에 승인된 full commit만 설치한다.
+설치 스크립트는 `svcops`에 이 명령만 비밀번호 없이 열어 둔다. `update approve`
+권한은 열지 않는다.
 
 설치 확인:
 
