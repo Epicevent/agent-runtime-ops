@@ -15,9 +15,8 @@ Use this skill to keep natural-language operations tied to the real repository a
 - Start with repo and server orientation before server-impacting work.
 - Prefer the `agent-runtime-ops` MCP tools when they are exposed; otherwise run the same `opsctl`
   commands manually through `ssh svcops`.
-- Treat Codex as the only standard operating-agent CLI on `svcops`.
-- Do not install or depend on Claude Code, Gemini CLI, OpenCode, or other agent CLIs for routine
-  operations.
+- Treat Codex and Gemini CLI as the standard operating-agent CLIs on `svcops`.
+- Do not install or depend on Claude Code, OpenCode, or other agent CLIs for routine operations.
 - Do not claim a server change is complete after local tests only.
 - Do not edit rendered Docker compose files directly.
 - Do not put customer state, NAS passwords, API keys, gateway tokens, or real slot assignment details

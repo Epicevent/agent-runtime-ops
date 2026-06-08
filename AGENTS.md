@@ -17,23 +17,24 @@ The normal operating account is:
 ssh svcops
 ```
 
-## Standard Operating Agent
+## Standard Operating Agents
 
-The standard natural-language operating harness for `svcops` is Codex. This repo installs and
-maintains the Codex global `AGENTS.md`, operation skill, and `agent-runtime-ops` MCP registration
-for that account. This affects all Codex sessions under the `svcops` Unix account, and does not
-touch other Unix accounts or a developer's local Codex account.
+The standard natural-language operating harnesses for `svcops` are Codex and Gemini CLI. This repo
+installs and maintains the Codex global `AGENTS.md`, Gemini global `GEMINI.md`, operation skill, and
+`agent-runtime-ops` MCP registration for that account. This affects sessions under the `svcops`
+Unix account, and does not touch other Unix accounts or a developer's local accounts.
 
 Normal operator entry:
 
 ```bash
 ssh svcops
 codex
+gemini
 ```
 
-Do not install Claude Code, Gemini CLI, OpenCode, or other agent CLIs as part of `install.sh`,
-`self-update`, or routine server operations. If another CLI is needed later, treat it as a separate
-approved project with its own install, auth, rollback, and verification plan.
+Do not install Claude Code, OpenCode, or other agent CLIs as part of `install.sh`, `self-update`,
+or routine server operations. If another CLI is needed later, treat it as a separate approved
+project with its own install, auth, rollback, and verification plan.
 
 Gemini/API keys in this repo are runtime slot secrets only. They are injected into managed runtime
 profiles with `opsctl runtime-secret`; they are not credentials for a Gemini CLI installation.
@@ -215,7 +216,7 @@ codex mcp add agent-runtime-ops -- /usr/local/bin/agent-runtime-ops-mcp
 The MCP server wraps `opsctl`; it does not reimplement operations policy. It may run runbook-backed
 mutations, but it must reject raw secret values and use `opsctl` with argv lists, not shell strings.
 
-No Claude/Gemini/OpenCode MCP registration is managed by this repo.
+No Claude/OpenCode MCP registration is managed by this repo.
 
 ## Remote Commands
 

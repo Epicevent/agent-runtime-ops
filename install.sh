@@ -12,9 +12,12 @@ CODEX_HOME="${AGENT_RUNTIME_CODEX_HOME:-$OPS_HOME/.codex}"
 CODEX_SKILL_NAME="agent-runtime-ops"
 CODEX_SKILL_DIR="$CODEX_HOME/skills/$CODEX_SKILL_NAME"
 CODEX_AGENTS_LINK="${AGENT_RUNTIME_CODEX_AGENTS:-$CODEX_HOME/AGENTS.md}"
+GEMINI_HOME="${AGENT_RUNTIME_GEMINI_HOME:-$OPS_HOME/.gemini}"
+GEMINI_AGENTS_LINK="${AGENT_RUNTIME_GEMINI_AGENTS:-$GEMINI_HOME/GEMINI.md}"
 OPS_HOME_AGENTS_LINK="${AGENT_RUNTIME_OPS_HOME_AGENTS:-$OPS_HOME/AGENTS.md}"
 BIN_LINK="${AGENT_RUNTIME_OPS_BIN:-/usr/local/bin/opsctl}"
 MCP_BIN_LINK="${AGENT_RUNTIME_OPS_MCP_BIN:-/usr/local/bin/agent-runtime-ops-mcp}"
+GEMINI_BIN_LINK="${AGENT_RUNTIME_GEMINI_BIN:-/usr/local/bin/gemini}"
 MANIFEST="${AGENT_RUNTIME_OPS_MANIFEST:-$INSTALL_ROOT/.agent-runtime-ops-manifest}"
 REPO_URL="${AGENT_RUNTIME_OPS_REPO_URL:-https://github.com/Epicevent/agent-runtime-ops.git}"
 REPO_REF="${AGENT_RUNTIME_OPS_REF:-}"
@@ -104,6 +107,8 @@ require_commands() {
   command -v python3 >/dev/null || die "missing command: python3"
   command -v rsync >/dev/null || die "missing command: rsync"
   command -v runuser >/dev/null || die "missing command: runuser"
+  command -v node >/dev/null || die "missing command: node"
+  command -v npm >/dev/null || die "missing command: npm"
 }
 
 bootstrap_from_git() {
@@ -165,6 +170,7 @@ copy_tree() {
   rsync -a --delete \
     --exclude '.git' \
     --exclude '.venv' \
+    --exclude 'node_modules' \
     --exclude '__pycache__' \
     --exclude '*.pyc' \
     "$src"/ "$dst"/
@@ -184,6 +190,15 @@ install_python_env() {
     -r "$release_dir/requirements.lock" >/dev/null
   "$release_dir/.venv/bin/pip" install --no-deps "$release_dir" >/dev/null
   "$release_dir/.venv/bin/opsctl" profile list >/dev/null
+}
+
+install_gemini_cli() {
+  local release_dir="$1"
+  local package_dir="$release_dir/agent-clis/gemini-cli"
+  [[ -f "$package_dir/package-lock.json" ]] || die "missing Gemini CLI package-lock.json"
+  (cd "$package_dir" && npm ci --omit=dev --audit=false --fund=false) >/dev/null
+  "$package_dir/node_modules/.bin/gemini" --version >/dev/null
+  info "gemini_cli=$package_dir"
 }
 
 install_ops_sudoers() {
@@ -232,9 +247,21 @@ set -euo pipefail
 exec "$CURRENT_LINK/.venv/bin/agent-runtime-ops-mcp" "\$@"
 EOF
   chmod 0755 "$MCP_BIN_LINK"
+  if [[ -e "$GEMINI_BIN_LINK" ]] && ! grep -q 'agent-runtime-ops managed gemini wrapper' "$GEMINI_BIN_LINK" 2>/dev/null; then
+    die "refusing to overwrite unmanaged Gemini wrapper: $GEMINI_BIN_LINK"
+  fi
+  rm -f "$GEMINI_BIN_LINK"
+  cat >"$GEMINI_BIN_LINK" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+# agent-runtime-ops managed gemini wrapper
+exec "$CURRENT_LINK/agent-clis/gemini-cli/node_modules/.bin/gemini" "\$@"
+EOF
+  chmod 0755 "$GEMINI_BIN_LINK"
   ln -sfn "current/.agent-runtime-ops-manifest" "$MANIFEST"
   chown root:"$OPS_GROUP" "$BIN_LINK" 2>/dev/null || true
   chown root:"$OPS_GROUP" "$MCP_BIN_LINK" 2>/dev/null || true
+  chown root:"$OPS_GROUP" "$GEMINI_BIN_LINK" 2>/dev/null || true
   chown -h root:"$OPS_GROUP" "$CURRENT_LINK" "$MANIFEST" 2>/dev/null || true
 }
 
@@ -285,6 +312,77 @@ install_codex_agents() {
   ln -s "$link_target" "$CODEX_AGENTS_LINK"
   chown -h "$OPS_USER:$OPS_GROUP" "$CODEX_AGENTS_LINK" 2>/dev/null || true
   info "codex_agents=linked"
+}
+
+install_gemini_agents() {
+  local release_dir="$1"
+  local target="$release_dir/ops-home/GEMINI.md"
+  local link_target="$CURRENT_LINK/ops-home/GEMINI.md"
+  if [[ ! -f "$target" ]]; then
+    info "gemini_agents=missing_source"
+    return 0
+  fi
+  if [[ ! -d "$GEMINI_HOME" ]]; then
+    install -d -o "$OPS_USER" -g "$OPS_GROUP" -m 0700 "$GEMINI_HOME"
+  fi
+  if [[ -L "$GEMINI_AGENTS_LINK" ]]; then
+    ln -sfn "$link_target" "$GEMINI_AGENTS_LINK"
+    chown -h "$OPS_USER:$OPS_GROUP" "$GEMINI_AGENTS_LINK" 2>/dev/null || true
+    info "gemini_agents=linked"
+    return 0
+  fi
+  if [[ -e "$GEMINI_AGENTS_LINK" ]]; then
+    info "gemini_agents=skipped_existing_file path=$GEMINI_AGENTS_LINK"
+    return 0
+  fi
+  ln -s "$link_target" "$GEMINI_AGENTS_LINK"
+  chown -h "$OPS_USER:$OPS_GROUP" "$GEMINI_AGENTS_LINK" 2>/dev/null || true
+  info "gemini_agents=linked"
+}
+
+install_gemini_settings() {
+  local settings="$GEMINI_HOME/settings.json"
+  if [[ ! -d "$GEMINI_HOME" ]]; then
+    install -d -o "$OPS_USER" -g "$OPS_GROUP" -m 0700 "$GEMINI_HOME"
+  fi
+  python3 - "$settings" "$MCP_BIN_LINK" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+mcp_bin = sys.argv[2]
+if path.exists():
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise SystemExit(f"{path} must contain a JSON object")
+else:
+    data = {}
+
+context = data.setdefault("context", {})
+if not isinstance(context, dict):
+    raise SystemExit("context must be a JSON object")
+current = context.get("fileName", [])
+if isinstance(current, str):
+    current = [current]
+elif not isinstance(current, list):
+    current = []
+ordered = []
+for item in ["AGENTS.md", "GEMINI.md", *current]:
+    if isinstance(item, str) and item not in ordered:
+        ordered.append(item)
+context["fileName"] = ordered
+
+mcp_servers = data.setdefault("mcpServers", {})
+if not isinstance(mcp_servers, dict):
+    raise SystemExit("mcpServers must be a JSON object")
+mcp_servers["agent-runtime-ops"] = {"command": mcp_bin}
+
+path.write_text(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+  chown "$OPS_USER:$OPS_GROUP" "$settings"
+  chmod 0600 "$settings"
+  info "gemini_settings=$settings"
 }
 
 install_codex_skill() {
@@ -355,6 +453,10 @@ install_package() {
     rm -rf "$release_dir"
     die "failed to build release python environment"
   fi
+  if ! install_gemini_cli "$release_dir"; then
+    rm -rf "$release_dir"
+    die "failed to install Gemini CLI"
+  fi
   write_manifest "$release_dir" "$src" "$commit"
   chown -R root:"$OPS_GROUP" "$release_dir"
 
@@ -362,6 +464,8 @@ install_package() {
   install_ops_sudoers
   install_ops_home_agents "$release_dir"
   install_codex_agents "$release_dir"
+  install_gemini_agents "$release_dir"
+  install_gemini_settings
   install_codex_skill "$release_dir"
   register_codex_mcp
 
@@ -377,8 +481,10 @@ install_package() {
   info "ops_group=$OPS_GROUP"
   info "opsctl=$BIN_LINK"
   info "mcp=$MCP_BIN_LINK"
+  info "gemini=$GEMINI_BIN_LINK"
   info "ops_home_agents=$OPS_HOME_AGENTS_LINK"
   info "codex_agents=$CODEX_AGENTS_LINK"
+  info "gemini_agents=$GEMINI_AGENTS_LINK"
   info "sudoers=$SUDOERS_FILE"
   info "state_root=$STATE_ROOT"
 }
@@ -404,6 +510,7 @@ check_install() {
   [[ -L "$CURRENT_LINK" && -d "$CURRENT_LINK" ]] || die "missing current release link: $CURRENT_LINK"
   [[ -x "$BIN_LINK" ]] || die "opsctl is not executable: $BIN_LINK"
   [[ -x "$MCP_BIN_LINK" ]] || die "agent-runtime-ops-mcp is not executable: $MCP_BIN_LINK"
+  [[ -x "$GEMINI_BIN_LINK" ]] || die "gemini is not executable: $GEMINI_BIN_LINK"
   [[ -d "$INSTALL_ROOT" ]] || die "missing install root: $INSTALL_ROOT"
   [[ -d "$STATE_ROOT" ]] || die "missing state root: $STATE_ROOT"
   [[ -r "$MANIFEST" ]] || die "missing manifest: $MANIFEST"
@@ -414,6 +521,7 @@ check_install() {
   info "install_root=present"
   info "current_release=present"
   info "mcp=present"
+  info "gemini=present"
   info "state_root=present"
   info "manifest=present"
   info "sudoers=present"
@@ -435,6 +543,18 @@ check_install() {
     info "codex_agents=existing_non_symlink"
   else
     info "codex_agents=missing"
+  fi
+  if [[ -L "$GEMINI_AGENTS_LINK" && -r "$GEMINI_AGENTS_LINK" ]]; then
+    info "gemini_agents=present"
+  elif [[ -e "$GEMINI_AGENTS_LINK" ]]; then
+    info "gemini_agents=existing_non_symlink"
+  else
+    info "gemini_agents=missing"
+  fi
+  if [[ -r "$GEMINI_HOME/settings.json" ]]; then
+    info "gemini_settings=present"
+  else
+    info "gemini_settings=missing"
   fi
   runuser -u "$OPS_USER" -- bash -lc "cd / && exec '$BIN_LINK' profile list"
 

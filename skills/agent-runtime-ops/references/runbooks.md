@@ -19,15 +19,16 @@ approved_matches_installed=yes
 If PowerShell is the local shell, avoid `$(...)` inside double-quoted SSH commands because it expands
 locally before SSH runs.
 
-## Standard Operating Agent
+## Standard Operating Agents
 
-Codex is the only standard natural-language operating CLI for `svcops`.
+Codex and Gemini CLI are the standard natural-language operating CLIs for `svcops`.
 
 Normal entry:
 
 ```bash
 ssh svcops
 codex
+gemini
 ```
 
 This repo currently installs:
@@ -35,18 +36,48 @@ This repo currently installs:
 ```text
 /home/svcops/AGENTS.md
 /home/svcops/.codex/AGENTS.md
+/home/svcops/.gemini/GEMINI.md
 /home/svcops/.codex/skills/agent-runtime-ops
 /usr/local/bin/agent-runtime-ops-mcp
 Codex MCP registration: agent-runtime-ops
+Gemini MCP settings: ~/.gemini/settings.json
 ```
 
 The `/home/svcops/.codex/AGENTS.md` link is intentionally global for every Codex session that runs
 as the `svcops` Unix account. It must not affect other server accounts or a developer's local Codex
 account.
 
-This repo does not install or manage Claude Code, Gemini CLI, OpenCode, or other agent CLIs. Do not
-add them during routine `self-update` work. If a non-Codex CLI becomes necessary, handle it as a
-separate approved project with an explicit install and rollback plan.
+The `/home/svcops/.gemini/GEMINI.md` link is intentionally global for every Gemini CLI session that
+runs as the `svcops` Unix account. It must not affect other server accounts or a developer's local
+Gemini account.
+
+This repo does not install or manage Claude Code, OpenCode, or other agent CLIs. Do not add them
+during routine `self-update` work. If another CLI becomes necessary, handle it as a separate
+approved project with an explicit install and rollback plan.
+
+Codex ChatGPT login for the `svcops` operating account:
+
+```bash
+ssh svcops
+codex login --device-auth
+codex login status
+```
+
+Gemini CLI API key for the `svcops` operating account:
+
+```bash
+ssh svcops
+install -d -m 0700 ~/.gemini
+read -rsp "GEMINI_API_KEY for svcops Gemini CLI: " GEMINI_API_KEY
+printf '\n'
+umask 077
+printf 'GEMINI_API_KEY=%s\n' "$GEMINI_API_KEY" > ~/.gemini/.env
+unset GEMINI_API_KEY
+gemini --version
+```
+
+Do not put the Codex login token or Gemini API key in chat, command arguments, MCP JSON arguments,
+or repo files.
 
 ## Deploy an Approved Repo Update
 
@@ -98,8 +129,8 @@ Use live checks after update, apply, rollback, NAS mount/unmount, or runtime sec
 
 ## Runtime Secret Injection
 
-Gemini/API keys here are runtime slot secrets, not Gemini CLI credentials. Do not install Gemini CLI
-or configure CLI auth for this flow.
+Gemini/API keys here are runtime slot secrets, not Gemini CLI credentials. Gemini CLI
+authentication for `svcops` is separate and lives under `/home/svcops/.gemini`.
 
 Never print the secret value. Preferred terminal stdin pattern:
 
