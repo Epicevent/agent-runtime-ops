@@ -52,10 +52,29 @@ class RuntimeContractTests(unittest.TestCase):
         desired = desired_slot("oc2", "hermes", "customer", "hermes-customer")
         results = contract_results("hermes-customer", desired)
         self.assertTrue(results["compose_runtime_user_model"])
+        self.assertTrue(results["compose_required_command"])
         self.assertTrue(results["compose_nas_root_bind_present"])
         self.assertTrue(results["compose_nas_root_readonly"])
         self.assertTrue(results["compose_nas_root_propagation"])
         self.assertTrue(results["compose_customer_source_mount_absent"])
+
+    def test_hermes_dev_contract(self) -> None:
+        desired = desired_slot("dev-hermess", "hermes", "dev", "hermes-dev")
+        results = contract_results("hermes-dev", desired)
+        self.assertTrue(results["compose_runtime_user_model"])
+        self.assertTrue(results["compose_required_command"])
+        self.assertTrue(results["compose_dev_source_mount_present"])
+
+    def test_hermes_rejects_missing_required_command(self) -> None:
+        desired = desired_slot("oc2", "hermes", "customer", "hermes-customer")
+        profile = load_profile("hermes-customer")
+        rendered = render_compose(profile, desired).text.replace(
+            "    command:\n      - gateway\n      - run\n",
+            "",
+            1,
+        )
+        checks = {item.name: item.ok for item in validate_compose_contract(profile, desired, rendered)}
+        self.assertFalse(checks["compose_required_command"])
 
     def test_hermes_customer_rejects_compose_level_user(self) -> None:
         desired = desired_slot("oc2", "hermes", "customer", "hermes-customer")

@@ -19,7 +19,7 @@ from agent_runtime_ops.cli import (
     cmd_rollout_promote,
     cmd_rollout_rollback_canary,
 )
-from agent_runtime_ops.yamlio import load_yaml
+from agent_runtime_ops.yamlio import dump_yaml, load_yaml
 
 
 def image_ref(digest_char: str) -> str:
@@ -248,6 +248,33 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertEqual(rollout["families"]["openclaw"]["canary"]["status"], "ok")
             self.assertEqual(apply.call_args.args[0].slot, "oc3")
 
+    def test_rollout_canary_restores_state_when_apply_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            import_candidate(root)
+            lanes_before = load_yaml(root / "lanes.yaml")
+            slots_before = load_yaml(root / "slots.yaml")
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.cli.cmd_apply", return_value=1),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_rollout_canary(
+                    argparse.Namespace(
+                        state_root=str(root),
+                        family="openclaw",
+                        release="openclaw-candidate",
+                        slot="oc3",
+                        allow_first_apply=False,
+                    )
+                )
+            self.assertEqual(rc, 1)
+            self.assertIn("reason=canary_apply_failed", output.getvalue())
+            self.assertEqual(load_yaml(root / "lanes.yaml"), lanes_before)
+            self.assertEqual(load_yaml(root / "slots.yaml"), slots_before)
+
     def test_rollout_promote_requires_matching_canary_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -336,6 +363,41 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertEqual(apply.call_args.args[0].slot, "oc3")
             rollout = load_yaml(root / "rollout-state.yaml")
             self.assertEqual(rollout["families"]["openclaw"]["canary"]["status"], "rolled_back")
+
+    def test_rollout_rollback_canary_recovers_single_canary_slot_without_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            import_candidate(root)
+            lanes = load_yaml(root / "lanes.yaml")
+            slots = load_yaml(root / "slots.yaml")
+            lanes["lanes"]["openclaw-canary"] = {
+                "family": "openclaw",
+                "slot_class": "customer",
+                "release": "openclaw-candidate",
+                "runtime_profile": "openclaw-customer",
+            }
+            for item in slots["slots"]:
+                if item["slot"] == "oc3":
+                    item["lane"] = "openclaw-canary"
+            (root / "lanes.yaml").write_text(dump_yaml(lanes), encoding="utf-8")
+            (root / "slots.yaml").write_text(dump_yaml(slots), encoding="utf-8")
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.cli.cmd_apply", return_value=0) as apply,
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_rollout_rollback_canary(argparse.Namespace(state_root=str(root), family="openclaw"))
+            self.assertEqual(rc, 0, output.getvalue())
+            self.assertIn("inferred_without_record=true", output.getvalue())
+            slots_after = load_yaml(root / "slots.yaml")["slots"]
+            self.assertEqual(next(item for item in slots_after if item["slot"] == "oc3")["lane"], "openclaw")
+            self.assertEqual(apply.call_args.args[0].slot, "oc3")
+            rollout = load_yaml(root / "rollout-state.yaml")
+            canary = rollout["families"]["openclaw"]["canary"]
+            self.assertEqual(canary["status"], "rolled_back_without_record")
+            self.assertEqual(canary["release"], "openclaw-candidate")
 
 
 if __name__ == "__main__":

@@ -2391,6 +2391,8 @@ def cmd_rollout_canary(args: argparse.Namespace) -> int:
         if not CUSTOMER_SLOT_RE.match(slot):
             raise ValueError("canary slot must be a customer slot like ocN")
         slots_data, lanes_data, releases_data = _load_slots_lanes_releases(state_root)
+        original_slots_data = copy.deepcopy(slots_data)
+        original_lanes_data = copy.deepcopy(lanes_data)
         _validate_release_for_family(releases_data, release, family)
         desired_before = load_desired_slot(slot, state_root)
         profile_before = load_profile(desired_before.runtime_profile)
@@ -2557,11 +2559,30 @@ def cmd_rollout_rollback_canary(args: argparse.Namespace) -> int:
         slots_data, lanes_data, releases_data = _load_slots_lanes_releases(state_root)
         rollout_state = _load_rollout_state(state_root)
         record = _family_rollout_record(rollout_state, family).get("canary")
-        if not isinstance(record, dict) or not record.get("slot") or not record.get("previous_lane"):
-            raise ValueError("no canary record to roll back")
-        slot = str(record["slot"])
-        previous_lane = str(record["previous_lane"])
-        previous_release = str(record.get("previous_release") or "")
+        inferred_without_record = False
+        if isinstance(record, dict) and record.get("slot") and record.get("previous_lane"):
+            slot = str(record["slot"])
+            previous_lane = str(record["previous_lane"])
+            previous_release = str(record.get("previous_release") or "")
+            canary_release = str(record.get("release") or "")
+        else:
+            fleet_lane = _fleet_lane_for_family(lanes_data, family)
+            canary_lane = _canary_lane_for_family(family)
+            canary_slots = _slots_for_lane(slots_data, canary_lane)
+            if len(canary_slots) != 1:
+                raise ValueError(
+                    f"no canary record to roll back and expected exactly one {canary_lane} slot, found {len(canary_slots)}"
+                )
+            lanes = lanes_data.get("lanes") or {}
+            fleet_data = lanes.get(fleet_lane)
+            canary_data = lanes.get(canary_lane)
+            if not isinstance(fleet_data, dict):
+                raise ValueError(f"fleet lane is invalid: {fleet_lane}")
+            slot = canary_slots[0]
+            previous_lane = fleet_lane
+            previous_release = str(fleet_data.get("release") or "")
+            canary_release = str(canary_data.get("release") or "") if isinstance(canary_data, dict) else ""
+            inferred_without_record = True
         if previous_lane not in (lanes_data.get("lanes") or {}):
             raise ValueError(f"previous lane no longer exists: {previous_lane}")
         _validate_release_for_family(releases_data, previous_release, family)
@@ -2581,6 +2602,8 @@ def cmd_rollout_rollback_canary(args: argparse.Namespace) -> int:
     print(f"slot={slot}")
     print(f"lane={previous_lane}")
     print(f"release={previous_release}")
+    if inferred_without_record:
+        print("inferred_without_record=true")
     rc = cmd_apply(argparse.Namespace(slot=slot, state_root=str(state_root), allow_first_apply=False))
     if rc != 0:
         print("rollout_rollback_canary_status=fail")
@@ -2593,6 +2616,17 @@ def cmd_rollout_rollback_canary(args: argparse.Namespace) -> int:
     if isinstance(canary, dict):
         canary["status"] = "rolled_back"
         canary["rolled_back_at"] = _now_iso()
+    elif inferred_without_record:
+        record["canary"] = {
+            "slot": slot,
+            "release": canary_release,
+            "lane": _canary_lane_for_family(family),
+            "previous_lane": previous_lane,
+            "previous_release": previous_release,
+            "status": "rolled_back_without_record",
+            "rolled_back_at": _now_iso(),
+            "recovered_from": "canary_state_without_rollout_record",
+        }
     _write_rollout_state(state_root, rollout_state)
     print("rollout_rollback_canary_status=ok")
     _append_action_log(state_root, "rollout_rollback_canary", slot, previous_release, "ok")

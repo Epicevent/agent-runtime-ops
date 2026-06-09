@@ -81,6 +81,12 @@ def _propagation_matches(actual: str, required: str) -> bool:
     return actual == required
 
 
+def _command_as_list(raw_command: Any) -> list[str] | None:
+    if isinstance(raw_command, list):
+        return [str(item) for item in raw_command]
+    return None
+
+
 def validate_compose_contract(profile: Any, desired: Any, rendered_text: str) -> list[ComposeContractCheck]:
     checks: list[ComposeContractCheck] = []
     try:
@@ -145,6 +151,18 @@ def validate_compose_contract(profile: Any, desired: Any, rendered_text: str) ->
         )
     else:
         checks.append(ComposeContractCheck(False, "compose_runtime_user_model", f"unknown_mode={runtime_user_mode}"))
+
+    required_command = profile.metadata.get("required_command")
+    if required_command is not None:
+        expected_command = [str(item) for item in required_command] if isinstance(required_command, list) else []
+        actual_command = _command_as_list(service.get("command"))
+        checks.append(
+            ComposeContractCheck(
+                bool(expected_command) and actual_command == expected_command,
+                "compose_required_command",
+                f"required={' '.join(expected_command) or 'invalid'} actual={' '.join(actual_command) if actual_command else 'missing'}",
+            )
+        )
 
     volumes = service.get("volumes") if isinstance(service.get("volumes"), list) else []
     container_nas_root = str(profile.metadata.get("container_nas_root") or "")
