@@ -704,7 +704,7 @@ class McpServer:
     def _tool_rollout_status(self, args: dict[str, Any]) -> dict[str, Any]:
         self._reject_unknown(args, {"family"})
         family = self._family(args.get("family"))
-        runs = [self._run([self.opsctl, "rollout", "status", "--family", family], timeout=60)]
+        runs = [self._run([self.sudo, self.opsctl, "rollout", "status", "--family", family], timeout=60)]
         return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
 
     def _tool_dev_recipe_status(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -761,7 +761,7 @@ class McpServer:
         self._reject_unknown(args, {"family", "release"})
         family = self._family(args.get("family"))
         release = self._release(args.get("release"))
-        runs = [self._run([self.opsctl, "rollout", "plan", "--family", family, "--release", release], timeout=60)]
+        runs = [self._run([self.sudo, self.opsctl, "rollout", "plan", "--family", family, "--release", release], timeout=60)]
         return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
 
     def _tool_rollout_canary(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -769,14 +769,14 @@ class McpServer:
         family = self._family(args.get("family"))
         release = self._release(args.get("release"))
         slot = self._slot(args.get("slot"))
-        runs = [self._run([self.opsctl, "rollout", "plan", "--family", family, "--release", release], timeout=60)]
+        runs = [self._run([self.sudo, self.opsctl, "rollout", "plan", "--family", family, "--release", release], timeout=60)]
         if runs[0]["returncode"] != 0:
             return self._common_response(ok=False, mutated=False, runs=runs, next_action="fix release or rollout plan before canary")
         argv = [self.sudo, self.opsctl, "rollout", "canary", "--family", family, "--release", release, "--slot", slot]
         if bool(args.get("allow_first_apply", False)):
             argv.append("--allow-first-apply")
         runs.append(self._run(argv, timeout=600))
-        runs.append(self._run([self.opsctl, "rollout", "status", "--family", family], timeout=60))
+        runs.append(self._run([self.sudo, self.opsctl, "rollout", "status", "--family", family], timeout=60))
         ok = all(item["returncode"] == 0 for item in runs)
         return self._common_response(ok=ok, mutated=True, runs=runs)
 
@@ -784,11 +784,11 @@ class McpServer:
         self._reject_unknown(args, {"family", "release"})
         family = self._family(args.get("family"))
         release = self._release(args.get("release"))
-        runs = [self._run([self.opsctl, "rollout", "status", "--family", family], timeout=60)]
+        runs = [self._run([self.sudo, self.opsctl, "rollout", "status", "--family", family], timeout=60)]
         if runs[0]["returncode"] != 0:
             return self._common_response(ok=False, mutated=False, runs=runs, next_action="fix rollout status before promote")
         runs.append(self._run([self.sudo, self.opsctl, "rollout", "promote", "--family", family, "--release", release], timeout=1800))
-        runs.append(self._run([self.opsctl, "rollout", "status", "--family", family], timeout=60))
+        runs.append(self._run([self.sudo, self.opsctl, "rollout", "status", "--family", family], timeout=60))
         ok = all(item["returncode"] == 0 for item in runs)
         return self._common_response(ok=ok, mutated=True, runs=runs)
 
@@ -796,7 +796,7 @@ class McpServer:
         self._reject_unknown(args, {"family"})
         family = self._family(args.get("family"))
         runs = [self._run([self.sudo, self.opsctl, "rollout", "rollback-canary", "--family", family], timeout=600)]
-        runs.append(self._run([self.opsctl, "rollout", "status", "--family", family], timeout=60))
+        runs.append(self._run([self.sudo, self.opsctl, "rollout", "status", "--family", family], timeout=60))
         ok = all(item["returncode"] == 0 for item in runs)
         return self._common_response(ok=ok, mutated=True, runs=runs)
 

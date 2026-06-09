@@ -213,6 +213,8 @@ install_ops_sudoers() {
     printf '%s ALL=(root) NOPASSWD: %s rollback *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s recipe apply-dev *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s release import *\n' "$OPS_USER" "$BIN_LINK"
+    printf '%s ALL=(root) NOPASSWD: %s rollout status *\n' "$OPS_USER" "$BIN_LINK"
+    printf '%s ALL=(root) NOPASSWD: %s rollout plan *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s rollout canary *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s rollout promote *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s rollout rollback-canary *\n' "$OPS_USER" "$BIN_LINK"
@@ -231,6 +233,20 @@ install_ops_sudoers() {
   if [[ "$SUDOERS_FILE" != "$LEGACY_SUDOERS_FILE" && -e "$LEGACY_SUDOERS_FILE" ]]; then
     rm -f "$LEGACY_SUDOERS_FILE"
   fi
+}
+
+repair_private_state_permissions() {
+  [[ -d "$STATE_ROOT" ]] || return 0
+  chgrp "$OPS_GROUP" "$STATE_ROOT" 2>/dev/null || true
+  chmod 0750 "$STATE_ROOT" 2>/dev/null || true
+  local name path
+  for name in slots.yaml lanes.yaml releases.yaml rollout-state.yaml dev-recipes.yaml nas-policy.yaml; do
+    path="$STATE_ROOT/$name"
+    if [[ -f "$path" && ! -L "$path" ]]; then
+      chgrp "$OPS_GROUP" "$path" 2>/dev/null || true
+      chmod 0640 "$path" 2>/dev/null || true
+    fi
+  done
 }
 
 activate_release() {
@@ -495,10 +511,7 @@ install_package() {
   install_codex_skill "$release_dir"
   register_codex_mcp
 
-  if [[ -d "$STATE_ROOT" ]]; then
-    chgrp "$OPS_GROUP" "$STATE_ROOT" 2>/dev/null || true
-    chmod 0750 "$STATE_ROOT" 2>/dev/null || true
-  fi
+  repair_private_state_permissions
 
   info "installed_dir=$release_dir"
   info "current=$CURRENT_LINK"

@@ -481,7 +481,7 @@ class McpServerTests(unittest.TestCase):
         self.assertTrue(payload["mutated"])
         self.assertEqual(
             runner.calls[0]["argv"],
-            ["opsctl", "rollout", "plan", "--family", "openclaw", "--release", "openclaw-candidate"],
+            ["sudo", "opsctl", "rollout", "plan", "--family", "openclaw", "--release", "openclaw-candidate"],
         )
         self.assertEqual(
             runner.calls[1]["argv"],
@@ -500,7 +500,7 @@ class McpServerTests(unittest.TestCase):
         )
         self.assertEqual(
             runner.calls[2]["argv"],
-            ["opsctl", "rollout", "status", "--family", "openclaw"],
+            ["sudo", "opsctl", "rollout", "status", "--family", "openclaw"],
         )
 
     def test_rollout_promote_uses_status_guard(self) -> None:
@@ -514,7 +514,7 @@ class McpServerTests(unittest.TestCase):
         server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
         payload = call_tool(server, "rollout_promote", {"family": "openclaw", "release": "openclaw-candidate"})
         self.assertTrue(payload["ok"])
-        self.assertEqual(runner.calls[0]["argv"], ["opsctl", "rollout", "status", "--family", "openclaw"])
+        self.assertEqual(runner.calls[0]["argv"], ["sudo", "opsctl", "rollout", "status", "--family", "openclaw"])
         self.assertEqual(
             runner.calls[1]["argv"],
             ["sudo", "opsctl", "rollout", "promote", "--family", "openclaw", "--release", "openclaw-candidate"],

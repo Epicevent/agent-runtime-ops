@@ -1822,6 +1822,8 @@ def _write_state_yaml_file(state_root: Path, name: str, data: dict) -> Path | No
     tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
     try:
         tmp_path.write_text(dump_yaml(data), encoding="utf-8")
+        if hasattr(os, "chown") and hasattr(os, "geteuid") and os.geteuid() == 0:
+            os.chown(tmp_path, 0, state_root.stat().st_gid)
         os.chmod(tmp_path, 0o640)
         os.replace(tmp_path, path)
     except Exception:
