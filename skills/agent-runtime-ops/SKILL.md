@@ -53,6 +53,7 @@ Read the named section from `references/runbooks.md` when the task matches:
 - Install or update: "Deploy an Approved Repo Update"
 - MCP registration or smoke test: "MCP Setup and Smoke Test"
 - Slot diagnosis: "Check a Slot"
+- Router, public host, or subdomain diagnosis/change: "Route and Public Host Diagnosis"
 - Image rollout from wrapper/product digests: "Image Rollout"
 - Dev source-mode work: "Dev Recipe"
 - Runtime API keys such as Gemini/OpenAI: "Runtime Secret Injection"

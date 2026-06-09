@@ -163,6 +163,46 @@ ssh svcops "sudo /usr/local/bin/opsctl check --live SLOT"
 For group checks, prefer MCP selector arguments such as `slot_class` or `family` instead of many
 parallel per-slot calls.
 
+## Route and Public Host Diagnosis
+
+MCP tool names do not fully explain the layering. Always keep these facts separate:
+
+```text
+routing_status = slot -> host port allocation only
+apache_status = public host and Apache proxy port truth
+runtime_truth = running image labels and runtime recipe/profile truth
+```
+
+For a router/subdomain/public-host question, inspect both route layers before drawing conclusions:
+
+```bash
+ssh svcops "/usr/local/bin/opsctl routing status SLOT"
+ssh svcops "/usr/local/bin/opsctl apache status SLOT"
+ssh svcops "sudo /usr/local/bin/opsctl runtime truth SLOT"
+```
+
+Interpretation:
+
+```text
+registry gateway_port must equal Apache gateway_port
+Apache public_host is the current external name
+DNS/wildcard acceptance is not enough to prove Apache dispatch to the slot
+image labels do not prove public host or host port allocation
+```
+
+Changing the visible slot name means changing Apache public host, not renaming the slot id. Use the
+dedicated command and verify the full path:
+
+```bash
+ssh svcops "sudo /usr/local/bin/opsctl apache set-host SLOT NEW-NAME.ji-tech.co.kr"
+ssh svcops "/usr/local/bin/opsctl apache status SLOT"
+ssh svcops "sudo /usr/local/bin/opsctl check --live SLOT"
+```
+
+Do not hand-edit `/srv/openclaw-ops/slot-registry.json` to rename a slot. The registry is not public
+host truth. Do not rename `ocN`/`dev-*` slot ids unless there is a separate migration plan covering
+Unix account, home directory, secrets, NAS, containers, labels, backups, and state.
+
 ## Image Rollout
 
 Use digest-pinned wrapper and product images. Do not use release-state rollout commands for normal
