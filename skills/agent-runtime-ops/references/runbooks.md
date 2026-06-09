@@ -20,6 +20,19 @@ approved_matches_installed=yes
 If PowerShell is the local shell, avoid `$(...)` inside double-quoted SSH commands because it expands
 locally before SSH runs.
 
+Before diagnosing or changing a slot, read the `runtime_contract`, `customer_surface`, `recipe_mode`,
+and `product_component` values from `opsctl slot list`, `opsctl status SLOT`, or `opsctl plan SLOT`.
+Keep the layers separate:
+
+```text
+runtime contract -> image recipe -> runtime profile -> release state
+```
+
+For Hermes customer slots, `hermes-workspace-http-3000` means the customer-facing surface is the
+workspace UI on container port `3000`. A candidate image whose product component is only
+`hermes-agent` does not satisfy that contract by itself; reject or fix the image recipe before
+changing the runtime profile.
+
 ## Standard Operating Agents
 
 Codex and Gemini CLI are the standard natural-language operating CLIs for `svcops`.

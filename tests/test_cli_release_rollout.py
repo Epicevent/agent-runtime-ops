@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from agent_runtime_ops.cli import (
     cmd_apply,
+    cmd_check,
     cmd_diagnostics_show,
     cmd_recipe_dev_apply,
     cmd_recipe_dev_status,
@@ -42,6 +43,47 @@ def import_args(root: Path, **overrides: object) -> argparse.Namespace:
     }
     values.update(overrides)
     return argparse.Namespace(**values)
+
+
+def write_hermes_state(root: Path, *, candidate_product_repo: str = "hermes-workspace") -> None:
+    current_digest = "sha256:" + "1" * 64
+    candidate_digest = "sha256:" + "2" * 64
+    wrapper_digest = "sha256:" + "3" * 64
+    (root / "slots.yaml").write_text(
+        """
+slots:
+  - slot: oc20
+    lane: hermes
+""".lstrip(),
+        encoding="utf-8",
+    )
+    (root / "lanes.yaml").write_text(
+        """
+lanes:
+  hermes:
+    family: hermes
+    slot_class: customer
+    release: hermes-current
+    runtime_profile: hermes-customer
+""".lstrip(),
+        encoding="utf-8",
+    )
+    (root / "releases.yaml").write_text(
+        f"""
+releases:
+  hermes-current:
+    family: hermes
+    wrapper_image: ghcr.io/epicevent/openclaw-nas-agent@{current_digest}
+    product_image: ghcr.io/epicevent/openclaw-nas-agent@{current_digest}
+    digest: {current_digest}
+  hermes-candidate:
+    family: hermes
+    wrapper_image: ghcr.io/epicevent/agent-runtime-hermes@{wrapper_digest}
+    product_image: ghcr.io/epicevent/{candidate_product_repo}@{candidate_digest}
+    digest: {wrapper_digest}
+""".lstrip(),
+        encoding="utf-8",
+    )
 
 
 def write_state(root: Path) -> None:
@@ -288,7 +330,9 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertEqual(candidate["product_image"], image_ref("2"))
             self.assertEqual(candidate["digest"], "sha256:" + "2" * 64)
             self.assertEqual(candidate["compatibility_mode"], "combined_runtime_image")
+            self.assertEqual(candidate["components"]["product_component"], "combined-runtime")
             self.assertIn("release_digest=sha256:" + "2" * 64, output.getvalue())
+            self.assertIn("product_component=combined-runtime", output.getvalue())
 
     def test_release_import_rejects_tag_only_image(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -315,6 +359,64 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertIn('"mutates": false', output.getvalue())
             self.assertIn('"release_digest": "sha256:' + "2" * 64 + '"', output.getvalue())
             self.assertEqual((root / "lanes.yaml").read_text(encoding="utf-8"), before)
+
+    def test_hermes_customer_rejects_agent_only_product_image_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_hermes_state(root, candidate_product_repo="hermes-jitech")
+            lanes = load_yaml(root / "lanes.yaml")
+            lanes["lanes"]["hermes"]["release"] = "hermes-candidate"
+            (root / "lanes.yaml").write_text(dump_yaml(lanes), encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                rc = cmd_check(argparse.Namespace(state_root=str(root), slot="oc20", live=False))
+
+            text = output.getvalue()
+            self.assertEqual(rc, 1, text)
+            self.assertIn("runtime_contract=hermes-workspace-http-3000", text)
+            self.assertIn("FAIL product_image_matches_runtime_contract", text)
+            self.assertIn("product_component=hermes-agent", text)
+
+    def test_rollout_plan_shows_hermes_contract_incompatibility(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_hermes_state(root, candidate_product_repo="hermes-jitech")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                rc = cmd_rollout_plan(argparse.Namespace(state_root=str(root), family="hermes", release="hermes-candidate"))
+
+            self.assertEqual(rc, 0, output.getvalue())
+            plan = json.loads(output.getvalue())
+            self.assertFalse(plan["contract_compatible"])
+            self.assertEqual(plan["runtime_contract"], "hermes-workspace-http-3000")
+            failed = [item["name"] for item in plan["contract_checks"] if not item["ok"]]
+            self.assertIn("product_image_matches_runtime_contract", failed)
+
+    def test_rollout_canary_rejects_hermes_agent_only_image_before_state_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_hermes_state(root, candidate_product_repo="hermes-jitech")
+            before_slots = (root / "slots.yaml").read_text(encoding="utf-8")
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.cli.cmd_apply") as apply,
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_rollout_canary(
+                    argparse.Namespace(
+                        state_root=str(root),
+                        family="hermes",
+                        release="hermes-candidate",
+                        slot="oc20",
+                        allow_first_apply=False,
+                    )
+                )
+
+            self.assertEqual(rc, 1)
+            self.assertIn("release does not satisfy runtime contract", output.getvalue())
+            self.assertEqual((root / "slots.yaml").read_text(encoding="utf-8"), before_slots)
+            apply.assert_not_called()
 
     def test_rollout_canary_moves_only_target_slot_and_records_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

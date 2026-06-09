@@ -163,6 +163,7 @@ class McpServer:
             },
             "instructions": (
                 "Use these tools to inspect and operate the svcops runtime through opsctl. "
+                "Separate runtime contract, image recipe, runtime profile, and release state before changing a slot. "
                 "Call one MCP tool at a time and wait for its response before calling another tool. "
                 "Use selector arguments such as slot_class for group queries instead of parallel per-slot calls. "
                 "Do not pass raw secret values as tool arguments."
@@ -180,7 +181,7 @@ class McpServer:
             {
                 "name": "slot_list",
                 "title": "List Slots",
-                "description": "List current slots with lane, family, slot class, runtime profile, release, and mode.",
+                "description": "List current slots with lane, family, contract, runtime profile, release, recipe, and mode.",
                 "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
             },
             {
@@ -216,7 +217,7 @@ class McpServer:
             {
                 "name": "release_import",
                 "title": "Import Image Release",
-                "description": "Register a digest-pinned image release in private server state.",
+                "description": "Register a digest-pinned image release and optional recipe components in private server state.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -226,6 +227,10 @@ class McpServer:
                         "product_image": {"type": "string"},
                         "wrapper_image": {"type": "string"},
                         "image_name": {"type": "string"},
+                        "components": {
+                            "type": "object",
+                            "additionalProperties": {"type": "string"},
+                        },
                         "compat_combined": {"type": "boolean", "default": True},
                         "replace": {"type": "boolean", "default": False},
                     },
@@ -281,7 +286,7 @@ class McpServer:
             {
                 "name": "rollout_plan",
                 "title": "Rollout Plan",
-                "description": "Validate a candidate release and show the dev-to-canary-to-fleet plan without mutating state.",
+                "description": "Validate release recipe/runtime-contract compatibility and show the dev-to-canary-to-fleet plan without mutating state.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -674,6 +679,7 @@ class McpServer:
                 "product_image",
                 "wrapper_image",
                 "image_name",
+                "components",
                 "compat_combined",
                 "replace",
             },
@@ -696,6 +702,16 @@ class McpServer:
             if args.get("image_ref") is not None:
                 raise ToolError("split releases use product_image and wrapper_image, not image_ref")
             argv.extend(["--product-image", product_image, "--wrapper-image", wrapper_image])
+        components = args.get("components")
+        if components is not None:
+            if not isinstance(components, dict):
+                raise ToolError("components must be an object of NAME=VALUE recipe metadata")
+            for key in sorted(components):
+                name = self._release(key)
+                value = self._safe_text(components[key], f"components.{name}")
+                if not value:
+                    raise ToolError(f"components.{name} must not be empty")
+                argv.extend(["--component", f"{name}={value}"])
         if bool(args.get("replace", False)):
             argv.append("--replace")
         runs = [self._run(argv, timeout=120)]
@@ -772,6 +788,17 @@ class McpServer:
         runs = [self._run([self.sudo, self.opsctl, "rollout", "plan", "--family", family, "--release", release], timeout=60)]
         if runs[0]["returncode"] != 0:
             return self._common_response(ok=False, mutated=False, runs=runs, next_action="fix release or rollout plan before canary")
+        try:
+            plan = json.loads(runs[0]["stdout"])
+        except Exception:
+            plan = {}
+        if isinstance(plan, dict) and plan.get("contract_compatible") is False:
+            return self._common_response(
+                ok=False,
+                mutated=False,
+                runs=runs,
+                next_action="fix release recipe/runtime contract before canary",
+            )
         argv = [self.sudo, self.opsctl, "rollout", "canary", "--family", family, "--release", release, "--slot", slot]
         if bool(args.get("allow_first_apply", False)):
             argv.append("--allow-first-apply")

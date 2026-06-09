@@ -17,6 +17,11 @@ Use this skill to keep natural-language operations tied to the real repository a
   commands manually through `ssh svcops`.
 - Treat Codex and Gemini CLI as the standard operating-agent CLIs on `svcops`.
 - Do not install or depend on Claude Code, OpenCode, or other agent CLIs for routine operations.
+- Before changing a slot, separate runtime contract, image recipe, runtime profile, and release
+  state. A live HTTP failure is not automatically a profile problem.
+- For Hermes customer slots, treat `hermes-workspace-http-3000` as the current customer contract:
+  workspace UI on container port `3000`. Dashboard port `9119` is not a customer-surface fix unless
+  the operator explicitly decides to change the product contract.
 - Do not claim a server change is complete after local tests only.
 - Do not edit rendered Docker compose files directly.
 - Do not guess target identifiers; resolve slots, profiles, accounts, shares, and releases from MCP,

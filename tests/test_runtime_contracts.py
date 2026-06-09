@@ -46,6 +46,7 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertTrue(results["compose_nas_root_bind_present"])
         self.assertTrue(results["compose_nas_root_readonly"])
         self.assertTrue(results["compose_nas_root_propagation"])
+        self.assertTrue(results["compose_customer_surface_port"])
         self.assertTrue(results["compose_customer_source_mount_absent"])
 
     def test_hermes_customer_contract(self) -> None:
@@ -56,6 +57,7 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertTrue(results["compose_nas_root_bind_present"])
         self.assertTrue(results["compose_nas_root_readonly"])
         self.assertTrue(results["compose_nas_root_propagation"])
+        self.assertTrue(results["compose_customer_surface_port"])
         self.assertTrue(results["compose_customer_source_mount_absent"])
 
     def test_hermes_dev_contract(self) -> None:
@@ -63,6 +65,7 @@ class RuntimeContractTests(unittest.TestCase):
         results = contract_results("hermes-dev", desired)
         self.assertTrue(results["compose_runtime_user_model"])
         self.assertTrue(results["compose_required_command"])
+        self.assertTrue(results["compose_customer_surface_port"])
         self.assertTrue(results["compose_dev_source_mount_present"])
 
     def test_hermes_rejects_missing_required_command(self) -> None:

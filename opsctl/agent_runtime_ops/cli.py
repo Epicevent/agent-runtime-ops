@@ -167,14 +167,19 @@ def cmd_slot_list(args: argparse.Namespace) -> int:
             family = profile.metadata.get("family") or desired.lane_data.get("family") or ""
             slot_class = desired.lane_data.get("slot_class") or ""
             mode = profile.metadata.get("mode") or ""
+            recipe_tokens = _release_recipe_tokens(desired.release_data)
             print(
                 f"slot={desired.slot} "
                 f"lane={desired.lane} "
                 f"family={family} "
                 f"slot_class={slot_class} "
                 f"runtime_profile={profile.name} "
+                f"runtime_contract={_profile_runtime_contract(profile)} "
+                f"customer_surface={_profile_customer_surface(profile)} "
                 f"release={desired.release_name} "
-                f"mode={mode}"
+                f"mode={mode} "
+                f"recipe_mode={recipe_tokens['recipe_mode']} "
+                f"product_component={recipe_tokens['product_component']}"
             )
         except Exception as exc:
             print(f"slot={slot} status=not_ready reason={exc}")
@@ -274,8 +279,13 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"release={desired.release_name}")
     print(f"runtime_profile={profile.name}")
     print(f"runtime_profile_digest={profile.digest}")
+    print(f"runtime_contract={_profile_runtime_contract(profile)}")
+    print(f"customer_surface={_profile_customer_surface(profile)}")
     print(f"family={profile.metadata.get('family')}")
     print(f"mode={profile.metadata.get('mode')}")
+    recipe_tokens = _release_recipe_tokens(desired.release_data)
+    for key, value in recipe_tokens.items():
+        print(f"{key}={value}")
     return 0
 
 
@@ -301,8 +311,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
         "release": desired.release_name,
         "runtime_profile": profile.name,
         "runtime_profile_digest": profile.digest,
+        "runtime_contract": _profile_runtime_contract(profile),
+        "customer_surface": _profile_customer_surface(profile),
         "wrapper_image": desired.release_data.get("wrapper_image"),
         "product_image": desired.release_data.get("product_image"),
+        "recipe": _release_recipe_payload(desired.release_data),
         "compose_sha256": rendered.sha256,
         "mutates": False,
     }
@@ -374,6 +387,142 @@ def _allowed_image_ref(family: object, role: str, image_ref: object) -> bool:
         ),
     }
     return image_ref.startswith(allowed.get((family, role), ()))
+
+
+def _metadata_list(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item)]
+    if isinstance(value, str) and value:
+        return [value]
+    return []
+
+
+def _csv(values: list[str]) -> str:
+    return ",".join(values)
+
+
+def _image_repo(image_ref: object) -> str:
+    if not isinstance(image_ref, str):
+        return ""
+    return image_ref.split("@sha256:", 1)[0]
+
+
+def _image_component_name(image_ref: object) -> str:
+    repo = _image_repo(image_ref)
+    mapping = {
+        "ghcr.io/epicevent/hermes-jitech": "hermes-agent",
+        "ghcr.io/epicevent/hermes-workspace": "hermes-workspace",
+        "ghcr.io/epicevent/openclaw-nas-agent": "combined-runtime",
+        "ghcr.io/epicevent/openclaw-jitech": "openclaw-control",
+        "ghcr.io/epicevent/agent-runtime-hermes": "hermes-wrapper",
+        "ghcr.io/epicevent/agent-runtime-openclaw": "openclaw-wrapper",
+    }
+    return mapping.get(repo, repo.rsplit("/", 1)[-1] if repo else "unknown")
+
+
+def _profile_runtime_contract(profile) -> str:
+    return str(profile.metadata.get("runtime_contract") or "")
+
+
+def _profile_customer_surface(profile) -> str:
+    return str(profile.metadata.get("customer_surface") or "")
+
+
+def _release_recipe_payload(release_data: dict) -> dict[str, object]:
+    product_image = release_data.get("product_image")
+    wrapper_image = release_data.get("wrapper_image")
+    payload: dict[str, object] = {
+        "mode": release_data.get("compatibility_mode") or "unknown",
+        "product_component": _image_component_name(product_image),
+        "wrapper_component": _image_component_name(wrapper_image),
+        "product_repo": _image_repo(product_image),
+        "wrapper_repo": _image_repo(wrapper_image),
+    }
+    components = release_data.get("components")
+    if isinstance(components, dict):
+        payload["components"] = {str(key): str(value) for key, value in components.items()}
+    return payload
+
+
+def _release_recipe_tokens(release_data: dict) -> dict[str, str]:
+    recipe = _release_recipe_payload(release_data)
+    return {
+        "recipe_mode": str(recipe.get("mode") or "unknown"),
+        "product_component": str(recipe.get("product_component") or "unknown"),
+        "wrapper_component": str(recipe.get("wrapper_component") or "unknown"),
+    }
+
+
+def _release_components_from_args(raw_components: object) -> dict[str, str]:
+    components: dict[str, str] = {}
+    if raw_components is None or raw_components == "":
+        return components
+    if not isinstance(raw_components, list):
+        raise ValueError("--component must be repeatable NAME=VALUE entries")
+    for raw_item in raw_components:
+        item = str(raw_item or "")
+        if "=" not in item:
+            raise ValueError("--component must use NAME=VALUE")
+        name, value = item.split("=", 1)
+        name = name.strip()
+        value = value.strip()
+        if not RELEASE_NAME_RE.match(name):
+            raise ValueError(f"invalid component name: {name}")
+        if not value or not SAFE_TEXT_RE.match(value):
+            raise ValueError(f"invalid component value for {name}")
+        components[name] = value
+    return components
+
+
+def _derived_release_components(product_image: str, wrapper_image: str) -> dict[str, str]:
+    return {
+        "product_image": product_image,
+        "wrapper_image": wrapper_image,
+        "product_component": _image_component_name(product_image),
+        "wrapper_component": _image_component_name(wrapper_image),
+    }
+
+
+def _release_profile_contract_checks(release_data: dict, profile) -> list[tuple[bool, str, str | None]]:
+    runtime_contract = _profile_runtime_contract(profile)
+    customer_surface = _profile_customer_surface(profile)
+    expected_components = _metadata_list(profile.metadata.get("expected_image_components"))
+    compatible_product_prefixes = _metadata_list(profile.metadata.get("compatible_product_image_prefixes"))
+    product_image = str(release_data.get("product_image") or "")
+    checks: list[tuple[bool, str, str | None]] = [
+        (bool(runtime_contract), "runtime_contract_declared", f"contract={runtime_contract or 'missing'}"),
+        (
+            bool(customer_surface),
+            "runtime_contract_customer_surface_declared",
+            f"surface={customer_surface or 'missing'}",
+        ),
+    ]
+    if expected_components:
+        checks.append(
+            (
+                True,
+                "runtime_contract_expected_components",
+                "components=" + _csv(expected_components),
+            )
+        )
+    if compatible_product_prefixes:
+        ok = any(product_image.startswith(prefix) for prefix in compatible_product_prefixes)
+        checks.append(
+            (
+                ok,
+                "product_image_matches_runtime_contract",
+                (
+                    f"contract={runtime_contract or 'unknown'} "
+                    f"product_component={_image_component_name(product_image)} "
+                    f"expected_prefixes={_csv(compatible_product_prefixes)}"
+                ),
+            )
+        )
+    return checks
+
+
+def _release_profile_contract_failures(release_data: dict, profile) -> list[str]:
+    return [name for ok, name, _ in _release_profile_contract_checks(release_data, profile) if not ok]
 
 
 def _container_name(slot: str, profile) -> str:
@@ -765,6 +914,7 @@ def _run_static_slot_checks(desired, profile, rendered=None) -> list[tuple[bool,
             str(product_image) if product_image else None,
         ),
     ]
+    checks.extend(_release_profile_contract_checks(desired.release_data, profile))
 
     if lane_slot_class == "customer":
         checks.extend(
@@ -809,6 +959,8 @@ def cmd_check(args: argparse.Namespace) -> int:
     print(f"release={desired.release_name}")
     print(f"runtime_profile={profile.name}")
     print(f"runtime_profile_digest={profile.digest}")
+    print(f"runtime_contract={_profile_runtime_contract(profile)}")
+    print(f"customer_surface={_profile_customer_surface(profile)}")
     print(f"compose_sha256={rendered.sha256}")
     print("check_mode=non_mutating")
     print(f"live_runtime_check={'enabled' if args.live else 'not_run'}")
@@ -955,11 +1107,14 @@ def _manifest_payload(
         "slot_class": desired.lane_data.get("slot_class"),
         "runtime_profile": profile.name,
         "runtime_profile_digest": profile.digest,
+        "runtime_contract": _profile_runtime_contract(profile),
+        "customer_surface": _profile_customer_surface(profile),
         "wrapper_image": wrapper_image,
         "wrapper_image_digest": _digest_from_image_ref(wrapper_image),
         "product_image": product_image,
         "product_image_digest": _digest_from_image_ref(product_image),
         "release_digest": desired.release_data.get("digest"),
+        "recipe": _release_recipe_payload(desired.release_data),
         "compose_sha256": rendered.sha256,
         "compose_path": str(compose_path),
     }
@@ -984,9 +1139,13 @@ def _write_slot_manifest(
         f"slot_class={desired.lane_data.get('slot_class')}",
         f"runtime_profile={profile.name}",
         f"runtime_profile_digest={profile.digest}",
+        f"runtime_contract={_profile_runtime_contract(profile)}",
+        f"customer_surface={_profile_customer_surface(profile)}",
         f"ops_repo_commit={_installed_source_commit()}",
         f"wrapper_image={desired.release_data.get('wrapper_image')}",
         f"product_image={desired.release_data.get('product_image')}",
+        f"recipe_mode={_release_recipe_tokens(desired.release_data)['recipe_mode']}",
+        f"product_component={_release_recipe_tokens(desired.release_data)['product_component']}",
         f"release_digest={desired.release_data.get('digest')}",
         f"compose_sha256={rendered.sha256}",
         f"compose_file={path.parent / 'docker-compose.agent-runtime.yml'}",
@@ -2407,6 +2566,8 @@ def cmd_release_import(args: argparse.Namespace) -> int:
             raise ValueError(f"product image repository is not allowed for {family}")
         if not _allowed_image_ref(family, "wrapper", wrapper_image):
             raise ValueError(f"wrapper image repository is not allowed for {family}")
+        components = _derived_release_components(product_image, wrapper_image)
+        components.update(_release_components_from_args(getattr(args, "component", None)))
 
         releases_data = load_yaml(state_root / "releases.yaml", default={})
         releases = releases_data.setdefault("releases", {})
@@ -2422,6 +2583,7 @@ def cmd_release_import(args: argparse.Namespace) -> int:
             "wrapper_image": wrapper_image,
             "digest": wrapper_digest,
             "product_digest": product_digest,
+            "components": components,
             "imported_at": _now_iso(),
             "imported_by": os.environ.get("SUDO_USER") or os.environ.get("USER") or "",
             "compatibility_mode": compatibility_mode,
@@ -2442,6 +2604,8 @@ def cmd_release_import(args: argparse.Namespace) -> int:
     print(f"family={family}")
     print(f"wrapper_image={wrapper_image}")
     print(f"product_image={product_image}")
+    print(f"recipe_mode={compatibility_mode}")
+    print(f"product_component={components.get('product_component', '')}")
     print(f"release_digest={wrapper_digest}")
     if backup_path:
         print(f"backup={backup_path}")
@@ -2515,12 +2679,24 @@ def cmd_rollout_plan(args: argparse.Namespace) -> int:
         canary_lane = _canary_lane_for_family(family)
         lanes = lanes_data.get("lanes") or {}
         fleet_release = str((lanes.get(fleet_lane) or {}).get("release") or "")
+        fleet_profile_name = str((lanes.get(fleet_lane) or {}).get("runtime_profile") or "")
+        fleet_profile = load_profile(fleet_profile_name)
+        contract_checks = [
+            {"ok": ok, "name": name, "detail": detail}
+            for ok, name, detail in _release_profile_contract_checks(release_data, fleet_profile)
+        ]
         plan = {
             "family": family,
             "release": release,
             "release_digest": release_data.get("digest"),
             "wrapper_image": release_data.get("wrapper_image"),
             "product_image": release_data.get("product_image"),
+            "recipe": _release_recipe_payload(release_data),
+            "runtime_profile": fleet_profile.name,
+            "runtime_contract": _profile_runtime_contract(fleet_profile),
+            "customer_surface": _profile_customer_surface(fleet_profile),
+            "contract_checks": contract_checks,
+            "contract_compatible": all(item["ok"] for item in contract_checks),
             "fleet_lane": fleet_lane,
             "fleet_current_release": fleet_release,
             "fleet_slots": _slots_for_lane(slots_data, fleet_lane),
@@ -2561,11 +2737,18 @@ def cmd_rollout_canary(args: argparse.Namespace) -> int:
         slots_data, lanes_data, releases_data = _load_slots_lanes_releases(state_root)
         original_slots_data = copy.deepcopy(slots_data)
         original_lanes_data = copy.deepcopy(lanes_data)
-        _validate_release_for_family(releases_data, release, family)
+        release_data = _validate_release_for_family(releases_data, release, family)
         desired_before = load_desired_slot(slot, state_root)
         profile_before = load_profile(desired_before.runtime_profile)
         if desired_before.lane_data.get("family") != family or desired_before.lane_data.get("slot_class") != "customer":
             raise ValueError(f"slot is not a {family} customer slot: {slot}")
+        contract_failures = _release_profile_contract_failures(release_data, profile_before)
+        if contract_failures:
+            raise ValueError(
+                "release does not satisfy runtime contract "
+                f"{_profile_runtime_contract(profile_before) or profile_before.name}:"
+                + ",".join(contract_failures)
+            )
         fleet_lane = _fleet_lane_for_family(lanes_data, family)
         canary_lane = _canary_lane_for_family(family)
         existing_rollout_state = _load_rollout_state(state_root)
@@ -3805,6 +3988,12 @@ def build_parser() -> argparse.ArgumentParser:
     release_import.add_argument("--product-image")
     release_import.add_argument("--wrapper-image")
     release_import.add_argument("--image-name")
+    release_import.add_argument(
+        "--component",
+        action="append",
+        default=[],
+        help="repeatable release recipe component in NAME=VALUE form, such as hermes-workspace=repo@sha",
+    )
     release_import.add_argument("--compat-combined", action="store_true")
     release_import.add_argument("--replace", action="store_true")
     release_import.set_defaults(func=cmd_release_import)

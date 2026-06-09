@@ -54,6 +54,7 @@ class McpServerTests(unittest.TestCase):
         )
         self.assertEqual(response["result"]["protocolVersion"], "2025-06-18")
         self.assertIn("one MCP tool at a time", response["result"]["instructions"])
+        self.assertIn("runtime contract", response["result"]["instructions"])
         self.assertIn("slot_class", response["result"]["instructions"])
 
         tools = server.handle_message({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
@@ -90,6 +91,8 @@ class McpServerTests(unittest.TestCase):
         key_schema = secret_tool["inputSchema"]["properties"]["key"]
         self.assertIn("GEMINI_API_KEY", key_schema["enum"])
         self.assertNotIn("API_KEY", key_schema["enum"])
+        release_tool = next(item for item in tools["result"]["tools"] if item["name"] == "release_import")
+        self.assertIn("components", release_tool["inputSchema"]["properties"])
 
     def test_unknown_tool_and_malformed_json(self) -> None:
         server = McpServer(runner=FakeRunner(), opsctl="opsctl", sudo="sudo")
@@ -385,6 +388,7 @@ class McpServerTests(unittest.TestCase):
                 "name": "openclaw-candidate",
                 "family": "openclaw",
                 "image_ref": image,
+                "components": {"openclaw-jitech": "Epicevent/openclaw-jitech@abc123"},
                 "compat_combined": True,
             },
         )
@@ -403,8 +407,25 @@ class McpServerTests(unittest.TestCase):
                 "--image",
                 image,
                 "--compat-combined",
+                "--component",
+                "openclaw-jitech=Epicevent/openclaw-jitech@abc123",
             ],
         )
+
+    def test_rollout_canary_stops_when_plan_reports_contract_mismatch(self) -> None:
+        plan = '{"mutates": false, "contract_compatible": false}\n'
+        runner = FakeRunner([(0, plan, "")])
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        payload = call_tool(
+            server,
+            "rollout_canary",
+            {"family": "hermes", "release": "hermes-candidate", "slot": "oc20"},
+        )
+
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["mutated"])
+        self.assertEqual(payload["next_action"], "fix release recipe/runtime contract before canary")
+        self.assertEqual(len(runner.calls), 1)
 
     def test_release_import_rejects_tag_only_image_ref(self) -> None:
         server = McpServer(runner=FakeRunner(), opsctl="opsctl", sudo="sudo")

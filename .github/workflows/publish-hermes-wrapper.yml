@@ -7,7 +7,7 @@ on:
         description: Public tag to publish
         required: true
       product_image:
-        description: Hermes product image digest
+        description: Hermes product image digest; customer slots normally require hermes-workspace/openclaw-nas-agent
         required: true
 
 permissions:
@@ -28,7 +28,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "${{ inputs.image_tag }}" =~ ^hermes-[A-Za-z0-9._-]+$ ]]
-          [[ "${{ inputs.product_image }}" =~ ^ghcr\.io/epicevent/hermes-jitech@sha256:[0-9a-f]{64}$ ]]
+          [[ "${{ inputs.product_image }}" =~ ^ghcr\.io/epicevent/(hermes-jitech|hermes-workspace|openclaw-nas-agent)@sha256:[0-9a-f]{64}$ ]]
 
       - name: Login to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin

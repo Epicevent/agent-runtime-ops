@@ -3,10 +3,15 @@ family: openclaw
 mode: image
 slot_class: customer
 service: openclaw-gateway
+runtime_contract: openclaw-gateway-http-18789
+customer_surface: openclaw-gateway@18789
+expected_image_components:
+  - openclaw-control-server
 container_nas_root: /home/node/nas_docs
 allow_source_mount: false
 required_mount_propagation: rslave
 required_read_only_nas: true
 runtime_user_mode: compose
 http_smoke_path: /healthz
+required_http_container_port: 18789
 startup_timeout_seconds: 90

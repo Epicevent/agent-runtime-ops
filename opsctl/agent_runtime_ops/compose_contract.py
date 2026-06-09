@@ -87,6 +87,18 @@ def _command_as_list(raw_command: Any) -> list[str] | None:
     return None
 
 
+def _port_targets_container_port(raw_port: Any, container_port: str) -> bool:
+    if isinstance(raw_port, dict):
+        target = raw_port.get("target")
+        return str(target) == container_port
+    if not isinstance(raw_port, str):
+        return False
+    text = raw_port.strip()
+    if "/" in text:
+        text = text.split("/", 1)[0]
+    return text.split(":")[-1] == container_port
+
+
 def validate_compose_contract(profile: Any, desired: Any, rendered_text: str) -> list[ComposeContractCheck]:
     checks: list[ComposeContractCheck] = []
     try:
@@ -161,6 +173,20 @@ def validate_compose_contract(profile: Any, desired: Any, rendered_text: str) ->
                 bool(expected_command) and actual_command == expected_command,
                 "compose_required_command",
                 f"required={' '.join(expected_command) or 'invalid'} actual={' '.join(actual_command) if actual_command else 'missing'}",
+            )
+        )
+
+    required_http_container_port = str(profile.metadata.get("required_http_container_port") or "")
+    if required_http_container_port:
+        ports = service.get("ports") if isinstance(service.get("ports"), list) else []
+        checks.append(
+            ComposeContractCheck(
+                any(_port_targets_container_port(port, required_http_container_port) for port in ports),
+                "compose_customer_surface_port",
+                (
+                    f"contract={profile.metadata.get('runtime_contract') or 'unknown'} "
+                    f"container_port={required_http_container_port}"
+                ),
             )
         )
 

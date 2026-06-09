@@ -86,6 +86,28 @@ Report like an operator would expect: request interpreted, targets, actual actio
 mutated, before/after state, pass/fail, and the next recoverable step. Do not posture as the
 operator; the operator controls intent and risk, and the agent executes, verifies, and communicates.
 
+## Runtime Contract First
+
+Before changing a slot, separate four layers and report them in that order:
+
+```text
+runtime contract -> image recipe -> runtime profile -> release state
+```
+
+The runtime contract is what the slot must expose to users. The image recipe is what was baked into
+the image. The runtime profile is how that image is executed on the server. The release state is
+which digest a lane or slot points at.
+
+Do not treat a live HTTP failure as a profile problem until the old working image and the new
+candidate image are compared against the same runtime contract. For Hermes customer slots, the
+current contract is `hermes-workspace-http-3000`: the customer-facing surface is the workspace UI on
+container port `3000`. The Hermes dashboard on `9119` is internal/admin unless a product decision
+explicitly changes the customer surface.
+
+If an image contains only a Hermes agent/gateway but the slot contract requires the Hermes workspace
+server on `3000`, fix or reject the image recipe. Do not change `hermes-customer` to dashboard ports
+as a bug fix; that would be a product contract change.
+
 ## First Move
 
 When work may affect the server, do all of the following before claiming completion:
