@@ -298,6 +298,37 @@ class McpServer:
                 },
             },
             {
+                "name": "rollout_dev_plan",
+                "title": "Dev Rollout Plan",
+                "description": "Validate a release against the image-declared dev runtime profile for one dev slot without mutating state.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "family": {"type": "string", "enum": ["hermes", "openclaw"]},
+                        "release": {"type": "string"},
+                        "slot": {"type": "string"},
+                    },
+                    "required": ["family", "release", "slot"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "rollout_dev_apply",
+                "title": "Apply Dev Release",
+                "description": "Move a dev slot lane to the image-declared dev runtime profile, apply it, and record the result.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "family": {"type": "string", "enum": ["hermes", "openclaw"]},
+                        "release": {"type": "string"},
+                        "slot": {"type": "string"},
+                        "allow_first_apply": {"type": "boolean", "default": False},
+                    },
+                    "required": ["family", "release", "slot"],
+                    "additionalProperties": False,
+                },
+            },
+            {
                 "name": "rollout_canary",
                 "title": "Rollout Canary",
                 "description": "Move one customer slot to the candidate release, apply it, and record canary success only after live checks pass.",
@@ -509,6 +540,8 @@ class McpServer:
             "dev_recipe_status": self._tool_dev_recipe_status,
             "dev_recipe_apply": self._tool_dev_recipe_apply,
             "rollout_plan": self._tool_rollout_plan,
+            "rollout_dev_plan": self._tool_rollout_dev_plan,
+            "rollout_dev_apply": self._tool_rollout_dev_apply,
             "rollout_canary": self._tool_rollout_canary,
             "rollout_promote": self._tool_rollout_promote,
             "rollout_rollback_canary": self._tool_rollout_rollback_canary,
@@ -779,6 +812,39 @@ class McpServer:
         release = self._release(args.get("release"))
         runs = [self._run([self.sudo, self.opsctl, "rollout", "plan", "--family", family, "--release", release], timeout=60)]
         return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
+
+    def _tool_rollout_dev_plan(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(args, {"family", "release", "slot"})
+        family = self._family(args.get("family"))
+        release = self._release(args.get("release"))
+        slot = self._slot(args.get("slot"))
+        runs = [
+            self._run(
+                [self.sudo, self.opsctl, "rollout", "dev-plan", "--family", family, "--release", release, "--slot", slot],
+                timeout=60,
+            )
+        ]
+        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
+
+    def _tool_rollout_dev_apply(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(args, {"family", "release", "slot", "allow_first_apply"})
+        family = self._family(args.get("family"))
+        release = self._release(args.get("release"))
+        slot = self._slot(args.get("slot"))
+        runs = [
+            self._run(
+                [self.sudo, self.opsctl, "rollout", "dev-plan", "--family", family, "--release", release, "--slot", slot],
+                timeout=60,
+            )
+        ]
+        if runs[0]["returncode"] != 0:
+            return self._common_response(ok=False, mutated=False, runs=runs, next_action="fix release or dev rollout plan before apply")
+        argv = [self.sudo, self.opsctl, "rollout", "dev-apply", "--family", family, "--release", release, "--slot", slot]
+        if bool(args.get("allow_first_apply", False)):
+            argv.append("--allow-first-apply")
+        runs.append(self._run(argv, timeout=900))
+        ok = all(item["returncode"] == 0 for item in runs)
+        return self._common_response(ok=ok, mutated=True, runs=runs)
 
     def _tool_rollout_canary(self, args: dict[str, Any]) -> dict[str, Any]:
         self._reject_unknown(args, {"family", "release", "slot", "allow_first_apply"})

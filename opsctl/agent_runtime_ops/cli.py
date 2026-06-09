@@ -44,7 +44,7 @@ from .runtime_secrets import (
     render_upserted_secret_env,
     validate_provider_secret_values,
 )
-from .state import load_desired_slot
+from .state import DesiredSlot, load_desired_slot
 from .yamlio import dump_yaml, load_yaml
 
 DEFAULT_REPO_URL = "https://github.com/Epicevent/agent-runtime-ops.git"
@@ -2900,6 +2900,170 @@ def _restore_state_files(state_root: Path, *, slots_data: dict, lanes_data: dict
     _write_state_yaml_file(state_root, "lanes.yaml", lanes_data)
 
 
+def _desired_with_release_and_profile(desired: DesiredSlot, release: str, release_data: dict, runtime_profile: str) -> DesiredSlot:
+    lane_data = dict(desired.lane_data)
+    lane_data["release"] = release
+    lane_data["runtime_profile"] = runtime_profile
+    return DesiredSlot(
+        slot=desired.slot,
+        lane=desired.lane,
+        lane_data=lane_data,
+        release_name=release,
+        release_data=release_data,
+        runtime_profile=runtime_profile,
+    )
+
+
+def _dev_rollout_target(state_root: Path, family: str, release: str, slot: str) -> tuple[dict, dict, dict, DesiredSlot, object, object]:
+    if family not in {"openclaw", "hermes"}:
+        raise ValueError("family must be openclaw or hermes")
+    if not DEV_SLOT_RE.match(slot):
+        raise ValueError("dev rollout slot must be a dev slot like dev-NAME")
+    slots_data, lanes_data, releases_data = _load_slots_lanes_releases(state_root)
+    release_data = _validate_release_for_family(releases_data, release, family)
+    desired_before = load_desired_slot(slot, state_root)
+    if desired_before.lane_data.get("family") != family or desired_before.lane_data.get("slot_class") != "dev":
+        raise ValueError(f"slot is not a {family} dev slot: {slot}")
+    lane_slots = _slots_for_lane(slots_data, desired_before.lane)
+    if lane_slots != [slot]:
+        raise ValueError(
+            f"dev lane must be slot-scoped before mutation: lane={desired_before.lane} slots={','.join(lane_slots)}"
+        )
+    target_profile_name = _release_runtime_profile_name(release_data, "dev", desired_before.runtime_profile)
+    target_profile = load_profile(target_profile_name)
+    target_desired = _desired_with_release_and_profile(desired_before, release, release_data, target_profile.name)
+    return slots_data, lanes_data, releases_data, target_desired, load_profile(desired_before.runtime_profile), target_profile
+
+
+def cmd_rollout_dev_plan(args: argparse.Namespace) -> int:
+    state_root = _state_root(args)
+    family = str(args.family)
+    release = str(args.release)
+    slot = str(args.slot)
+    try:
+        slots_data, lanes_data, _releases_data, target_desired, profile_before, target_profile = _dev_rollout_target(
+            state_root, family, release, slot
+        )
+        rendered = render_compose(target_profile, target_desired)
+        contract_checks = [
+            {"ok": ok, "name": name, "detail": detail}
+            for ok, name, detail in _release_profile_contract_checks(target_desired.release_data, target_profile)
+        ]
+        static_checks = [
+            {"ok": ok, "name": name, "detail": detail}
+            for ok, name, detail in _run_static_slot_checks(target_desired, target_profile, rendered)
+        ]
+        plan = {
+            "family": family,
+            "slot": slot,
+            "lane": target_desired.lane,
+            "lane_slots": _slots_for_lane(slots_data, target_desired.lane),
+            "release": release,
+            "current_release": load_desired_slot(slot, state_root).release_name,
+            "runtime_profile": target_profile.name,
+            "current_runtime_profile": profile_before.name,
+            "runtime_contract": _profile_runtime_contract(target_profile),
+            "customer_surface": _profile_customer_surface(target_profile),
+            "recipe": _release_recipe_payload(target_desired.release_data),
+            "contract_checks": contract_checks,
+            "static_checks": static_checks,
+            "contract_compatible": all(item["ok"] for item in contract_checks + static_checks),
+            "compose_sha256": rendered.sha256,
+            "mutates": False,
+            "steps": [
+                "rollout dev-apply --family FAMILY --release RELEASE --slot DEV_SLOT",
+                "verify dev live checks",
+                "rollout canary --family FAMILY --release RELEASE --slot CUSTOMER_SLOT",
+                "rollout promote --family FAMILY --release RELEASE",
+            ],
+        }
+    except Exception as exc:
+        print(json.dumps({"rollout_dev_plan_status": "fail", "reason": str(exc), "mutates": False}, ensure_ascii=False, indent=2))
+        return 1
+    print(json.dumps(plan, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_rollout_dev_apply(args: argparse.Namespace) -> int:
+    if not _is_root():
+        print("error: run as root/admin: sudo /usr/local/bin/opsctl rollout dev-apply ...", file=sys.stderr)
+        return 2
+    state_root = _state_root(args)
+    family = str(args.family)
+    release = str(args.release)
+    slot = str(args.slot)
+    try:
+        slots_data, lanes_data, _releases_data, target_desired, profile_before, target_profile = _dev_rollout_target(
+            state_root, family, release, slot
+        )
+        original_lanes_data = copy.deepcopy(lanes_data)
+        rendered = render_compose(target_profile, target_desired)
+        static_failures = [
+            name for ok, name, _ in _run_static_slot_checks(target_desired, target_profile, rendered) if not ok
+        ]
+        if static_failures:
+            raise ValueError(f"static contract check failed: {','.join(static_failures)}")
+        lanes = lanes_data.get("lanes") or {}
+        lane_data = lanes.get(target_desired.lane)
+        if not isinstance(lane_data, dict):
+            raise ValueError(f"dev lane is invalid: {target_desired.lane}")
+        previous_release = str(lane_data.get("release") or "")
+        previous_runtime_profile = str(lane_data.get("runtime_profile") or "")
+        lane_data["release"] = release
+        lane_data["runtime_profile"] = target_profile.name
+        _write_state_yaml_file(state_root, "lanes.yaml", lanes_data)
+    except Exception as exc:
+        print("rollout_dev_apply_status=fail")
+        print(f"reason={exc}")
+        try:
+            _append_action_log(state_root, "rollout_dev_apply", slot, release, "fail", str(exc))
+        except Exception:
+            pass
+        return 1
+
+    print("rollout_dev_apply_state=updated")
+    print(f"family={family}")
+    print(f"slot={slot}")
+    print(f"lane={target_desired.lane}")
+    print(f"previous_release={previous_release}")
+    print(f"previous_runtime_profile={previous_runtime_profile}")
+    print(f"release={release}")
+    print(f"runtime_profile={target_profile.name}")
+    apply_rc = cmd_apply(
+        argparse.Namespace(
+            slot=slot,
+            state_root=str(state_root),
+            allow_first_apply=bool(getattr(args, "allow_first_apply", False)),
+        )
+    )
+    if apply_rc != 0:
+        _write_state_yaml_file(state_root, "lanes.yaml", original_lanes_data)
+        print("rollout_dev_apply_status=fail")
+        print("reason=dev_apply_failed")
+        _append_action_log(state_root, "rollout_dev_apply", slot, release, "fail", "dev_apply_failed")
+        return apply_rc or 1
+
+    rollout_state = _load_rollout_state(state_root)
+    record = _family_rollout_record(rollout_state, family)
+    dev_slots = record.setdefault("dev_slots", {})
+    if not isinstance(dev_slots, dict):
+        raise ValueError("rollout state dev_slots must be a mapping")
+    dev_slots[slot] = {
+        "slot": slot,
+        "lane": target_desired.lane,
+        "release": release,
+        "previous_release": previous_release,
+        "previous_runtime_profile": previous_runtime_profile,
+        "runtime_profile": target_profile.name,
+        "status": "ok",
+        "checked_at": _now_iso(),
+    }
+    _write_rollout_state(state_root, rollout_state)
+    print("rollout_dev_apply_status=ok")
+    _append_action_log(state_root, "rollout_dev_apply", slot, release, "ok", f"profile={target_profile.name}")
+    return 0
+
+
 def cmd_rollout_canary(args: argparse.Namespace) -> int:
     if not _is_root():
         print("error: run as root/admin: sudo /usr/local/bin/opsctl rollout canary ...", file=sys.stderr)
@@ -4146,6 +4310,17 @@ def build_parser() -> argparse.ArgumentParser:
     rollout_plan.add_argument("--family", required=True, choices=["hermes", "openclaw"])
     rollout_plan.add_argument("--release", required=True)
     rollout_plan.set_defaults(func=cmd_rollout_plan)
+    rollout_dev_plan = rollout_sub.add_parser("dev-plan")
+    rollout_dev_plan.add_argument("--family", required=True, choices=["hermes", "openclaw"])
+    rollout_dev_plan.add_argument("--release", required=True)
+    rollout_dev_plan.add_argument("--slot", required=True)
+    rollout_dev_plan.set_defaults(func=cmd_rollout_dev_plan)
+    rollout_dev_apply = rollout_sub.add_parser("dev-apply")
+    rollout_dev_apply.add_argument("--family", required=True, choices=["hermes", "openclaw"])
+    rollout_dev_apply.add_argument("--release", required=True)
+    rollout_dev_apply.add_argument("--slot", required=True)
+    rollout_dev_apply.add_argument("--allow-first-apply", action="store_true")
+    rollout_dev_apply.set_defaults(func=cmd_rollout_dev_apply)
     rollout_canary = rollout_sub.add_parser("canary")
     rollout_canary.add_argument("--family", required=True, choices=["hermes", "openclaw"])
     rollout_canary.add_argument("--release", required=True)

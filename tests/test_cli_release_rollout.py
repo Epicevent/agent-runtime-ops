@@ -19,6 +19,8 @@ from agent_runtime_ops.cli import (
     cmd_recipe_dev_status,
     cmd_release_import,
     cmd_rollout_canary,
+    cmd_rollout_dev_apply,
+    cmd_rollout_dev_plan,
     cmd_rollout_plan,
     cmd_rollout_promote,
     cmd_rollout_rollback_canary,
@@ -135,6 +137,8 @@ def write_hermes_state(root: Path, *, candidate_product_repo: str = "hermes-work
 slots:
   - slot: oc20
     lane: hermes
+  - slot: dev-hermess
+    lane: dev-hermes
 """.lstrip(),
         encoding="utf-8",
     )
@@ -146,6 +150,11 @@ lanes:
     slot_class: customer
     release: hermes-current
     runtime_profile: hermes-customer
+  dev-hermes:
+    family: hermes
+    slot_class: dev
+    release: hermes-current
+    runtime_profile: hermes-dev
 """.lstrip(),
         encoding="utf-8",
     )
@@ -574,6 +583,79 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertTrue(plan["contract_compatible"], output.getvalue())
             self.assertEqual(plan["fleet_runtime_profile"], "hermes-customer")
             self.assertEqual(plan["runtime_profile"], "hermes-workspace-customer")
+
+    def test_rollout_dev_plan_uses_image_recipe_dev_runtime_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_hermes_state(root)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                rc = cmd_rollout_dev_plan(
+                    argparse.Namespace(
+                        state_root=str(root),
+                        family="hermes",
+                        release="hermes-candidate",
+                        slot="dev-hermess",
+                    )
+                )
+
+            self.assertEqual(rc, 0, output.getvalue())
+            plan = json.loads(output.getvalue())
+            self.assertTrue(plan["contract_compatible"], output.getvalue())
+            self.assertEqual(plan["current_runtime_profile"], "hermes-dev")
+            self.assertEqual(plan["runtime_profile"], "hermes-workspace-dev")
+            self.assertEqual(plan["lane_slots"], ["dev-hermess"])
+
+    def test_rollout_dev_apply_records_image_recipe_dev_runtime_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_hermes_state(root)
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.cli.cmd_apply", return_value=0) as apply,
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_rollout_dev_apply(
+                    argparse.Namespace(
+                        state_root=str(root),
+                        family="hermes",
+                        release="hermes-candidate",
+                        slot="dev-hermess",
+                        allow_first_apply=False,
+                    )
+                )
+            self.assertEqual(rc, 0, output.getvalue())
+            lanes = load_yaml(root / "lanes.yaml")["lanes"]
+            self.assertEqual(lanes["dev-hermes"]["release"], "hermes-candidate")
+            self.assertEqual(lanes["dev-hermes"]["runtime_profile"], "hermes-workspace-dev")
+            rollout = load_yaml(root / "rollout-state.yaml")
+            self.assertEqual(rollout["families"]["hermes"]["dev_slots"]["dev-hermess"]["runtime_profile"], "hermes-workspace-dev")
+            self.assertEqual(apply.call_args.args[0].slot, "dev-hermess")
+
+    def test_rollout_dev_apply_restores_lane_when_apply_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_hermes_state(root)
+            lanes_before = load_yaml(root / "lanes.yaml")
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.cli.cmd_apply", return_value=1),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_rollout_dev_apply(
+                    argparse.Namespace(
+                        state_root=str(root),
+                        family="hermes",
+                        release="hermes-candidate",
+                        slot="dev-hermess",
+                        allow_first_apply=False,
+                    )
+                )
+            self.assertEqual(rc, 1)
+            self.assertIn("reason=dev_apply_failed", output.getvalue())
+            self.assertEqual(load_yaml(root / "lanes.yaml"), lanes_before)
 
     def test_rollout_canary_rejects_hermes_agent_only_image_before_state_change(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
