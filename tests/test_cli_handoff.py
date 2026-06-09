@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from agent_runtime_ops.cli import cmd_handoff_status
+from agent_runtime_ops.routing import SlotRoute, dump_routing_registry
 
 
 def write_state(root: Path) -> None:
@@ -53,6 +54,15 @@ releases:
     product_image: ghcr.io/epicevent/openclaw-nas-agent@{digest}
     digest: {digest}
 """.lstrip(),
+        encoding="utf-8",
+    )
+    (root / "slot-registry.json").write_text(
+        dump_routing_registry(
+            [
+                SlotRoute("dev-oc", "dev-oc.ji-tech.co.kr", 30789, 30790),
+                SlotRoute("dev-hermess", "dev-hermess.ji-tech.co.kr", 30889, 30890),
+            ]
+        ),
         encoding="utf-8",
     )
 

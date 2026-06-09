@@ -5,8 +5,25 @@ import unittest
 from agent_runtime_ops.compose_contract import validate_compose_contract
 from agent_runtime_ops.image_components import image_component_name, image_repo
 from agent_runtime_ops.profiles import load_profile
-from agent_runtime_ops.renderer import _slot_ports, render_compose
+from agent_runtime_ops.renderer import render_compose
+from agent_runtime_ops.routing import SlotRoute
 from agent_runtime_ops.state import DesiredSlot
+
+
+def test_route(slot: str) -> SlotRoute:
+    ports = {
+        "oc1": (28789, 28790),
+        "oc2": (28889, 28890),
+        "dev-hermess": (30889, 30890),
+        "dev-openclaw": (30789, 30790),
+    }
+    gateway_port, bridge_port = ports.get(slot, (29989, 29990))
+    return SlotRoute(
+        slot=slot,
+        public_host=f"{slot}.ji-tech.co.kr",
+        gateway_port=gateway_port,
+        bridge_port=bridge_port,
+    )
 
 
 def desired_slot(
@@ -30,6 +47,7 @@ def desired_slot(
             "digest": digest,
         },
         runtime_profile=runtime_profile,
+        route=test_route(slot),
     )
 
 
@@ -47,12 +65,11 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertEqual(image_component_name(f"ghcr.io/epicevent/hermes-workspace@{digest}"), "hermes-workspace")
         self.assertEqual(image_component_name("ghcr.io/epicevent/openclaw-jitech@sha256:" + "c" * 64), "openclaw-control")
 
-    def test_oc_slot_port_policy(self) -> None:
-        self.assertEqual(_slot_ports("oc1"), ("28789", "28790"))
-        self.assertEqual(_slot_ports("oc2"), ("28889", "28890"))
-        self.assertEqual(_slot_ports("oc15"), ("30189", "30190"))
-        self.assertEqual(_slot_ports("dev-oc"), ("30789", "30790"))
-        self.assertEqual(_slot_ports("dev-hermess"), ("30889", "30890"))
+    def test_compose_uses_route_registry_ports(self) -> None:
+        desired = desired_slot("oc1", "openclaw", "customer", "openclaw-customer")
+        rendered = render_compose(load_profile("openclaw-customer"), desired).text
+        self.assertIn("127.0.0.1:28789:18789", rendered)
+        self.assertIn("127.0.0.1:28790:18790", rendered)
 
     def test_openclaw_customer_contract(self) -> None:
         desired = desired_slot("oc1", "openclaw", "customer", "openclaw-customer")

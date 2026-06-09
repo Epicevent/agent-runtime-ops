@@ -91,29 +91,45 @@ operator; the operator controls intent and risk, and the agent executes, verifie
 Before changing a slot, separate five layers and report them in that order:
 
 ```text
-runtime contract -> canonical runtime recipe -> image recipe -> runtime profile -> release state
+routing contract -> live image truth -> canonical runtime recipe -> runtime profile -> applied manifest
 ```
 
-The runtime contract is what the slot must expose to users. The canonical runtime recipe in
-`recipes/runtime/*.yaml` is the repo-owned source of truth for the dev/customer projections. The
-image recipe is the immutable wrapper-image attestation of that canonical recipe and the baked
-product image. The runtime profile is how that projection is executed on the server. The release
-state is which digest a lane or slot points at.
+The routing contract is the Apache-facing slot coordinate: public host, host gateway port, and host
+bridge port. It lives in `/srv/openclaw-ops/slot-registry.json` and must not contain image, release,
+runtime profile, family, or canonical recipe fields. Ports are not computed from `ocN`; they are
+registry-owned because Apache must agree with them.
+
+Live image truth is the running container image and the wrapper OCI labels on that image. Treat
+those labels as the source of truth for family, product image, product component, runtime profiles,
+runtime contracts, and canonical recipe identity. The canonical runtime recipe in
+`recipes/runtime/*.yaml` is the repo-owned policy that wrapper labels must attest to. The runtime
+profile is how that projection is executed on the server. The applied manifest is audit/drift
+evidence, not the source of truth.
 
 For wrapped product images, the wrapper OCI labels must include the canonical recipe name/digest and
-must match `recipes/runtime/*.yaml`. Do not treat a sidecar file, release-import argument, or
-install-time repair as the source of truth. `opsctl release import` should read the wrapper image
-labels, verify them against the canonical recipe, store the declared recipe in release state, and
-rollout should select the runtime profile declared by that recipe.
+must match `recipes/runtime/*.yaml`. Do not treat a sidecar file, release-import argument, copied
+release state, or install-time repair as runtime truth. Prefer the image-based rollout commands:
+
+```bash
+sudo /usr/local/bin/opsctl rollout image-plan --wrapper-image WRAP@sha256:... --product-image PROD@sha256:...
+sudo /usr/local/bin/opsctl rollout image-dev-apply --slot dev-oc --wrapper-image WRAP@sha256:... --product-image PROD@sha256:...
+sudo /usr/local/bin/opsctl rollout image-canary --slot oc3 --wrapper-image WRAP@sha256:... --product-image PROD@sha256:...
+sudo /usr/local/bin/opsctl rollout image-promote --from-slot oc3 --slots oc1,oc2,oc4
+```
+
+The older `release import` and `rollout --release` commands are retained as legacy compatibility
+surfaces. Do not use them for new OpenClaw/Hermes image rollouts unless the image-based path is
+missing a required capability and the exception is reported.
 
 Product source provenance is a separate layer. `opsctl recipe apply-dev` may record git metadata for
 a dev source tree, but that proves source lineage, not runtime shape. Do not use source provenance to
 explain away a runtime recipe/profile mismatch.
 
-`install.sh` and `opsctl self-update` install tools and profile definitions only. They must not
-silently rewrite slot, lane, release, or profile state to make a broken deployment look fixed. Any
-state change must be a separate operator-visible command such as release import, canary, promote,
-rollback, or apply, with before/after verification.
+`install.sh` and `opsctl self-update` install tools, profile definitions, and the managed operation
+skill only. They may seed the minimal routing registry from legacy slots when it is missing, but
+they must not silently rewrite runtime image truth to make a broken deployment look fixed. Any
+runtime change must be a separate operator-visible command such as image-dev-apply, image-canary,
+image-promote, rollback, or an explicitly reported legacy command, with before/after verification.
 
 Do not treat a live HTTP failure as a profile problem until the old working image and the new
 candidate image are compared against the same runtime contract. For Hermes customer slots, the
@@ -133,6 +149,7 @@ When work may affect the server, do all of the following before claiming complet
 git status --short --branch
 ssh svcops "/usr/local/bin/opsctl update status"
 ssh svcops "/usr/local/bin/opsctl slot list"
+ssh svcops "/usr/local/bin/opsctl routing status"
 ssh svcops "/usr/local/bin/opsctl profile list"
 ```
 
@@ -140,8 +157,7 @@ If the task is slot-specific, also run the non-mutating checks first:
 
 ```bash
 ssh svcops "/usr/local/bin/opsctl status SLOT"
-ssh svcops "/usr/local/bin/opsctl plan SLOT"
-ssh svcops "/usr/local/bin/opsctl check SLOT"
+ssh svcops "sudo /usr/local/bin/opsctl runtime truth SLOT"
 ssh svcops "sudo /usr/local/bin/opsctl check --live SLOT"
 ```
 
@@ -172,8 +188,9 @@ sudo /usr/local/bin/opsctl self-update
 
 ```bash
 /usr/local/bin/opsctl update status
+/usr/local/bin/opsctl routing status
 /usr/local/bin/opsctl profile list
-/usr/local/bin/opsctl check SLOT
+sudo /usr/local/bin/opsctl runtime truth SLOT
 sudo /usr/local/bin/opsctl check --live SLOT
 ```
 
@@ -194,9 +211,9 @@ Treat these as read-only unless the user is explicitly asking for an operation:
 ```bash
 /usr/local/bin/opsctl update status
 /usr/local/bin/opsctl profile list
+/usr/local/bin/opsctl routing status
 /usr/local/bin/opsctl status SLOT
-/usr/local/bin/opsctl plan SLOT
-/usr/local/bin/opsctl check SLOT
+sudo /usr/local/bin/opsctl runtime truth SLOT
 sudo /usr/local/bin/opsctl check --live SLOT
 /usr/local/bin/opsctl nas requests
 /usr/local/bin/opsctl nas mounted SLOT
@@ -211,6 +228,9 @@ These mutate runtime or server state:
 sudo /usr/local/bin/opsctl self-update
 sudo /usr/local/bin/opsctl apply SLOT
 sudo /usr/local/bin/opsctl rollback SLOT
+sudo /usr/local/bin/opsctl rollout image-dev-apply --slot SLOT --wrapper-image WRAP@sha256:... --product-image PROD@sha256:...
+sudo /usr/local/bin/opsctl rollout image-canary --slot SLOT --wrapper-image WRAP@sha256:... --product-image PROD@sha256:...
+sudo /usr/local/bin/opsctl rollout image-promote --from-slot SLOT --slots SLOT1,SLOT2
 sudo /usr/local/bin/opsctl runtime-secret set SLOT --key KEY --value-stdin --check
 sudo /usr/local/bin/opsctl nas mount SLOT //HOST/SHARE
 sudo /usr/local/bin/opsctl nas unmount SLOT //HOST/SHARE

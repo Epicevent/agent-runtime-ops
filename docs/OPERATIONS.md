@@ -96,8 +96,36 @@ sudo /usr/local/bin/opsctl nas unmount oc3 //192.168.0.222/hanpass
 ## Canonical runtime recipe
 
 Runtime recipe identity starts in this repo, under `recipes/runtime/*.yaml`.
-Wrapper image labels and release state must attest to that repo-owned recipe; they are not separate
-sources of truth.
+Wrapper image labels must attest to that repo-owned recipe. Release state is legacy rollout
+metadata; it is not runtime truth.
+
+## Routing registry and live image truth
+
+`/srv/openclaw-ops/slot-registry.json` is intentionally small. It owns only the Apache-facing
+routing contract:
+
+```text
+slot, public_host, gateway_port, bridge_port, enabled
+```
+
+It must not contain family, runtime profile, release, image, or canonical recipe fields. Those are
+read from the running wrapper image labels:
+
+```bash
+sudo /usr/local/bin/opsctl runtime truth SLOT
+sudo /usr/local/bin/opsctl runtime truth --all
+```
+
+OpenClaw and Hermes image rollouts should use digest-pinned image commands:
+
+```bash
+sudo /usr/local/bin/opsctl rollout image-plan --wrapper-image WRAP@sha256:... --product-image PROD@sha256:...
+sudo /usr/local/bin/opsctl rollout image-dev-apply --slot dev-oc --wrapper-image WRAP@sha256:... --product-image PROD@sha256:...
+sudo /usr/local/bin/opsctl rollout image-canary --slot oc3 --wrapper-image WRAP@sha256:... --product-image PROD@sha256:...
+sudo /usr/local/bin/opsctl rollout image-promote --from-slot oc3 --slots oc1,oc2,oc4
+```
+
+The legacy release-state rollout commands remain for compatibility only.
 
 Useful read-only checks:
 

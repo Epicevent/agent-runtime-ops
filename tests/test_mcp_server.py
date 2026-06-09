@@ -54,24 +54,33 @@ class McpServerTests(unittest.TestCase):
         )
         self.assertEqual(response["result"]["protocolVersion"], "2025-06-18")
         self.assertIn("one MCP tool at a time", response["result"]["instructions"])
-        self.assertIn("runtime contract", response["result"]["instructions"])
+        self.assertIn("routing contract", response["result"]["instructions"])
+        self.assertIn("live image truth", response["result"]["instructions"])
         self.assertIn("slot_class", response["result"]["instructions"])
 
         tools = server.handle_message({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
         names = {item["name"] for item in tools["result"]["tools"]}
         self.assertIn("ops_orientation", names)
         self.assertIn("slot_list", names)
+        self.assertIn("routing_status", names)
+        self.assertIn("runtime_truth", names)
         self.assertIn("runtime_secret_set_from_file", names)
         self.assertIn("deploy_update", names)
-        self.assertIn("release_import", names)
-        self.assertIn("rollout_status", names)
         self.assertIn("canonical_recipe_validate", names)
         self.assertIn("dev_recipe_status", names)
         self.assertIn("dev_recipe_apply", names)
-        self.assertIn("rollout_plan", names)
-        self.assertIn("rollout_canary", names)
-        self.assertIn("rollout_promote", names)
-        self.assertIn("rollout_rollback_canary", names)
+        self.assertIn("rollout_image_plan", names)
+        self.assertIn("rollout_image_dev_apply", names)
+        self.assertIn("rollout_image_canary", names)
+        self.assertIn("rollout_image_promote", names)
+        self.assertNotIn("release_import", names)
+        self.assertNotIn("rollout_status", names)
+        self.assertNotIn("rollout_plan", names)
+        self.assertNotIn("rollout_dev_plan", names)
+        self.assertNotIn("rollout_dev_apply", names)
+        self.assertNotIn("rollout_canary", names)
+        self.assertNotIn("rollout_promote", names)
+        self.assertNotIn("rollout_rollback_canary", names)
         self.assertIn("handoff_status", names)
         self.assertIn("nas_remove", names)
         self.assertIn("nas_credential_status", names)
@@ -79,6 +88,7 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("slot_class", slot_check_tool["description"])
         slot_check_schema = slot_check_tool["inputSchema"]["properties"]
         self.assertEqual(slot_check_schema["slot_class"]["enum"], ["customer", "dev"])
+        self.assertNotIn("live", slot_check_schema)
         status_tool = next(item for item in tools["result"]["tools"] if item["name"] == "runtime_secret_status")
         self.assertIn("slot_class", status_tool["description"])
         status_schema = status_tool["inputSchema"]["properties"]
@@ -92,8 +102,8 @@ class McpServerTests(unittest.TestCase):
         key_schema = secret_tool["inputSchema"]["properties"]["key"]
         self.assertIn("GEMINI_API_KEY", key_schema["enum"])
         self.assertNotIn("API_KEY", key_schema["enum"])
-        release_tool = next(item for item in tools["result"]["tools"] if item["name"] == "release_import")
-        self.assertIn("components", release_tool["inputSchema"]["properties"])
+        image_plan_tool = next(item for item in tools["result"]["tools"] if item["name"] == "rollout_image_plan")
+        self.assertIn("wrapper_image", image_plan_tool["inputSchema"]["properties"])
 
     def test_unknown_tool_and_malformed_json(self) -> None:
         server = McpServer(runner=FakeRunner(), opsctl="opsctl", sudo="sudo")
@@ -120,6 +130,41 @@ class McpServerTests(unittest.TestCase):
         self.assertEqual(
             runner.calls[0]["argv"],
             ["opsctl", "recipe", "validate-canonical", "hermes-workspace"],
+        )
+
+    def test_runtime_truth_uses_sudo_opsctl_argv(self) -> None:
+        runner = FakeRunner([(0, "truth_status=ok\n", "")])
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        payload = call_tool(server, "runtime_truth", {"slot": "oc3"})
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["mutated"])
+        self.assertEqual(runner.calls[0]["argv"], ["sudo", "opsctl", "runtime", "truth", "oc3"])
+
+    def test_rollout_image_plan_uses_digest_images_without_release_name(self) -> None:
+        wrapper = "ghcr.io/epicevent/agent-runtime-openclaw@sha256:" + "a" * 64
+        product = "ghcr.io/epicevent/openclaw-jitech@sha256:" + "b" * 64
+        runner = FakeRunner([(0, '{"rollout_image_plan_status":"ok"}\n', "")])
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        payload = call_tool(
+            server,
+            "rollout_image_plan",
+            {"wrapper_image": wrapper, "product_image": product, "slot": "oc3"},
+        )
+        self.assertTrue(payload["ok"])
+        self.assertEqual(
+            runner.calls[0]["argv"],
+            [
+                "sudo",
+                "opsctl",
+                "rollout",
+                "image-plan",
+                "--wrapper-image",
+                wrapper,
+                "--product-image",
+                product,
+                "--slot",
+                "oc3",
+            ],
         )
 
     def test_ops_orientation_includes_slot_list(self) -> None:
@@ -149,33 +194,30 @@ class McpServerTests(unittest.TestCase):
     def test_slot_check_uses_argv_lists(self) -> None:
         runner = FakeRunner(
             [
-                (0, "status=ok\n", ""),
-                (0, '{"mutates": false}\n', ""),
-                (0, "PASS contract\n", ""),
+                (0, "routing_status=ok\n", ""),
+                (0, "truth_status=ok\n", ""),
                 (0, "PASS live\n", ""),
             ]
         )
         server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
-        payload = call_tool(server, "slot_check", {"slot": "oc1", "live": True})
+        payload = call_tool(server, "slot_check", {"slot": "oc1"})
         self.assertTrue(payload["ok"])
         self.assertFalse(payload["mutated"])
-        self.assertEqual(runner.calls[0]["argv"], ["opsctl", "status", "oc1"])
-        self.assertEqual(runner.calls[1]["argv"], ["opsctl", "plan", "oc1"])
-        self.assertEqual(runner.calls[2]["argv"], ["opsctl", "check", "oc1"])
-        self.assertEqual(runner.calls[3]["argv"], ["sudo", "opsctl", "check", "--live", "oc1"])
+        self.assertEqual(runner.calls[0]["argv"], ["opsctl", "routing", "status", "oc1"])
+        self.assertEqual(runner.calls[1]["argv"], ["sudo", "opsctl", "runtime", "truth", "oc1"])
+        self.assertEqual(runner.calls[2]["argv"], ["sudo", "opsctl", "check", "--live", "oc1"])
         self.assertTrue(all(isinstance(call["argv"], list) for call in runner.calls))
 
     def test_slot_check_failure_is_structured_result_not_mcp_error(self) -> None:
         runner = FakeRunner(
             [
-                (0, "status=ok\n", ""),
-                (0, '{"mutates": false}\n', ""),
-                (0, "PASS contract\n", ""),
+                (0, "routing_status=ok\n", ""),
+                (0, "truth_status=ok\n", ""),
                 (1, "FAIL live_container_nas_root_propagation\ncheck_status=fail failed=1\n", ""),
             ]
         )
         server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
-        result = call_tool_result(server, "slot_check", {"slot": "oc1", "live": True})
+        result = call_tool_result(server, "slot_check", {"slot": "oc1"})
         payload = result["structuredContent"]
         self.assertFalse(payload["ok"])
         self.assertFalse(result["isError"])
@@ -189,19 +231,19 @@ class McpServerTests(unittest.TestCase):
                     0,
                     "\n".join(
                         [
-                            "slot=dev-hermess lane=dev-hermes family=hermes slot_class=dev runtime_profile=hermes-dev",
-                            "slot=dev-oc lane=dev-openclaw family=openclaw slot_class=dev runtime_profile=openclaw-dev",
-                            "slot=oc1 lane=openclaw family=openclaw slot_class=customer runtime_profile=openclaw-customer",
+                            "slot=dev-hermess slot_class=dev",
+                            "slot=dev-oc slot_class=dev",
+                            "slot=oc1 slot_class=customer",
                         ]
                     )
                     + "\n",
                     "",
                 ),
-                (0, "slot=dev-hermess\n", ""),
-                (0, '{"mutates": false}\n', ""),
+                (0, "routing_status=ok slot=dev-hermess\n", ""),
+                (0, "slot=dev-hermess truth_status=ok\n", ""),
                 (0, "PASS dev-hermess\n", ""),
-                (0, "slot=dev-oc\n", ""),
-                (0, '{"mutates": false}\n', ""),
+                (0, "routing_status=ok slot=dev-oc\n", ""),
+                (0, "slot=dev-oc truth_status=ok\n", ""),
                 (1, "FAIL dev-oc\ncheck_status=fail failed=1\n", ""),
             ]
         )
@@ -213,8 +255,8 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("PASS dev-hermess", payload["stdout"])
         self.assertIn("check_status=fail", payload["stdout"])
         self.assertEqual(runner.calls[0]["argv"], ["opsctl", "slot", "list"])
-        self.assertEqual(runner.calls[1]["argv"], ["opsctl", "status", "dev-hermess"])
-        self.assertEqual(runner.calls[4]["argv"], ["opsctl", "status", "dev-oc"])
+        self.assertEqual(runner.calls[1]["argv"], ["opsctl", "routing", "status", "dev-hermess"])
+        self.assertEqual(runner.calls[4]["argv"], ["opsctl", "routing", "status", "dev-oc"])
 
     def test_secret_raw_argument_is_rejected_and_redacted(self) -> None:
         secret = "AIza" + "A" * 32
@@ -330,8 +372,19 @@ class McpServerTests(unittest.TestCase):
                     0,
                     "\n".join(
                         [
-                            "slot=dev-hermess lane=dev-hermes family=hermes slot_class=dev runtime_profile=hermes-dev",
-                            "slot=dev-oc lane=dev-openclaw family=openclaw slot_class=dev runtime_profile=openclaw-dev",
+                            "slot=dev-hermess slot_class=dev",
+                            "slot=dev-oc slot_class=dev",
+                        ]
+                    )
+                    + "\n",
+                    "",
+                ),
+                (
+                    0,
+                    "\n".join(
+                        [
+                            "slot=dev-hermess truth_status=ok family=hermes",
+                            "slot=dev-oc truth_status=ok family=openclaw",
                         ]
                     )
                     + "\n",
@@ -344,6 +397,7 @@ class McpServerTests(unittest.TestCase):
         payload = call_tool(server, "runtime_secret_status", {"slot_class": "dev", "family": "openclaw"})
         self.assertTrue(payload["ok"])
         self.assertIn("slot=dev-oc", payload["stdout"])
+        self.assertEqual(runner.calls[1]["argv"], ["sudo", "opsctl", "runtime", "truth", "--all"])
         self.assertEqual(runner.calls[-1]["argv"], ["sudo", "opsctl", "runtime-secret", "status", "dev-oc"])
 
     def test_runtime_secret_status_requires_one_slot_shape(self) -> None:
@@ -389,72 +443,28 @@ class McpServerTests(unittest.TestCase):
         self.assertFalse(payload["mutated"])
         self.assertEqual(payload["next_action"], f"sudo opsctl update approve {target}")
 
-    def test_release_import_uses_digest_pinned_argv_list(self) -> None:
-        image = "ghcr.io/epicevent/openclaw-nas-agent@sha256:" + "2" * 64
-        runner = FakeRunner([(0, "release_import_status=ok\n", "")])
-        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
-        payload = call_tool(
-            server,
-            "release_import",
-            {
-                "name": "openclaw-candidate",
-                "family": "openclaw",
-                "image_ref": image,
-                "components": {"openclaw-jitech": "Epicevent/openclaw-jitech@abc123"},
-                "compat_combined": True,
-            },
-        )
-        self.assertTrue(payload["ok"])
-        self.assertTrue(payload["mutated"])
-        self.assertEqual(
-            runner.calls[0]["argv"],
-            [
-                "sudo",
-                "opsctl",
-                "release",
-                "import",
-                "openclaw-candidate",
-                "--family",
-                "openclaw",
-                "--image",
-                image,
-                "--compat-combined",
-                "--component",
-                "openclaw-jitech=Epicevent/openclaw-jitech@abc123",
-            ],
-        )
-
-    def test_rollout_canary_stops_when_plan_reports_contract_mismatch(self) -> None:
-        plan = '{"mutates": false, "contract_compatible": false}\n'
-        runner = FakeRunner([(0, plan, "")])
-        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
-        payload = call_tool(
-            server,
-            "rollout_canary",
-            {"family": "hermes", "release": "hermes-candidate", "slot": "oc20"},
-        )
-
-        self.assertFalse(payload["ok"])
-        self.assertFalse(payload["mutated"])
-        self.assertEqual(payload["next_action"], "fix release recipe/runtime contract before canary")
-        self.assertEqual(len(runner.calls), 1)
-
-    def test_release_import_rejects_tag_only_image_ref(self) -> None:
+    def test_legacy_release_state_tools_are_not_public_mcp_tools(self) -> None:
         server = McpServer(runner=FakeRunner(), opsctl="opsctl", sudo="sudo")
-        result = call_tool_result(
-            server,
+        for name in (
             "release_import",
-            {
-                "name": "openclaw-candidate",
-                "family": "openclaw",
-                "image_ref": "ghcr.io/epicevent/openclaw-nas-agent:latest",
-                "compat_combined": True,
-            },
-        )
-        payload = result["structuredContent"]
-        self.assertTrue(result["isError"])
-        self.assertFalse(payload["ok"])
-        self.assertIn("digest-pinned", payload["next_action"])
+            "rollout_status",
+            "rollout_plan",
+            "rollout_dev_plan",
+            "rollout_dev_apply",
+            "rollout_canary",
+            "rollout_promote",
+            "rollout_rollback_canary",
+        ):
+            response = server.handle_message(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 20,
+                    "method": "tools/call",
+                    "params": {"name": name, "arguments": {}},
+                }
+            )
+            self.assertEqual(response["error"]["code"], -32602)
+            self.assertIn("unknown tool", response["error"]["message"])
 
     def test_dev_recipe_apply_runs_status_then_apply_dev(self) -> None:
         runner = FakeRunner(
@@ -494,63 +504,6 @@ class McpServerTests(unittest.TestCase):
                 "npm run build",
                 "--no-apply",
             ],
-        )
-
-    def test_rollout_canary_runs_plan_then_mutating_canary_then_status(self) -> None:
-        runner = FakeRunner(
-            [
-                (0, '{"mutates": false}\n', ""),
-                (0, "rollout_canary_status=ok\n", ""),
-                (0, "rollout_status=ok\n", ""),
-            ]
-        )
-        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
-        payload = call_tool(
-            server,
-            "rollout_canary",
-            {"family": "openclaw", "release": "openclaw-candidate", "slot": "oc3"},
-        )
-        self.assertTrue(payload["ok"])
-        self.assertTrue(payload["mutated"])
-        self.assertEqual(
-            runner.calls[0]["argv"],
-            ["sudo", "opsctl", "rollout", "plan", "--family", "openclaw", "--release", "openclaw-candidate"],
-        )
-        self.assertEqual(
-            runner.calls[1]["argv"],
-            [
-                "sudo",
-                "opsctl",
-                "rollout",
-                "canary",
-                "--family",
-                "openclaw",
-                "--release",
-                "openclaw-candidate",
-                "--slot",
-                "oc3",
-            ],
-        )
-        self.assertEqual(
-            runner.calls[2]["argv"],
-            ["sudo", "opsctl", "rollout", "status", "--family", "openclaw"],
-        )
-
-    def test_rollout_promote_uses_status_guard(self) -> None:
-        runner = FakeRunner(
-            [
-                (0, "rollout_status=ok\nrecorded_canary_status=ok\n", ""),
-                (0, "rollout_promote_status=ok\n", ""),
-                (0, "rollout_status=ok\n", ""),
-            ]
-        )
-        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
-        payload = call_tool(server, "rollout_promote", {"family": "openclaw", "release": "openclaw-candidate"})
-        self.assertTrue(payload["ok"])
-        self.assertEqual(runner.calls[0]["argv"], ["sudo", "opsctl", "rollout", "status", "--family", "openclaw"])
-        self.assertEqual(
-            runner.calls[1]["argv"],
-            ["sudo", "opsctl", "rollout", "promote", "--family", "openclaw", "--release", "openclaw-candidate"],
         )
 
     def test_nas_credential_status_uses_sudo_and_is_non_mutating(self) -> None:

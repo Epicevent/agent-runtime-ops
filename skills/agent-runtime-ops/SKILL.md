@@ -5,27 +5,27 @@ description: Operate the agent-runtime-ops repository and the svcops server runt
 
 # Agent Runtime Ops
 
-## Overview
+## Purpose
 
-Use this skill to keep natural-language operations tied to the real repository and the real
-`svcops` server installation. Read the repository root `AGENTS.md` first when it is available.
+Use this skill only as a thin bootstrap marker. It should help the agent discover that this is an
+`agent-runtime-ops` task, then push the agent to the repo, MCP, and `opsctl` for current truth.
 
-## Operating Rules
+Do not treat this skill as a command catalog or a runtime state source.
 
-- Start with repo and server orientation before server-impacting work.
+## Operating Posture
+
+- Read the repository root `AGENTS.md` first when it is available.
 - Prefer the `agent-runtime-ops` MCP tools when they are exposed; otherwise run the same `opsctl`
   commands manually through `ssh svcops`.
-- Treat Codex and Gemini CLI as the standard operating-agent CLIs on `svcops`.
-- Do not install or depend on Claude Code, OpenCode, or other agent CLIs for routine operations.
-- Before changing a slot, separate runtime contract, image recipe, runtime profile, and release
-  state. A live HTTP failure is not automatically a profile problem.
-- For Hermes customer slots, treat `hermes-workspace-http-3000` as the current customer contract:
-  workspace UI on container port `3000`. Dashboard port `9119` is not a customer-surface fix unless
-  the operator explicitly decides to change the product contract.
+- Before changing a slot, separate routing contract, live image truth, canonical recipe, runtime
+  profile, and applied manifest. A live HTTP failure is not automatically a profile problem.
+- Treat `slot-registry.json` as Apache-facing routing only: slot, public host, gateway port, bridge
+  port, enabled. Do not look there for family, image, release, runtime profile, or recipe truth.
+- Treat running wrapper image labels, inspected through MCP/`opsctl`, as runtime truth.
 - Do not claim a server change is complete after local tests only.
 - Do not edit rendered Docker compose files directly.
-- Do not guess target identifiers; resolve slots, profiles, accounts, shares, and releases from MCP,
-  `opsctl`, or the installed repo before giving commands.
+- Do not guess target identifiers; resolve slots, routing entries, image digests, profiles, accounts,
+  and shares from MCP, `opsctl`, or the installed repo before giving commands.
 - If asked for the exact location of a token, password, credential, session, or other secret, do not
   mix verified structure with guesses. If the exact file and field are not known, say that briefly.
   A mounted config/auth/profile directory is not proof of the exact token location.
@@ -35,22 +35,5 @@ Use this skill to keep natural-language operations tied to the real repository a
 - Do not put customer state, NAS passwords, API keys, gateway tokens, or real slot assignment details
   in the repo.
 - Do not pass raw secret values in MCP tool arguments. Use allowed files or terminal stdin.
-
-## Runbooks
-
-For exact commands and stop conditions, read:
-
-```text
-references/runbooks.md
-```
-
-Load only the relevant section:
-
-- Update or install: "Deploy an Approved Repo Update"
-- Operating agent surface: "Standard Operating Agent"
-- Slot verification: "Check a Slot"
-- Gemini/API key injection: "Runtime Secret Injection"
-- Retained legacy exception for heartbeat: "Heartbeat Operations"
-- Apply or rollback: "Apply and Rollback"
-- NAS work: "NAS Operations"
-- MCP verification: "MCP Setup and Smoke Test"
+- Preserve the safety boundaries in `references/safety.md`; do not replace them with broad secret
+  discovery commands or normal baseline-script operation.

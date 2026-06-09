@@ -212,6 +212,8 @@ install_ops_sudoers() {
     printf '%s ALL=(root) NOPASSWD: %s apply *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s rollback *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s diagnostics show *\n' "$OPS_USER" "$BIN_LINK"
+    printf '%s ALL=(root) NOPASSWD: %s routing seed-legacy *\n' "$OPS_USER" "$BIN_LINK"
+    printf '%s ALL=(root) NOPASSWD: %s runtime truth *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s recipe apply-dev *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s release import *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s rollout status *\n' "$OPS_USER" "$BIN_LINK"
@@ -221,6 +223,10 @@ install_ops_sudoers() {
     printf '%s ALL=(root) NOPASSWD: %s rollout canary *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s rollout promote *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s rollout rollback-canary *\n' "$OPS_USER" "$BIN_LINK"
+    printf '%s ALL=(root) NOPASSWD: %s rollout image-plan *\n' "$OPS_USER" "$BIN_LINK"
+    printf '%s ALL=(root) NOPASSWD: %s rollout image-dev-apply *\n' "$OPS_USER" "$BIN_LINK"
+    printf '%s ALL=(root) NOPASSWD: %s rollout image-canary *\n' "$OPS_USER" "$BIN_LINK"
+    printf '%s ALL=(root) NOPASSWD: %s rollout image-promote *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s runtime-secret *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s handoff status *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s nas mount *\n' "$OPS_USER" "$BIN_LINK"
@@ -243,13 +249,24 @@ repair_private_state_permissions() {
   chgrp "$OPS_GROUP" "$STATE_ROOT" 2>/dev/null || true
   chmod 0750 "$STATE_ROOT" 2>/dev/null || true
   local name path
-  for name in slots.yaml lanes.yaml releases.yaml rollout-state.yaml dev-recipes.yaml nas-policy.yaml; do
+  for name in slots.yaml lanes.yaml releases.yaml rollout-state.yaml dev-recipes.yaml nas-policy.yaml slot-registry.json; do
     path="$STATE_ROOT/$name"
     if [[ -f "$path" && ! -L "$path" ]]; then
       chgrp "$OPS_GROUP" "$path" 2>/dev/null || true
       chmod 0640 "$path" 2>/dev/null || true
     fi
   done
+}
+
+seed_routing_registry() {
+  [[ -d "$STATE_ROOT" ]] || return 0
+  [[ -f "$STATE_ROOT/slot-registry.json" ]] && return 0
+  [[ -f "$STATE_ROOT/slots.yaml" ]] || return 0
+  if "$BIN_LINK" --state-root "$STATE_ROOT" routing seed-legacy --write >/dev/null; then
+    info "routing_registry=seeded_from_legacy_slots"
+  else
+    info "routing_registry=seed_failed"
+  fi
 }
 
 activate_release() {
@@ -515,6 +532,8 @@ install_package() {
   register_codex_mcp
 
   repair_private_state_permissions
+  seed_routing_registry
+  repair_private_state_permissions
 
   info "installed_dir=$release_dir"
   info "current=$CURRENT_LINK"
@@ -601,14 +620,14 @@ check_install() {
   runuser -u "$OPS_USER" -- bash -lc "cd / && exec '$BIN_LINK' profile list"
 
   local missing=0
-  for name in slots.yaml lanes.yaml releases.yaml nas-policy.yaml; do
+  for name in slot-registry.json nas-policy.yaml; do
     state_file_status "$name" || missing=1
   done
   if [[ "$missing" -eq 0 ]]; then
     info "private_state_ready=yes"
   else
     info "private_state_ready=no"
-    info "next_action=create_or_fix_/srv/openclaw-ops/lanes.yaml_and_releases.yaml"
+    info "next_action=create_or_fix_/srv/openclaw-ops/slot-registry.json_and_nas-policy.yaml"
   fi
 }
 

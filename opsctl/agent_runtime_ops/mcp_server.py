@@ -163,7 +163,7 @@ class McpServer:
             },
             "instructions": (
                 "Use these tools to inspect and operate the svcops runtime through opsctl. "
-                "Separate runtime contract, image recipe, runtime profile, and release state before changing a slot. "
+                "Separate routing contract, live image truth, canonical recipe, runtime profile, and applied manifest before changing a slot. "
                 "Call one MCP tool at a time and wait for its response before calling another tool. "
                 "Use selector arguments such as slot_class for group queries instead of parallel per-slot calls. "
                 "Do not pass raw secret values as tool arguments."
@@ -181,14 +181,37 @@ class McpServer:
             {
                 "name": "slot_list",
                 "title": "List Slots",
-                "description": "List current slots with lane, family, contract, runtime profile, release, recipe, and mode.",
+                "description": "List known slot names for targeting; use routing_status and runtime_truth for authoritative details.",
                 "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+            {
+                "name": "routing_status",
+                "title": "Routing Status",
+                "description": "Inspect the minimal Apache-facing routing registry for one slot or all slots.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"slot": {"type": "string"}},
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "runtime_truth",
+                "title": "Runtime Image Truth",
+                "description": "Inspect running container image labels directly; this is the authoritative runtime truth path.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "slot": {"type": "string"},
+                        "all": {"type": "boolean", "default": False},
+                    },
+                    "additionalProperties": False,
+                },
             },
             {
                 "name": "slot_check",
                 "title": "Check Slot",
                 "description": (
-                    "Run status, plan, contract check, and optionally live check. "
+                    "Run routing status, live image truth, and live contract check. "
                     "For dev or customer groups, prefer slot_class over repeated per-slot calls."
                 ),
                 "inputSchema": {
@@ -198,7 +221,6 @@ class McpServer:
                         "slots": {"type": "array", "items": {"type": "string"}, "minItems": 1},
                         "slot_class": {"type": "string", "enum": ["customer", "dev"]},
                         "family": {"type": "string", "enum": ["hermes", "openclaw"]},
-                        "live": {"type": "boolean", "default": False},
                     },
                     "oneOf": [{"required": ["slot"]}, {"required": ["slots"]}, {"required": ["slot_class"]}],
                     "additionalProperties": False,
@@ -215,37 +237,64 @@ class McpServer:
                 },
             },
             {
-                "name": "release_import",
-                "title": "Import Image Release",
-                "description": "Register a digest-pinned image release and optional recipe components in private server state.",
+                "name": "rollout_image_plan",
+                "title": "Plan Image Rollout",
+                "description": "Validate wrapper/product image labels directly against routing slots without using release state.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "name": {"type": "string"},
-                        "family": {"type": "string", "enum": ["hermes", "openclaw"]},
-                        "image_ref": {"type": "string"},
-                        "product_image": {"type": "string"},
                         "wrapper_image": {"type": "string"},
-                        "image_name": {"type": "string"},
-                        "components": {
-                            "type": "object",
-                            "additionalProperties": {"type": "string"},
-                        },
-                        "compat_combined": {"type": "boolean", "default": True},
-                        "replace": {"type": "boolean", "default": False},
+                        "product_image": {"type": "string"},
+                        "slot": {"type": "string"},
+                        "slots": {"type": "array", "items": {"type": "string"}},
                     },
-                    "required": ["name", "family"],
+                    "required": ["wrapper_image", "product_image"],
                     "additionalProperties": False,
                 },
             },
             {
-                "name": "rollout_status",
-                "title": "Rollout Status",
-                "description": "Inspect fleet lane, canary lane, slots, and recorded rollout status for a runtime family.",
+                "name": "rollout_image_dev_apply",
+                "title": "Apply Dev Image",
+                "description": "Apply a digest-pinned wrapper/product image directly to a dev slot using routing registry ports.",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {"family": {"type": "string", "enum": ["hermes", "openclaw"]}},
-                    "required": ["family"],
+                    "properties": {
+                        "slot": {"type": "string"},
+                        "wrapper_image": {"type": "string"},
+                        "product_image": {"type": "string"},
+                        "allow_first_apply": {"type": "boolean", "default": False},
+                    },
+                    "required": ["slot", "wrapper_image", "product_image"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "rollout_image_canary",
+                "title": "Apply Canary Image",
+                "description": "Apply a digest-pinned wrapper/product image directly to one customer canary slot.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "slot": {"type": "string"},
+                        "wrapper_image": {"type": "string"},
+                        "product_image": {"type": "string"},
+                        "allow_first_apply": {"type": "boolean", "default": False},
+                    },
+                    "required": ["slot", "wrapper_image", "product_image"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "rollout_image_promote",
+                "title": "Promote Live Image",
+                "description": "Read image truth from a canary slot and apply that exact image to explicit customer slots.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "from_slot": {"type": "string"},
+                        "slots": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                    },
+                    "required": ["from_slot", "slots"],
                     "additionalProperties": False,
                 },
             },
@@ -291,92 +340,6 @@ class McpServer:
                     },
                     "required": ["slot"],
                     "oneOf": [{"required": ["source_output"]}, {"required": ["sync_from"]}],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "rollout_plan",
-                "title": "Rollout Plan",
-                "description": "Validate release recipe/runtime-contract compatibility and show the dev-to-canary-to-fleet plan without mutating state.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "family": {"type": "string", "enum": ["hermes", "openclaw"]},
-                        "release": {"type": "string"},
-                    },
-                    "required": ["family", "release"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "rollout_dev_plan",
-                "title": "Dev Rollout Plan",
-                "description": "Validate a release against the image-declared dev runtime profile for one dev slot without mutating state.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "family": {"type": "string", "enum": ["hermes", "openclaw"]},
-                        "release": {"type": "string"},
-                        "slot": {"type": "string"},
-                    },
-                    "required": ["family", "release", "slot"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "rollout_dev_apply",
-                "title": "Apply Dev Release",
-                "description": "Move a dev slot lane to the image-declared dev runtime profile, apply it, and record the result.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "family": {"type": "string", "enum": ["hermes", "openclaw"]},
-                        "release": {"type": "string"},
-                        "slot": {"type": "string"},
-                        "allow_first_apply": {"type": "boolean", "default": False},
-                    },
-                    "required": ["family", "release", "slot"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "rollout_canary",
-                "title": "Rollout Canary",
-                "description": "Move one customer slot to the candidate release, apply it, and record canary success only after live checks pass.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "family": {"type": "string", "enum": ["hermes", "openclaw"]},
-                        "release": {"type": "string"},
-                        "slot": {"type": "string"},
-                        "allow_first_apply": {"type": "boolean", "default": False},
-                    },
-                    "required": ["family", "release", "slot"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "rollout_promote",
-                "title": "Promote Rollout",
-                "description": "Promote a release to the family fleet lane only when a matching successful canary is recorded.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "family": {"type": "string", "enum": ["hermes", "openclaw"]},
-                        "release": {"type": "string"},
-                    },
-                    "required": ["family", "release"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "rollout_rollback_canary",
-                "title": "Rollback Canary",
-                "description": "Move the recorded canary slot back to its previous lane and apply that slot.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {"family": {"type": "string", "enum": ["hermes", "openclaw"]}},
-                    "required": ["family"],
                     "additionalProperties": False,
                 },
             },
@@ -544,19 +507,17 @@ class McpServer:
         handlers = {
             "ops_orientation": self._tool_ops_orientation,
             "slot_list": self._tool_slot_list,
+            "routing_status": self._tool_routing_status,
+            "runtime_truth": self._tool_runtime_truth,
             "slot_check": self._tool_slot_check,
             "deploy_update": self._tool_deploy_update,
-            "release_import": self._tool_release_import,
-            "rollout_status": self._tool_rollout_status,
+            "rollout_image_plan": self._tool_rollout_image_plan,
+            "rollout_image_dev_apply": self._tool_rollout_image_dev_apply,
+            "rollout_image_canary": self._tool_rollout_image_canary,
+            "rollout_image_promote": self._tool_rollout_image_promote,
             "canonical_recipe_validate": self._tool_canonical_recipe_validate,
             "dev_recipe_status": self._tool_dev_recipe_status,
             "dev_recipe_apply": self._tool_dev_recipe_apply,
-            "rollout_plan": self._tool_rollout_plan,
-            "rollout_dev_plan": self._tool_rollout_dev_plan,
-            "rollout_dev_apply": self._tool_rollout_dev_apply,
-            "rollout_canary": self._tool_rollout_canary,
-            "rollout_promote": self._tool_rollout_promote,
-            "rollout_rollback_canary": self._tool_rollout_rollback_canary,
             "runtime_secret_status": self._tool_runtime_secret_status,
             "runtime_secret_set_from_file": self._tool_runtime_secret_set_from_file,
             "handoff_status": self._tool_handoff_status,
@@ -644,20 +605,33 @@ class McpServer:
         runs = [self._run([self.opsctl, "slot", "list"], timeout=60)]
         return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
 
+    def _tool_routing_status(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(args, {"slot"})
+        argv = [self.opsctl, "routing", "status"]
+        if args.get("slot"):
+            argv.append(self._slot(args.get("slot")))
+        runs = [self._run(argv, timeout=60)]
+        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
+
+    def _tool_runtime_truth(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(args, {"slot", "all"})
+        argv = [self.sudo, self.opsctl, "runtime", "truth"]
+        if bool(args.get("all", False)):
+            if args.get("slot") is not None:
+                raise ToolError("provide either slot or all, not both")
+            argv.append("--all")
+        else:
+            argv.append(self._slot(args.get("slot")))
+        runs = [self._run(argv, timeout=120)]
+        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
+
     def _tool_slot_check(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"slot", "slots", "slot_class", "family", "live"})
-        live = bool(args.get("live", False))
+        self._reject_unknown(args, {"slot", "slots", "slot_class", "family"})
         slots, runs = self._resolve_slots(args)
         for slot in slots:
-            runs.extend(
-                [
-                    self._run([self.opsctl, "status", slot]),
-                    self._run([self.opsctl, "plan", slot]),
-                    self._run([self.opsctl, "check", slot]),
-                ]
-            )
-            if live:
-                runs.append(self._run([self.sudo, self.opsctl, "check", "--live", slot], timeout=120))
+            runs.append(self._run([self.opsctl, "routing", "status", slot]))
+            runs.append(self._run([self.sudo, self.opsctl, "runtime", "truth", slot], timeout=120))
+            runs.append(self._run([self.sudo, self.opsctl, "check", "--live", slot], timeout=120))
         ok = all(item["returncode"] == 0 for item in runs)
         return self._common_response(ok=ok, mutated=False, runs=runs)
 
@@ -714,59 +688,72 @@ class McpServer:
             },
         )
 
-    def _tool_release_import(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(
-            args,
-            {
-                "name",
-                "family",
-                "image_ref",
-                "product_image",
-                "wrapper_image",
-                "image_name",
-                "components",
-                "compat_combined",
-                "replace",
-            },
-        )
-        name = self._release(args.get("name"))
-        family = self._family(args.get("family"))
-        compat_combined = bool(args.get("compat_combined", True))
-        argv = [self.sudo, self.opsctl, "release", "import", name, "--family", family]
-        image_name = args.get("image_name")
-        if image_name:
-            argv.extend(["--image-name", self._release(image_name)])
-        if compat_combined:
-            image_ref = self._image_ref(args.get("image_ref"))
-            if args.get("product_image") is not None or args.get("wrapper_image") is not None:
-                raise ToolError("compat_combined uses image_ref; do not pass product_image or wrapper_image")
-            argv.extend(["--image", image_ref, "--compat-combined"])
-        else:
-            product_image = self._image_ref(args.get("product_image"))
-            wrapper_image = self._image_ref(args.get("wrapper_image"))
-            if args.get("image_ref") is not None:
-                raise ToolError("split releases use product_image and wrapper_image, not image_ref")
-            argv.extend(["--product-image", product_image, "--wrapper-image", wrapper_image])
-        components = args.get("components")
-        if components is not None:
-            if not isinstance(components, dict):
-                raise ToolError("components must be an object of NAME=VALUE recipe metadata")
-            for key in sorted(components):
-                name = self._release(key)
-                value = self._safe_text(components[key], f"components.{name}")
-                if not value:
-                    raise ToolError(f"components.{name} must not be empty")
-                argv.extend(["--component", f"{name}={value}"])
-        if bool(args.get("replace", False)):
-            argv.append("--replace")
-        runs = [self._run(argv, timeout=120)]
+    def _tool_rollout_image_plan(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(args, {"wrapper_image", "product_image", "slot", "slots"})
+        argv = [
+            self.sudo,
+            self.opsctl,
+            "rollout",
+            "image-plan",
+            "--wrapper-image",
+            self._image_ref(args.get("wrapper_image")),
+            "--product-image",
+            self._image_ref(args.get("product_image")),
+        ]
+        if args.get("slot"):
+            argv.extend(["--slot", self._slot(args.get("slot"))])
+        slots = args.get("slots")
+        if slots is not None:
+            if not isinstance(slots, list) or not slots:
+                raise ToolError("slots must be a non-empty array")
+            argv.append("--slots")
+            argv.extend(self._slot(item) for item in slots)
+        runs = [self._run(argv, timeout=180)]
+        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
+
+    def _tool_rollout_image_dev_apply(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self._tool_rollout_image_apply(args, command="image-dev-apply")
+
+    def _tool_rollout_image_canary(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self._tool_rollout_image_apply(args, command="image-canary")
+
+    def _tool_rollout_image_apply(self, args: dict[str, Any], *, command: str) -> dict[str, Any]:
+        self._reject_unknown(args, {"slot", "wrapper_image", "product_image", "allow_first_apply"})
+        argv = [
+            self.sudo,
+            self.opsctl,
+            "rollout",
+            command,
+            "--slot",
+            self._slot(args.get("slot")),
+            "--wrapper-image",
+            self._image_ref(args.get("wrapper_image")),
+            "--product-image",
+            self._image_ref(args.get("product_image")),
+        ]
+        if bool(args.get("allow_first_apply", False)):
+            argv.append("--allow-first-apply")
+        runs = [self._run(argv, timeout=900)]
         return self._common_response(ok=runs[0]["returncode"] == 0, mutated=True, runs=runs)
 
-    def _tool_rollout_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"family"})
-        family = self._family(args.get("family"))
-        runs = [self._run([self.sudo, self.opsctl, "rollout", "status", "--family", family], timeout=60)]
-        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
+    def _tool_rollout_image_promote(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(args, {"from_slot", "slots"})
+        slots = args.get("slots")
+        if not isinstance(slots, list) or not slots:
+            raise ToolError("slots must be a non-empty array")
+        slot_values = [self._slot(item) for item in slots]
+        argv = [
+            self.sudo,
+            self.opsctl,
+            "rollout",
+            "image-promote",
+            "--from-slot",
+            self._slot(args.get("from_slot")),
+            "--slots",
+            ",".join(slot_values),
+        ]
+        runs = [self._run(argv, timeout=1800)]
+        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=True, runs=runs)
 
     def _tool_canonical_recipe_validate(self, args: dict[str, Any]) -> dict[str, Any]:
         self._reject_unknown(args, {"name"})
@@ -821,93 +808,6 @@ class McpServer:
         if bool(args.get("no_apply", False)):
             argv.append("--no-apply")
         runs.append(self._run(argv, timeout=900))
-        ok = all(item["returncode"] == 0 for item in runs)
-        return self._common_response(ok=ok, mutated=True, runs=runs)
-
-    def _tool_rollout_plan(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"family", "release"})
-        family = self._family(args.get("family"))
-        release = self._release(args.get("release"))
-        runs = [self._run([self.sudo, self.opsctl, "rollout", "plan", "--family", family, "--release", release], timeout=60)]
-        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
-
-    def _tool_rollout_dev_plan(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"family", "release", "slot"})
-        family = self._family(args.get("family"))
-        release = self._release(args.get("release"))
-        slot = self._slot(args.get("slot"))
-        runs = [
-            self._run(
-                [self.sudo, self.opsctl, "rollout", "dev-plan", "--family", family, "--release", release, "--slot", slot],
-                timeout=60,
-            )
-        ]
-        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
-
-    def _tool_rollout_dev_apply(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"family", "release", "slot", "allow_first_apply"})
-        family = self._family(args.get("family"))
-        release = self._release(args.get("release"))
-        slot = self._slot(args.get("slot"))
-        runs = [
-            self._run(
-                [self.sudo, self.opsctl, "rollout", "dev-plan", "--family", family, "--release", release, "--slot", slot],
-                timeout=60,
-            )
-        ]
-        if runs[0]["returncode"] != 0:
-            return self._common_response(ok=False, mutated=False, runs=runs, next_action="fix release or dev rollout plan before apply")
-        argv = [self.sudo, self.opsctl, "rollout", "dev-apply", "--family", family, "--release", release, "--slot", slot]
-        if bool(args.get("allow_first_apply", False)):
-            argv.append("--allow-first-apply")
-        runs.append(self._run(argv, timeout=900))
-        ok = all(item["returncode"] == 0 for item in runs)
-        return self._common_response(ok=ok, mutated=True, runs=runs)
-
-    def _tool_rollout_canary(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"family", "release", "slot", "allow_first_apply"})
-        family = self._family(args.get("family"))
-        release = self._release(args.get("release"))
-        slot = self._slot(args.get("slot"))
-        runs = [self._run([self.sudo, self.opsctl, "rollout", "plan", "--family", family, "--release", release], timeout=60)]
-        if runs[0]["returncode"] != 0:
-            return self._common_response(ok=False, mutated=False, runs=runs, next_action="fix release or rollout plan before canary")
-        try:
-            plan = json.loads(runs[0]["stdout"])
-        except Exception:
-            plan = {}
-        if isinstance(plan, dict) and plan.get("contract_compatible") is False:
-            return self._common_response(
-                ok=False,
-                mutated=False,
-                runs=runs,
-                next_action="fix release recipe/runtime contract before canary",
-            )
-        argv = [self.sudo, self.opsctl, "rollout", "canary", "--family", family, "--release", release, "--slot", slot]
-        if bool(args.get("allow_first_apply", False)):
-            argv.append("--allow-first-apply")
-        runs.append(self._run(argv, timeout=600))
-        runs.append(self._run([self.sudo, self.opsctl, "rollout", "status", "--family", family], timeout=60))
-        ok = all(item["returncode"] == 0 for item in runs)
-        return self._common_response(ok=ok, mutated=True, runs=runs)
-
-    def _tool_rollout_promote(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"family", "release"})
-        family = self._family(args.get("family"))
-        release = self._release(args.get("release"))
-        runs = [self._run([self.sudo, self.opsctl, "rollout", "status", "--family", family], timeout=60)]
-        if runs[0]["returncode"] != 0:
-            return self._common_response(ok=False, mutated=False, runs=runs, next_action="fix rollout status before promote")
-        runs.append(self._run([self.sudo, self.opsctl, "rollout", "promote", "--family", family, "--release", release], timeout=1800))
-        runs.append(self._run([self.sudo, self.opsctl, "rollout", "status", "--family", family], timeout=60))
-        ok = all(item["returncode"] == 0 for item in runs)
-        return self._common_response(ok=ok, mutated=True, runs=runs)
-
-    def _tool_rollout_rollback_canary(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"family"})
-        family = self._family(args.get("family"))
-        runs = [self._run([self.sudo, self.opsctl, "rollout", "rollback-canary", "--family", family], timeout=600)]
-        runs.append(self._run([self.sudo, self.opsctl, "rollout", "status", "--family", family], timeout=60))
         ok = all(item["returncode"] == 0 for item in runs)
         return self._common_response(ok=ok, mutated=True, runs=runs)
 
@@ -1044,7 +944,7 @@ class McpServer:
         if unknown:
             lowered = {item.lower().replace("-", "_") for item in unknown}
             if lowered & SENSITIVE_ARGUMENTS:
-                raise ToolError("raw secret argument rejected; pass an allowed secret_file path or use stdin runbooks")
+                raise ToolError("raw secret argument rejected; pass an allowed secret_file path or a manual stdin flow")
             raise ToolError("unsupported argument(s): " + ",".join(unknown))
 
     def _reject_sensitive_raw_args(self, args: dict[str, Any], *, allowed: set[str] | None = None) -> None:
@@ -1052,7 +952,7 @@ class McpServer:
         for key in args:
             normalized = key.lower().replace("-", "_")
             if key not in allowed and normalized in SENSITIVE_ARGUMENTS:
-                raise ToolError("raw secret argument rejected; pass an allowed secret_file path or use stdin runbooks")
+                raise ToolError("raw secret argument rejected; pass an allowed secret_file path or a manual stdin flow")
 
     def _slot(self, value: Any) -> str:
         slot = str(value or "")
@@ -1119,19 +1019,28 @@ class McpServer:
         slot_list = self._run([self.opsctl, "slot", "list"], timeout=60)
         if slot_list["returncode"] != 0:
             return [], [slot_list]
+        runs = [slot_list]
+        family_by_slot: dict[str, str] = {}
+        if family:
+            truth = self._run([self.sudo, self.opsctl, "runtime", "truth", "--all"], timeout=120)
+            runs.append(truth)
+            for raw_line in truth["stdout"].splitlines():
+                row = _parse_key_value_tokens(raw_line)
+                if row.get("slot") and row.get("family"):
+                    family_by_slot[row["slot"]] = row["family"]
         slots: list[str] = []
         for raw_line in slot_list["stdout"].splitlines():
             row = _parse_key_value_tokens(raw_line)
             if row.get("slot_class") != slot_class:
                 continue
-            if family and row.get("family") != family:
-                continue
             slot = row.get("slot")
+            if family and family_by_slot.get(str(slot)) != family:
+                continue
             if slot:
                 slots.append(self._slot(slot))
         if not slots:
             raise ToolError("no slots matched slot_class/family")
-        return slots, [slot_list]
+        return slots, runs
 
     def _share(self, value: Any) -> str:
         share = str(value or "")

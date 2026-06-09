@@ -20,6 +20,7 @@ from agent_runtime_ops.cli import (
     cmd_slot_list,
 )
 from agent_runtime_ops.nas import parse_smb_share
+from agent_runtime_ops.routing import SlotRoute, dump_routing_registry
 
 
 def write_state(root: Path) -> None:
@@ -61,6 +62,15 @@ releases:
 """.lstrip(),
         encoding="utf-8",
     )
+    (root / "slot-registry.json").write_text(
+        dump_routing_registry(
+            [
+                SlotRoute("oc3", "oc3.ji-tech.co.kr", 28989, 28990),
+                SlotRoute("dev-oc", "dev-oc.ji-tech.co.kr", 30789, 30790),
+            ]
+        ),
+        encoding="utf-8",
+    )
 
 
 class CliNasTests(unittest.TestCase):
@@ -79,7 +89,7 @@ class CliNasTests(unittest.TestCase):
         self.assertIn("pending_request_count=0", output.getvalue())
         self.assertIn("nas_requests_status=ok", output.getvalue())
 
-    def test_slot_list_reports_slots_and_profiles_from_state(self) -> None:
+    def test_slot_list_reports_routing_registry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write_state(root)
@@ -90,7 +100,8 @@ class CliNasTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("slot=dev-oc", text)
         self.assertIn("slot_class=dev", text)
-        self.assertIn("runtime_profile=openclaw-dev", text)
+        self.assertIn("gateway_port=30789", text)
+        self.assertIn("public_host=dev-oc.ji-tech.co.kr", text)
         self.assertIn("slot_list_status=ok count=2", text)
 
     def test_approve_auto_accepts_slots_yaml_list(self) -> None:

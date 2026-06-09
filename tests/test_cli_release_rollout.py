@@ -19,15 +19,18 @@ from agent_runtime_ops.cli import (
     cmd_recipe_dev_status,
     cmd_recipe_validate_canonical,
     cmd_release_import,
+    cmd_routing_seed_legacy,
     cmd_rollout_canary,
     cmd_rollout_dev_apply,
     cmd_rollout_dev_plan,
+    cmd_rollout_image_plan,
     cmd_rollout_plan,
     cmd_rollout_promote,
     cmd_rollout_rollback_canary,
     _image_recipe_from_wrapper_image,
 )
 from agent_runtime_ops.canonical_recipes import load_canonical_recipe
+from agent_runtime_ops.routing import SlotRoute, dump_routing_registry, load_routing_registry
 from agent_runtime_ops.yamlio import dump_yaml, load_yaml
 
 
@@ -140,6 +143,28 @@ def import_args(root: Path, **overrides: object) -> argparse.Namespace:
     return argparse.Namespace(**values)
 
 
+def write_slot_registry(root: Path, slots: list[str]) -> None:
+    default_ports = {
+        "oc3": (28989, 28990),
+        "oc4": (29089, 29090),
+        "oc20": (30689, 30690),
+        "dev-oc": (30789, 30790),
+        "dev-hermess": (30889, 30890),
+    }
+    routes = []
+    for index, slot in enumerate(slots):
+        gateway_port, bridge_port = default_ports.get(slot, (32000 + index * 2, 32001 + index * 2))
+        routes.append(
+            SlotRoute(
+                slot=slot,
+                public_host=f"{slot}.ji-tech.co.kr",
+                gateway_port=gateway_port,
+                bridge_port=bridge_port,
+            )
+        )
+    (root / "slot-registry.json").write_text(dump_routing_registry(routes), encoding="utf-8")
+
+
 def write_hermes_state(root: Path, *, candidate_product_repo: str = "hermes-workspace") -> None:
     current_digest = "sha256:" + "1" * 64
     (root / "slots.yaml").write_text(
@@ -180,6 +205,7 @@ releases:
 """.lstrip(),
         encoding="utf-8",
     )
+    write_slot_registry(root, ["oc20", "dev-hermess"])
 
 
 def write_state(root: Path) -> None:
@@ -223,6 +249,7 @@ releases:
 """.lstrip(),
         encoding="utf-8",
     )
+    write_slot_registry(root, ["oc3", "oc4", "dev-oc"])
 
 
 def import_candidate(root: Path, name: str = "openclaw-candidate") -> None:
@@ -434,6 +461,49 @@ class CliReleaseRolloutTests(unittest.TestCase):
         self.assertIn("CANONICAL_RECIPE_NAME=hermes-workspace", text)
         self.assertIn(f"CANONICAL_RECIPE_DIGEST={hermes_workspace_recipe_digest()}", text)
         self.assertIn("RUNTIME_PROFILE_DEV=hermes-workspace-dev", text)
+
+    def test_routing_seed_legacy_writes_minimal_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            (root / "slot-registry.json").unlink()
+            output = io.StringIO()
+            with patch("agent_runtime_ops.cli._is_root", return_value=True), contextlib.redirect_stdout(output):
+                rc = cmd_routing_seed_legacy(argparse.Namespace(state_root=str(root), write=True, replace=False))
+            self.assertEqual(rc, 0, output.getvalue())
+            routes = {route.slot: route for route in load_routing_registry(root)}
+            self.assertEqual(routes["oc3"].gateway_port, 28989)
+            self.assertEqual(routes["dev-oc"].gateway_port, 30789)
+            text = (root / "slot-registry.json").read_text(encoding="utf-8")
+            self.assertNotIn("runtime_profile", text)
+            self.assertNotIn("release", text)
+
+    def test_rollout_image_plan_uses_wrapper_labels_and_routing_ports(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_hermes_state(root)
+            wrapper = wrapper_image_ref("agent-runtime-hermes", "3")
+            product = wrapper_image_ref("hermes-workspace", "2")
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.cli._image_recipe_labels_from_wrapper", return_value=hermes_recipe_labels(product_image=product)),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_rollout_image_plan(
+                    argparse.Namespace(
+                        state_root=str(root),
+                        wrapper_image=wrapper,
+                        product_image=product,
+                        slot="oc20",
+                        slots=None,
+                    )
+                )
+            self.assertEqual(rc, 0, output.getvalue())
+            plan = json.loads(output.getvalue())
+            self.assertEqual(plan["family"], "hermes")
+            self.assertEqual(plan["slots"][0]["gateway_port"], 30689)
+            self.assertEqual(plan["slots"][0]["runtime_profile"], "hermes-workspace-customer")
 
     def test_release_import_registers_combined_digest_release(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

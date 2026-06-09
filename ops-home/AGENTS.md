@@ -33,7 +33,7 @@ MCP: agent-runtime-ops
   provide the full manual command, explain the consequence, and tell them not to paste secret values
   back into chat.
 - Do not guess target identifiers. Before giving a manual command, resolve the current slot,
-  profile, account, share, or release name from MCP, `opsctl`, or the installed repo. In
+  routing entry, image digest, profile, account, or share from MCP, `opsctl`, or the installed repo. In
   particular, do not use a runtime profile name as a slot name unless current state proves that it
   is also a slot.
 - Separate verified facts from unknowns. If the operator asks where a token, password, session,

@@ -47,6 +47,15 @@ from .nas import (
 from .profiles import list_profile_names, load_profile
 from .redaction import redact
 from .renderer import render_compose
+from .routing import (
+    SlotRoute,
+    dump_routing_registry,
+    get_slot_route,
+    load_routing_registry,
+    routing_registry_path,
+    seed_routes_from_legacy_slots,
+    slot_class_from_name,
+)
 from .runtime_secrets import (
     PROVIDER_SECRET_KEYS,
     parse_secret_env_text,
@@ -71,6 +80,7 @@ DEV_RECIPE_STATE_NAME = "dev-recipes.yaml"
 DEV_RECIPE_STAGE_ROOT = "agent-runtime-source"
 IMAGE_RECIPE_LABEL_PREFIX = "com.epicevent.agent-runtime."
 IMAGE_RECIPE_SCHEMA = "v1"
+IMAGE_ROLLOUT_RELEASE_NAME = "direct-image"
 
 
 def _state_root(args: argparse.Namespace) -> Path:
@@ -166,38 +176,81 @@ def cmd_profile_list(args: argparse.Namespace) -> int:
 def cmd_slot_list(args: argparse.Namespace) -> int:
     state_root = _state_root(args)
     try:
-        slots_data = load_yaml(state_root / "slots.yaml").get("slots") or {}
+        routes = load_routing_registry(state_root)
     except Exception as exc:
         print("slot_list_status=fail")
         print(f"reason={exc}")
         return 1
 
     count = 0
-    for slot in _slot_names_from_config(slots_data):
+    for route in routes:
         count += 1
-        try:
-            desired = load_desired_slot(slot, state_root)
-            profile = load_profile(desired.runtime_profile)
-            family = profile.metadata.get("family") or desired.lane_data.get("family") or ""
-            slot_class = desired.lane_data.get("slot_class") or ""
-            mode = profile.metadata.get("mode") or ""
-            recipe_tokens = _release_recipe_tokens(desired.release_data)
-            print(
-                f"slot={desired.slot} "
-                f"lane={desired.lane} "
-                f"family={family} "
-                f"slot_class={slot_class} "
-                f"runtime_profile={profile.name} "
-                f"runtime_contract={_profile_runtime_contract(profile)} "
-                f"customer_surface={_profile_customer_surface(profile)} "
-                f"release={desired.release_name} "
-                f"mode={mode} "
-                f"recipe_mode={recipe_tokens['recipe_mode']} "
-                f"product_component={recipe_tokens['product_component']}"
-            )
-        except Exception as exc:
-            print(f"slot={slot} status=not_ready reason={exc}")
+        print(
+            f"slot={route.slot} "
+            f"slot_class={route.slot_class} "
+            f"public_host={route.public_host} "
+            f"gateway_port={route.gateway_port} "
+            f"bridge_port={route.bridge_port} "
+            f"enabled={'yes' if route.enabled else 'no'}"
+        )
     print(f"slot_list_status=ok count={count}")
+    return 0
+
+
+def cmd_routing_status(args: argparse.Namespace) -> int:
+    state_root = _state_root(args)
+    try:
+        routes = load_routing_registry(state_root)
+        if getattr(args, "slot", None):
+            wanted = str(args.slot)
+            routes = [route for route in routes if route.slot == wanted]
+            if not routes:
+                raise KeyError(f"slot route not found: {wanted}")
+    except Exception as exc:
+        print("routing_status=fail")
+        print(f"reason={exc}")
+        return 1
+    for route in routes:
+        print(
+            f"slot={route.slot} "
+            f"slot_class={route.slot_class} "
+            f"public_host={route.public_host} "
+            f"gateway_port={route.gateway_port} "
+            f"bridge_port={route.bridge_port} "
+            f"enabled={'yes' if route.enabled else 'no'}"
+        )
+    print(f"routing_status=ok count={len(routes)}")
+    return 0
+
+
+def cmd_routing_seed_legacy(args: argparse.Namespace) -> int:
+    state_root = _state_root(args)
+    try:
+        routes = seed_routes_from_legacy_slots(state_root)
+        text = dump_routing_registry(routes)
+        path = routing_registry_path(state_root)
+        if getattr(args, "write", False):
+            if not _is_root():
+                print("error: run as root/admin: sudo /usr/local/bin/opsctl routing seed-legacy --write", file=sys.stderr)
+                return 2
+            if path.exists() and not getattr(args, "replace", False):
+                raise ValueError(f"routing registry already exists: {path}; use --replace")
+            if path.exists() and path.is_symlink():
+                raise ValueError(f"routing registry must not be symlink: {path}")
+            tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+            tmp_path.write_text(text, encoding="utf-8")
+            if hasattr(os, "chown"):
+                os.chown(tmp_path, 0, state_root.stat().st_gid)
+            os.chmod(tmp_path, 0o640)
+            os.replace(tmp_path, path)
+            print(f"routing_registry={path}")
+        else:
+            print(text, end="")
+    except Exception as exc:
+        print("routing_seed_status=fail")
+        print(f"reason={exc}")
+        return 1
+    print(f"routing_seed_status=ok count={len(routes)} write={'yes' if getattr(args, 'write', False) else 'no'}")
     return 0
 
 
@@ -281,26 +334,41 @@ def cmd_update_status(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
+    state_root = _state_root(args)
     try:
-        desired = load_desired_slot(args.slot, _state_root(args))
-        profile = load_profile(desired.runtime_profile)
+        route = get_slot_route(args.slot, state_root)
     except Exception as exc:
         print(f"status=unknown")
         print(f"reason={exc}")
         return 1
-    print(f"slot={desired.slot}")
-    print(f"lane={desired.lane}")
-    print(f"release={desired.release_name}")
-    print(f"runtime_profile={profile.name}")
-    print(f"runtime_profile_digest={profile.digest}")
-    print(f"runtime_contract={_profile_runtime_contract(profile)}")
-    print(f"customer_surface={_profile_customer_surface(profile)}")
-    print(f"family={profile.metadata.get('family')}")
-    print(f"mode={profile.metadata.get('mode')}")
-    recipe_tokens = _release_recipe_tokens(desired.release_data)
-    for key, value in recipe_tokens.items():
-        print(f"{key}={value}")
-    return 0
+    print(f"slot={route.slot}")
+    print(f"slot_class={route.slot_class}")
+    print(f"public_host={route.public_host}")
+    print(f"gateway_port={route.gateway_port}")
+    print(f"bridge_port={route.bridge_port}")
+    print(f"enabled={'yes' if route.enabled else 'no'}")
+    if not _is_root():
+        print("truth_source=live_image")
+        print("truth_status=requires_live_root")
+        print(f"next_action=sudo /usr/local/bin/opsctl runtime truth {route.slot}")
+        return 0
+    try:
+        truth, checks = _live_runtime_truth(route.slot, state_root)
+    except Exception as exc:
+        print("truth_source=live_image")
+        print("truth_status=fail")
+        print(f"reason={exc}")
+        return 1
+    for key, value in truth.items():
+        if key not in {"slot", "slot_class", "public_host", "gateway_port", "bridge_port", "enabled"}:
+            print(f"{key}={value}")
+    failed = 0
+    for ok, name, detail in checks:
+        _check_line(ok, name, detail)
+        if not ok:
+            failed += 1
+    print(f"status={'ok' if failed == 0 and truth.get('truth_status') == 'ok' else 'fail'}")
+    return 0 if failed == 0 and truth.get("truth_status") == "ok" else 1
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
@@ -629,6 +697,57 @@ def _image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product
     return recipe
 
 
+def _image_recipe_from_wrapper_image_auto(wrapper_image: str, *, product_image: str) -> dict[str, object]:
+    labels = _image_recipe_labels_from_wrapper(wrapper_image)
+    family = _recipe_label(labels, "family")
+    if family not in {"openclaw", "hermes"}:
+        raise ValueError(f"wrapper image recipe family mismatch: label={family or 'missing'}")
+    return _image_recipe_from_wrapper_image(wrapper_image, family=family, product_image=product_image)
+
+
+def _release_data_from_direct_images(wrapper_image: str, product_image: str) -> dict[str, object]:
+    wrapper_digest = _validate_image_digest_ref(wrapper_image)
+    product_digest = _validate_image_digest_ref(product_image)
+    image_recipe = _image_recipe_from_wrapper_image_auto(wrapper_image, product_image=product_image)
+    family = str(image_recipe.get("family") or "")
+    if family not in {"openclaw", "hermes"}:
+        raise ValueError("wrapper image recipe did not declare a supported family")
+    if not _allowed_image_ref(family, "wrapper", wrapper_image):
+        raise ValueError(f"wrapper image repository is not allowed for {family}")
+    if not _allowed_image_ref(family, "product", product_image):
+        raise ValueError(f"product image repository is not allowed for {family}")
+    components = _derived_release_components(product_image, wrapper_image)
+    components.update(
+        {
+            "product_component": str(image_recipe.get("product_component") or components["product_component"]),
+            "wrapper_component": str(image_recipe.get("wrapper_component") or components["wrapper_component"]),
+            "canonical_recipe_name": str(image_recipe.get("canonical_recipe_name") or ""),
+            "canonical_recipe_digest": str(image_recipe.get("canonical_recipe_digest") or ""),
+            "runtime_profile_customer": str(
+                (image_recipe.get("runtime_profiles") or {}).get("customer")
+                if isinstance(image_recipe.get("runtime_profiles"), dict)
+                else ""
+            ),
+            "runtime_profile_dev": str(
+                (image_recipe.get("runtime_profiles") or {}).get("dev")
+                if isinstance(image_recipe.get("runtime_profiles"), dict)
+                else ""
+            ),
+        }
+    )
+    return {
+        "family": family,
+        "image_name": IMAGE_ROLLOUT_RELEASE_NAME,
+        "product_image": product_image,
+        "wrapper_image": wrapper_image,
+        "digest": wrapper_digest,
+        "product_digest": product_digest,
+        "components": components,
+        "compatibility_mode": "wrapped_product_image",
+        "image_recipe": image_recipe,
+    }
+
+
 def _release_image_recipe(release_data: dict) -> dict[str, object]:
     recipe = release_data.get("image_recipe")
     return recipe if isinstance(recipe, dict) else {}
@@ -782,35 +901,24 @@ def _run_text_cwd(command: list[str], cwd: Path, timeout: int = 20) -> subproces
         return subprocess.CompletedProcess(command, 127, "", str(exc))
 
 
-def _slot_gateway_port(slot: str) -> int | None:
-    dev_ports = {
-        "dev-oc": 30789,
-        "dev-hermess": 30889,
-    }
-    if slot in dev_ports:
-        return dev_ports[slot]
-    match = re.match(r"^oc([0-9]+)$", slot)
-    if not match:
-        return None
-    return 28789 + (int(match.group(1)) - 1) * 100
-
-
-def _http_backend_smoke(slot: str, path: str) -> tuple[bool, str]:
-    port = _slot_gateway_port(slot)
-    if port is None:
-        return False, "slot_has_no_gateway_port"
+def _http_backend_smoke(slot: str, path: str, state_root: Path) -> tuple[bool, str]:
+    try:
+        route = get_slot_route(slot, state_root)
+    except Exception as exc:
+        return False, f"slot_route_missing reason={exc}"
+    port = route.gateway_port
     smoke_path = path if path.startswith("/") else f"/{path}"
     url = f"http://127.0.0.1:{port}{smoke_path}"
-    request = urllib.request.Request(url, headers={"Host": f"{slot}.ji-tech.co.kr"})
+    request = urllib.request.Request(url, headers={"Host": route.public_host})
     try:
         with urllib.request.urlopen(request, timeout=5) as response:
             status = int(response.getcode())
-            return 200 <= status < 500, f"url={url} status={status}"
+            return 200 <= status < 500, f"url={url} host={route.public_host} status={status}"
     except urllib.error.HTTPError as exc:
         status = int(exc.code)
-        return 200 <= status < 500, f"url={url} status={status}"
+        return 200 <= status < 500, f"url={url} host={route.public_host} status={status}"
     except Exception as exc:
-        return False, f"url={url} reason={exc}"
+        return False, f"url={url} host={route.public_host} reason={exc}"
 
 
 def _parse_findmnt_pairs(output: str) -> list[dict[str, str]]:
@@ -958,6 +1066,167 @@ def _find_gateway_container(slot: str, profile) -> tuple[str | None, str | None]
     return _container_name(slot, profile), "fallback_name"
 
 
+def _find_gateway_container_by_slot(slot: str) -> tuple[str | None, str | None]:
+    by_label = _run_text(
+        [
+            "docker",
+            "ps",
+            "-a",
+            "--filter",
+            f"label=agent-runtime.slot={slot}",
+            "--filter",
+            "label=agent-runtime.service=gateway",
+            "--format",
+            "{{.ID}}",
+        ]
+    )
+    if by_label.returncode != 0:
+        return None, (by_label.stderr or by_label.stdout).strip() or "docker_ps_failed"
+    ids = [line.strip() for line in by_label.stdout.splitlines() if line.strip()]
+    if len(ids) == 1:
+        return ids[0], "slot_label"
+    if len(ids) > 1:
+        return None, f"multiple_slot_label_matches:{len(ids)}"
+    return None, "not_found"
+
+
+def _labels_from_container_info(info: dict) -> dict[str, str]:
+    config = info.get("Config") if isinstance(info, dict) else {}
+    labels = config.get("Labels") if isinstance(config, dict) else {}
+    if not isinstance(labels, dict):
+        return {}
+    return {str(key): str(value) for key, value in labels.items()}
+
+
+def _live_image_truth_from_info(slot: str, info: dict, route: SlotRoute) -> dict[str, str]:
+    labels = _labels_from_container_info(info)
+    config = info.get("Config") if isinstance(info, dict) else {}
+    image = str((config or {}).get("Image") or "")
+    slot_class = route.slot_class
+    schema = _recipe_label(labels, "recipe.schema")
+    family = _recipe_label(labels, "family")
+    product_image = _recipe_label(labels, "product-image")
+    runtime_profile = _recipe_label(labels, f"runtime-profile.{slot_class}")
+    runtime_contract = _recipe_label(labels, f"runtime-contract.{slot_class}")
+    return {
+        "slot": slot,
+        "truth_source": "live_image",
+        "truth_status": "ok" if schema == IMAGE_RECIPE_SCHEMA else "legacy_or_unlabeled",
+        "public_host": route.public_host,
+        "gateway_port": str(route.gateway_port),
+        "bridge_port": str(route.bridge_port),
+        "enabled": "yes" if route.enabled else "no",
+        "slot_class": slot_class,
+        "wrapper_image": image,
+        "family": family,
+        "product_image": product_image,
+        "product_component": _recipe_label(labels, "product-component"),
+        "wrapper_component": _recipe_label(labels, "wrapper-component"),
+        "runtime_profile": runtime_profile,
+        "runtime_contract": runtime_contract,
+        "canonical_recipe_name": _recipe_label(labels, "recipe.name"),
+        "canonical_recipe_digest": _recipe_label(labels, "recipe.digest"),
+        "ops_repo_commit": _recipe_label(labels, "ops-repo-commit"),
+    }
+
+
+def _live_runtime_truth(slot: str, state_root: Path) -> tuple[dict[str, str], list[tuple[bool, str, str | None]]]:
+    checks: list[tuple[bool, str, str | None]] = []
+    route = get_slot_route(slot, state_root)
+    container, lookup = _find_gateway_container_by_slot(slot)
+    checks.append((bool(container), "truth_container_lookup", lookup))
+    if not container:
+        return (
+            {
+                "slot": slot,
+                "truth_source": "live_image",
+                "truth_status": "not_running",
+                "public_host": route.public_host,
+                "gateway_port": str(route.gateway_port),
+                "bridge_port": str(route.bridge_port),
+                "enabled": "yes" if route.enabled else "no",
+                "slot_class": route.slot_class,
+            },
+            checks,
+        )
+    inspect = _run_text(["docker", "inspect", container])
+    checks.append((inspect.returncode == 0, "truth_container_inspect_ok", container))
+    if inspect.returncode != 0:
+        detail = (inspect.stderr or inspect.stdout).strip()
+        return (
+            {
+                "slot": slot,
+                "truth_source": "live_image",
+                "truth_status": "inspect_failed",
+                "reason": detail[:200],
+            },
+            checks,
+        )
+    try:
+        info = json.loads(inspect.stdout)[0]
+    except Exception as exc:
+        checks.append((False, "truth_container_inspect_parse_ok", str(exc)))
+        return ({"slot": slot, "truth_source": "live_image", "truth_status": "parse_failed", "reason": str(exc)}, checks)
+    truth = _live_image_truth_from_info(slot, info, route)
+    labels = _labels_from_container_info(info)
+    checks.extend(
+        [
+            (truth["truth_status"] == "ok", "truth_image_labeled", truth["truth_status"]),
+            (bool(truth.get("family")), "truth_family_present", truth.get("family") or "missing"),
+            (bool(truth.get("runtime_profile")), "truth_runtime_profile_present", truth.get("runtime_profile") or "missing"),
+            (
+                labels.get("agent-runtime.slot") in {None, slot},
+                "truth_container_slot_label_matches",
+                f"label={labels.get('agent-runtime.slot') or 'missing'} route={slot}",
+            ),
+        ]
+    )
+    return truth, checks
+
+
+def _print_key_values(data: dict[str, object]) -> None:
+    for key, value in data.items():
+        print(f"{key}={value}")
+
+
+def cmd_runtime_truth(args: argparse.Namespace) -> int:
+    if not _is_root():
+        print("error: run as root/admin: sudo /usr/local/bin/opsctl runtime truth ...", file=sys.stderr)
+        return 2
+    state_root = _state_root(args)
+    try:
+        all_slots = bool(getattr(args, "all", False))
+        slot_arg = getattr(args, "slot", None)
+        if all_slots and slot_arg:
+            raise ValueError("provide either SLOT or --all, not both")
+        if not all_slots and not slot_arg:
+            raise ValueError("provide SLOT or --all")
+        if all_slots:
+            slots = [route.slot for route in load_routing_registry(state_root) if route.enabled]
+        else:
+            slots = [str(slot_arg)]
+        all_ok = True
+        for slot in slots:
+            truth, checks = _live_runtime_truth(slot, state_root)
+            if len(slots) > 1:
+                summary = " ".join(f"{key}={value}" for key, value in truth.items())
+                print(summary)
+            else:
+                _print_key_values(truth)
+                for ok, name, detail in checks:
+                    _check_line(ok, name, detail)
+            if truth.get("truth_status") != "ok":
+                all_ok = False
+            if any(not ok for ok, _, _ in checks):
+                all_ok = False
+    except Exception as exc:
+        print("runtime_truth_status=fail")
+        print(f"reason={exc}")
+        return 1
+    print(f"runtime_truth_status={'ok' if all_ok else 'fail'} count={len(slots)}")
+    return 0 if all_ok else 1
+
+
 def _run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool, str, str | None]]:
     checks: list[tuple[bool, str, str | None]] = []
     if not _is_root():
@@ -994,6 +1263,32 @@ def _run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool
     except Exception as exc:
         checks.append((False, "live_container_inspect_parse_ok", str(exc)))
         return checks
+    try:
+        truth, truth_checks = _live_runtime_truth(desired.slot, state_root)
+        checks.extend(truth_checks)
+        checks.append(
+            (
+                truth.get("truth_status") == "ok",
+                "live_image_truth_labeled",
+                f"status={truth.get('truth_status')}",
+            )
+        )
+        checks.append(
+            (
+                truth.get("runtime_profile") in {"", profile.name} if truth.get("truth_status") != "ok" else truth.get("runtime_profile") == profile.name,
+                "live_image_truth_profile_matches",
+                f"image={truth.get('runtime_profile') or 'missing'} profile={profile.name}",
+            )
+        )
+        checks.append(
+            (
+                truth.get("canonical_recipe_name") not in {None, "", "unknown"} if truth.get("truth_status") == "ok" else True,
+                "live_image_truth_canonical_present",
+                f"name={truth.get('canonical_recipe_name') or 'missing'}",
+            )
+        )
+    except Exception as exc:
+        checks.append((False, "live_image_truth_read_ok", str(exc)))
     state = info.get("State") or {}
     config = info.get("Config") or {}
     image_data = info.get("Image") or ""
@@ -1026,7 +1321,7 @@ def _run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool
 
     smoke_path = str(profile.metadata.get("http_smoke_path") or "")
     if smoke_path:
-        smoke_ok, smoke_detail = _http_backend_smoke(desired.slot, smoke_path)
+        smoke_ok, smoke_detail = _http_backend_smoke(desired.slot, smoke_path, state_root)
         checks.append((smoke_ok, "live_backend_http_smoke_ok", smoke_detail))
 
     host_rc, host_error, host_mounts = _findmnt_under(host_nas_root)
@@ -1184,7 +1479,14 @@ def _run_static_slot_checks(desired, profile, rendered=None) -> list[tuple[bool,
 
 def cmd_check(args: argparse.Namespace) -> int:
     try:
-        desired = load_desired_slot(args.slot, _state_root(args))
+        state_root = _state_root(args)
+        try:
+            desired = load_desired_slot(args.slot, state_root)
+            profile = load_profile(desired.runtime_profile)
+        except Exception:
+            if not args.live:
+                raise
+            desired, profile = _desired_from_live_image_truth(args.slot, state_root)
         profile = load_profile(desired.runtime_profile)
         rendered = render_compose(profile, desired)
     except Exception as exc:
@@ -1349,6 +1651,9 @@ def _manifest_payload(
         "runtime_profile_digest": profile.digest,
         "runtime_contract": _profile_runtime_contract(profile),
         "customer_surface": _profile_customer_surface(profile),
+        "public_host": desired.route.public_host if getattr(desired, "route", None) else "",
+        "gateway_port": desired.route.gateway_port if getattr(desired, "route", None) else "",
+        "bridge_port": desired.route.bridge_port if getattr(desired, "route", None) else "",
         "wrapper_image": wrapper_image,
         "wrapper_image_digest": _digest_from_image_ref(wrapper_image),
         "product_image": product_image,
@@ -1381,6 +1686,9 @@ def _write_slot_manifest(
         f"runtime_profile_digest={profile.digest}",
         f"runtime_contract={_profile_runtime_contract(profile)}",
         f"customer_surface={_profile_customer_surface(profile)}",
+        f"public_host={desired.route.public_host if getattr(desired, 'route', None) else ''}",
+        f"gateway_port={desired.route.gateway_port if getattr(desired, 'route', None) else ''}",
+        f"bridge_port={desired.route.bridge_port if getattr(desired, 'route', None) else ''}",
         f"ops_repo_commit={_installed_source_commit()}",
         f"wrapper_image={desired.release_data.get('wrapper_image')}",
         f"product_image={desired.release_data.get('product_image')}",
@@ -1779,14 +2087,15 @@ def _profile_startup_timeout_seconds(profile) -> int:
     return max(30, min(value, 600))
 
 
-def cmd_apply(args: argparse.Namespace) -> int:
-    if not _is_root():
-        print("error: run as root/admin: sudo /usr/local/bin/opsctl apply SLOT", file=sys.stderr)
-        return 2
-    state_root = _state_root(args)
+def _apply_desired_slot(
+    *,
+    desired,
+    profile,
+    state_root: Path,
+    allow_first_apply: bool,
+    action_name: str = "apply",
+) -> int:
     try:
-        desired = load_desired_slot(args.slot, state_root)
-        profile = load_profile(desired.runtime_profile)
         rendered = render_compose(profile, desired)
         static_failures = [
             name for ok, name, _ in _run_static_slot_checks(desired, profile, rendered) if not ok
@@ -1803,17 +2112,17 @@ def cmd_apply(args: argparse.Namespace) -> int:
         missing = sorted(required - present)
         if missing:
             raise ValueError(f"missing required .env keys: {','.join(missing)}")
-        if not manifest_path.exists() and not state_manifest_path.exists() and not args.allow_first_apply:
+        if not manifest_path.exists() and not state_manifest_path.exists() and not allow_first_apply:
             raise ValueError("first agent-runtime apply requires --allow-first-apply")
         previous_manifest = state_manifest_path if state_manifest_path.exists() else manifest_path if manifest_path.exists() else None
         backup_dir = _backup_agent_runtime_state(desired.slot, runtime_dir, state_root)
         _atomic_write(compose_path, rendered.text, 0o644)
     except Exception as exc:
-        print(f"slot={args.slot}")
+        print(f"slot={getattr(desired, 'slot', '')}")
         print("apply_status=fail")
         print(f"reason={exc}")
         try:
-            _append_action_log(state_root, "apply", args.slot, args.slot, "fail", str(exc))
+            _append_action_log(state_root, action_name, getattr(desired, "slot", ""), getattr(desired, "slot", ""), "fail", str(exc))
         except Exception:
             pass
         return 1
@@ -1835,7 +2144,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
         _print_process_result("compose_config_error", config)
         print(f"rollback_status={'ok' if ok else 'fail'}")
         print(f"rollback_reason={reason}")
-        _append_action_log(state_root, "apply", desired.slot, desired.slot, "fail", "compose_config_failed")
+        _append_action_log(state_root, action_name, desired.slot, desired.slot, "fail", "compose_config_failed")
         return config.returncode or 1
 
     up = _run_text_cwd(
@@ -1849,7 +2158,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
         _print_process_result("compose_up_error", up)
         print(f"rollback_status={'ok' if ok else 'fail'}")
         print(f"rollback_reason={reason}")
-        _append_action_log(state_root, "apply", desired.slot, desired.slot, "fail", "compose_up_failed")
+        _append_action_log(state_root, action_name, desired.slot, desired.slot, "fail", "compose_up_failed")
         return up.returncode or 1
 
     failed = 0
@@ -1870,7 +2179,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
             print(f"failure_diagnostics_dir={diagnostics_dir}")
         print(f"rollback_status={'ok' if ok else 'fail'}")
         print(f"rollback_reason={reason}")
-        _append_action_log(state_root, "apply", desired.slot, desired.slot, "fail", f"live_failed={failed}")
+        _append_action_log(state_root, action_name, desired.slot, desired.slot, "fail", f"live_failed={failed}")
         return 1
 
     applied_at = _now_iso()
@@ -1885,7 +2194,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
             applied_at=applied_at,
             previous_manifest=previous_manifest,
         )
-        _append_action_log(state_root, "apply", desired.slot, desired.release_name, "ok", rendered.sha256)
+        _append_action_log(state_root, action_name, desired.slot, desired.release_name, "ok", rendered.sha256)
     except Exception as exc:
         ok, reason = _restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
         print("apply_status=fail")
@@ -1893,12 +2202,38 @@ def cmd_apply(args: argparse.Namespace) -> int:
         print(f"rollback_status={'ok' if ok else 'fail'}")
         print(f"rollback_reason={reason}")
         try:
-            _append_action_log(state_root, "apply", desired.slot, desired.slot, "fail", f"manifest_write_failed:{exc}")
+            _append_action_log(state_root, action_name, desired.slot, desired.slot, "fail", f"manifest_write_failed:{exc}")
         except Exception:
             pass
         return 1
     print("apply_status=ok")
     return 0
+
+
+def cmd_apply(args: argparse.Namespace) -> int:
+    if not _is_root():
+        print("error: run as root/admin: sudo /usr/local/bin/opsctl apply SLOT", file=sys.stderr)
+        return 2
+    state_root = _state_root(args)
+    try:
+        desired = load_desired_slot(args.slot, state_root)
+        profile = load_profile(desired.runtime_profile)
+    except Exception as exc:
+        print(f"slot={args.slot}")
+        print("apply_status=fail")
+        print(f"reason={exc}")
+        try:
+            _append_action_log(state_root, "apply", args.slot, args.slot, "fail", str(exc))
+        except Exception:
+            pass
+        return 1
+    return _apply_desired_slot(
+        desired=desired,
+        profile=profile,
+        state_root=state_root,
+        allow_first_apply=bool(args.allow_first_apply),
+        action_name="apply",
+    )
 
 
 def cmd_rollback(args: argparse.Namespace) -> int:
@@ -2712,16 +3047,15 @@ def _upsert_runtime_env_file(path: Path, updates: dict[str, str], uid: int, gid:
     _atomic_write_key_value(path, data, 0o640, uid, gid)
 
 
-def _dev_recipe_runtime_env(desired) -> dict[str, str]:
+def _dev_recipe_runtime_env(desired, state_root: Path) -> dict[str, str]:
     family = str(desired.lane_data.get("family") or "")
-    gateway_port = _slot_gateway_port(desired.slot)
+    route = get_slot_route(desired.slot, state_root)
     env = {
         "OPENCLAW_RUNTIME_FAMILY": family,
         "OPENCLAW_IMAGE": str(desired.release_data.get("wrapper_image") or ""),
+        "OPENCLAW_GATEWAY_PORT": str(route.gateway_port),
+        "OPENCLAW_BRIDGE_PORT": str(route.bridge_port),
     }
-    if gateway_port is not None:
-        env["OPENCLAW_GATEWAY_PORT"] = str(gateway_port)
-        env["OPENCLAW_BRIDGE_PORT"] = str(gateway_port + 1)
     return env
 
 
@@ -2812,7 +3146,7 @@ def cmd_recipe_dev_apply(args: argparse.Namespace) -> int:
         provenance_source = source if sync_from else source_output
         runtime_dir = _ensure_dev_runtime_dir(slot)
         uid, gid = _slot_uid_gid(slot)
-        env_updates = _dev_recipe_runtime_env(desired)
+        env_updates = _dev_recipe_runtime_env(desired, state_root)
         env_updates["SOURCE_OUTPUT"] = str(source_output)
         _upsert_runtime_env_file(runtime_dir / ".env", env_updates, uid, gid)
         recipe_state = _load_dev_recipe_state(state_root)
@@ -3108,11 +3442,51 @@ def _desired_with_release_and_profile(desired: DesiredSlot, release: str, releas
         release_name=release,
         release_data=release_data,
         runtime_profile=runtime_profile,
+        route=desired.route,
     )
 
 
 def _release_canonical_record(release_data: dict) -> dict[str, str]:
     return canonical_recipe_identity(canonical_recipe_for_release(release_data))
+
+
+def _desired_from_direct_images(slot: str, release_data: dict, state_root: Path):
+    route = get_slot_route(slot, state_root)
+    slot_class = route.slot_class
+    image_recipe = _release_image_recipe(release_data)
+    profiles = image_recipe.get("runtime_profiles") if isinstance(image_recipe, dict) else {}
+    runtime_profile = profiles.get(slot_class) if isinstance(profiles, dict) else ""
+    if not runtime_profile:
+        raise ValueError(f"wrapper image recipe has no runtime profile for slot_class={slot_class}")
+    family = str(image_recipe.get("family") or release_data.get("family") or "")
+    profile = load_profile(str(runtime_profile))
+    if profile.metadata.get("family") != family:
+        raise ValueError(f"slot image family/profile mismatch: image={family} profile={profile.metadata.get('family')}")
+    if profile.metadata.get("slot_class") != slot_class:
+        raise ValueError(
+            f"slot image slot_class/profile mismatch: slot={slot_class} profile={profile.metadata.get('slot_class')}"
+        )
+    desired = DesiredSlot(
+        slot=slot,
+        lane=f"image-{family}-{slot_class}",
+        lane_data={"family": family, "slot_class": slot_class},
+        release_name=IMAGE_ROLLOUT_RELEASE_NAME,
+        release_data=release_data,
+        runtime_profile=str(runtime_profile),
+        route=route,
+    )
+    return desired, profile
+
+
+def _desired_from_live_image_truth(slot: str, state_root: Path):
+    truth, checks = _live_runtime_truth(slot, state_root)
+    failed = [name for ok, name, _ in checks if not ok]
+    if failed or truth.get("truth_status") != "ok":
+        raise ValueError(f"live image truth is not ok: status={truth.get('truth_status')} failed={','.join(failed)}")
+    wrapper_image = str(truth.get("wrapper_image") or "")
+    product_image = str(truth.get("product_image") or "")
+    release_data = _release_data_from_direct_images(wrapper_image, product_image)
+    return _desired_from_direct_images(slot, release_data, state_root)
 
 
 def _dev_rollout_target(state_root: Path, family: str, release: str, slot: str) -> tuple[dict, dict, dict, DesiredSlot, object, object]:
@@ -3461,6 +3835,159 @@ def cmd_rollout_promote(args: argparse.Namespace) -> int:
     _write_rollout_state(state_root, rollout_state)
     print("rollout_promote_status=ok")
     _append_action_log(state_root, "rollout_promote", "-", release, "ok", f"slots={len(slots_to_apply)}")
+    return 0
+
+
+def _direct_image_release_from_args(args: argparse.Namespace) -> dict[str, object]:
+    return _release_data_from_direct_images(str(args.wrapper_image), str(args.product_image))
+
+
+def cmd_rollout_image_plan(args: argparse.Namespace) -> int:
+    state_root = _state_root(args)
+    try:
+        release_data = _direct_image_release_from_args(args)
+        slots = [str(item) for item in (getattr(args, "slots", None) or [])]
+        if getattr(args, "slot", None):
+            slots.append(str(args.slot))
+        if not slots:
+            slots = [route.slot for route in load_routing_registry(state_root) if route.enabled]
+        plans = []
+        for slot in slots:
+            desired, profile = _desired_from_direct_images(slot, release_data, state_root)
+            rendered = render_compose(profile, desired)
+            checks = [
+                {"ok": ok, "name": name, "detail": detail}
+                for ok, name, detail in _run_static_slot_checks(desired, profile, rendered)
+            ]
+            plans.append(
+                {
+                    "slot": slot,
+                    "slot_class": desired.lane_data.get("slot_class"),
+                    "public_host": desired.route.public_host if desired.route else "",
+                    "gateway_port": desired.route.gateway_port if desired.route else "",
+                    "bridge_port": desired.route.bridge_port if desired.route else "",
+                    "runtime_profile": profile.name,
+                    "runtime_contract": _profile_runtime_contract(profile),
+                    "checks": checks,
+                    "compatible": all(item["ok"] for item in checks),
+                    "compose_sha256": rendered.sha256,
+                }
+            )
+        payload = {
+            "rollout_image_plan_status": "ok",
+            "truth_source": "wrapper_image_labels",
+            "family": release_data.get("family"),
+            "wrapper_image": release_data.get("wrapper_image"),
+            "product_image": release_data.get("product_image"),
+            "recipe": _release_recipe_payload(release_data),
+            "slots": plans,
+            "mutates": False,
+        }
+    except Exception as exc:
+        print(json.dumps({"rollout_image_plan_status": "fail", "reason": str(exc), "mutates": False}, ensure_ascii=False, indent=2))
+        return 1
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _cmd_rollout_image_apply_slot(args: argparse.Namespace, *, required_slot_class: str, action_name: str) -> int:
+    if not _is_root():
+        print(f"error: run as root/admin: sudo /usr/local/bin/opsctl rollout {action_name} ...", file=sys.stderr)
+        return 2
+    state_root = _state_root(args)
+    slot = str(args.slot)
+    try:
+        release_data = _direct_image_release_from_args(args)
+        desired, profile = _desired_from_direct_images(slot, release_data, state_root)
+        if desired.lane_data.get("slot_class") != required_slot_class:
+            raise ValueError(f"{action_name} requires slot_class={required_slot_class}: {slot}")
+    except Exception as exc:
+        print(f"rollout_{action_name.replace('-', '_')}_status=fail")
+        print(f"reason={exc}")
+        try:
+            _append_action_log(state_root, f"rollout_{action_name}", slot, IMAGE_ROLLOUT_RELEASE_NAME, "fail", str(exc))
+        except Exception:
+            pass
+        return 1
+    print(f"rollout_{action_name.replace('-', '_')}_state=direct_image")
+    print(f"slot={slot}")
+    print(f"family={desired.lane_data.get('family')}")
+    print(f"runtime_profile={profile.name}")
+    print(f"wrapper_image={release_data.get('wrapper_image')}")
+    print(f"product_image={release_data.get('product_image')}")
+    for key, value in _release_canonical_record(release_data).items():
+        print(f"{key}={value}")
+    rc = _apply_desired_slot(
+        desired=desired,
+        profile=profile,
+        state_root=state_root,
+        allow_first_apply=bool(getattr(args, "allow_first_apply", False)),
+        action_name=f"rollout_{action_name}",
+    )
+    if rc == 0:
+        print(f"rollout_{action_name.replace('-', '_')}_status=ok")
+    return rc
+
+
+def cmd_rollout_image_dev_apply(args: argparse.Namespace) -> int:
+    return _cmd_rollout_image_apply_slot(args, required_slot_class="dev", action_name="image-dev-apply")
+
+
+def cmd_rollout_image_canary(args: argparse.Namespace) -> int:
+    return _cmd_rollout_image_apply_slot(args, required_slot_class="customer", action_name="image-canary")
+
+
+def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
+    if not _is_root():
+        print("error: run as root/admin: sudo /usr/local/bin/opsctl rollout image-promote ...", file=sys.stderr)
+        return 2
+    state_root = _state_root(args)
+    from_slot = str(args.from_slot)
+    try:
+        source_truth, source_checks = _live_runtime_truth(from_slot, state_root)
+        failed = [name for ok, name, _ in source_checks if not ok]
+        if failed or source_truth.get("truth_status") != "ok":
+            raise ValueError(
+                f"from-slot live image truth is not ok: status={source_truth.get('truth_status')} failed={','.join(failed)}"
+            )
+        wrapper_image = str(source_truth.get("wrapper_image") or "")
+        product_image = str(source_truth.get("product_image") or "")
+        release_data = _release_data_from_direct_images(wrapper_image, product_image)
+        slots = [item.strip() for item in str(args.slots).split(",") if item.strip()]
+        if not slots:
+            raise ValueError("--slots must name the promotion targets explicitly")
+        applied: list[str] = []
+        for slot in slots:
+            desired, profile = _desired_from_direct_images(slot, release_data, state_root)
+            if desired.lane_data.get("slot_class") != "customer":
+                raise ValueError(f"promotion target is not a customer slot: {slot}")
+            rc = _apply_desired_slot(
+                desired=desired,
+                profile=profile,
+                state_root=state_root,
+                allow_first_apply=False,
+                action_name="rollout_image_promote",
+            )
+            if rc != 0:
+                print("rollout_image_promote_status=partial")
+                print(f"failed_slot={slot}")
+                _append_action_log(state_root, "rollout_image_promote", slot, wrapper_image, "partial", "slot_apply_failed")
+                return rc or 1
+            applied.append(slot)
+    except Exception as exc:
+        print("rollout_image_promote_status=fail")
+        print(f"reason={exc}")
+        try:
+            _append_action_log(state_root, "rollout_image_promote", from_slot, from_slot, "fail", str(exc))
+        except Exception:
+            pass
+        return 1
+    print("rollout_image_promote_status=ok")
+    print(f"from_slot={from_slot}")
+    print(f"slots={','.join(applied)}")
+    print(f"wrapper_image={release_data.get('wrapper_image')}")
+    print(f"product_image={release_data.get('product_image')}")
+    _append_action_log(state_root, "rollout_image_promote", from_slot, str(release_data.get("wrapper_image") or ""), "ok", f"slots={len(applied)}")
     return 0
 
 
@@ -4482,6 +5009,23 @@ def build_parser() -> argparse.ArgumentParser:
     slot_list = slot_sub.add_parser("list")
     slot_list.set_defaults(func=cmd_slot_list)
 
+    routing = sub.add_parser("routing")
+    routing_sub = routing.add_subparsers(dest="routing_command", required=True)
+    routing_status = routing_sub.add_parser("status")
+    routing_status.add_argument("slot", nargs="?")
+    routing_status.set_defaults(func=cmd_routing_status)
+    routing_seed = routing_sub.add_parser("seed-legacy")
+    routing_seed.add_argument("--write", action="store_true")
+    routing_seed.add_argument("--replace", action="store_true")
+    routing_seed.set_defaults(func=cmd_routing_seed_legacy)
+
+    runtime = sub.add_parser("runtime")
+    runtime_sub = runtime.add_subparsers(dest="runtime_command", required=True)
+    runtime_truth = runtime_sub.add_parser("truth")
+    runtime_truth.add_argument("slot", nargs="?")
+    runtime_truth.add_argument("--all", action="store_true")
+    runtime_truth.set_defaults(func=cmd_runtime_truth)
+
     for name, func in (("status", cmd_status), ("plan", cmd_plan), ("check", cmd_check)):
         item = sub.add_parser(name)
         item.add_argument("slot")
@@ -4506,39 +5050,62 @@ def build_parser() -> argparse.ArgumentParser:
     diagnostics_show.add_argument("--tail", type=int, default=120)
     diagnostics_show.set_defaults(func=cmd_diagnostics_show)
 
-    rollout = sub.add_parser("rollout")
+    rollout = sub.add_parser("rollout", description="Prefer image-* commands. Release-state commands are legacy recovery compatibility.")
     rollout_sub = rollout.add_subparsers(dest="rollout_command", required=True)
-    rollout_status = rollout_sub.add_parser("status")
+    legacy_rollout_help = "legacy recovery compatibility; prefer image-* rollout commands"
+    rollout_status = rollout_sub.add_parser("status", help=legacy_rollout_help, description=legacy_rollout_help)
     rollout_status.add_argument("--family", required=True, choices=["hermes", "openclaw"])
     rollout_status.set_defaults(func=cmd_rollout_status)
-    rollout_plan = rollout_sub.add_parser("plan")
+    rollout_plan = rollout_sub.add_parser("plan", help=legacy_rollout_help, description=legacy_rollout_help)
     rollout_plan.add_argument("--family", required=True, choices=["hermes", "openclaw"])
     rollout_plan.add_argument("--release", required=True)
     rollout_plan.set_defaults(func=cmd_rollout_plan)
-    rollout_dev_plan = rollout_sub.add_parser("dev-plan")
+    rollout_dev_plan = rollout_sub.add_parser("dev-plan", help=legacy_rollout_help, description=legacy_rollout_help)
     rollout_dev_plan.add_argument("--family", required=True, choices=["hermes", "openclaw"])
     rollout_dev_plan.add_argument("--release", required=True)
     rollout_dev_plan.add_argument("--slot", required=True)
     rollout_dev_plan.set_defaults(func=cmd_rollout_dev_plan)
-    rollout_dev_apply = rollout_sub.add_parser("dev-apply")
+    rollout_dev_apply = rollout_sub.add_parser("dev-apply", help=legacy_rollout_help, description=legacy_rollout_help)
     rollout_dev_apply.add_argument("--family", required=True, choices=["hermes", "openclaw"])
     rollout_dev_apply.add_argument("--release", required=True)
     rollout_dev_apply.add_argument("--slot", required=True)
     rollout_dev_apply.add_argument("--allow-first-apply", action="store_true")
     rollout_dev_apply.set_defaults(func=cmd_rollout_dev_apply)
-    rollout_canary = rollout_sub.add_parser("canary")
+    rollout_canary = rollout_sub.add_parser("canary", help=legacy_rollout_help, description=legacy_rollout_help)
     rollout_canary.add_argument("--family", required=True, choices=["hermes", "openclaw"])
     rollout_canary.add_argument("--release", required=True)
     rollout_canary.add_argument("--slot", required=True)
     rollout_canary.add_argument("--allow-first-apply", action="store_true")
     rollout_canary.set_defaults(func=cmd_rollout_canary)
-    rollout_promote = rollout_sub.add_parser("promote")
+    rollout_promote = rollout_sub.add_parser("promote", help=legacy_rollout_help, description=legacy_rollout_help)
     rollout_promote.add_argument("--family", required=True, choices=["hermes", "openclaw"])
     rollout_promote.add_argument("--release", required=True)
     rollout_promote.set_defaults(func=cmd_rollout_promote)
-    rollout_rollback_canary = rollout_sub.add_parser("rollback-canary")
+    rollout_rollback_canary = rollout_sub.add_parser("rollback-canary", help=legacy_rollout_help, description=legacy_rollout_help)
     rollout_rollback_canary.add_argument("--family", required=True, choices=["hermes", "openclaw"])
     rollout_rollback_canary.set_defaults(func=cmd_rollout_rollback_canary)
+    rollout_image_plan = rollout_sub.add_parser("image-plan", help="validate digest-pinned images without release state")
+    rollout_image_plan.add_argument("--wrapper-image", required=True)
+    rollout_image_plan.add_argument("--product-image", required=True)
+    rollout_image_plan.add_argument("--slot")
+    rollout_image_plan.add_argument("--slots", nargs="*")
+    rollout_image_plan.set_defaults(func=cmd_rollout_image_plan)
+    rollout_image_dev_apply = rollout_sub.add_parser("image-dev-apply", help="apply digest-pinned images to a dev slot")
+    rollout_image_dev_apply.add_argument("--slot", required=True)
+    rollout_image_dev_apply.add_argument("--wrapper-image", required=True)
+    rollout_image_dev_apply.add_argument("--product-image", required=True)
+    rollout_image_dev_apply.add_argument("--allow-first-apply", action="store_true")
+    rollout_image_dev_apply.set_defaults(func=cmd_rollout_image_dev_apply)
+    rollout_image_canary = rollout_sub.add_parser("image-canary", help="apply digest-pinned images to one customer canary slot")
+    rollout_image_canary.add_argument("--slot", required=True)
+    rollout_image_canary.add_argument("--wrapper-image", required=True)
+    rollout_image_canary.add_argument("--product-image", required=True)
+    rollout_image_canary.add_argument("--allow-first-apply", action="store_true")
+    rollout_image_canary.set_defaults(func=cmd_rollout_image_canary)
+    rollout_image_promote = rollout_sub.add_parser("image-promote", help="promote the exact live canary image to explicit slots")
+    rollout_image_promote.add_argument("--from-slot", required=True)
+    rollout_image_promote.add_argument("--slots", required=True, help="comma-separated customer slots to apply")
+    rollout_image_promote.set_defaults(func=cmd_rollout_image_promote)
 
     recipe = sub.add_parser("recipe")
     recipe_sub = recipe.add_subparsers(dest="recipe_command", required=True)
@@ -4562,9 +5129,10 @@ def build_parser() -> argparse.ArgumentParser:
     recipe_apply_dev.add_argument("--no-apply", action="store_true")
     recipe_apply_dev.set_defaults(func=cmd_recipe_dev_apply)
 
-    release = sub.add_parser("release")
+    release = sub.add_parser("release", description="Legacy release-state compatibility. Prefer digest-pinned rollout image-* commands.")
     release_sub = release.add_subparsers(dest="release_command", required=True)
-    release_import = release_sub.add_parser("import")
+    legacy_release_help = "legacy release-state compatibility; prefer rollout image-* commands"
+    release_import = release_sub.add_parser("import", help=legacy_release_help, description=legacy_release_help)
     release_import.add_argument("name")
     release_import.add_argument("--family", required=True, choices=["hermes", "openclaw"])
     release_import.add_argument("--image")
@@ -4580,11 +5148,11 @@ def build_parser() -> argparse.ArgumentParser:
     release_import.add_argument("--compat-combined", action="store_true")
     release_import.add_argument("--replace", action="store_true")
     release_import.set_defaults(func=cmd_release_import)
-    release_add = release_sub.add_parser("add")
+    release_add = release_sub.add_parser("add", help=legacy_release_help, description=legacy_release_help)
     release_add.add_argument("name")
     release_add.add_argument("image")
     release_add.set_defaults(func=cmd_release_add)
-    release_promote = release_sub.add_parser("promote")
+    release_promote = release_sub.add_parser("promote", help=legacy_release_help, description=legacy_release_help)
     release_promote.add_argument("name")
     release_promote.add_argument("lane")
     release_promote.set_defaults(func=cmd_release_promote)
