@@ -1480,14 +1480,15 @@ def _run_static_slot_checks(desired, profile, rendered=None) -> list[tuple[bool,
 def cmd_check(args: argparse.Namespace) -> int:
     try:
         state_root = _state_root(args)
-        try:
+        if args.live:
+            try:
+                desired, profile = _desired_from_live_image_truth(args.slot, state_root)
+            except Exception:
+                desired = load_desired_slot(args.slot, state_root)
+                profile = load_profile(desired.runtime_profile)
+        else:
             desired = load_desired_slot(args.slot, state_root)
             profile = load_profile(desired.runtime_profile)
-        except Exception:
-            if not args.live:
-                raise
-            desired, profile = _desired_from_live_image_truth(args.slot, state_root)
-        profile = load_profile(desired.runtime_profile)
         rendered = render_compose(profile, desired)
     except Exception as exc:
         print(f"slot={args.slot}")

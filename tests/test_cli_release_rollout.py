@@ -30,7 +30,9 @@ from agent_runtime_ops.cli import (
     _image_recipe_from_wrapper_image,
 )
 from agent_runtime_ops.canonical_recipes import load_canonical_recipe
+from agent_runtime_ops.profiles import load_profile
 from agent_runtime_ops.routing import SlotRoute, dump_routing_registry, load_routing_registry
+from agent_runtime_ops.state import DesiredSlot
 from agent_runtime_ops.yamlio import dump_yaml, load_yaml
 
 
@@ -44,6 +46,35 @@ def wrapper_image_ref(repo: str, digest_char: str) -> str:
 
 def hermes_workspace_recipe_digest() -> str:
     return load_canonical_recipe("hermes-workspace").digest
+
+
+def openclaw_control_recipe_digest() -> str:
+    return load_canonical_recipe("openclaw-control").digest
+
+
+def openclaw_image_recipe(*, product_image: str) -> dict[str, object]:
+    return {
+        "schema": "v1",
+        "source": "wrapper_image_labels",
+        "canonical_recipe_name": "openclaw-control",
+        "canonical_recipe_digest": openclaw_control_recipe_digest(),
+        "family": "openclaw",
+        "product_image": product_image,
+        "product_component": "openclaw-control",
+        "wrapper_component": "openclaw-wrapper",
+        "runtime_profiles": {
+            "customer": "openclaw-customer",
+            "dev": "openclaw-dev",
+        },
+        "runtime_contracts": {
+            "customer": "openclaw-gateway-http-18789",
+            "dev": "openclaw-gateway-source-http-18789",
+        },
+        "command_mode": "compose-command",
+        "working_dir": "",
+        "http_port": "18789",
+        "ops_repo_commit": "ec892a32f9ca846f390e2dd19c577dd13d4f044f",
+    }
 
 
 def hermes_image_recipe(
@@ -640,6 +671,54 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertIn('"mutates": false', output.getvalue())
             self.assertIn('"release_digest": "sha256:' + "2" * 64 + '"', output.getvalue())
             self.assertEqual((root / "lanes.yaml").read_text(encoding="utf-8"), before)
+
+    def test_live_check_prefers_live_image_truth_over_legacy_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            route = next(route for route in load_routing_registry(root) if route.slot == "dev-oc")
+            wrapper_image = wrapper_image_ref("agent-runtime-openclaw", "9")
+            product_image = wrapper_image_ref("openclaw-jitech", "8")
+            release_data = {
+                "family": "openclaw",
+                "image_name": "direct-image",
+                "wrapper_image": wrapper_image,
+                "product_image": product_image,
+                "digest": "sha256:" + "9" * 64,
+                "product_digest": "sha256:" + "8" * 64,
+                "compatibility_mode": "wrapped_product_image",
+                "image_recipe": openclaw_image_recipe(product_image=product_image),
+            }
+            desired = DesiredSlot(
+                slot="dev-oc",
+                lane="image-openclaw-dev",
+                lane_data={"family": "openclaw", "slot_class": "dev"},
+                release_name="direct-image",
+                release_data=release_data,
+                runtime_profile="openclaw-dev",
+                route=route,
+            )
+            output = io.StringIO()
+            with (
+                patch(
+                    "agent_runtime_ops.cli._desired_from_live_image_truth",
+                    return_value=(desired, load_profile("openclaw-dev")),
+                ),
+                patch(
+                    "agent_runtime_ops.cli._run_live_slot_checks",
+                    return_value=[(True, "live_container_image_matches_release", wrapper_image)],
+                ),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_check(argparse.Namespace(state_root=str(root), slot="dev-oc", live=True))
+
+            text = output.getvalue()
+            self.assertEqual(rc, 0, text)
+            self.assertIn("release=direct-image", text)
+            self.assertIn(wrapper_image, text)
+            self.assertIn("canonical_recipe_name=openclaw-control", text)
+            self.assertNotIn(image_ref("1"), text)
+            self.assertIn("PASS live_container_image_matches_release", text)
 
     def test_hermes_customer_rejects_agent_only_product_image_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
