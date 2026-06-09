@@ -1,0 +1,305 @@
+from __future__ import annotations
+
+import argparse
+import contextlib
+import io
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from agent_runtime_ops.cli import (
+    cmd_recipe_dev_apply,
+    cmd_recipe_dev_status,
+    cmd_release_import,
+    cmd_rollout_canary,
+    cmd_rollout_plan,
+    cmd_rollout_promote,
+    cmd_rollout_rollback_canary,
+)
+from agent_runtime_ops.yamlio import load_yaml
+
+
+def image_ref(digest_char: str) -> str:
+    return "ghcr.io/epicevent/openclaw-nas-agent@sha256:" + digest_char * 64
+
+
+def import_args(root: Path, **overrides: object) -> argparse.Namespace:
+    values: dict[str, object] = {
+        "state_root": str(root),
+        "name": "openclaw-candidate",
+        "family": "openclaw",
+        "image": image_ref("2"),
+        "product_image": None,
+        "wrapper_image": None,
+        "image_name": None,
+        "compat_combined": True,
+        "replace": False,
+    }
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+def write_state(root: Path) -> None:
+    current_digest = "sha256:" + "1" * 64
+    (root / "slots.yaml").write_text(
+        """
+slots:
+  - slot: oc3
+    lane: openclaw
+  - slot: oc4
+    lane: openclaw
+  - slot: dev-oc
+    lane: dev-openclaw
+""".lstrip(),
+        encoding="utf-8",
+    )
+    (root / "lanes.yaml").write_text(
+        """
+lanes:
+  openclaw:
+    family: openclaw
+    slot_class: customer
+    release: openclaw-current
+    runtime_profile: openclaw-customer
+  dev-openclaw:
+    family: openclaw
+    slot_class: dev
+    release: openclaw-current
+    runtime_profile: openclaw-dev
+""".lstrip(),
+        encoding="utf-8",
+    )
+    (root / "releases.yaml").write_text(
+        f"""
+releases:
+  openclaw-current:
+    family: openclaw
+    wrapper_image: ghcr.io/epicevent/openclaw-nas-agent@{current_digest}
+    product_image: ghcr.io/epicevent/openclaw-nas-agent@{current_digest}
+    digest: {current_digest}
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+
+def import_candidate(root: Path, name: str = "openclaw-candidate") -> None:
+    output = io.StringIO()
+    with patch("agent_runtime_ops.cli._is_root", return_value=True), contextlib.redirect_stdout(output):
+        rc = cmd_release_import(import_args(root, name=name))
+    assert rc == 0, output.getvalue()
+
+
+class CliReleaseRolloutTests(unittest.TestCase):
+    def test_recipe_apply_dev_records_source_output_without_image_bake(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            source_output = root / "openclawdev" / "dist" / "control-ui"
+            source_output.mkdir(parents=True)
+            (source_output / "index.html").write_text("ok", encoding="utf-8")
+            runtime_dir = root / "home" / "dev-oc" / "openclaw"
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.cli._ensure_dev_runtime_dir", return_value=runtime_dir),
+                patch("agent_runtime_ops.cli._slot_uid_gid", return_value=(1000, 1000)),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_recipe_dev_apply(
+                    argparse.Namespace(
+                        state_root=str(root),
+                        slot="dev-oc",
+                        recipe_name="openclaw-ui",
+                        source_output=str(source_output),
+                        sync_from=None,
+                        build_command="npm run build",
+                        allow_first_apply=False,
+                        no_apply=True,
+                    )
+                )
+            self.assertEqual(rc, 0, output.getvalue())
+            env_text = (runtime_dir / ".env").read_text(encoding="utf-8")
+            self.assertIn(f"SOURCE_OUTPUT={source_output}", env_text)
+            self.assertIn("OPENCLAW_RUNTIME_FAMILY=openclaw", env_text)
+            recipe = load_yaml(root / "dev-recipes.yaml")["recipes"]["dev-oc"]
+            self.assertEqual(recipe["recipe_name"], "openclaw-ui")
+            self.assertEqual(recipe["source_output"], str(source_output))
+            self.assertEqual(recipe["build_command"], "npm run build")
+
+    def test_recipe_status_reports_missing_recipe_for_dev_slot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                rc = cmd_recipe_dev_status(argparse.Namespace(state_root=str(root), slot="dev-oc"))
+            self.assertEqual(rc, 0, output.getvalue())
+            self.assertIn("recipe_status=missing", output.getvalue())
+
+    def test_release_import_registers_combined_digest_release(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            output = io.StringIO()
+            with patch("agent_runtime_ops.cli._is_root", return_value=True), contextlib.redirect_stdout(output):
+                rc = cmd_release_import(import_args(root))
+            self.assertEqual(rc, 0, output.getvalue())
+            releases = load_yaml(root / "releases.yaml")["releases"]
+            candidate = releases["openclaw-candidate"]
+            self.assertEqual(candidate["family"], "openclaw")
+            self.assertEqual(candidate["wrapper_image"], image_ref("2"))
+            self.assertEqual(candidate["product_image"], image_ref("2"))
+            self.assertEqual(candidate["digest"], "sha256:" + "2" * 64)
+            self.assertEqual(candidate["compatibility_mode"], "combined_runtime_image")
+            self.assertIn("release_digest=sha256:" + "2" * 64, output.getvalue())
+
+    def test_release_import_rejects_tag_only_image(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            output = io.StringIO()
+            with patch("agent_runtime_ops.cli._is_root", return_value=True), contextlib.redirect_stdout(output):
+                rc = cmd_release_import(import_args(root, name="openclaw-bad", image="ghcr.io/epicevent/openclaw-nas-agent:latest"))
+            self.assertEqual(rc, 1)
+            self.assertIn("pinned by digest", output.getvalue())
+
+    def test_rollout_plan_is_non_mutating(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            import_candidate(root)
+            before = (root / "lanes.yaml").read_text(encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                rc = cmd_rollout_plan(
+                    argparse.Namespace(state_root=str(root), family="openclaw", release="openclaw-candidate")
+                )
+            self.assertEqual(rc, 0, output.getvalue())
+            self.assertIn('"mutates": false', output.getvalue())
+            self.assertIn('"release_digest": "sha256:' + "2" * 64 + '"', output.getvalue())
+            self.assertEqual((root / "lanes.yaml").read_text(encoding="utf-8"), before)
+
+    def test_rollout_canary_moves_only_target_slot_and_records_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            import_candidate(root)
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.cli.cmd_apply", return_value=0) as apply,
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_rollout_canary(
+                    argparse.Namespace(
+                        state_root=str(root),
+                        family="openclaw",
+                        release="openclaw-candidate",
+                        slot="oc3",
+                        allow_first_apply=False,
+                    )
+                )
+            self.assertEqual(rc, 0, output.getvalue())
+            slots = load_yaml(root / "slots.yaml")["slots"]
+            lanes = load_yaml(root / "lanes.yaml")["lanes"]
+            self.assertEqual(next(item for item in slots if item["slot"] == "oc3")["lane"], "openclaw-canary")
+            self.assertEqual(next(item for item in slots if item["slot"] == "oc4")["lane"], "openclaw")
+            self.assertEqual(lanes["openclaw"]["release"], "openclaw-current")
+            self.assertEqual(lanes["openclaw-canary"]["release"], "openclaw-candidate")
+            rollout = load_yaml(root / "rollout-state.yaml")
+            self.assertEqual(rollout["families"]["openclaw"]["canary"]["status"], "ok")
+            self.assertEqual(apply.call_args.args[0].slot, "oc3")
+
+    def test_rollout_promote_requires_matching_canary_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            import_candidate(root)
+            output = io.StringIO()
+            with patch("agent_runtime_ops.cli._is_root", return_value=True), contextlib.redirect_stdout(output):
+                rc = cmd_rollout_promote(
+                    argparse.Namespace(state_root=str(root), family="openclaw", release="openclaw-candidate")
+                )
+            self.assertEqual(rc, 1)
+            self.assertIn("matching successful canary", output.getvalue())
+
+    def test_rollout_promote_returns_canary_to_fleet_and_applies_all_fleet_slots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            import_candidate(root)
+            with (
+                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.cli.cmd_apply", return_value=0),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(
+                    cmd_rollout_canary(
+                        argparse.Namespace(
+                            state_root=str(root),
+                            family="openclaw",
+                            release="openclaw-candidate",
+                            slot="oc3",
+                            allow_first_apply=False,
+                        )
+                    ),
+                    0,
+                )
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.cli.cmd_apply", return_value=0) as apply,
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_rollout_promote(
+                    argparse.Namespace(state_root=str(root), family="openclaw", release="openclaw-candidate")
+                )
+            self.assertEqual(rc, 0, output.getvalue())
+            slots = load_yaml(root / "slots.yaml")["slots"]
+            lanes = load_yaml(root / "lanes.yaml")["lanes"]
+            self.assertEqual(next(item for item in slots if item["slot"] == "oc3")["lane"], "openclaw")
+            self.assertEqual(lanes["openclaw"]["release"], "openclaw-candidate")
+            self.assertEqual([call.args[0].slot for call in apply.call_args_list], ["oc3", "oc4"])
+            rollout = load_yaml(root / "rollout-state.yaml")
+            self.assertEqual(rollout["families"]["openclaw"]["promotion"]["status"], "ok")
+
+    def test_rollout_rollback_canary_restores_previous_lane(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            import_candidate(root)
+            with (
+                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.cli.cmd_apply", return_value=0),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(
+                    cmd_rollout_canary(
+                        argparse.Namespace(
+                            state_root=str(root),
+                            family="openclaw",
+                            release="openclaw-candidate",
+                            slot="oc3",
+                            allow_first_apply=False,
+                        )
+                    ),
+                    0,
+                )
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.cli.cmd_apply", return_value=0) as apply,
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_rollout_rollback_canary(argparse.Namespace(state_root=str(root), family="openclaw"))
+            self.assertEqual(rc, 0, output.getvalue())
+            slots = load_yaml(root / "slots.yaml")["slots"]
+            self.assertEqual(next(item for item in slots if item["slot"] == "oc3")["lane"], "openclaw")
+            self.assertEqual(apply.call_args.args[0].slot, "oc3")
+            rollout = load_yaml(root / "rollout-state.yaml")
+            self.assertEqual(rollout["families"]["openclaw"]["canary"]["status"], "rolled_back")
+
+
+if __name__ == "__main__":
+    unittest.main()

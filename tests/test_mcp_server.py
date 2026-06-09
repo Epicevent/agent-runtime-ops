@@ -62,6 +62,14 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("slot_list", names)
         self.assertIn("runtime_secret_set_from_file", names)
         self.assertIn("deploy_update", names)
+        self.assertIn("release_import", names)
+        self.assertIn("rollout_status", names)
+        self.assertIn("dev_recipe_status", names)
+        self.assertIn("dev_recipe_apply", names)
+        self.assertIn("rollout_plan", names)
+        self.assertIn("rollout_canary", names)
+        self.assertIn("rollout_promote", names)
+        self.assertIn("rollout_rollback_canary", names)
         self.assertIn("handoff_status", names)
         self.assertIn("nas_remove", names)
         self.assertIn("nas_credential_status", names)
@@ -365,6 +373,152 @@ class McpServerTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertFalse(payload["mutated"])
         self.assertEqual(payload["next_action"], f"sudo opsctl update approve {target}")
+
+    def test_release_import_uses_digest_pinned_argv_list(self) -> None:
+        image = "ghcr.io/epicevent/openclaw-nas-agent@sha256:" + "2" * 64
+        runner = FakeRunner([(0, "release_import_status=ok\n", "")])
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        payload = call_tool(
+            server,
+            "release_import",
+            {
+                "name": "openclaw-candidate",
+                "family": "openclaw",
+                "image_ref": image,
+                "compat_combined": True,
+            },
+        )
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["mutated"])
+        self.assertEqual(
+            runner.calls[0]["argv"],
+            [
+                "sudo",
+                "opsctl",
+                "release",
+                "import",
+                "openclaw-candidate",
+                "--family",
+                "openclaw",
+                "--image",
+                image,
+                "--compat-combined",
+            ],
+        )
+
+    def test_release_import_rejects_tag_only_image_ref(self) -> None:
+        server = McpServer(runner=FakeRunner(), opsctl="opsctl", sudo="sudo")
+        result = call_tool_result(
+            server,
+            "release_import",
+            {
+                "name": "openclaw-candidate",
+                "family": "openclaw",
+                "image_ref": "ghcr.io/epicevent/openclaw-nas-agent:latest",
+                "compat_combined": True,
+            },
+        )
+        payload = result["structuredContent"]
+        self.assertTrue(result["isError"])
+        self.assertFalse(payload["ok"])
+        self.assertIn("digest-pinned", payload["next_action"])
+
+    def test_dev_recipe_apply_runs_status_then_apply_dev(self) -> None:
+        runner = FakeRunner(
+            [
+                (0, "slot=dev-oc\nrecipe_status=missing\n", ""),
+                (0, "recipe_apply_dev_status=prepared\napply=skipped\n", ""),
+            ]
+        )
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        payload = call_tool(
+            server,
+            "dev_recipe_apply",
+            {
+                "slot": "dev-oc",
+                "recipe_name": "openclaw-ui",
+                "sync_from": "/home/openclawdev/openclaw/dist/control-ui",
+                "build_command": "npm run build",
+                "no_apply": True,
+            },
+        )
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["mutated"])
+        self.assertEqual(runner.calls[0]["argv"], ["opsctl", "recipe", "status", "dev-oc"])
+        self.assertEqual(
+            runner.calls[1]["argv"],
+            [
+                "sudo",
+                "opsctl",
+                "recipe",
+                "apply-dev",
+                "dev-oc",
+                "--recipe-name",
+                "openclaw-ui",
+                "--sync-from",
+                "/home/openclawdev/openclaw/dist/control-ui",
+                "--build-command",
+                "npm run build",
+                "--no-apply",
+            ],
+        )
+
+    def test_rollout_canary_runs_plan_then_mutating_canary_then_status(self) -> None:
+        runner = FakeRunner(
+            [
+                (0, '{"mutates": false}\n', ""),
+                (0, "rollout_canary_status=ok\n", ""),
+                (0, "rollout_status=ok\n", ""),
+            ]
+        )
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        payload = call_tool(
+            server,
+            "rollout_canary",
+            {"family": "openclaw", "release": "openclaw-candidate", "slot": "oc3"},
+        )
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["mutated"])
+        self.assertEqual(
+            runner.calls[0]["argv"],
+            ["opsctl", "rollout", "plan", "--family", "openclaw", "--release", "openclaw-candidate"],
+        )
+        self.assertEqual(
+            runner.calls[1]["argv"],
+            [
+                "sudo",
+                "opsctl",
+                "rollout",
+                "canary",
+                "--family",
+                "openclaw",
+                "--release",
+                "openclaw-candidate",
+                "--slot",
+                "oc3",
+            ],
+        )
+        self.assertEqual(
+            runner.calls[2]["argv"],
+            ["opsctl", "rollout", "status", "--family", "openclaw"],
+        )
+
+    def test_rollout_promote_uses_status_guard(self) -> None:
+        runner = FakeRunner(
+            [
+                (0, "rollout_status=ok\nrecorded_canary_status=ok\n", ""),
+                (0, "rollout_promote_status=ok\n", ""),
+                (0, "rollout_status=ok\n", ""),
+            ]
+        )
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        payload = call_tool(server, "rollout_promote", {"family": "openclaw", "release": "openclaw-candidate"})
+        self.assertTrue(payload["ok"])
+        self.assertEqual(runner.calls[0]["argv"], ["opsctl", "rollout", "status", "--family", "openclaw"])
+        self.assertEqual(
+            runner.calls[1]["argv"],
+            ["sudo", "opsctl", "rollout", "promote", "--family", "openclaw", "--release", "openclaw-candidate"],
+        )
 
     def test_nas_credential_status_uses_sudo_and_is_non_mutating(self) -> None:
         runner = FakeRunner([(0, "official_credential_present=yes\nsecret_value_printed=no\n", "")])

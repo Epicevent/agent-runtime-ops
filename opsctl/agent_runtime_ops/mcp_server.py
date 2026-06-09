@@ -18,6 +18,9 @@ from .runtime_secrets import PROVIDER_SECRET_KEYS
 PROTOCOL_VERSION = "2025-06-18"
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 SLOT_RE = re.compile(r"^(?:oc[0-9]+|dev-[a-z0-9-]+)$")
+RELEASE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+IMAGE_REF_RE = re.compile(r"^[A-Za-z0-9./:_-]+@sha256:[0-9a-f]{64}$")
+SAFE_TEXT_RE = re.compile(r"^[^\r\n\t]*$")
 SENSITIVE_ARGUMENTS = {
     "api_key",
     "apikey",
@@ -211,6 +214,126 @@ class McpServer:
                 },
             },
             {
+                "name": "release_import",
+                "title": "Import Image Release",
+                "description": "Register a digest-pinned image release in private server state.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "family": {"type": "string", "enum": ["hermes", "openclaw"]},
+                        "image_ref": {"type": "string"},
+                        "product_image": {"type": "string"},
+                        "wrapper_image": {"type": "string"},
+                        "image_name": {"type": "string"},
+                        "compat_combined": {"type": "boolean", "default": True},
+                        "replace": {"type": "boolean", "default": False},
+                    },
+                    "required": ["name", "family"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "rollout_status",
+                "title": "Rollout Status",
+                "description": "Inspect fleet lane, canary lane, slots, and recorded rollout status for a runtime family.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"family": {"type": "string", "enum": ["hermes", "openclaw"]}},
+                    "required": ["family"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "dev_recipe_status",
+                "title": "Dev Recipe Status",
+                "description": "Inspect the source-mode recipe currently recorded for a dev slot.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"slot": {"type": "string"}},
+                    "required": ["slot"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "dev_recipe_apply",
+                "title": "Apply Dev Recipe",
+                "description": (
+                    "Connect a source-mode dev slot to external dev output, optionally syncing it into the slot stage, "
+                    "then apply and live-check the slot."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "slot": {"type": "string"},
+                        "recipe_name": {"type": "string"},
+                        "source_output": {"type": "string"},
+                        "sync_from": {"type": "string"},
+                        "build_command": {"type": "string"},
+                        "allow_first_apply": {"type": "boolean", "default": False},
+                        "no_apply": {"type": "boolean", "default": False},
+                    },
+                    "required": ["slot"],
+                    "oneOf": [{"required": ["source_output"]}, {"required": ["sync_from"]}],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "rollout_plan",
+                "title": "Rollout Plan",
+                "description": "Validate a candidate release and show the dev-to-canary-to-fleet plan without mutating state.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "family": {"type": "string", "enum": ["hermes", "openclaw"]},
+                        "release": {"type": "string"},
+                    },
+                    "required": ["family", "release"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "rollout_canary",
+                "title": "Rollout Canary",
+                "description": "Move one customer slot to the candidate release, apply it, and record canary success only after live checks pass.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "family": {"type": "string", "enum": ["hermes", "openclaw"]},
+                        "release": {"type": "string"},
+                        "slot": {"type": "string"},
+                        "allow_first_apply": {"type": "boolean", "default": False},
+                    },
+                    "required": ["family", "release", "slot"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "rollout_promote",
+                "title": "Promote Rollout",
+                "description": "Promote a release to the family fleet lane only when a matching successful canary is recorded.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "family": {"type": "string", "enum": ["hermes", "openclaw"]},
+                        "release": {"type": "string"},
+                    },
+                    "required": ["family", "release"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "rollout_rollback_canary",
+                "title": "Rollback Canary",
+                "description": "Move the recorded canary slot back to its previous lane and apply that slot.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"family": {"type": "string", "enum": ["hermes", "openclaw"]}},
+                    "required": ["family"],
+                    "additionalProperties": False,
+                },
+            },
+            {
                 "name": "runtime_secret_status",
                 "title": "Runtime Secret Status",
                 "description": (
@@ -376,6 +499,14 @@ class McpServer:
             "slot_list": self._tool_slot_list,
             "slot_check": self._tool_slot_check,
             "deploy_update": self._tool_deploy_update,
+            "release_import": self._tool_release_import,
+            "rollout_status": self._tool_rollout_status,
+            "dev_recipe_status": self._tool_dev_recipe_status,
+            "dev_recipe_apply": self._tool_dev_recipe_apply,
+            "rollout_plan": self._tool_rollout_plan,
+            "rollout_canary": self._tool_rollout_canary,
+            "rollout_promote": self._tool_rollout_promote,
+            "rollout_rollback_canary": self._tool_rollout_rollback_canary,
             "runtime_secret_status": self._tool_runtime_secret_status,
             "runtime_secret_set_from_file": self._tool_runtime_secret_set_from_file,
             "handoff_status": self._tool_handoff_status,
@@ -533,6 +664,142 @@ class McpServer:
             },
         )
 
+    def _tool_release_import(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(
+            args,
+            {
+                "name",
+                "family",
+                "image_ref",
+                "product_image",
+                "wrapper_image",
+                "image_name",
+                "compat_combined",
+                "replace",
+            },
+        )
+        name = self._release(args.get("name"))
+        family = self._family(args.get("family"))
+        compat_combined = bool(args.get("compat_combined", True))
+        argv = [self.sudo, self.opsctl, "release", "import", name, "--family", family]
+        image_name = args.get("image_name")
+        if image_name:
+            argv.extend(["--image-name", self._release(image_name)])
+        if compat_combined:
+            image_ref = self._image_ref(args.get("image_ref"))
+            if args.get("product_image") is not None or args.get("wrapper_image") is not None:
+                raise ToolError("compat_combined uses image_ref; do not pass product_image or wrapper_image")
+            argv.extend(["--image", image_ref, "--compat-combined"])
+        else:
+            product_image = self._image_ref(args.get("product_image"))
+            wrapper_image = self._image_ref(args.get("wrapper_image"))
+            if args.get("image_ref") is not None:
+                raise ToolError("split releases use product_image and wrapper_image, not image_ref")
+            argv.extend(["--product-image", product_image, "--wrapper-image", wrapper_image])
+        if bool(args.get("replace", False)):
+            argv.append("--replace")
+        runs = [self._run(argv, timeout=120)]
+        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=True, runs=runs)
+
+    def _tool_rollout_status(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(args, {"family"})
+        family = self._family(args.get("family"))
+        runs = [self._run([self.opsctl, "rollout", "status", "--family", family], timeout=60)]
+        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
+
+    def _tool_dev_recipe_status(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(args, {"slot"})
+        slot = self._slot(args.get("slot"))
+        if not slot.startswith("dev-"):
+            raise ToolError("dev recipe tools require a dev slot")
+        runs = [self._run([self.opsctl, "recipe", "status", slot], timeout=60)]
+        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
+
+    def _tool_dev_recipe_apply(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(
+            args,
+            {
+                "slot",
+                "recipe_name",
+                "source_output",
+                "sync_from",
+                "build_command",
+                "allow_first_apply",
+                "no_apply",
+            },
+        )
+        slot = self._slot(args.get("slot"))
+        if not slot.startswith("dev-"):
+            raise ToolError("dev recipe tools require a dev slot")
+        has_source_output = args.get("source_output") is not None
+        has_sync_from = args.get("sync_from") is not None
+        if has_source_output == has_sync_from:
+            raise ToolError("provide exactly one of source_output or sync_from")
+        runs = [self._run([self.opsctl, "recipe", "status", slot], timeout=60)]
+        if runs[0]["returncode"] != 0:
+            return self._common_response(ok=False, mutated=False, runs=runs, next_action="fix dev recipe status before apply")
+        argv = [self.sudo, self.opsctl, "recipe", "apply-dev", slot]
+        recipe_name = args.get("recipe_name")
+        if recipe_name:
+            argv.extend(["--recipe-name", self._release(recipe_name)])
+        if has_source_output:
+            argv.extend(["--source-output", self._path_text(args.get("source_output"), "source_output")])
+        else:
+            argv.extend(["--sync-from", self._path_text(args.get("sync_from"), "sync_from")])
+        build_command = self._safe_text(args.get("build_command"), "build_command")
+        if build_command:
+            argv.extend(["--build-command", build_command])
+        if bool(args.get("allow_first_apply", False)):
+            argv.append("--allow-first-apply")
+        if bool(args.get("no_apply", False)):
+            argv.append("--no-apply")
+        runs.append(self._run(argv, timeout=900))
+        ok = all(item["returncode"] == 0 for item in runs)
+        return self._common_response(ok=ok, mutated=True, runs=runs)
+
+    def _tool_rollout_plan(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(args, {"family", "release"})
+        family = self._family(args.get("family"))
+        release = self._release(args.get("release"))
+        runs = [self._run([self.opsctl, "rollout", "plan", "--family", family, "--release", release], timeout=60)]
+        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
+
+    def _tool_rollout_canary(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(args, {"family", "release", "slot", "allow_first_apply"})
+        family = self._family(args.get("family"))
+        release = self._release(args.get("release"))
+        slot = self._slot(args.get("slot"))
+        runs = [self._run([self.opsctl, "rollout", "plan", "--family", family, "--release", release], timeout=60)]
+        if runs[0]["returncode"] != 0:
+            return self._common_response(ok=False, mutated=False, runs=runs, next_action="fix release or rollout plan before canary")
+        argv = [self.sudo, self.opsctl, "rollout", "canary", "--family", family, "--release", release, "--slot", slot]
+        if bool(args.get("allow_first_apply", False)):
+            argv.append("--allow-first-apply")
+        runs.append(self._run(argv, timeout=600))
+        runs.append(self._run([self.opsctl, "rollout", "status", "--family", family], timeout=60))
+        ok = all(item["returncode"] == 0 for item in runs)
+        return self._common_response(ok=ok, mutated=True, runs=runs)
+
+    def _tool_rollout_promote(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(args, {"family", "release"})
+        family = self._family(args.get("family"))
+        release = self._release(args.get("release"))
+        runs = [self._run([self.opsctl, "rollout", "status", "--family", family], timeout=60)]
+        if runs[0]["returncode"] != 0:
+            return self._common_response(ok=False, mutated=False, runs=runs, next_action="fix rollout status before promote")
+        runs.append(self._run([self.sudo, self.opsctl, "rollout", "promote", "--family", family, "--release", release], timeout=1800))
+        runs.append(self._run([self.opsctl, "rollout", "status", "--family", family], timeout=60))
+        ok = all(item["returncode"] == 0 for item in runs)
+        return self._common_response(ok=ok, mutated=True, runs=runs)
+
+    def _tool_rollout_rollback_canary(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(args, {"family"})
+        family = self._family(args.get("family"))
+        runs = [self._run([self.sudo, self.opsctl, "rollout", "rollback-canary", "--family", family], timeout=600)]
+        runs.append(self._run([self.opsctl, "rollout", "status", "--family", family], timeout=60))
+        ok = all(item["returncode"] == 0 for item in runs)
+        return self._common_response(ok=ok, mutated=True, runs=runs)
+
     def _tool_runtime_secret_status(self, args: dict[str, Any]) -> dict[str, Any]:
         self._reject_unknown(args, {"slot", "slots", "slot_class", "family"})
         slots, runs = self._resolve_slots(args)
@@ -681,6 +948,36 @@ class McpServer:
         if not SLOT_RE.match(slot):
             raise ToolError("slot must look like ocN or dev-name")
         return slot
+
+    def _family(self, value: Any) -> str:
+        family = str(value or "")
+        if family not in {"hermes", "openclaw"}:
+            raise ToolError("family must be hermes or openclaw")
+        return family
+
+    def _release(self, value: Any) -> str:
+        release = str(value or "")
+        if not RELEASE_RE.match(release):
+            raise ToolError("release name must contain only letters, numbers, '.', '_', or '-'")
+        return release
+
+    def _image_ref(self, value: Any) -> str:
+        image_ref = str(value or "")
+        if not IMAGE_REF_RE.match(image_ref):
+            raise ToolError("image reference must be digest-pinned as REGISTRY/IMAGE@sha256:<64 hex>")
+        return image_ref
+
+    def _safe_text(self, value: Any, name: str) -> str:
+        text = str(value or "").strip()
+        if text and not SAFE_TEXT_RE.match(text):
+            raise ToolError(f"{name} must not contain control characters")
+        return text
+
+    def _path_text(self, value: Any, name: str) -> str:
+        text = self._safe_text(value, name)
+        if not text.startswith("/"):
+            raise ToolError(f"{name} must be an absolute path")
+        return text
 
     def _slots(self, args: dict[str, Any]) -> list[str]:
         has_slot = args.get("slot") is not None
