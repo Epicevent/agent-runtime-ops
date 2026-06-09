@@ -1,6 +1,7 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
+ARG BASE_IMAGE
 ARG PRODUCT_IMAGE=""
 ARG OPS_REPO_COMMIT=""
 ARG RUNTIME_FAMILY="hermes"
@@ -22,4 +23,3 @@ RUN set -eu; \
       echo "product_image=${PRODUCT_IMAGE}"; \
       echo "ops_repo_commit=${OPS_REPO_COMMIT}"; \
     } > /usr/local/share/agent-runtime-ops/wrapper.manifest
-
