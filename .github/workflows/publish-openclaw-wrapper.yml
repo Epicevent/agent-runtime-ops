@@ -23,6 +23,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install opsctl
+        run: python -m pip install .
+
       - name: Validate inputs
         shell: bash
         run: |
@@ -37,18 +44,25 @@ jobs:
         run: |
           set -euo pipefail
           image_ref="$IMAGE_REPOSITORY:${{ inputs.image_tag }}"
+          python -m agent_runtime_ops.cli recipe validate-canonical openclaw-control --emit-build-args > recipe.env
+          set -a
+          . ./recipe.env
+          set +a
+          [[ "$RUNTIME_FAMILY" == "openclaw" ]]
           docker build \
             --build-arg BASE_IMAGE="${{ inputs.product_image }}" \
             --build-arg PRODUCT_IMAGE="${{ inputs.product_image }}" \
             --build-arg OPS_REPO_COMMIT="${{ github.sha }}" \
-            --build-arg PRODUCT_COMPONENT="openclaw-control" \
-            --build-arg RUNTIME_PROFILE_CUSTOMER="openclaw-customer" \
-            --build-arg RUNTIME_PROFILE_DEV="openclaw-dev" \
-            --build-arg RUNTIME_CONTRACT_CUSTOMER="openclaw-gateway-http-18789" \
-            --build-arg RUNTIME_CONTRACT_DEV="openclaw-gateway-source-http-18789" \
-            --build-arg RUNTIME_COMMAND_MODE="compose-command" \
-            --build-arg RUNTIME_WORKING_DIR="" \
-            --build-arg RUNTIME_HTTP_PORT="18789" \
+            --build-arg PRODUCT_COMPONENT="$PRODUCT_COMPONENT" \
+            --build-arg RUNTIME_PROFILE_CUSTOMER="$RUNTIME_PROFILE_CUSTOMER" \
+            --build-arg RUNTIME_PROFILE_DEV="$RUNTIME_PROFILE_DEV" \
+            --build-arg RUNTIME_CONTRACT_CUSTOMER="$RUNTIME_CONTRACT_CUSTOMER" \
+            --build-arg RUNTIME_CONTRACT_DEV="$RUNTIME_CONTRACT_DEV" \
+            --build-arg RUNTIME_COMMAND_MODE="$RUNTIME_COMMAND_MODE" \
+            --build-arg RUNTIME_WORKING_DIR="$RUNTIME_WORKING_DIR" \
+            --build-arg RUNTIME_HTTP_PORT="$RUNTIME_HTTP_PORT" \
+            --build-arg CANONICAL_RECIPE_NAME="$CANONICAL_RECIPE_NAME" \
+            --build-arg CANONICAL_RECIPE_DIGEST="$CANONICAL_RECIPE_DIGEST" \
             -t "$image_ref" \
             -f images/openclaw-wrapper/Dockerfile .
 
@@ -63,7 +77,11 @@ jobs:
           grep -Fx "product_image=${{ inputs.product_image }}" ./wrapper.manifest
           grep -Fx "runtime_profile_customer=openclaw-customer" ./wrapper.manifest
           grep -Fx "runtime_profile_dev=openclaw-dev" ./wrapper.manifest
+          grep -Fx "canonical_recipe_name=openclaw-control" ./wrapper.manifest
+          grep -E "^canonical_recipe_digest=sha256:[0-9a-f]{64}$" ./wrapper.manifest
           docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.recipe.schema" }}' | grep -Fx v1
+          docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.recipe.name" }}' | grep -Fx openclaw-control
+          docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.recipe.digest" }}' | grep -E '^sha256:[0-9a-f]{64}$'
           docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.product-image" }}' | grep -Fx "${{ inputs.product_image }}"
 
       - name: Push wrapper

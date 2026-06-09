@@ -1,0 +1,234 @@
+from __future__ import annotations
+
+import hashlib
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from .image_components import image_repo
+from .paths import RUNTIME_RECIPE_ROOT
+from .profiles import RuntimeProfile, load_profile
+from .yamlio import load_yaml
+
+
+CANONICAL_RECIPE_SCHEMA = "v1"
+
+
+@dataclass(frozen=True)
+class CanonicalRuntimeRecipe:
+    name: str
+    path: Path
+    data: dict[str, Any]
+    digest: str
+
+
+def _normalized_recipe_yaml(data: dict[str, Any]) -> bytes:
+    return yaml.safe_dump(data, allow_unicode=True, sort_keys=True).encode("utf-8")
+
+
+def canonical_recipe_digest(data: dict[str, Any]) -> str:
+    return "sha256:" + hashlib.sha256(_normalized_recipe_yaml(data)).hexdigest()
+
+
+def list_canonical_recipe_names(recipe_root: Path = RUNTIME_RECIPE_ROOT) -> list[str]:
+    if not recipe_root.exists():
+        return []
+    return sorted(path.stem for path in recipe_root.glob("*.yaml") if path.is_file())
+
+
+def load_canonical_recipe(name: str, recipe_root: Path = RUNTIME_RECIPE_ROOT) -> CanonicalRuntimeRecipe:
+    if "/" in name or "\\" in name or name in {"", ".", ".."}:
+        raise ValueError(f"invalid canonical recipe name: {name}")
+    path = recipe_root / f"{name}.yaml"
+    data = load_yaml(path)
+    if not isinstance(data, dict):
+        raise ValueError(f"canonical recipe must be a mapping: {name}")
+    if data.get("schema") != CANONICAL_RECIPE_SCHEMA:
+        raise ValueError(f"canonical recipe schema mismatch: {name}")
+    if data.get("name") != name:
+        raise ValueError(f"canonical recipe name mismatch: path={name} declared={data.get('name')!r}")
+    return CanonicalRuntimeRecipe(name=name, path=path, data=data, digest=canonical_recipe_digest(data))
+
+
+def _string_map(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): str(item) for key, item in value.items()}
+
+
+def canonical_recipe_for_product(family: str, product_image: object) -> CanonicalRuntimeRecipe | None:
+    product_repo = image_repo(product_image)
+    for name in list_canonical_recipe_names():
+        recipe = load_canonical_recipe(name)
+        if recipe.data.get("family") != family:
+            continue
+        if recipe.data.get("product_image_repo") == product_repo:
+            return recipe
+    return None
+
+
+def canonical_recipe_for_release(release_data: dict[str, Any]) -> CanonicalRuntimeRecipe | None:
+    image_recipe = release_data.get("image_recipe")
+    if isinstance(image_recipe, dict):
+        recipe_name = image_recipe.get("canonical_recipe_name") or image_recipe.get("recipe_name")
+        if recipe_name:
+            return load_canonical_recipe(str(recipe_name))
+    family = str(release_data.get("family") or "")
+    product_image = release_data.get("product_image")
+    return canonical_recipe_for_product(family, product_image)
+
+
+def canonical_recipe_identity(recipe: CanonicalRuntimeRecipe | None) -> dict[str, str]:
+    if recipe is None:
+        return {"canonical_recipe_name": "", "canonical_recipe_digest": ""}
+    return {"canonical_recipe_name": recipe.name, "canonical_recipe_digest": recipe.digest}
+
+
+def canonical_label_values(recipe: CanonicalRuntimeRecipe) -> dict[str, str]:
+    runtime_profiles = _string_map(recipe.data.get("runtime_profiles"))
+    runtime_contracts = _string_map(recipe.data.get("runtime_contracts"))
+    return {
+        "recipe.name": recipe.name,
+        "recipe.digest": recipe.digest,
+        "family": str(recipe.data.get("family") or ""),
+        "product-component": str(recipe.data.get("product_component") or ""),
+        "wrapper-component": str(recipe.data.get("wrapper_component") or ""),
+        "runtime-profile.customer": runtime_profiles.get("customer", ""),
+        "runtime-profile.dev": runtime_profiles.get("dev", ""),
+        "runtime-contract.customer": runtime_contracts.get("customer", ""),
+        "runtime-contract.dev": runtime_contracts.get("dev", ""),
+        "command-mode": str(recipe.data.get("command_mode") or ""),
+        "working-dir": str(recipe.data.get("working_dir") or ""),
+        "http-port": str(recipe.data.get("http_port") or ""),
+    }
+
+
+def _metadata_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value]
+    if value in (None, ""):
+        return []
+    return [str(value)]
+
+
+def _command_mode_matches(recipe: CanonicalRuntimeRecipe, profile: RuntimeProfile) -> bool:
+    command_mode = str(recipe.data.get("command_mode") or "")
+    if command_mode == "image-default":
+        return profile.metadata.get("image_default_command") is True
+    if command_mode == "gateway-run":
+        return _metadata_list(profile.metadata.get("required_command")) == ["gateway", "run"]
+    if command_mode == "compose-command":
+        return profile.metadata.get("image_default_command") is not True and profile.metadata.get("required_command") is None
+    return False
+
+
+def projection_checks(recipe: CanonicalRuntimeRecipe, slot_class: str) -> list[tuple[bool, str, str | None]]:
+    runtime_profiles = _string_map(recipe.data.get("runtime_profiles"))
+    runtime_contracts = _string_map(recipe.data.get("runtime_contracts"))
+    profile_name = runtime_profiles.get(slot_class, "")
+    checks: list[tuple[bool, str, str | None]] = [
+        (slot_class in {"customer", "dev"}, "canonical_projection_known", f"slot_class={slot_class}"),
+        (bool(profile_name), "canonical_projection_profile_declared", f"profile={profile_name or 'missing'}"),
+    ]
+    if not profile_name:
+        return checks
+
+    profile = load_profile(profile_name)
+    expected_source_mount = slot_class == "dev"
+    expected_working_dir = str(recipe.data.get("working_dir") or "")
+    expected_http_port = str(recipe.data.get("http_port") or "")
+    expected_components = _metadata_list(recipe.data.get("expected_image_components"))
+    profile_components = _metadata_list(profile.metadata.get("expected_image_components"))
+    checks.extend(
+        [
+            (
+                profile.metadata.get("family") == recipe.data.get("family"),
+                "canonical_profile_family_matches",
+                f"recipe={recipe.data.get('family') or 'missing'} profile={profile.metadata.get('family') or 'missing'}",
+            ),
+            (
+                profile.metadata.get("slot_class") == slot_class,
+                "canonical_profile_slot_class_matches",
+                f"recipe={slot_class} profile={profile.metadata.get('slot_class') or 'missing'}",
+            ),
+            (
+                profile.metadata.get("product_component") == recipe.data.get("product_component"),
+                "canonical_product_component_matches",
+                f"recipe={recipe.data.get('product_component') or 'missing'} profile={profile.metadata.get('product_component') or 'missing'}",
+            ),
+            (
+                profile.metadata.get("runtime_contract") == runtime_contracts.get(slot_class),
+                "canonical_runtime_contract_matches",
+                f"recipe={runtime_contracts.get(slot_class, 'missing')} profile={profile.metadata.get('runtime_contract') or 'missing'}",
+            ),
+            (
+                profile.metadata.get("customer_surface") == recipe.data.get("customer_surface"),
+                "canonical_customer_surface_matches",
+                f"recipe={recipe.data.get('customer_surface') or 'missing'} profile={profile.metadata.get('customer_surface') or 'missing'}",
+            ),
+            (
+                profile_components == expected_components,
+                "canonical_expected_components_match",
+                f"recipe={','.join(expected_components)} profile={','.join(profile_components)}",
+            ),
+            (
+                profile.metadata.get("container_nas_root") == recipe.data.get("container_nas_root"),
+                "canonical_nas_root_matches",
+                f"recipe={recipe.data.get('container_nas_root') or 'missing'} profile={profile.metadata.get('container_nas_root') or 'missing'}",
+            ),
+            (
+                profile.metadata.get("allow_source_mount") is expected_source_mount,
+                "canonical_source_mount_policy_matches",
+                f"slot_class={slot_class} allow_source_mount={profile.metadata.get('allow_source_mount')}",
+            ),
+            (
+                slot_class == "customer"
+                or profile.metadata.get("source_output_target") == recipe.data.get("source_output_target"),
+                "canonical_source_mount_target_matches",
+                f"recipe={recipe.data.get('source_output_target') or 'missing'} profile={profile.metadata.get('source_output_target') or 'missing'}",
+            ),
+            (
+                profile.metadata.get("runtime_user_mode") == recipe.data.get("runtime_user_mode"),
+                "canonical_runtime_user_mode_matches",
+                f"recipe={recipe.data.get('runtime_user_mode') or 'missing'} profile={profile.metadata.get('runtime_user_mode') or 'missing'}",
+            ),
+            (
+                _command_mode_matches(recipe, profile),
+                "canonical_command_mode_matches",
+                f"recipe={recipe.data.get('command_mode') or 'missing'} profile={profile.name}",
+            ),
+            (
+                str(profile.metadata.get("required_working_dir") or "") == expected_working_dir,
+                "canonical_working_dir_matches",
+                f"recipe={expected_working_dir or 'empty'} profile={profile.metadata.get('required_working_dir') or 'empty'}",
+            ),
+            (
+                str(profile.metadata.get("required_http_container_port") or "") == expected_http_port,
+                "canonical_http_port_matches",
+                f"recipe={expected_http_port or 'missing'} profile={profile.metadata.get('required_http_container_port') or 'missing'}",
+            ),
+        ]
+    )
+    return checks
+
+
+def validate_canonical_recipe(recipe: CanonicalRuntimeRecipe) -> list[tuple[bool, str, str | None]]:
+    checks: list[tuple[bool, str, str | None]] = [
+        (bool(recipe.data.get("family")), "canonical_family_declared", f"family={recipe.data.get('family') or 'missing'}"),
+        (
+            bool(recipe.data.get("product_image_repo")),
+            "canonical_product_image_repo_declared",
+            f"repo={recipe.data.get('product_image_repo') or 'missing'}",
+        ),
+        (
+            bool(recipe.data.get("wrapper_repo")),
+            "canonical_wrapper_repo_declared",
+            f"repo={recipe.data.get('wrapper_repo') or 'missing'}",
+        ),
+    ]
+    checks.extend(projection_checks(recipe, "customer"))
+    checks.extend(projection_checks(recipe, "dev"))
+    return checks
+

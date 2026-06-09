@@ -24,6 +24,12 @@ jobs:
       - name: List runtime profiles
         run: python -m agent_runtime_ops.cli profile list
 
+      - name: Validate canonical runtime recipes
+        run: |
+          python -m agent_runtime_ops.cli recipe validate-canonical hermes-workspace
+          python -m agent_runtime_ops.cli recipe validate-canonical hermes-combined
+          python -m agent_runtime_ops.cli recipe validate-canonical openclaw-control
+
       - name: Verify no legacy compose repair path
         run: |
           set -euo pipefail

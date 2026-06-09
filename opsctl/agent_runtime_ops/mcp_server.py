@@ -250,6 +250,17 @@ class McpServer:
                 },
             },
             {
+                "name": "canonical_recipe_validate",
+                "title": "Validate Canonical Recipe",
+                "description": "Validate the repo-owned canonical runtime recipe that generates dev/customer projections and wrapper labels.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"],
+                    "additionalProperties": False,
+                },
+            },
+            {
                 "name": "dev_recipe_status",
                 "title": "Dev Recipe Status",
                 "description": "Inspect the source-mode recipe currently recorded for a dev slot.",
@@ -537,6 +548,7 @@ class McpServer:
             "deploy_update": self._tool_deploy_update,
             "release_import": self._tool_release_import,
             "rollout_status": self._tool_rollout_status,
+            "canonical_recipe_validate": self._tool_canonical_recipe_validate,
             "dev_recipe_status": self._tool_dev_recipe_status,
             "dev_recipe_apply": self._tool_dev_recipe_apply,
             "rollout_plan": self._tool_rollout_plan,
@@ -754,6 +766,12 @@ class McpServer:
         self._reject_unknown(args, {"family"})
         family = self._family(args.get("family"))
         runs = [self._run([self.sudo, self.opsctl, "rollout", "status", "--family", family], timeout=60)]
+        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
+
+    def _tool_canonical_recipe_validate(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(args, {"name"})
+        name = self._release(args.get("name"))
+        runs = [self._run([self.opsctl, "recipe", "validate-canonical", name], timeout=60)]
         return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
 
     def _tool_dev_recipe_status(self, args: dict[str, Any]) -> dict[str, Any]:

@@ -39,6 +39,7 @@ def _find_repo_root() -> Path:
 
 REPO_ROOT = _find_repo_root()
 PROFILE_ROOT = REPO_ROOT / "profiles" / "runtime"
+RUNTIME_RECIPE_ROOT = REPO_ROOT / "recipes" / "runtime"
 DEFAULT_STATE_ROOT = Path("/srv/openclaw-ops")
 
 

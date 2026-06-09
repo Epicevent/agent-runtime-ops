@@ -19,6 +19,16 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from .canonical_recipes import (
+    canonical_label_values,
+    canonical_recipe_for_product,
+    canonical_recipe_for_release,
+    canonical_recipe_identity,
+    list_canonical_recipe_names,
+    load_canonical_recipe,
+    projection_checks as canonical_projection_checks,
+    validate_canonical_recipe,
+)
 from .compose_contract import validate_compose_contract
 from .image_components import image_component_name as _image_component_name
 from .image_components import image_repo as _image_repo
@@ -423,6 +433,7 @@ def _release_recipe_payload(release_data: dict) -> dict[str, object]:
     product_image = release_data.get("product_image")
     wrapper_image = release_data.get("wrapper_image")
     image_recipe = _release_image_recipe(release_data)
+    canonical_recipe = canonical_recipe_for_release(release_data)
     payload: dict[str, object] = {
         "mode": release_data.get("compatibility_mode") or "unknown",
         "product_component": image_recipe.get("product_component") or _image_component_name(product_image),
@@ -430,6 +441,7 @@ def _release_recipe_payload(release_data: dict) -> dict[str, object]:
         "product_repo": _image_repo(product_image),
         "wrapper_repo": _image_repo(wrapper_image),
     }
+    payload.update(canonical_recipe_identity(canonical_recipe))
     components = release_data.get("components")
     if isinstance(components, dict):
         payload["components"] = {str(key): str(value) for key, value in components.items()}
@@ -444,6 +456,8 @@ def _release_recipe_tokens(release_data: dict) -> dict[str, str]:
         "recipe_mode": str(recipe.get("mode") or "unknown"),
         "product_component": str(recipe.get("product_component") or "unknown"),
         "wrapper_component": str(recipe.get("wrapper_component") or "unknown"),
+        "canonical_recipe_name": str(recipe.get("canonical_recipe_name") or "unknown"),
+        "canonical_recipe_digest": str(recipe.get("canonical_recipe_digest") or "unknown"),
     }
 
 
@@ -523,6 +537,8 @@ def _image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product
     wrapper_component = _recipe_label(labels, "wrapper-component")
     command_mode = _recipe_label(labels, "command-mode")
     http_port = _recipe_label(labels, "http-port")
+    canonical_name = _recipe_label(labels, "recipe.name")
+    canonical_digest = _recipe_label(labels, "recipe.digest")
     required = {
         "product-component": product_component,
         "wrapper-component": wrapper_component,
@@ -546,9 +562,41 @@ def _image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product
         raise ValueError(
             f"wrapper image recipe wrapper-component mismatch: label={wrapper_component} derived={derived_wrapper_component}"
         )
+    canonical_recipe = load_canonical_recipe(canonical_name) if canonical_name else canonical_recipe_for_product(family, product_image)
+    if canonical_recipe is None:
+        raise ValueError("wrapper image recipe does not map to a canonical runtime recipe")
+    canonical_failures = [name for ok, name, _ in validate_canonical_recipe(canonical_recipe) if not ok]
+    if canonical_failures:
+        raise ValueError("canonical runtime recipe validation failed: " + ",".join(canonical_failures))
+    expected_labels = canonical_label_values(canonical_recipe)
+    label_checks = {
+        "product-component": product_component,
+        "wrapper-component": wrapper_component,
+        "runtime-profile.customer": customer_profile,
+        "runtime-profile.dev": dev_profile,
+        "runtime-contract.customer": customer_contract,
+        "runtime-contract.dev": dev_contract,
+        "command-mode": command_mode,
+        "working-dir": _recipe_label(labels, "working-dir"),
+        "http-port": http_port,
+    }
+    for label_name, actual in label_checks.items():
+        expected = expected_labels[label_name]
+        if actual != expected:
+            raise ValueError(
+                f"wrapper image canonical recipe mismatch: {label_name} label={actual or 'missing'} canonical={expected or 'missing'}"
+            )
+    if canonical_name and canonical_name != canonical_recipe.name:
+        raise ValueError(f"wrapper image canonical recipe name mismatch: label={canonical_name} canonical={canonical_recipe.name}")
+    if canonical_digest and canonical_digest != canonical_recipe.digest:
+        raise ValueError(
+            f"wrapper image canonical recipe digest mismatch: label={canonical_digest} canonical={canonical_recipe.digest}"
+        )
     recipe = {
         "schema": schema,
         "source": "wrapper_image_labels",
+        "canonical_recipe_name": canonical_recipe.name,
+        "canonical_recipe_digest": canonical_recipe.digest,
         "family": label_family,
         "product_image": label_product_image,
         "product_component": product_component,
@@ -604,6 +652,7 @@ def _release_profile_contract_checks(release_data: dict, profile) -> list[tuple[
     product_image = str(release_data.get("product_image") or "")
     slot_class = str(profile.metadata.get("slot_class") or "")
     image_recipe = _release_image_recipe(release_data)
+    canonical_recipe = canonical_recipe_for_release(release_data)
     checks: list[tuple[bool, str, str | None]] = [
         (bool(runtime_contract), "runtime_contract_declared", f"contract={runtime_contract or 'missing'}"),
         (
@@ -612,6 +661,45 @@ def _release_profile_contract_checks(release_data: dict, profile) -> list[tuple[
             f"surface={customer_surface or 'missing'}",
         ),
     ]
+    if canonical_recipe is not None:
+        slot_class = str(profile.metadata.get("slot_class") or "")
+        canonical_profiles = canonical_recipe.data.get("runtime_profiles")
+        canonical_profile_name = (
+            canonical_profiles.get(slot_class)
+            if isinstance(canonical_profiles, dict)
+            else ""
+        )
+        checks.extend(
+            [
+                (True, "canonical_recipe_identified", f"name={canonical_recipe.name} digest={canonical_recipe.digest}"),
+                (
+                    canonical_profile_name == profile.name,
+                    "canonical_projection_matches_runtime_profile",
+                    f"recipe={canonical_profile_name or 'missing'} profile={profile.name}",
+                ),
+                (
+                    _image_repo(product_image) == canonical_recipe.data.get("product_image_repo"),
+                    "canonical_product_repo_matches_release",
+                    f"release={_image_repo(product_image) or 'missing'} canonical={canonical_recipe.data.get('product_image_repo') or 'missing'}",
+                ),
+                (
+                    release_data.get("compatibility_mode") != "wrapped_product_image"
+                    or _image_repo(release_data.get("wrapper_image")) == canonical_recipe.data.get("wrapper_repo"),
+                    "canonical_wrapper_repo_matches_release",
+                    f"release={_image_repo(release_data.get('wrapper_image')) or 'missing'} canonical={canonical_recipe.data.get('wrapper_repo') or 'missing'}",
+                ),
+                (
+                    not image_recipe or image_recipe.get("canonical_recipe_digest") in (None, "", canonical_recipe.digest),
+                    "canonical_recipe_digest_matches_release",
+                    f"release={image_recipe.get('canonical_recipe_digest') if image_recipe else 'derived'} canonical={canonical_recipe.digest}",
+                ),
+            ]
+        )
+        checks.extend(canonical_projection_checks(canonical_recipe, slot_class))
+    elif release_data.get("compatibility_mode") == "wrapped_product_image":
+        checks.append((False, "canonical_recipe_identified", f"product_image={product_image or 'missing'}"))
+    else:
+        checks.append((True, "canonical_recipe_not_required_for_legacy_release", f"product_image={product_image or 'missing'}"))
     if image_recipe:
         runtime_profiles = image_recipe.get("runtime_profiles")
         expected_profile = runtime_profiles.get(slot_class) if isinstance(runtime_profiles, dict) else ""
@@ -1111,6 +1199,8 @@ def cmd_check(args: argparse.Namespace) -> int:
     print(f"runtime_profile_digest={profile.digest}")
     print(f"runtime_contract={_profile_runtime_contract(profile)}")
     print(f"customer_surface={_profile_customer_surface(profile)}")
+    for key, value in canonical_recipe_identity(canonical_recipe_for_release(desired.release_data)).items():
+        print(f"{key}={value}")
     print(f"compose_sha256={rendered.sha256}")
     print("check_mode=non_mutating")
     print(f"live_runtime_check={'enabled' if args.live else 'not_run'}")
@@ -2460,6 +2550,65 @@ def _validate_recipe_name(name: str) -> None:
     _validate_release_name(name)
 
 
+def _build_arg_lines_for_canonical_recipe(name: str) -> list[str]:
+    recipe = load_canonical_recipe(name)
+    labels = canonical_label_values(recipe)
+    return [
+        f"CANONICAL_RECIPE_NAME={recipe.name}",
+        f"CANONICAL_RECIPE_DIGEST={recipe.digest}",
+        f"RUNTIME_FAMILY={labels['family']}",
+        f"PRODUCT_COMPONENT={labels['product-component']}",
+        f"WRAPPER_COMPONENT={labels['wrapper-component']}",
+        f"RUNTIME_PROFILE_CUSTOMER={labels['runtime-profile.customer']}",
+        f"RUNTIME_PROFILE_DEV={labels['runtime-profile.dev']}",
+        f"RUNTIME_CONTRACT_CUSTOMER={labels['runtime-contract.customer']}",
+        f"RUNTIME_CONTRACT_DEV={labels['runtime-contract.dev']}",
+        f"RUNTIME_COMMAND_MODE={labels['command-mode']}",
+        f"RUNTIME_WORKING_DIR={labels['working-dir']}",
+        f"RUNTIME_HTTP_PORT={labels['http-port']}",
+    ]
+
+
+def cmd_recipe_validate_canonical(args: argparse.Namespace) -> int:
+    name = str(args.name)
+    try:
+        recipe = load_canonical_recipe(name)
+        checks = validate_canonical_recipe(recipe)
+    except Exception as exc:
+        print(f"name={name}")
+        print("canonical_recipe_status=fail")
+        print(f"reason={exc}")
+        return 1
+
+    failed = sum(1 for ok, _check_name, _detail in checks if not ok)
+    if getattr(args, "emit_build_args", False):
+        if failed:
+            print(f"canonical_recipe_status=fail failed={failed}", file=sys.stderr)
+            return 1
+        for line in _build_arg_lines_for_canonical_recipe(name):
+            print(line)
+        return 0
+
+    print(f"name={recipe.name}")
+    print(f"canonical_recipe_digest={recipe.digest}")
+    print(f"family={recipe.data.get('family')}")
+    print(f"product_component={recipe.data.get('product_component')}")
+    for ok, check_name, detail in checks:
+        _check_line(ok, check_name, detail)
+    if failed:
+        print(f"canonical_recipe_status=fail failed={failed}")
+        return 1
+    print("canonical_recipe_status=ok")
+    return 0
+
+
+def cmd_recipe_list_canonical(args: argparse.Namespace) -> int:
+    for name in list_canonical_recipe_names():
+        recipe = load_canonical_recipe(name)
+        print(f"{recipe.name} {recipe.digest}")
+    return 0
+
+
 def _safe_existing_directory(value: object, name: str) -> Path:
     text = str(value or "").strip()
     if not text:
@@ -2576,6 +2725,36 @@ def _dev_recipe_runtime_env(desired) -> dict[str, str]:
     return env
 
 
+def _redact_git_url(value: str) -> str:
+    return re.sub(r"://[^/@]+@", "://<redacted>@", value)
+
+
+def _source_provenance(source: Path) -> dict[str, object]:
+    data: dict[str, object] = {
+        "path": str(source),
+        "status": "unknown",
+        "git_head": "",
+        "git_dirty": None,
+        "git_toplevel": "",
+        "git_remote_origin": "",
+    }
+    rev = _run_text(["git", "-C", str(source), "rev-parse", "--show-toplevel", "HEAD"], timeout=30)
+    if rev.returncode != 0:
+        data["status"] = "no_git"
+        return data
+    lines = [line.strip() for line in rev.stdout.splitlines() if line.strip()]
+    if len(lines) >= 2:
+        data["git_toplevel"] = lines[0]
+        data["git_head"] = lines[1]
+    status = _run_text(["git", "-C", str(source), "status", "--porcelain"], timeout=30)
+    data["git_dirty"] = bool(status.stdout.strip()) if status.returncode == 0 else None
+    remote = _run_text(["git", "-C", str(source), "remote", "get-url", "origin"], timeout=30)
+    if remote.returncode == 0:
+        data["git_remote_origin"] = _redact_git_url(remote.stdout.strip())
+    data["status"] = "git"
+    return data
+
+
 def cmd_recipe_dev_status(args: argparse.Namespace) -> int:
     state_root = _state_root(args)
     slot = str(args.slot)
@@ -2597,6 +2776,10 @@ def cmd_recipe_dev_status(args: argparse.Namespace) -> int:
         print("recipe_status=present")
         for key in ("recipe_name", "source_output", "sync_from", "build_command", "updated_at"):
             print(f"{key}={recipe.get(key, '')}")
+        source_provenance = recipe.get("source_provenance")
+        if isinstance(source_provenance, dict):
+            for key in ("status", "git_head", "git_dirty", "git_toplevel", "git_remote_origin"):
+                print(f"source_provenance_{key}={source_provenance.get(key, '')}")
     else:
         print("recipe_status=missing")
     return 0
@@ -2626,6 +2809,7 @@ def cmd_recipe_dev_apply(args: argparse.Namespace) -> int:
         else:
             source_output = _safe_existing_directory(source_output_arg, "--source-output")
             sync_from_value = ""
+        provenance_source = source if sync_from else source_output
         runtime_dir = _ensure_dev_runtime_dir(slot)
         uid, gid = _slot_uid_gid(slot)
         env_updates = _dev_recipe_runtime_env(desired)
@@ -2642,6 +2826,7 @@ def cmd_recipe_dev_apply(args: argparse.Namespace) -> int:
             "recipe_name": recipe_name,
             "source_output": str(source_output),
             "sync_from": sync_from_value,
+            "source_provenance": _source_provenance(provenance_source),
             "build_command": _optional_safe_text(args.build_command, "--build-command"),
             "updated_at": _now_iso(),
             "updated_by": os.environ.get("SUDO_USER") or os.environ.get("USER") or "",
@@ -2725,6 +2910,8 @@ def cmd_release_import(args: argparse.Namespace) -> int:
                 {
                     "product_component": str(image_recipe.get("product_component") or components["product_component"]),
                     "wrapper_component": str(image_recipe.get("wrapper_component") or components["wrapper_component"]),
+                    "canonical_recipe_name": str(image_recipe.get("canonical_recipe_name") or ""),
+                    "canonical_recipe_digest": str(image_recipe.get("canonical_recipe_digest") or ""),
                     "runtime_profile_customer": str(
                         (image_recipe.get("runtime_profiles") or {}).get("customer")
                         if isinstance(image_recipe.get("runtime_profiles"), dict)
@@ -2779,6 +2966,8 @@ def cmd_release_import(args: argparse.Namespace) -> int:
     print(f"recipe_mode={compatibility_mode}")
     print(f"product_component={components.get('product_component', '')}")
     if image_recipe:
+        print(f"canonical_recipe_name={image_recipe.get('canonical_recipe_name', '')}")
+        print(f"canonical_recipe_digest={image_recipe.get('canonical_recipe_digest', '')}")
         profiles = image_recipe.get("runtime_profiles") if isinstance(image_recipe, dict) else {}
         if isinstance(profiles, dict):
             print(f"runtime_profile_customer={profiles.get('customer', '')}")
@@ -2838,8 +3027,16 @@ def cmd_rollout_status(args: argparse.Namespace) -> int:
     if isinstance(record, dict) and record:
         print(f"recorded_canary_slot={record.get('slot', '')}")
         print(f"recorded_canary_release={record.get('release', '')}")
+        print(f"recorded_canary_canonical_recipe_name={record.get('canonical_recipe_name', '')}")
+        print(f"recorded_canary_canonical_recipe_digest={record.get('canonical_recipe_digest', '')}")
         print(f"recorded_canary_status={record.get('status', '')}")
         print(f"recorded_canary_checked_at={record.get('checked_at', '')}")
+    promotion = _family_rollout_record(rollout_state, family).get("promotion") or {}
+    if isinstance(promotion, dict) and promotion:
+        print(f"recorded_promotion_release={promotion.get('release', '')}")
+        print(f"recorded_promotion_canonical_recipe_name={promotion.get('canonical_recipe_name', '')}")
+        print(f"recorded_promotion_canonical_recipe_digest={promotion.get('canonical_recipe_digest', '')}")
+        print(f"recorded_promotion_status={promotion.get('status', '')}")
     return 0
 
 
@@ -2912,6 +3109,10 @@ def _desired_with_release_and_profile(desired: DesiredSlot, release: str, releas
         release_data=release_data,
         runtime_profile=runtime_profile,
     )
+
+
+def _release_canonical_record(release_data: dict) -> dict[str, str]:
+    return canonical_recipe_identity(canonical_recipe_for_release(release_data))
 
 
 def _dev_rollout_target(state_root: Path, family: str, release: str, slot: str) -> tuple[dict, dict, dict, DesiredSlot, object, object]:
@@ -3055,6 +3256,7 @@ def cmd_rollout_dev_apply(args: argparse.Namespace) -> int:
         "previous_release": previous_release,
         "previous_runtime_profile": previous_runtime_profile,
         "runtime_profile": target_profile.name,
+        **_release_canonical_record(target_desired.release_data),
         "status": "ok",
         "checked_at": _now_iso(),
     }
@@ -3156,6 +3358,7 @@ def cmd_rollout_canary(args: argparse.Namespace) -> int:
         "previous_release": previous_release,
         "previous_runtime_profile": profile_before.name,
         "runtime_profile": target_profile.name,
+        **_release_canonical_record(release_data),
         "status": "ok",
         "checked_at": _now_iso(),
     }
@@ -3230,6 +3433,7 @@ def cmd_rollout_promote(args: argparse.Namespace) -> int:
             record = _family_rollout_record(rollout_state, family)
             record["promotion"] = {
                 "release": release,
+                **_release_canonical_record(release_data),
                 "status": "partial",
                 "failed_slot": slot,
                 "updated_at": _now_iso(),
@@ -3249,6 +3453,7 @@ def cmd_rollout_promote(args: argparse.Namespace) -> int:
     record["promotion"] = {
         "release": release,
         "runtime_profile": target_profile.name,
+        **_release_canonical_record(release_data),
         "status": "ok",
         "slots": slots_to_apply,
         "updated_at": _now_iso(),
@@ -4337,6 +4542,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     recipe = sub.add_parser("recipe")
     recipe_sub = recipe.add_subparsers(dest="recipe_command", required=True)
+    recipe_list_canonical = recipe_sub.add_parser("list-canonical")
+    recipe_list_canonical.set_defaults(func=cmd_recipe_list_canonical)
+    recipe_validate_canonical = recipe_sub.add_parser("validate-canonical")
+    recipe_validate_canonical.add_argument("name")
+    recipe_validate_canonical.add_argument("--emit-build-args", action="store_true")
+    recipe_validate_canonical.set_defaults(func=cmd_recipe_validate_canonical)
     recipe_status = recipe_sub.add_parser("status")
     recipe_status.add_argument("slot")
     recipe_status.set_defaults(func=cmd_recipe_dev_status)

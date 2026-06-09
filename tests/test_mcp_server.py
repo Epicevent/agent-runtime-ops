@@ -65,6 +65,7 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("deploy_update", names)
         self.assertIn("release_import", names)
         self.assertIn("rollout_status", names)
+        self.assertIn("canonical_recipe_validate", names)
         self.assertIn("dev_recipe_status", names)
         self.assertIn("dev_recipe_apply", names)
         self.assertIn("rollout_plan", names)
@@ -109,6 +110,17 @@ class McpServerTests(unittest.TestCase):
 
         malformed = server.handle_line("{")
         self.assertEqual(malformed["error"]["code"], -32700)
+
+    def test_canonical_recipe_validate_uses_opsctl_argv(self) -> None:
+        runner = FakeRunner([(0, "canonical_recipe_status=ok\n", "")])
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        payload = call_tool(server, "canonical_recipe_validate", {"name": "hermes-workspace"})
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["mutated"])
+        self.assertEqual(
+            runner.calls[0]["argv"],
+            ["opsctl", "recipe", "validate-canonical", "hermes-workspace"],
+        )
 
     def test_ops_orientation_includes_slot_list(self) -> None:
         runner = FakeRunner(

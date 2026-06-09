@@ -92,3 +92,31 @@ sudo /usr/local/bin/opsctl nas unmount oc3 //192.168.0.222/hanpass
 ```
 
 `rollout`은 단일 slot apply/rollback migration 검증이 끝날 때까지 닫아 둔다.
+
+## Canonical runtime recipe
+
+Runtime recipe identity starts in this repo, under `recipes/runtime/*.yaml`.
+Wrapper image labels and release state must attest to that repo-owned recipe; they are not separate
+sources of truth.
+
+Useful read-only checks:
+
+```bash
+opsctl recipe list-canonical
+opsctl recipe validate-canonical hermes-workspace
+opsctl recipe validate-canonical hermes-combined
+opsctl recipe validate-canonical openclaw-control
+```
+
+Wrapper publish workflows use:
+
+```bash
+opsctl recipe validate-canonical RECIPE --emit-build-args
+```
+
+`opsctl check SLOT`, `opsctl rollout plan`, and `opsctl rollout dev-plan` should report the same
+`canonical_recipe_name` and `canonical_recipe_digest` for dev and customer projections when they are
+part of the same runtime recipe.
+
+`opsctl recipe apply-dev` records source provenance separately under `dev-recipes.yaml`. Treat that
+as product source evidence, not as the runtime recipe source of truth.

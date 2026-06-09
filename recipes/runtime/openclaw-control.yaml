@@ -1,0 +1,22 @@
+schema: v1
+name: openclaw-control
+family: openclaw
+product_component: openclaw-control
+product_image_repo: ghcr.io/epicevent/openclaw-jitech
+wrapper_component: openclaw-wrapper
+wrapper_repo: ghcr.io/epicevent/agent-runtime-openclaw
+runtime_profiles:
+  customer: openclaw-customer
+  dev: openclaw-dev
+runtime_contracts:
+  customer: openclaw-gateway-http-18789
+  dev: openclaw-gateway-source-http-18789
+customer_surface: openclaw-gateway@18789
+expected_image_components:
+  - openclaw-control-server
+container_nas_root: /home/node/nas_docs
+source_output_target: /app/dist/control-ui
+runtime_user_mode: compose
+command_mode: compose-command
+working_dir: ""
+http_port: "18789"

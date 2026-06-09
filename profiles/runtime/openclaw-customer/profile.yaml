@@ -5,6 +5,7 @@ slot_class: customer
 service: openclaw-gateway
 runtime_contract: openclaw-gateway-http-18789
 customer_surface: openclaw-gateway@18789
+product_component: openclaw-control
 expected_image_components:
   - openclaw-control-server
 container_nas_root: /home/node/nas_docs

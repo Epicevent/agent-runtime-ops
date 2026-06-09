@@ -1,0 +1,24 @@
+schema: v1
+name: hermes-combined
+family: hermes
+product_component: combined-runtime
+product_image_repo: ghcr.io/epicevent/openclaw-nas-agent
+wrapper_component: hermes-wrapper
+wrapper_repo: ghcr.io/epicevent/agent-runtime-hermes
+runtime_profiles:
+  customer: hermes-customer
+  dev: hermes-dev
+runtime_contracts:
+  customer: hermes-workspace-http-3000
+  dev: hermes-workspace-source-http-3000
+customer_surface: workspace-ui@3000
+expected_image_components:
+  - hermes-workspace-server
+  - hermes-gateway
+  - hermes-dashboard
+container_nas_root: /workspace/nas_docs
+source_output_target: /opt/hermes-workspace
+runtime_user_mode: image-managed
+command_mode: gateway-run
+working_dir: /opt/data/home
+http_port: "3000"

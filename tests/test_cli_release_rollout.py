@@ -17,6 +17,7 @@ from agent_runtime_ops.cli import (
     cmd_diagnostics_show,
     cmd_recipe_dev_apply,
     cmd_recipe_dev_status,
+    cmd_recipe_validate_canonical,
     cmd_release_import,
     cmd_rollout_canary,
     cmd_rollout_dev_apply,
@@ -26,6 +27,7 @@ from agent_runtime_ops.cli import (
     cmd_rollout_rollback_canary,
     _image_recipe_from_wrapper_image,
 )
+from agent_runtime_ops.canonical_recipes import load_canonical_recipe
 from agent_runtime_ops.yamlio import dump_yaml, load_yaml
 
 
@@ -35,6 +37,10 @@ def image_ref(digest_char: str) -> str:
 
 def wrapper_image_ref(repo: str, digest_char: str) -> str:
     return f"ghcr.io/epicevent/{repo}@sha256:" + digest_char * 64
+
+
+def hermes_workspace_recipe_digest() -> str:
+    return load_canonical_recipe("hermes-workspace").digest
 
 
 def hermes_image_recipe(
@@ -48,6 +54,8 @@ def hermes_image_recipe(
     return {
         "schema": "v1",
         "source": "wrapper_image_labels",
+        "canonical_recipe_name": "hermes-workspace",
+        "canonical_recipe_digest": hermes_workspace_recipe_digest(),
         "family": "hermes",
         "product_image": product_image,
         "product_component": product_component,
@@ -71,6 +79,8 @@ def hermes_recipe_labels(**overrides: str) -> dict[str, str]:
     product_image = overrides.pop("product_image", wrapper_image_ref("hermes-workspace", "2"))
     values = {
         "recipe.schema": "v1",
+        "recipe.name": "hermes-workspace",
+        "recipe.digest": hermes_workspace_recipe_digest(),
         "family": "hermes",
         "product-image": product_image,
         "product-component": "hermes-workspace",
@@ -390,6 +400,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertEqual(recipe["recipe_name"], "openclaw-ui")
             self.assertEqual(recipe["source_output"], str(source_output))
             self.assertEqual(recipe["build_command"], "npm run build")
+            self.assertEqual(recipe["source_provenance"]["status"], "no_git")
 
     def test_recipe_status_reports_missing_recipe_for_dev_slot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -400,6 +411,29 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 rc = cmd_recipe_dev_status(argparse.Namespace(state_root=str(root), slot="dev-oc"))
             self.assertEqual(rc, 0, output.getvalue())
             self.assertIn("recipe_status=missing", output.getvalue())
+
+    def test_recipe_validate_canonical_reports_digest(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = cmd_recipe_validate_canonical(
+                argparse.Namespace(name="hermes-workspace", emit_build_args=False)
+            )
+        text = output.getvalue()
+        self.assertEqual(rc, 0, text)
+        self.assertIn("canonical_recipe_status=ok", text)
+        self.assertIn(f"canonical_recipe_digest={hermes_workspace_recipe_digest()}", text)
+
+    def test_recipe_validate_canonical_emits_wrapper_build_args(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = cmd_recipe_validate_canonical(
+                argparse.Namespace(name="hermes-workspace", emit_build_args=True)
+            )
+        text = output.getvalue()
+        self.assertEqual(rc, 0, text)
+        self.assertIn("CANONICAL_RECIPE_NAME=hermes-workspace", text)
+        self.assertIn(f"CANONICAL_RECIPE_DIGEST={hermes_workspace_recipe_digest()}", text)
+        self.assertIn("RUNTIME_PROFILE_DEV=hermes-workspace-dev", text)
 
     def test_release_import_registers_combined_digest_release(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -426,8 +460,18 @@ class CliReleaseRolloutTests(unittest.TestCase):
         with patch("agent_runtime_ops.cli._image_recipe_labels_from_wrapper", return_value=hermes_recipe_labels()):
             recipe = _image_recipe_from_wrapper_image(wrapper_image, family="hermes", product_image=product_image)
         self.assertEqual(recipe["source"], "wrapper_image_labels")
+        self.assertEqual(recipe["canonical_recipe_name"], "hermes-workspace")
+        self.assertEqual(recipe["canonical_recipe_digest"], hermes_workspace_recipe_digest())
         self.assertEqual(recipe["runtime_profiles"]["customer"], "hermes-workspace-customer")
         self.assertEqual(recipe["product_component"], "hermes-workspace")
+
+    def test_wrapper_image_recipe_rejects_canonical_digest_mismatch(self) -> None:
+        product_image = wrapper_image_ref("hermes-workspace", "2")
+        wrapper_image = wrapper_image_ref("agent-runtime-hermes", "3")
+        labels = hermes_recipe_labels(**{"recipe.digest": "sha256:" + "9" * 64})
+        with patch("agent_runtime_ops.cli._image_recipe_labels_from_wrapper", return_value=labels):
+            with self.assertRaisesRegex(ValueError, "canonical recipe digest mismatch"):
+                _image_recipe_from_wrapper_image(wrapper_image, family="hermes", product_image=product_image)
 
     def test_wrapper_image_recipe_rejects_component_mismatch(self) -> None:
         product_image = wrapper_image_ref("hermes-workspace", "2")
@@ -464,8 +508,12 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertEqual(rc, 0, output.getvalue())
             release = load_yaml(root / "releases.yaml")["releases"]["hermes-labeled"]
             self.assertEqual(release["compatibility_mode"], "wrapped_product_image")
+            self.assertEqual(release["image_recipe"]["canonical_recipe_name"], "hermes-workspace")
+            self.assertEqual(release["image_recipe"]["canonical_recipe_digest"], hermes_workspace_recipe_digest())
+            self.assertEqual(release["components"]["canonical_recipe_name"], "hermes-workspace")
             self.assertEqual(release["image_recipe"]["runtime_profiles"]["customer"], "hermes-workspace-customer")
             self.assertEqual(release["components"]["runtime_profile_customer"], "hermes-workspace-customer")
+            self.assertIn("canonical_recipe_name=hermes-workspace", output.getvalue())
             self.assertIn("runtime_profile_customer=hermes-workspace-customer", output.getvalue())
 
     def test_release_import_rejects_split_wrapper_without_recipe_labels(self) -> None:
@@ -553,6 +601,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertIn("runtime_contract=hermes-workspace-http-3000", text)
             self.assertIn("PASS product_image_matches_runtime_contract", text)
             self.assertIn("product_component=combined-runtime", text)
+            self.assertIn("canonical_recipe_name=hermes-combined", text)
 
     def test_rollout_plan_shows_hermes_contract_incompatibility(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -583,6 +632,8 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertTrue(plan["contract_compatible"], output.getvalue())
             self.assertEqual(plan["fleet_runtime_profile"], "hermes-customer")
             self.assertEqual(plan["runtime_profile"], "hermes-workspace-customer")
+            self.assertEqual(plan["recipe"]["canonical_recipe_name"], "hermes-workspace")
+            self.assertEqual(plan["recipe"]["canonical_recipe_digest"], hermes_workspace_recipe_digest())
 
     def test_rollout_dev_plan_uses_image_recipe_dev_runtime_profile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -605,6 +656,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertEqual(plan["current_runtime_profile"], "hermes-dev")
             self.assertEqual(plan["runtime_profile"], "hermes-workspace-dev")
             self.assertEqual(plan["lane_slots"], ["dev-hermess"])
+            self.assertEqual(plan["recipe"]["canonical_recipe_name"], "hermes-workspace")
 
     def test_rollout_dev_apply_records_image_recipe_dev_runtime_profile(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -631,6 +683,10 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertEqual(lanes["dev-hermes"]["runtime_profile"], "hermes-workspace-dev")
             rollout = load_yaml(root / "rollout-state.yaml")
             self.assertEqual(rollout["families"]["hermes"]["dev_slots"]["dev-hermess"]["runtime_profile"], "hermes-workspace-dev")
+            self.assertEqual(
+                rollout["families"]["hermes"]["dev_slots"]["dev-hermess"]["canonical_recipe_name"],
+                "hermes-workspace",
+            )
             self.assertEqual(apply.call_args.args[0].slot, "dev-hermess")
 
     def test_rollout_dev_apply_restores_lane_when_apply_fails(self) -> None:
@@ -708,6 +764,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertEqual(lanes["hermes-canary"]["runtime_profile"], "hermes-workspace-customer")
             rollout = load_yaml(root / "rollout-state.yaml")
             self.assertEqual(rollout["families"]["hermes"]["canary"]["runtime_profile"], "hermes-workspace-customer")
+            self.assertEqual(rollout["families"]["hermes"]["canary"]["canonical_recipe_name"], "hermes-workspace")
             self.assertEqual(apply.call_args.args[0].slot, "oc20")
 
     def test_rollout_canary_moves_only_target_slot_and_records_success(self) -> None:

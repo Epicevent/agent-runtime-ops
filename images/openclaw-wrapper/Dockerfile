@@ -14,6 +14,8 @@ ARG RUNTIME_CONTRACT_DEV=""
 ARG RUNTIME_COMMAND_MODE=""
 ARG RUNTIME_WORKING_DIR=""
 ARG RUNTIME_HTTP_PORT=""
+ARG CANONICAL_RECIPE_NAME=""
+ARG CANONICAL_RECIPE_DIGEST=""
 
 LABEL org.opencontainers.image.title="JI TECH OpenClaw runtime wrapper"
 LABEL org.opencontainers.image.description="OpenClaw product image wrapped with JI TECH runtime document tooling"
@@ -22,6 +24,8 @@ LABEL org.opencontainers.image.base.name="${BASE_IMAGE}"
 LABEL org.opencontainers.image.product.image="${PRODUCT_IMAGE}"
 LABEL org.opencontainers.image.revision="${OPS_REPO_COMMIT}"
 LABEL com.epicevent.agent-runtime.recipe.schema="v1"
+LABEL com.epicevent.agent-runtime.recipe.name="${CANONICAL_RECIPE_NAME}"
+LABEL com.epicevent.agent-runtime.recipe.digest="${CANONICAL_RECIPE_DIGEST}"
 LABEL com.epicevent.agent-runtime.family="${RUNTIME_FAMILY}"
 LABEL com.epicevent.agent-runtime.product-image="${PRODUCT_IMAGE}"
 LABEL com.epicevent.agent-runtime.product-component="${PRODUCT_COMPONENT}"
@@ -53,6 +57,8 @@ RUN set -eu; \
       echo "command_mode=${RUNTIME_COMMAND_MODE}"; \
       echo "working_dir=${RUNTIME_WORKING_DIR}"; \
       echo "http_port=${RUNTIME_HTTP_PORT}"; \
+      echo "canonical_recipe_name=${CANONICAL_RECIPE_NAME}"; \
+      echo "canonical_recipe_digest=${CANONICAL_RECIPE_DIGEST}"; \
       echo "ops_repo_commit=${OPS_REPO_COMMIT}"; \
     } > /usr/local/share/agent-runtime-ops/wrapper.manifest
 

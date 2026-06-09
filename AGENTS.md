@@ -88,20 +88,27 @@ operator; the operator controls intent and risk, and the agent executes, verifie
 
 ## Runtime Contract First
 
-Before changing a slot, separate four layers and report them in that order:
+Before changing a slot, separate five layers and report them in that order:
 
 ```text
-runtime contract -> image recipe -> runtime profile -> release state
+runtime contract -> canonical runtime recipe -> image recipe -> runtime profile -> release state
 ```
 
-The runtime contract is what the slot must expose to users. The image recipe is what was baked into
-the image. The runtime profile is how that image is executed on the server. The release state is
-which digest a lane or slot points at.
+The runtime contract is what the slot must expose to users. The canonical runtime recipe in
+`recipes/runtime/*.yaml` is the repo-owned source of truth for the dev/customer projections. The
+image recipe is the immutable wrapper-image attestation of that canonical recipe and the baked
+product image. The runtime profile is how that projection is executed on the server. The release
+state is which digest a lane or slot points at.
 
-For wrapped product images, the image recipe must come from immutable OCI labels on the wrapper
-image digest. Do not treat a sidecar file, release-import argument, or install-time repair as the
-source of truth. `opsctl release import` should read the wrapper image labels, store the declared
-recipe in release state, and rollout should select the runtime profile declared by that recipe.
+For wrapped product images, the wrapper OCI labels must include the canonical recipe name/digest and
+must match `recipes/runtime/*.yaml`. Do not treat a sidecar file, release-import argument, or
+install-time repair as the source of truth. `opsctl release import` should read the wrapper image
+labels, verify them against the canonical recipe, store the declared recipe in release state, and
+rollout should select the runtime profile declared by that recipe.
+
+Product source provenance is a separate layer. `opsctl recipe apply-dev` may record git metadata for
+a dev source tree, but that proves source lineage, not runtime shape. Do not use source provenance to
+explain away a runtime recipe/profile mismatch.
 
 `install.sh` and `opsctl self-update` install tools and profile definitions only. They must not
 silently rewrite slot, lane, release, or profile state to make a broken deployment look fixed. Any
