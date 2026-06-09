@@ -33,6 +33,7 @@ from .nas import (
     root_credential_path,
 )
 from .profiles import list_profile_names, load_profile
+from .redaction import redact
 from .renderer import render_compose
 from .runtime_secrets import (
     PROVIDER_SECRET_KEYS,
@@ -1184,6 +1185,40 @@ def _print_process_result(prefix: str, proc: subprocess.CompletedProcess[str], l
         print(f"{prefix}={detail[:limit]}")
 
 
+def _write_failed_container_diagnostics(slot: str, profile, backup_dir: Path) -> Path | None:
+    try:
+        container, lookup = _find_gateway_container(slot, profile)
+        diag_dir = backup_dir / "failed-container"
+        diag_dir.mkdir(mode=0o700, exist_ok=True)
+        (diag_dir / "lookup.txt").write_text(f"container={container or ''}\nlookup={lookup or ''}\n", encoding="utf-8")
+        if not container:
+            return diag_dir
+        commands = {
+            "inspect.json": ["docker", "inspect", container],
+            "logs.txt": ["docker", "logs", "--tail", "300", container],
+            "ports.txt": ["docker", "port", container],
+            "top.txt": ["docker", "top", container],
+        }
+        for name, command in commands.items():
+            proc = _run_text(command, timeout=30)
+            body = {
+                "argv": command,
+                "returncode": proc.returncode,
+                "stdout": redact(proc.stdout or ""),
+                "stderr": redact(proc.stderr or ""),
+            }
+            (diag_dir / name).write_text(json.dumps(body, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return diag_dir
+    except Exception as exc:
+        try:
+            diag_dir = backup_dir / "failed-container"
+            diag_dir.mkdir(mode=0o700, exist_ok=True)
+            (diag_dir / "error.txt").write_text(str(exc) + "\n", encoding="utf-8")
+            return diag_dir
+        except Exception:
+            return None
+
+
 def _run_live_slot_checks_with_wait(desired, profile, state_root: Path, timeout_seconds: int = 90) -> list[tuple[bool, str, str | None]]:
     deadline = time.monotonic() + timeout_seconds
     last_checks: list[tuple[bool, str, str | None]] = []
@@ -1299,8 +1334,11 @@ def cmd_apply(args: argparse.Namespace) -> int:
         if not ok:
             failed += 1
     if failed:
+        diagnostics_dir = _write_failed_container_diagnostics(desired.slot, profile, backup_dir)
         ok, reason = _restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
         print(f"apply_status=fail live_failed={failed}")
+        if diagnostics_dir:
+            print(f"failure_diagnostics_dir={diagnostics_dir}")
         print(f"rollback_status={'ok' if ok else 'fail'}")
         print(f"rollback_reason={reason}")
         _append_action_log(state_root, "apply", desired.slot, desired.slot, "fail", f"live_failed={failed}")

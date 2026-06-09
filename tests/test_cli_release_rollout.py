@@ -128,6 +128,49 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertIn("--force-recreate", up_calls[0])
             self.assertIn("--remove-orphans", up_calls[0])
 
+    def test_apply_writes_diagnostics_before_live_failure_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            runtime_dir = root / "home" / "oc3" / "openclaw"
+            runtime_dir.mkdir(parents=True)
+            (runtime_dir / ".env").write_text(
+                "RUNTIME_UID=993\nRUNTIME_GID=980\nDATA_GID=980\n",
+                encoding="utf-8",
+            )
+            events: list[str] = []
+            diag_dir = runtime_dir / ".agent-runtime-backups" / "failed-container"
+
+            def fake_restore(*args: object, **kwargs: object) -> tuple[bool, str]:
+                events.append("restore")
+                return True, "rollback_applied"
+
+            def fake_diagnostics(*args: object, **kwargs: object) -> Path:
+                events.append("diagnostics")
+                return diag_dir
+
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.cli._slot_runtime_dir", return_value=runtime_dir),
+                patch(
+                    "agent_runtime_ops.cli._run_text_cwd",
+                    return_value=subprocess.CompletedProcess(["docker"], 0, "", ""),
+                ),
+                patch(
+                    "agent_runtime_ops.cli._run_live_slot_checks_with_wait",
+                    return_value=[(False, "live_backend_http_smoke_ok", "connection reset")],
+                ),
+                patch("agent_runtime_ops.cli._write_failed_container_diagnostics", side_effect=fake_diagnostics),
+                patch("agent_runtime_ops.cli._restore_backup", side_effect=fake_restore),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_apply(argparse.Namespace(state_root=str(root), slot="oc3", allow_first_apply=True))
+
+            self.assertEqual(rc, 1)
+            self.assertEqual(events, ["diagnostics", "restore"])
+            self.assertIn(f"failure_diagnostics_dir={diag_dir}", output.getvalue())
+
     def test_recipe_apply_dev_records_source_output_without_image_bake(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
