@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -11,6 +12,7 @@ from unittest.mock import patch
 
 from agent_runtime_ops.cli import (
     cmd_apply,
+    cmd_diagnostics_show,
     cmd_recipe_dev_apply,
     cmd_recipe_dev_status,
     cmd_release_import,
@@ -170,6 +172,60 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertEqual(rc, 1)
             self.assertEqual(events, ["diagnostics", "restore"])
             self.assertIn(f"failure_diagnostics_dir={diag_dir}", output.getvalue())
+
+    def test_diagnostics_show_prints_redacted_failure_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runtime_dir = root / "home" / "oc3" / "openclaw"
+            diag_dir = runtime_dir / ".agent-runtime-backups" / "20260609T000000+0900" / "failed-container"
+            diag_dir.mkdir(parents=True)
+            secret = "server-secret-value"
+            (diag_dir / "lookup.txt").write_text("container=abc123\nlookup=label\n", encoding="utf-8")
+            inspect_stdout = [
+                {
+                    "Id": "abc123456789",
+                    "Name": "/agent-runtime-oc3-openclaw-gateway-1",
+                    "State": {"Running": True, "Pid": 1234, "ExitCode": 0, "Health": {"Status": "none"}},
+                    "Config": {
+                        "Image": "ghcr.io/epicevent/agent-runtime-hermes@sha256:" + "a" * 64,
+                        "Entrypoint": ["/init", "/opt/hermes/docker/main-wrapper.sh"],
+                        "Cmd": ["gateway", "run"],
+                        "WorkingDir": "/opt/data/home",
+                        "Env": [f"API_SERVER_KEY={secret}"],
+                    },
+                }
+            ]
+            (diag_dir / "inspect.json").write_text(
+                json.dumps({"returncode": 0, "stdout": json.dumps(inspect_stdout), "stderr": ""}),
+                encoding="utf-8",
+            )
+            (diag_dir / "logs.txt").write_text(
+                json.dumps({"returncode": 0, "stdout": f"API_SERVER_KEY={secret}\nready\n", "stderr": ""}),
+                encoding="utf-8",
+            )
+            (diag_dir / "ports.txt").write_text(
+                json.dumps({"returncode": 0, "stdout": "3000/tcp -> 127.0.0.1:30689\n", "stderr": ""}),
+                encoding="utf-8",
+            )
+            (diag_dir / "top.txt").write_text(
+                json.dumps({"returncode": 0, "stdout": "PID CMD\n1234 hermes gateway run\n", "stderr": ""}),
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.cli._slot_runtime_dir", return_value=runtime_dir),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_diagnostics_show(argparse.Namespace(slot="oc3", dir=str(diag_dir), tail=20))
+
+            text = output.getvalue()
+            self.assertEqual(rc, 0, text)
+            self.assertIn("diagnostics_status=ok", text)
+            self.assertIn("container_cmd=gateway run", text)
+            self.assertIn("ports_tail_begin", text)
+            self.assertNotIn(secret, text)
+            self.assertIn("API_SERVER_KEY=<redacted>", text)
 
     def test_recipe_apply_dev_records_source_output_without_image_bake(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

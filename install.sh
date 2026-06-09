@@ -211,6 +211,7 @@ install_ops_sudoers() {
     printf '%s ALL=(root) NOPASSWD: %s check --live *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s apply *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s rollback *\n' "$OPS_USER" "$BIN_LINK"
+    printf '%s ALL=(root) NOPASSWD: %s diagnostics show *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s recipe apply-dev *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s release import *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s rollout status *\n' "$OPS_USER" "$BIN_LINK"

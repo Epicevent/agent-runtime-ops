@@ -4,7 +4,7 @@ import re
 
 
 SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b(api[_-]?key|token|password|passwd|credential|secret(?:[_-]?[a-z0-9]+)?)=([^\s]+)"
+    r"(?i)\b([a-z0-9_-]*(?:api(?:[_-]?[a-z0-9]+)*[_-]?key|token|password|passwd|credential|secret)[a-z0-9_-]*)=([^\s,'\"\\\]}]+)"
 )
 GOOGLE_API_KEY_RE = re.compile(r"AIza[0-9A-Za-z_-]{20,}")
 SAFE_STATUS_VALUES = {

@@ -24,6 +24,14 @@ class RedactionTests(unittest.TestCase):
         self.assertIn("gemini_api_key=<redacted>", redacted)
         self.assertIn("password=<redacted>", redacted)
 
+    def test_redacts_composite_secret_key_names(self) -> None:
+        text = '["API_SERVER_KEY=server-secret","HERMES_TOKEN=token-secret"]'
+        redacted = redact(text)
+        self.assertNotIn("server-secret", redacted)
+        self.assertNotIn("token-secret", redacted)
+        self.assertIn("API_SERVER_KEY=<redacted>", redacted)
+        self.assertIn("HERMES_TOKEN=<redacted>", redacted)
+
 
 if __name__ == "__main__":
     unittest.main()
