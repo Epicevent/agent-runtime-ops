@@ -5,6 +5,8 @@ from typing import Any
 
 import yaml
 
+from .image_components import release_product_component
+
 
 @dataclass(frozen=True)
 class ComposeContractCheck:
@@ -87,6 +89,13 @@ def _command_as_list(raw_command: Any) -> list[str] | None:
     return None
 
 
+def _desired_product_component(desired: Any) -> str:
+    release_data = getattr(desired, "release_data", {})
+    if isinstance(release_data, dict):
+        return release_product_component(release_data)
+    return "unknown"
+
+
 def _port_targets_container_port(raw_port: Any, container_port: str) -> bool:
     if isinstance(raw_port, dict):
         target = raw_port.get("target")
@@ -164,8 +173,20 @@ def validate_compose_contract(profile: Any, desired: Any, rendered_text: str) ->
     else:
         checks.append(ComposeContractCheck(False, "compose_runtime_user_model", f"unknown_mode={runtime_user_mode}"))
 
-    required_command = profile.metadata.get("required_command")
-    if required_command is not None:
+    product_component = _desired_product_component(desired)
+    image_default_components = {
+        str(item) for item in profile.metadata.get("image_default_command_product_components") or []
+    }
+    if product_component in image_default_components:
+        actual_command = _command_as_list(service.get("command"))
+        checks.append(
+            ComposeContractCheck(
+                actual_command is None,
+                "compose_uses_image_default_command",
+                f"product_component={product_component} actual={' '.join(actual_command) if actual_command else 'missing'}",
+            )
+        )
+    elif (required_command := profile.metadata.get("required_command")) is not None:
         expected_command = [str(item) for item in required_command] if isinstance(required_command, list) else []
         actual_command = _command_as_list(service.get("command"))
         checks.append(
@@ -175,6 +196,23 @@ def validate_compose_contract(profile: Any, desired: Any, rendered_text: str) ->
                 f"required={' '.join(expected_command) or 'invalid'} actual={' '.join(actual_command) if actual_command else 'missing'}",
             )
         )
+
+    working_dir_by_component = profile.metadata.get("working_dir_by_product_component")
+    if isinstance(working_dir_by_component, dict):
+        expected_working_dir = str(
+            working_dir_by_component.get(product_component)
+            or working_dir_by_component.get("default")
+            or ""
+        )
+        if expected_working_dir:
+            actual_working_dir = str(service.get("working_dir") or "")
+            checks.append(
+                ComposeContractCheck(
+                    actual_working_dir == expected_working_dir,
+                    "compose_working_dir_matches_product_component",
+                    f"product_component={product_component} required={expected_working_dir} actual={actual_working_dir or 'missing'}",
+                )
+            )
 
     required_http_container_port = str(profile.metadata.get("required_http_container_port") or "")
     if required_http_container_port:

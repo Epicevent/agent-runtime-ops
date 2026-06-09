@@ -20,6 +20,8 @@ import urllib.request
 from pathlib import Path
 
 from .compose_contract import validate_compose_contract
+from .image_components import image_component_name as _image_component_name
+from .image_components import image_repo as _image_repo
 from .paths import DEFAULT_STATE_ROOT, REPO_ROOT
 from .nas import (
     agent_nas_dir,
@@ -405,25 +407,6 @@ def _metadata_list(value: object) -> list[str]:
 
 def _csv(values: list[str]) -> str:
     return ",".join(values)
-
-
-def _image_repo(image_ref: object) -> str:
-    if not isinstance(image_ref, str):
-        return ""
-    return image_ref.split("@sha256:", 1)[0]
-
-
-def _image_component_name(image_ref: object) -> str:
-    repo = _image_repo(image_ref)
-    mapping = {
-        "ghcr.io/epicevent/hermes-jitech": "hermes-agent",
-        "ghcr.io/epicevent/hermes-workspace": "hermes-workspace",
-        "ghcr.io/epicevent/openclaw-nas-agent": "combined-runtime",
-        "ghcr.io/epicevent/openclaw-jitech": "openclaw-control",
-        "ghcr.io/epicevent/agent-runtime-hermes": "hermes-wrapper",
-        "ghcr.io/epicevent/agent-runtime-openclaw": "openclaw-wrapper",
-    }
-    return mapping.get(repo, repo.rsplit("/", 1)[-1] if repo else "unknown")
 
 
 def _profile_runtime_contract(profile) -> str:

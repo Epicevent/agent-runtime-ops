@@ -3,13 +3,21 @@ from __future__ import annotations
 import unittest
 
 from agent_runtime_ops.compose_contract import validate_compose_contract
+from agent_runtime_ops.image_components import image_component_name, image_repo
 from agent_runtime_ops.profiles import load_profile
 from agent_runtime_ops.renderer import _slot_ports, render_compose
 from agent_runtime_ops.state import DesiredSlot
 
 
-def desired_slot(slot: str, family: str, slot_class: str, runtime_profile: str) -> DesiredSlot:
+def desired_slot(
+    slot: str,
+    family: str,
+    slot_class: str,
+    runtime_profile: str,
+    product_repo: str | None = None,
+) -> DesiredSlot:
     digest = "sha256:" + "a" * 64
+    product_repo = product_repo or f"{family}-jitech"
     return DesiredSlot(
         slot=slot,
         lane=f"{family}-{slot_class}-stable",
@@ -18,7 +26,7 @@ def desired_slot(slot: str, family: str, slot_class: str, runtime_profile: str) 
         release_data={
             "family": family,
             "wrapper_image": f"ghcr.io/epicevent/agent-runtime-{family}@{digest}",
-            "product_image": f"ghcr.io/epicevent/{family}-jitech@{digest}",
+            "product_image": f"ghcr.io/epicevent/{product_repo}@{digest}",
             "digest": digest,
         },
         runtime_profile=runtime_profile,
@@ -32,6 +40,13 @@ def contract_results(profile_name: str, desired: DesiredSlot) -> dict[str, bool]
 
 
 class RuntimeContractTests(unittest.TestCase):
+    def test_image_component_recipe_identity(self) -> None:
+        digest = "sha256:" + "b" * 64
+        self.assertEqual(image_repo(f"ghcr.io/epicevent/hermes-workspace@{digest}"), "ghcr.io/epicevent/hermes-workspace")
+        self.assertEqual(image_repo("ghcr.io/epicevent/hermes-workspace:main"), "ghcr.io/epicevent/hermes-workspace")
+        self.assertEqual(image_component_name(f"ghcr.io/epicevent/hermes-workspace@{digest}"), "hermes-workspace")
+        self.assertEqual(image_component_name("ghcr.io/epicevent/openclaw-jitech@sha256:" + "c" * 64), "openclaw-control")
+
     def test_oc_slot_port_policy(self) -> None:
         self.assertEqual(_slot_ports("oc1"), ("28789", "28790"))
         self.assertEqual(_slot_ports("oc2"), ("28889", "28890"))
@@ -50,26 +65,34 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertTrue(results["compose_customer_source_mount_absent"])
 
     def test_hermes_customer_contract(self) -> None:
-        desired = desired_slot("oc2", "hermes", "customer", "hermes-customer")
+        desired = desired_slot("oc2", "hermes", "customer", "hermes-customer", product_repo="hermes-workspace")
         results = contract_results("hermes-customer", desired)
         self.assertTrue(results["compose_runtime_user_model"])
-        self.assertTrue(results["compose_required_command"])
+        self.assertTrue(results["compose_uses_image_default_command"])
+        self.assertTrue(results["compose_working_dir_matches_product_component"])
         self.assertTrue(results["compose_nas_root_bind_present"])
         self.assertTrue(results["compose_nas_root_readonly"])
         self.assertTrue(results["compose_nas_root_propagation"])
         self.assertTrue(results["compose_customer_surface_port"])
         self.assertTrue(results["compose_customer_source_mount_absent"])
 
+    def test_hermes_customer_combined_runtime_keeps_gateway_command(self) -> None:
+        desired = desired_slot("oc2", "hermes", "customer", "hermes-customer", product_repo="openclaw-nas-agent")
+        results = contract_results("hermes-customer", desired)
+        self.assertTrue(results["compose_required_command"])
+        self.assertTrue(results["compose_working_dir_matches_product_component"])
+
     def test_hermes_dev_contract(self) -> None:
-        desired = desired_slot("dev-hermess", "hermes", "dev", "hermes-dev")
+        desired = desired_slot("dev-hermess", "hermes", "dev", "hermes-dev", product_repo="hermes-workspace")
         results = contract_results("hermes-dev", desired)
         self.assertTrue(results["compose_runtime_user_model"])
-        self.assertTrue(results["compose_required_command"])
+        self.assertTrue(results["compose_uses_image_default_command"])
+        self.assertTrue(results["compose_working_dir_matches_product_component"])
         self.assertTrue(results["compose_customer_surface_port"])
         self.assertTrue(results["compose_dev_source_mount_present"])
 
     def test_hermes_rejects_missing_required_command(self) -> None:
-        desired = desired_slot("oc2", "hermes", "customer", "hermes-customer")
+        desired = desired_slot("oc2", "hermes", "customer", "hermes-customer", product_repo="openclaw-nas-agent")
         profile = load_profile("hermes-customer")
         rendered = render_compose(profile, desired).text.replace(
             "    command:\n      - gateway\n      - run\n",
@@ -78,6 +101,17 @@ class RuntimeContractTests(unittest.TestCase):
         )
         checks = {item.name: item.ok for item in validate_compose_contract(profile, desired, rendered)}
         self.assertFalse(checks["compose_required_command"])
+
+    def test_hermes_workspace_rejects_command_override(self) -> None:
+        desired = desired_slot("oc2", "hermes", "customer", "hermes-customer", product_repo="hermes-workspace")
+        profile = load_profile("hermes-customer")
+        rendered = render_compose(profile, desired).text.replace(
+            "    env_file:\n",
+            "    command:\n      - gateway\n      - run\n    env_file:\n",
+            1,
+        )
+        checks = {item.name: item.ok for item in validate_compose_contract(profile, desired, rendered)}
+        self.assertFalse(checks["compose_uses_image_default_command"])
 
     def test_hermes_customer_rejects_compose_level_user(self) -> None:
         desired = desired_slot("oc2", "hermes", "customer", "hermes-customer")

@@ -21,6 +21,11 @@ runtime_user_mode: image-managed
 required_command:
   - gateway
   - run
+image_default_command_product_components:
+  - hermes-workspace
+working_dir_by_product_component:
+  hermes-workspace: /app
+  default: /opt/data/home
 http_smoke_path: /
 required_http_container_port: 3000
 startup_timeout_seconds: 240

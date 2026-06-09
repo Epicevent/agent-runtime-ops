@@ -2,9 +2,11 @@ services:
   openclaw-gateway:
     image: "{{ image_ref }}"
     restart: unless-stopped
+{% if product_component != "hermes-workspace" %}
     command:
       - gateway
       - run
+{% endif %}
     env_file:
       - .env
     environment:
@@ -48,4 +50,8 @@ services:
         read_only: true
         bind:
           propagation: rslave
+{% if product_component == "hermes-workspace" %}
+    working_dir: /app
+{% else %}
     working_dir: /opt/data/home
+{% endif %}

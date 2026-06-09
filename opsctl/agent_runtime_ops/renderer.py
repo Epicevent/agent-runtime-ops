@@ -6,6 +6,7 @@ import re
 
 from jinja2 import Environment, StrictUndefined
 
+from .image_components import release_product_component
 from .profiles import RuntimeProfile
 from .state import DesiredSlot
 
@@ -62,6 +63,7 @@ def render_compose(profile: RuntimeProfile, desired: DesiredSlot, variables: dic
         "release": desired.release_name,
         "runtime_profile": desired.runtime_profile,
         "image_ref": desired.release_data.get("wrapper_image"),
+        "product_component": release_product_component(desired.release_data),
         "target_home": f"/home/{desired.slot}",
         "runtime_uid": runtime_uid,
         "runtime_gid": runtime_gid,
