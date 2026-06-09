@@ -59,8 +59,8 @@ releases:
     (root / "slot-registry.json").write_text(
         dump_routing_registry(
             [
-                SlotRoute("dev-oc", "dev-oc.ji-tech.co.kr", 30789, 30790),
-                SlotRoute("dev-hermess", "dev-hermess.ji-tech.co.kr", 30889, 30890),
+                SlotRoute("dev-oc", 30789, 30790),
+                SlotRoute("dev-hermess", 30889, 30890),
             ]
         ),
         encoding="utf-8",

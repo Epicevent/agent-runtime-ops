@@ -19,6 +19,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from .apache import parse_apache_route, set_apache_host, validate_public_host
 from .canonical_recipes import (
     canonical_label_values,
     canonical_recipe_for_product,
@@ -188,7 +189,6 @@ def cmd_slot_list(args: argparse.Namespace) -> int:
         print(
             f"slot={route.slot} "
             f"slot_class={route.slot_class} "
-            f"public_host={route.public_host} "
             f"gateway_port={route.gateway_port} "
             f"bridge_port={route.bridge_port} "
             f"enabled={'yes' if route.enabled else 'no'}"
@@ -214,7 +214,6 @@ def cmd_routing_status(args: argparse.Namespace) -> int:
         print(
             f"slot={route.slot} "
             f"slot_class={route.slot_class} "
-            f"public_host={route.public_host} "
             f"gateway_port={route.gateway_port} "
             f"bridge_port={route.bridge_port} "
             f"enabled={'yes' if route.enabled else 'no'}"
@@ -251,6 +250,133 @@ def cmd_routing_seed_legacy(args: argparse.Namespace) -> int:
         print(f"reason={exc}")
         return 1
     print(f"routing_seed_status=ok count={len(routes)} write={'yes' if getattr(args, 'write', False) else 'no'}")
+    return 0
+
+
+def cmd_routing_normalize(args: argparse.Namespace) -> int:
+    state_root = _state_root(args)
+    try:
+        path = routing_registry_path(state_root)
+        routes = load_routing_registry(state_root)
+        text = dump_routing_registry(routes)
+        if getattr(args, "write", False):
+            if not _is_root():
+                print("error: run as root/admin: sudo /usr/local/bin/opsctl routing normalize --write", file=sys.stderr)
+                return 2
+            if path.exists() and path.is_symlink():
+                raise ValueError(f"routing registry must not be symlink: {path}")
+            backup_path = path.with_name(f"{path.name}.{datetime.now(timezone.utc).astimezone().strftime('%Y%m%d%H%M%S')}.bak")
+            shutil.copy2(path, backup_path)
+            tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+            tmp_path.write_text(text, encoding="utf-8")
+            if hasattr(os, "chown"):
+                os.chown(tmp_path, 0, state_root.stat().st_gid)
+            os.chmod(tmp_path, 0o640)
+            os.replace(tmp_path, path)
+            print(f"routing_registry={path}")
+            print(f"backup_file={backup_path}")
+        else:
+            print(text, end="")
+    except Exception as exc:
+        print("routing_normalize_status=fail")
+        print(f"reason={exc}")
+        return 1
+    print(f"routing_normalize_status=ok count={len(routes)} write={'yes' if getattr(args, 'write', False) else 'no'}")
+    return 0
+
+
+def _apache_route_checks(route: SlotRoute, apache_route) -> list[tuple[bool, str, str | None]]:
+    checks = [
+        (
+            apache_route.gateway_port == route.gateway_port,
+            "apache_gateway_port_matches_registry",
+            f"apache={apache_route.gateway_port} registry={route.gateway_port}",
+        )
+    ]
+    if apache_route.websocket_port is not None:
+        checks.append(
+            (
+                apache_route.websocket_port == route.gateway_port,
+                "apache_websocket_port_matches_registry",
+                f"apache={apache_route.websocket_port} registry={route.gateway_port}",
+            )
+        )
+    return checks
+
+
+def cmd_apache_status(args: argparse.Namespace) -> int:
+    state_root = _state_root(args)
+    try:
+        routes = load_routing_registry(state_root)
+        if getattr(args, "slot", None):
+            wanted = str(args.slot)
+            routes = [route for route in routes if route.slot == wanted]
+            if not routes:
+                raise KeyError(f"slot route not found: {wanted}")
+    except Exception as exc:
+        print("apache_status=fail")
+        print(f"reason={exc}")
+        return 1
+    failed = 0
+    count = 0
+    for route in routes:
+        count += 1
+        try:
+            apache_route = parse_apache_route(route.slot)
+            print(
+                f"slot={route.slot} "
+                f"slot_class={route.slot_class} "
+                f"public_host={apache_route.public_host} "
+                f"gateway_port={apache_route.gateway_port} "
+                f"registry_gateway_port={route.gateway_port} "
+                f"bridge_port={route.bridge_port} "
+                f"enabled={'yes' if route.enabled else 'no'} "
+                f"apache_file={apache_route.path}"
+            )
+            for ok, name, detail in _apache_route_checks(route, apache_route):
+                if getattr(args, "slot", None):
+                    _check_line(ok, name, detail)
+                if not ok:
+                    failed += 1
+        except Exception as exc:
+            failed += 1
+            print(f"slot={route.slot} apache_status=fail reason={exc}")
+    print(f"apache_status={'ok' if failed == 0 else 'fail'} count={count} failed={failed}")
+    return 0 if failed == 0 else 1
+
+
+def cmd_apache_set_host(args: argparse.Namespace) -> int:
+    if not _is_root():
+        print("error: run as root/admin: sudo /usr/local/bin/opsctl apache set-host SLOT HOST", file=sys.stderr)
+        return 2
+    state_root = _state_root(args)
+    slot = str(args.slot)
+    try:
+        host = validate_public_host(str(args.host))
+        route = get_slot_route(slot, state_root)
+        before = parse_apache_route(slot)
+        for ok, name, detail in _apache_route_checks(route, before):
+            if not ok:
+                raise ValueError(f"{name}: {detail}")
+        suffix = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d%H%M%S")
+        change = set_apache_host(slot, host, backup_suffix=suffix)
+        after = parse_apache_route(slot)
+        for ok, name, detail in _apache_route_checks(route, after):
+            if not ok:
+                raise ValueError(f"{name}: {detail}")
+    except Exception as exc:
+        print(f"slot={slot}")
+        print("apache_set_host_status=fail")
+        print(f"reason={exc}")
+        return 1
+    print(f"slot={slot}")
+    print(f"old_public_host={change.old_host}")
+    print(f"public_host={change.new_host}")
+    print(f"gateway_port={after.gateway_port}")
+    print(f"registry_gateway_port={route.gateway_port}")
+    print(f"apache_file={change.path}")
+    print(f"backup_file={change.backup_path}")
+    print("apache_set_host_status=ok")
     return 0
 
 
@@ -337,16 +463,23 @@ def cmd_status(args: argparse.Namespace) -> int:
     state_root = _state_root(args)
     try:
         route = get_slot_route(args.slot, state_root)
+        apache_route = parse_apache_route(route.slot)
     except Exception as exc:
         print(f"status=unknown")
         print(f"reason={exc}")
         return 1
     print(f"slot={route.slot}")
     print(f"slot_class={route.slot_class}")
-    print(f"public_host={route.public_host}")
+    print(f"public_host={apache_route.public_host}")
     print(f"gateway_port={route.gateway_port}")
+    print(f"apache_gateway_port={apache_route.gateway_port}")
     print(f"bridge_port={route.bridge_port}")
     print(f"enabled={'yes' if route.enabled else 'no'}")
+    for ok, name, detail in _apache_route_checks(route, apache_route):
+        _check_line(ok, name, detail)
+        if not ok:
+            print("status=fail")
+            return 1
     if not _is_root():
         print("truth_source=live_image")
         print("truth_status=requires_live_root")
@@ -360,7 +493,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"reason={exc}")
         return 1
     for key, value in truth.items():
-        if key not in {"slot", "slot_class", "public_host", "gateway_port", "bridge_port", "enabled"}:
+        if key not in {"slot", "slot_class", "public_host", "gateway_port", "apache_gateway_port", "bridge_port", "enabled"}:
             print(f"{key}={value}")
     failed = 0
     for ok, name, detail in checks:
@@ -411,6 +544,13 @@ def _check_line(ok: bool, name: str, detail: str | None = None) -> None:
         print(f"{status} {name} {detail}")
     else:
         print(f"{status} {name}")
+
+
+def _apache_public_host(slot: str) -> str:
+    try:
+        return parse_apache_route(slot).public_host
+    except Exception:
+        return ""
 
 
 def _has_digest_ref(value: object) -> bool:
@@ -904,21 +1044,22 @@ def _run_text_cwd(command: list[str], cwd: Path, timeout: int = 20) -> subproces
 def _http_backend_smoke(slot: str, path: str, state_root: Path) -> tuple[bool, str]:
     try:
         route = get_slot_route(slot, state_root)
+        apache_route = parse_apache_route(slot)
     except Exception as exc:
-        return False, f"slot_route_missing reason={exc}"
+        return False, f"route_truth_missing reason={exc}"
     port = route.gateway_port
     smoke_path = path if path.startswith("/") else f"/{path}"
     url = f"http://127.0.0.1:{port}{smoke_path}"
-    request = urllib.request.Request(url, headers={"Host": route.public_host})
+    request = urllib.request.Request(url, headers={"Host": apache_route.public_host})
     try:
         with urllib.request.urlopen(request, timeout=5) as response:
             status = int(response.getcode())
-            return 200 <= status < 500, f"url={url} host={route.public_host} status={status}"
+            return 200 <= status < 500, f"url={url} host={apache_route.public_host} status={status}"
     except urllib.error.HTTPError as exc:
         status = int(exc.code)
-        return 200 <= status < 500, f"url={url} host={route.public_host} status={status}"
+        return 200 <= status < 500, f"url={url} host={apache_route.public_host} status={status}"
     except Exception as exc:
-        return False, f"url={url} host={route.public_host} reason={exc}"
+        return False, f"url={url} host={apache_route.public_host} reason={exc}"
 
 
 def _parse_findmnt_pairs(output: str) -> list[dict[str, str]]:
@@ -1098,7 +1239,7 @@ def _labels_from_container_info(info: dict) -> dict[str, str]:
     return {str(key): str(value) for key, value in labels.items()}
 
 
-def _live_image_truth_from_info(slot: str, info: dict, route: SlotRoute) -> dict[str, str]:
+def _live_image_truth_from_info(slot: str, info: dict, route: SlotRoute, apache_route) -> dict[str, str]:
     labels = _labels_from_container_info(info)
     config = info.get("Config") if isinstance(info, dict) else {}
     image = str((config or {}).get("Image") or "")
@@ -1112,8 +1253,9 @@ def _live_image_truth_from_info(slot: str, info: dict, route: SlotRoute) -> dict
         "slot": slot,
         "truth_source": "live_image",
         "truth_status": "ok" if schema == IMAGE_RECIPE_SCHEMA else "legacy_or_unlabeled",
-        "public_host": route.public_host,
+        "public_host": apache_route.public_host,
         "gateway_port": str(route.gateway_port),
+        "apache_gateway_port": str(apache_route.gateway_port),
         "bridge_port": str(route.bridge_port),
         "enabled": "yes" if route.enabled else "no",
         "slot_class": slot_class,
@@ -1133,6 +1275,8 @@ def _live_image_truth_from_info(slot: str, info: dict, route: SlotRoute) -> dict
 def _live_runtime_truth(slot: str, state_root: Path) -> tuple[dict[str, str], list[tuple[bool, str, str | None]]]:
     checks: list[tuple[bool, str, str | None]] = []
     route = get_slot_route(slot, state_root)
+    apache_route = parse_apache_route(slot)
+    checks.extend(_apache_route_checks(route, apache_route))
     container, lookup = _find_gateway_container_by_slot(slot)
     checks.append((bool(container), "truth_container_lookup", lookup))
     if not container:
@@ -1141,8 +1285,9 @@ def _live_runtime_truth(slot: str, state_root: Path) -> tuple[dict[str, str], li
                 "slot": slot,
                 "truth_source": "live_image",
                 "truth_status": "not_running",
-                "public_host": route.public_host,
+                "public_host": apache_route.public_host,
                 "gateway_port": str(route.gateway_port),
+                "apache_gateway_port": str(apache_route.gateway_port),
                 "bridge_port": str(route.bridge_port),
                 "enabled": "yes" if route.enabled else "no",
                 "slot_class": route.slot_class,
@@ -1167,7 +1312,7 @@ def _live_runtime_truth(slot: str, state_root: Path) -> tuple[dict[str, str], li
     except Exception as exc:
         checks.append((False, "truth_container_inspect_parse_ok", str(exc)))
         return ({"slot": slot, "truth_source": "live_image", "truth_status": "parse_failed", "reason": str(exc)}, checks)
-    truth = _live_image_truth_from_info(slot, info, route)
+    truth = _live_image_truth_from_info(slot, info, route, apache_route)
     labels = _labels_from_container_info(info)
     checks.extend(
         [
@@ -1652,7 +1797,7 @@ def _manifest_payload(
         "runtime_profile_digest": profile.digest,
         "runtime_contract": _profile_runtime_contract(profile),
         "customer_surface": _profile_customer_surface(profile),
-        "public_host": desired.route.public_host if getattr(desired, "route", None) else "",
+        "public_host": _apache_public_host(desired.slot),
         "gateway_port": desired.route.gateway_port if getattr(desired, "route", None) else "",
         "bridge_port": desired.route.bridge_port if getattr(desired, "route", None) else "",
         "wrapper_image": wrapper_image,
@@ -1687,7 +1832,7 @@ def _write_slot_manifest(
         f"runtime_profile_digest={profile.digest}",
         f"runtime_contract={_profile_runtime_contract(profile)}",
         f"customer_surface={_profile_customer_surface(profile)}",
-        f"public_host={desired.route.public_host if getattr(desired, 'route', None) else ''}",
+        f"public_host={_apache_public_host(desired.slot)}",
         f"gateway_port={desired.route.gateway_port if getattr(desired, 'route', None) else ''}",
         f"bridge_port={desired.route.bridge_port if getattr(desired, 'route', None) else ''}",
         f"ops_repo_commit={_installed_source_commit()}",
@@ -3864,7 +4009,7 @@ def cmd_rollout_image_plan(args: argparse.Namespace) -> int:
                 {
                     "slot": slot,
                     "slot_class": desired.lane_data.get("slot_class"),
-                    "public_host": desired.route.public_host if desired.route else "",
+                    "public_host": _apache_public_host(slot),
                     "gateway_port": desired.route.gateway_port if desired.route else "",
                     "bridge_port": desired.route.bridge_port if desired.route else "",
                     "runtime_profile": profile.name,
@@ -5019,6 +5164,19 @@ def build_parser() -> argparse.ArgumentParser:
     routing_seed.add_argument("--write", action="store_true")
     routing_seed.add_argument("--replace", action="store_true")
     routing_seed.set_defaults(func=cmd_routing_seed_legacy)
+    routing_normalize = routing_sub.add_parser("normalize")
+    routing_normalize.add_argument("--write", action="store_true")
+    routing_normalize.set_defaults(func=cmd_routing_normalize)
+
+    apache = sub.add_parser("apache")
+    apache_sub = apache.add_subparsers(dest="apache_command", required=True)
+    apache_status = apache_sub.add_parser("status")
+    apache_status.add_argument("slot", nargs="?")
+    apache_status.set_defaults(func=cmd_apache_status)
+    apache_set_host = apache_sub.add_parser("set-host")
+    apache_set_host.add_argument("slot")
+    apache_set_host.add_argument("host")
+    apache_set_host.set_defaults(func=cmd_apache_set_host)
 
     runtime = sub.add_parser("runtime")
     runtime_sub = runtime.add_subparsers(dest="runtime_command", required=True)

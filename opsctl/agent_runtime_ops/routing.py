@@ -12,7 +12,8 @@ from .yamlio import load_yaml
 ROUTING_REGISTRY_NAME = "slot-registry.json"
 CUSTOMER_SLOT_RE = re.compile(r"^oc[0-9]+$")
 DEV_SLOT_RE = re.compile(r"^dev-[a-z0-9-]+$")
-ALLOWED_ROUTE_KEYS = {"slot", "public_host", "gateway_port", "bridge_port", "enabled", "notes"}
+ALLOWED_ROUTE_KEYS = {"slot", "gateway_port", "bridge_port", "enabled"}
+LEGACY_ROUTE_KEYS = {"public_host", "notes"}
 FORBIDDEN_ROUTE_KEYS = {
     "family",
     "lane",
@@ -28,11 +29,9 @@ FORBIDDEN_ROUTE_KEYS = {
 @dataclass(frozen=True)
 class SlotRoute:
     slot: str
-    public_host: str
     gateway_port: int
     bridge_port: int
     enabled: bool = True
-    notes: str = ""
 
     @property
     def slot_class(self) -> str:
@@ -47,13 +46,10 @@ class SlotRoute:
     def to_json(self) -> dict[str, object]:
         data: dict[str, object] = {
             "slot": self.slot,
-            "public_host": self.public_host,
             "gateway_port": self.gateway_port,
             "bridge_port": self.bridge_port,
             "enabled": self.enabled,
         }
-        if self.notes:
-            data["notes"] = self.notes
         return data
 
 
@@ -84,21 +80,16 @@ def _route_from_item(item: dict[str, Any]) -> SlotRoute:
     forbidden = sorted(keys & FORBIDDEN_ROUTE_KEYS)
     if forbidden:
         raise ValueError("routing registry must not contain runtime truth fields: " + ",".join(forbidden))
-    unknown = sorted(keys - ALLOWED_ROUTE_KEYS)
+    unknown = sorted(keys - ALLOWED_ROUTE_KEYS - LEGACY_ROUTE_KEYS)
     if unknown:
         raise ValueError("routing registry has unknown fields: " + ",".join(unknown))
     slot = str(item.get("slot") or "").strip()
     slot_class_from_name(slot)
-    public_host = str(item.get("public_host") or "").strip()
-    if not public_host or any(ch.isspace() for ch in public_host):
-        raise ValueError(f"public_host is required for slot: {slot}")
     return SlotRoute(
         slot=slot,
-        public_host=public_host,
         gateway_port=_port(item.get("gateway_port"), "gateway_port"),
         bridge_port=_port(item.get("bridge_port"), "bridge_port"),
         enabled=bool(item.get("enabled", True)),
-        notes=str(item.get("notes") or ""),
     )
 
 
@@ -114,7 +105,6 @@ def load_routing_registry(state_root: Path = DEFAULT_STATE_ROOT) -> list[SlotRou
         raise ValueError("slot-registry.json slots must be objects")
     seen_slots: set[str] = set()
     seen_ports: set[int] = set()
-    seen_hosts: set[str] = set()
     for route in routes:
         if route.slot in seen_slots:
             raise ValueError(f"duplicate slot in routing registry: {route.slot}")
@@ -123,9 +113,6 @@ def load_routing_registry(state_root: Path = DEFAULT_STATE_ROOT) -> list[SlotRou
             if port in seen_ports:
                 raise ValueError(f"duplicate {port_name} in routing registry: {port}")
             seen_ports.add(port)
-        if route.public_host in seen_hosts:
-            raise ValueError(f"duplicate public_host in routing registry: {route.public_host}")
-        seen_hosts.add(route.public_host)
     return routes
 
 
@@ -168,11 +155,9 @@ def seed_routes_from_legacy_slots(state_root: Path = DEFAULT_STATE_ROOT) -> list
         routes.append(
             SlotRoute(
                 slot=slot,
-                public_host=f"{slot}.ji-tech.co.kr",
                 gateway_port=gateway_port,
                 bridge_port=bridge_port,
                 enabled=True,
-                notes="seeded_from_legacy_slots",
             )
         )
     return routes
@@ -180,9 +165,8 @@ def seed_routes_from_legacy_slots(state_root: Path = DEFAULT_STATE_ROOT) -> list
 
 def dump_routing_registry(routes: list[SlotRoute]) -> str:
     data = {
-        "schema": "v1",
-        "description": "Apache-facing slot routing only. Runtime image truth is not stored here.",
+        "schema": "v2",
+        "description": "Slot port allocation only. Public host truth is read from Apache; runtime image truth is not stored here.",
         "slots": [route.to_json() for route in routes],
     }
     return json.dumps(data, ensure_ascii=False, indent=2, sort_keys=False) + "\n"
-

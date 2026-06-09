@@ -88,16 +88,17 @@ operator; the operator controls intent and risk, and the agent executes, verifie
 
 ## Runtime Contract First
 
-Before changing a slot, separate five layers and report them in that order:
+Before changing a slot, separate these layers and report them in that order:
 
 ```text
-routing contract -> live image truth -> canonical runtime recipe -> runtime profile -> applied manifest
+port allocation -> Apache public host -> live image truth -> canonical runtime recipe -> runtime profile -> applied manifest
 ```
 
-The routing contract is the Apache-facing slot coordinate: public host, host gateway port, and host
-bridge port. It lives in `/srv/openclaw-ops/slot-registry.json` and must not contain image, release,
-runtime profile, family, or canonical recipe fields. Ports are not computed from `ocN`; they are
-registry-owned because Apache must agree with them.
+The routing registry is only slot host-port allocation: slot, gateway port, bridge port, and
+enabled state. It lives in `/srv/openclaw-ops/slot-registry.json` and must not contain public host,
+image, release, runtime profile, family, or canonical recipe fields. Public host truth comes from
+Apache route status. Ports are not computed from `ocN`; they are registry-owned because Apache must
+agree with them.
 
 Live image truth is the running container image and the wrapper OCI labels on that image. Treat
 those labels as the source of truth for family, product image, product component, runtime profiles,

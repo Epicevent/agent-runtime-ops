@@ -65,8 +65,8 @@ releases:
     (root / "slot-registry.json").write_text(
         dump_routing_registry(
             [
-                SlotRoute("oc3", "oc3.ji-tech.co.kr", 28989, 28990),
-                SlotRoute("dev-oc", "dev-oc.ji-tech.co.kr", 30789, 30790),
+                SlotRoute("oc3", 28989, 28990),
+                SlotRoute("dev-oc", 30789, 30790),
             ]
         ),
         encoding="utf-8",
@@ -101,7 +101,7 @@ class CliNasTests(unittest.TestCase):
         self.assertIn("slot=dev-oc", text)
         self.assertIn("slot_class=dev", text)
         self.assertIn("gateway_port=30789", text)
-        self.assertIn("public_host=dev-oc.ji-tech.co.kr", text)
+        self.assertNotIn("public_host=", text)
         self.assertIn("slot_list_status=ok count=2", text)
 
     def test_approve_auto_accepts_slots_yaml_list(self) -> None:

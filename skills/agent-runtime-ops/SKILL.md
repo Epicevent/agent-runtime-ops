@@ -21,10 +21,12 @@ state must still be read from MCP, `opsctl`, the installed repo, or the live ser
   commands manually through `ssh svcops`.
 - For exact commands and stop conditions, load only the relevant section of
   `references/runbooks.md`.
-- Before changing a slot, separate routing contract, live image truth, canonical recipe, runtime
-  profile, and applied manifest. A live HTTP failure is not automatically a profile problem.
-- Treat `slot-registry.json` as Apache-facing routing only: slot, public host, gateway port, bridge
-  port, enabled. Do not look there for family, image, release, runtime profile, or recipe truth.
+- Before changing a slot, separate port allocation, Apache public-host truth, live image truth,
+  canonical recipe, runtime profile, and applied manifest. A live HTTP failure is not automatically
+  a profile problem.
+- Treat `slot-registry.json` as port allocation only: slot, gateway port, bridge port, enabled. Do
+  not look there for public host, family, image, release, runtime profile, or recipe truth.
+- Treat Apache route status as public-host truth.
 - Treat running wrapper image labels, inspected through MCP/`opsctl`, as runtime truth.
 - Do not claim a server change is complete after local tests only.
 - Do not edit rendered Docker compose files directly.

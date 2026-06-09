@@ -63,6 +63,8 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("ops_orientation", names)
         self.assertIn("slot_list", names)
         self.assertIn("routing_status", names)
+        self.assertIn("apache_status", names)
+        self.assertIn("apache_set_host", names)
         self.assertIn("runtime_truth", names)
         self.assertIn("runtime_secret_set_from_file", names)
         self.assertIn("deploy_update", names)
@@ -81,6 +83,7 @@ class McpServerTests(unittest.TestCase):
         self.assertNotIn("rollout_canary", names)
         self.assertNotIn("rollout_promote", names)
         self.assertNotIn("rollout_rollback_canary", names)
+        self.assertNotIn("slot_apply", names)
         self.assertIn("handoff_status", names)
         self.assertIn("nas_remove", names)
         self.assertIn("nas_credential_status", names)
@@ -191,10 +194,19 @@ class McpServerTests(unittest.TestCase):
         self.assertFalse(payload["mutated"])
         self.assertEqual(runner.calls[0]["argv"], ["opsctl", "slot", "list"])
 
+    def test_apache_set_host_uses_sudo_opsctl_argv(self) -> None:
+        runner = FakeRunner([(0, "apache_set_host_status=ok\n", "")])
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        payload = call_tool(server, "apache_set_host", {"slot": "oc3", "host": "Demo.JI-TECH.CO.KR."})
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["mutated"])
+        self.assertEqual(runner.calls[0]["argv"], ["sudo", "opsctl", "apache", "set-host", "oc3", "demo.ji-tech.co.kr"])
+
     def test_slot_check_uses_argv_lists(self) -> None:
         runner = FakeRunner(
             [
                 (0, "routing_status=ok\n", ""),
+                (0, "apache_status=ok\n", ""),
                 (0, "truth_status=ok\n", ""),
                 (0, "PASS live\n", ""),
             ]
@@ -204,14 +216,16 @@ class McpServerTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertFalse(payload["mutated"])
         self.assertEqual(runner.calls[0]["argv"], ["opsctl", "routing", "status", "oc1"])
-        self.assertEqual(runner.calls[1]["argv"], ["sudo", "opsctl", "runtime", "truth", "oc1"])
-        self.assertEqual(runner.calls[2]["argv"], ["sudo", "opsctl", "check", "--live", "oc1"])
+        self.assertEqual(runner.calls[1]["argv"], ["opsctl", "apache", "status", "oc1"])
+        self.assertEqual(runner.calls[2]["argv"], ["sudo", "opsctl", "runtime", "truth", "oc1"])
+        self.assertEqual(runner.calls[3]["argv"], ["sudo", "opsctl", "check", "--live", "oc1"])
         self.assertTrue(all(isinstance(call["argv"], list) for call in runner.calls))
 
     def test_slot_check_failure_is_structured_result_not_mcp_error(self) -> None:
         runner = FakeRunner(
             [
                 (0, "routing_status=ok\n", ""),
+                (0, "apache_status=ok\n", ""),
                 (0, "truth_status=ok\n", ""),
                 (1, "FAIL live_container_nas_root_propagation\ncheck_status=fail failed=1\n", ""),
             ]
@@ -240,9 +254,11 @@ class McpServerTests(unittest.TestCase):
                     "",
                 ),
                 (0, "routing_status=ok slot=dev-hermess\n", ""),
+                (0, "apache_status=ok slot=dev-hermess\n", ""),
                 (0, "slot=dev-hermess truth_status=ok\n", ""),
                 (0, "PASS dev-hermess\n", ""),
                 (0, "routing_status=ok slot=dev-oc\n", ""),
+                (0, "apache_status=ok slot=dev-oc\n", ""),
                 (0, "slot=dev-oc truth_status=ok\n", ""),
                 (1, "FAIL dev-oc\ncheck_status=fail failed=1\n", ""),
             ]
@@ -256,7 +272,7 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("check_status=fail", payload["stdout"])
         self.assertEqual(runner.calls[0]["argv"], ["opsctl", "slot", "list"])
         self.assertEqual(runner.calls[1]["argv"], ["opsctl", "routing", "status", "dev-hermess"])
-        self.assertEqual(runner.calls[4]["argv"], ["opsctl", "routing", "status", "dev-oc"])
+        self.assertEqual(runner.calls[5]["argv"], ["opsctl", "routing", "status", "dev-oc"])
 
     def test_secret_raw_argument_is_rejected_and_redacted(self) -> None:
         secret = "AIza" + "A" * 32
@@ -454,6 +470,7 @@ class McpServerTests(unittest.TestCase):
             "rollout_canary",
             "rollout_promote",
             "rollout_rollback_canary",
+            "slot_apply",
         ):
             response = server.handle_message(
                 {

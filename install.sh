@@ -213,6 +213,8 @@ install_ops_sudoers() {
     printf '%s ALL=(root) NOPASSWD: %s rollback *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s diagnostics show *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s routing seed-legacy *\n' "$OPS_USER" "$BIN_LINK"
+    printf '%s ALL=(root) NOPASSWD: %s routing normalize *\n' "$OPS_USER" "$BIN_LINK"
+    printf '%s ALL=(root) NOPASSWD: %s apache set-host *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s runtime truth *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s recipe apply-dev *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s release import *\n' "$OPS_USER" "$BIN_LINK"
@@ -260,7 +262,14 @@ repair_private_state_permissions() {
 
 seed_routing_registry() {
   [[ -d "$STATE_ROOT" ]] || return 0
-  [[ -f "$STATE_ROOT/slot-registry.json" ]] && return 0
+  if [[ -f "$STATE_ROOT/slot-registry.json" ]]; then
+    if "$BIN_LINK" --state-root "$STATE_ROOT" routing normalize --write >/dev/null; then
+      info "routing_registry=normalized"
+    else
+      info "routing_registry=normalize_failed"
+    fi
+    return 0
+  fi
   [[ -f "$STATE_ROOT/slots.yaml" ]] || return 0
   if "$BIN_LINK" --state-root "$STATE_ROOT" routing seed-legacy --write >/dev/null; then
     info "routing_registry=seeded_from_legacy_slots"

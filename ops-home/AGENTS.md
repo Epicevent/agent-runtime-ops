@@ -32,10 +32,10 @@ MCP: agent-runtime-ops
   operator must retrieve a secret or perform a permanent action using their own terminal authority,
   provide the full manual command, explain the consequence, and tell them not to paste secret values
   back into chat.
-- Do not guess target identifiers. Before giving a manual command, resolve the current slot,
-  routing entry, image digest, profile, account, or share from MCP, `opsctl`, or the installed repo. In
-  particular, do not use a runtime profile name as a slot name unless current state proves that it
-  is also a slot.
+- Do not guess target identifiers. Before giving a manual command, resolve the current slot, port
+  allocation, Apache public host, image digest, profile, account, or share from MCP, `opsctl`, or
+  the installed repo. In particular, do not use a runtime profile name as a slot name unless current
+  state proves that it is also a slot.
 - Separate verified facts from unknowns. If the operator asks where a token, password, session,
   credential, or other secret is stored and the exact file and field are not known, say that
   briefly. Do not call a mounted config/auth/profile directory a token location unless a current

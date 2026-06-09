@@ -21,6 +21,7 @@ SLOT_RE = re.compile(r"^(?:oc[0-9]+|dev-[a-z0-9-]+)$")
 RELEASE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 IMAGE_REF_RE = re.compile(r"^[A-Za-z0-9./:_-]+@sha256:[0-9a-f]{64}$")
 SAFE_TEXT_RE = re.compile(r"^[^\r\n\t]*$")
+HOST_RE = re.compile(r"^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$")
 SENSITIVE_ARGUMENTS = {
     "api_key",
     "apikey",
@@ -187,10 +188,31 @@ class McpServer:
             {
                 "name": "routing_status",
                 "title": "Routing Status",
-                "description": "Inspect the minimal Apache-facing routing registry for one slot or all slots.",
+                "description": "Inspect slot port allocation for one slot or all slots. Public host truth lives in Apache.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {"slot": {"type": "string"}},
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "apache_status",
+                "title": "Apache Route Status",
+                "description": "Inspect public host and Apache proxy port truth for one slot or all slots.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"slot": {"type": "string"}},
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "apache_set_host",
+                "title": "Set Apache Public Host",
+                "description": "Change the Apache ServerName for one slot while preserving registry ports.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"slot": {"type": "string"}, "host": {"type": "string"}},
+                    "required": ["slot", "host"],
                     "additionalProperties": False,
                 },
             },
@@ -211,7 +233,7 @@ class McpServer:
                 "name": "slot_check",
                 "title": "Check Slot",
                 "description": (
-                    "Run routing status, live image truth, and live contract check. "
+                    "Run routing status, Apache route status, live image truth, and live contract check. "
                     "For dev or customer groups, prefer slot_class over repeated per-slot calls."
                 ),
                 "inputSchema": {
@@ -399,20 +421,6 @@ class McpServer:
                 },
             },
             {
-                "name": "slot_apply",
-                "title": "Apply Slot",
-                "description": "Pre-check, apply one slot, and run a live check.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "slot": {"type": "string"},
-                        "allow_first_apply": {"type": "boolean", "default": False},
-                    },
-                    "required": ["slot"],
-                    "additionalProperties": False,
-                },
-            },
-            {
                 "name": "slot_rollback",
                 "title": "Rollback Slot",
                 "description": "Rollback one slot and run a live check.",
@@ -508,6 +516,8 @@ class McpServer:
             "ops_orientation": self._tool_ops_orientation,
             "slot_list": self._tool_slot_list,
             "routing_status": self._tool_routing_status,
+            "apache_status": self._tool_apache_status,
+            "apache_set_host": self._tool_apache_set_host,
             "runtime_truth": self._tool_runtime_truth,
             "slot_check": self._tool_slot_check,
             "deploy_update": self._tool_deploy_update,
@@ -521,7 +531,6 @@ class McpServer:
             "runtime_secret_status": self._tool_runtime_secret_status,
             "runtime_secret_set_from_file": self._tool_runtime_secret_set_from_file,
             "handoff_status": self._tool_handoff_status,
-            "slot_apply": self._tool_slot_apply,
             "slot_rollback": self._tool_slot_rollback,
             "nas_status": self._tool_nas_status,
             "nas_mount": self._tool_nas_mount,
@@ -613,6 +622,21 @@ class McpServer:
         runs = [self._run(argv, timeout=60)]
         return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
 
+    def _tool_apache_status(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(args, {"slot"})
+        argv = [self.opsctl, "apache", "status"]
+        if args.get("slot"):
+            argv.append(self._slot(args.get("slot")))
+        runs = [self._run(argv, timeout=60)]
+        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
+
+    def _tool_apache_set_host(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(args, {"slot", "host"})
+        slot = self._slot(args.get("slot"))
+        host = self._host(args.get("host"))
+        runs = [self._run([self.sudo, self.opsctl, "apache", "set-host", slot, host], timeout=120)]
+        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=True, runs=runs)
+
     def _tool_runtime_truth(self, args: dict[str, Any]) -> dict[str, Any]:
         self._reject_unknown(args, {"slot", "all"})
         argv = [self.sudo, self.opsctl, "runtime", "truth"]
@@ -630,6 +654,7 @@ class McpServer:
         slots, runs = self._resolve_slots(args)
         for slot in slots:
             runs.append(self._run([self.opsctl, "routing", "status", slot]))
+            runs.append(self._run([self.opsctl, "apache", "status", slot]))
             runs.append(self._run([self.sudo, self.opsctl, "runtime", "truth", slot], timeout=120))
             runs.append(self._run([self.sudo, self.opsctl, "check", "--live", slot], timeout=120))
         ok = all(item["returncode"] == 0 for item in runs)
@@ -977,6 +1002,12 @@ class McpServer:
         if not IMAGE_REF_RE.match(image_ref):
             raise ToolError("image reference must be digest-pinned as REGISTRY/IMAGE@sha256:<64 hex>")
         return image_ref
+
+    def _host(self, value: Any) -> str:
+        host = str(value or "").strip().lower().rstrip(".")
+        if not HOST_RE.match(host):
+            raise ToolError("host must be a DNS name without scheme, port, path, or whitespace")
+        return host
 
     def _safe_text(self, value: Any, name: str) -> str:
         text = str(value or "").strip()

@@ -20,7 +20,6 @@ def test_route(slot: str) -> SlotRoute:
     gateway_port, bridge_port = ports.get(slot, (29989, 29990))
     return SlotRoute(
         slot=slot,
-        public_host=f"{slot}.ji-tech.co.kr",
         gateway_port=gateway_port,
         bridge_port=bridge_port,
     )

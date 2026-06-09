@@ -12,6 +12,7 @@ git status --short --branch
 ssh svcops "/usr/local/bin/opsctl update status"
 ssh svcops "/usr/local/bin/opsctl slot list"
 ssh svcops "/usr/local/bin/opsctl routing status"
+ssh svcops "/usr/local/bin/opsctl apache status"
 ssh svcops "/usr/local/bin/opsctl profile list"
 ```
 
@@ -24,11 +25,12 @@ approved_matches_installed=yes
 For slot-specific work, establish layers in this order:
 
 ```text
-routing contract -> live image truth -> canonical runtime recipe -> runtime profile -> applied manifest
+port allocation -> Apache public host -> live image truth -> canonical runtime recipe -> runtime profile -> applied manifest
 ```
 
-Routing is only public host and host ports. Runtime family, product image, wrapper image, profile,
-contract, and canonical recipe identity come from live wrapper image labels.
+The routing registry is only slot port allocation. Public host truth comes from Apache route status.
+Runtime family, product image, wrapper image, profile, contract, and canonical recipe identity come
+from live wrapper image labels.
 
 ## Operating Agent Surface
 
@@ -97,6 +99,7 @@ Verify:
 ```bash
 ssh svcops "/usr/local/bin/opsctl update status"
 ssh svcops "/usr/local/bin/opsctl routing status"
+ssh svcops "/usr/local/bin/opsctl apache status"
 ssh svcops "/usr/local/bin/opsctl profile list"
 ssh svcops "codex mcp list"
 ```
@@ -152,6 +155,7 @@ Manual equivalent:
 ```bash
 ssh svcops "/usr/local/bin/opsctl status SLOT"
 ssh svcops "/usr/local/bin/opsctl routing status SLOT"
+ssh svcops "/usr/local/bin/opsctl apache status SLOT"
 ssh svcops "sudo /usr/local/bin/opsctl runtime truth SLOT"
 ssh svcops "sudo /usr/local/bin/opsctl check --live SLOT"
 ```
@@ -258,10 +262,12 @@ terminal, and tell them not to paste the secret value back into chat. Record onl
 
 ## Apply and Rollback
 
-Apply a slot only after checks identify the intended target:
+Normal rollouts should use image rollout tools, not legacy release-state apply. Use `apply` only for
+an explicit legacy-state recovery or migration operation after checks identify the intended target:
 
 ```bash
 ssh svcops "/usr/local/bin/opsctl routing status SLOT"
+ssh svcops "/usr/local/bin/opsctl apache status SLOT"
 ssh svcops "sudo /usr/local/bin/opsctl runtime truth SLOT"
 ssh svcops "sudo /usr/local/bin/opsctl apply SLOT"
 ssh svcops "sudo /usr/local/bin/opsctl check --live SLOT"

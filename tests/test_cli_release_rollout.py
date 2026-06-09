@@ -19,6 +19,7 @@ from agent_runtime_ops.cli import (
     cmd_recipe_dev_status,
     cmd_recipe_validate_canonical,
     cmd_release_import,
+    cmd_routing_normalize,
     cmd_routing_seed_legacy,
     cmd_rollout_canary,
     cmd_rollout_dev_apply,
@@ -188,7 +189,6 @@ def write_slot_registry(root: Path, slots: list[str]) -> None:
         routes.append(
             SlotRoute(
                 slot=slot,
-                public_host=f"{slot}.ji-tech.co.kr",
                 gateway_port=gateway_port,
                 bridge_port=bridge_port,
             )
@@ -506,8 +506,30 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertEqual(routes["oc3"].gateway_port, 28989)
             self.assertEqual(routes["dev-oc"].gateway_port, 30789)
             text = (root / "slot-registry.json").read_text(encoding="utf-8")
+            self.assertIn('"schema": "v2"', text)
+            self.assertNotIn("public_host", text)
+            self.assertNotIn("notes", text)
             self.assertNotIn("runtime_profile", text)
             self.assertNotIn("release", text)
+
+    def test_routing_normalize_removes_legacy_public_host_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            legacy_text = (root / "slot-registry.json").read_text(encoding="utf-8")
+            legacy_text = legacy_text.replace('"schema": "v2"', '"schema": "v1"')
+            legacy_text = legacy_text.replace('"gateway_port"', '"public_host": "legacy.example.com",\n      "notes": "legacy",\n      "gateway_port"', 1)
+            (root / "slot-registry.json").write_text(legacy_text, encoding="utf-8")
+            output = io.StringIO()
+            with patch("agent_runtime_ops.cli._is_root", return_value=True), contextlib.redirect_stdout(output):
+                rc = cmd_routing_normalize(argparse.Namespace(state_root=str(root), write=True))
+            text = (root / "slot-registry.json").read_text(encoding="utf-8")
+            self.assertEqual(rc, 0, output.getvalue())
+            self.assertIn('"schema": "v2"', text)
+            self.assertNotIn("public_host", text)
+            self.assertNotIn("notes", text)
+            routes = {route.slot: route for route in load_routing_registry(root)}
+            self.assertEqual(routes["oc3"].gateway_port, 28989)
 
     def test_rollout_image_plan_uses_wrapper_labels_and_routing_ports(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
