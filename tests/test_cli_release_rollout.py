@@ -377,6 +377,20 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertIn("FAIL product_image_matches_runtime_contract", text)
             self.assertIn("product_component=hermes-agent", text)
 
+    def test_hermes_customer_accepts_current_combined_runtime_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_hermes_state(root)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                rc = cmd_check(argparse.Namespace(state_root=str(root), slot="oc20", live=False))
+
+            text = output.getvalue()
+            self.assertEqual(rc, 0, text)
+            self.assertIn("runtime_contract=hermes-workspace-http-3000", text)
+            self.assertIn("PASS product_image_matches_runtime_contract", text)
+            self.assertIn("product_component=combined-runtime", text)
+
     def test_rollout_plan_shows_hermes_contract_incompatibility(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

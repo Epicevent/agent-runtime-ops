@@ -10,8 +10,8 @@ expected_image_components:
   - hermes-gateway
   - hermes-dashboard
 compatible_product_image_prefixes:
-  - ghcr.io/epicevent/hermes-workspace@sha256:
-  - ghcr.io/epicevent/openclaw-nas-agent@sha256:
+  - "ghcr.io/epicevent/hermes-workspace@sha256:"
+  - "ghcr.io/epicevent/openclaw-nas-agent@sha256:"
 container_nas_root: /workspace/nas_docs
 allow_source_mount: true
 source_output_target: /opt/hermes-workspace

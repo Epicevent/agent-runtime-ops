@@ -391,7 +391,13 @@ def _allowed_image_ref(family: object, role: str, image_ref: object) -> bool:
 
 def _metadata_list(value: object) -> list[str]:
     if isinstance(value, list):
-        return [str(item) for item in value if str(item)]
+        items: list[str] = []
+        for item in value:
+            if isinstance(item, dict) and len(item) == 1 and next(iter(item.values())) is None:
+                items.append(str(next(iter(item.keys()))))
+            elif str(item):
+                items.append(str(item))
+        return items
     if isinstance(value, str) and value:
         return [value]
     return []
