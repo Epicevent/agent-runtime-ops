@@ -1,7 +1,7 @@
 # Agent Runtime Ops Safety Boundaries
 
 This file is not a runbook. It preserves operator-safety posture that must not be lost while command
-details move into MCP, `opsctl --help`, and the repo.
+details live in `references/runbooks.md`, MCP, `opsctl --help`, and the repo.
 
 ## Secrets
 
