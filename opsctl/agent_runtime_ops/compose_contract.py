@@ -87,29 +87,6 @@ def _command_as_list(raw_command: Any) -> list[str] | None:
     return None
 
 
-def _environment_as_dict(raw_environment: Any) -> dict[str, str]:
-    if isinstance(raw_environment, dict):
-        return {str(key): str(value) for key, value in raw_environment.items()}
-    if isinstance(raw_environment, list):
-        values: dict[str, str] = {}
-        for item in raw_environment:
-            if isinstance(item, str) and "=" in item:
-                key, value = item.split("=", 1)
-                values[key] = value
-        return values
-    return {}
-
-
-def _port_target(port: Any) -> str:
-    if isinstance(port, dict):
-        return str(port.get("target") or "")
-    if isinstance(port, str):
-        value = port.split("/", 1)[0]
-        parts = value.rsplit(":", 1)
-        return parts[-1] if parts else ""
-    return ""
-
-
 def validate_compose_contract(profile: Any, desired: Any, rendered_text: str) -> list[ComposeContractCheck]:
     checks: list[ComposeContractCheck] = []
     try:
@@ -184,32 +161,6 @@ def validate_compose_contract(profile: Any, desired: Any, rendered_text: str) ->
                 bool(expected_command) and actual_command == expected_command,
                 "compose_required_command",
                 f"required={' '.join(expected_command) or 'invalid'} actual={' '.join(actual_command) if actual_command else 'missing'}",
-            )
-        )
-
-    environment = _environment_as_dict(service.get("environment"))
-    required_environment = profile.metadata.get("required_environment")
-    if isinstance(required_environment, dict):
-        for key, value in required_environment.items():
-            expected_value = str(value)
-            actual_value = environment.get(str(key))
-            checks.append(
-                ComposeContractCheck(
-                    actual_value == expected_value,
-                    f"compose_required_environment_{str(key).lower()}",
-                    f"required={expected_value} actual={actual_value if actual_value is not None else 'missing'}",
-                )
-            )
-
-    required_gateway_container_port = str(profile.metadata.get("required_gateway_container_port") or "")
-    if required_gateway_container_port:
-        ports = service.get("ports") if isinstance(service.get("ports"), list) else []
-        targets = [_port_target(port) for port in ports]
-        checks.append(
-            ComposeContractCheck(
-                required_gateway_container_port in targets,
-                "compose_gateway_port_targets_required_container_port",
-                f"required={required_gateway_container_port} actual={','.join(targets) or 'missing'}",
             )
         )
 

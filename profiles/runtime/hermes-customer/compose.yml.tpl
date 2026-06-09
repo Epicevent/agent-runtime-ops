@@ -14,7 +14,7 @@ services:
       HERMES_API_URL: http://127.0.0.1:8642
       HERMES_DASHBOARD_URL: http://127.0.0.1:9119
       HERMES_DASHBOARD: "1"
-      HERMES_DASHBOARD_HOST: 0.0.0.0
+      HERMES_DASHBOARD_HOST: 127.0.0.1
       HERMES_DASHBOARD_PORT: "9119"
       HERMES_DASHBOARD_INSECURE: "1"
       API_SERVER_ENABLED: "true"
@@ -31,7 +31,7 @@ services:
       LANGUAGE: ko_KR:ko
       LC_ALL: ko_KR.UTF-8
     ports:
-      - "127.0.0.1:{{ gateway_port }}:9119"
+      - "127.0.0.1:{{ gateway_port }}:3000"
     labels:
       agent-runtime.slot: "{{ slot }}"
       agent-runtime.family: "{{ family }}"

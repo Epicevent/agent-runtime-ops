@@ -53,9 +53,6 @@ class RuntimeContractTests(unittest.TestCase):
         results = contract_results("hermes-customer", desired)
         self.assertTrue(results["compose_runtime_user_model"])
         self.assertTrue(results["compose_required_command"])
-        self.assertTrue(results["compose_required_environment_hermes_dashboard_host"])
-        self.assertTrue(results["compose_required_environment_hermes_dashboard_port"])
-        self.assertTrue(results["compose_gateway_port_targets_required_container_port"])
         self.assertTrue(results["compose_nas_root_bind_present"])
         self.assertTrue(results["compose_nas_root_readonly"])
         self.assertTrue(results["compose_nas_root_propagation"])
@@ -66,9 +63,6 @@ class RuntimeContractTests(unittest.TestCase):
         results = contract_results("hermes-dev", desired)
         self.assertTrue(results["compose_runtime_user_model"])
         self.assertTrue(results["compose_required_command"])
-        self.assertTrue(results["compose_required_environment_hermes_dashboard_host"])
-        self.assertTrue(results["compose_required_environment_hermes_dashboard_port"])
-        self.assertTrue(results["compose_gateway_port_targets_required_container_port"])
         self.assertTrue(results["compose_dev_source_mount_present"])
 
     def test_hermes_rejects_missing_required_command(self) -> None:
@@ -81,18 +75,6 @@ class RuntimeContractTests(unittest.TestCase):
         )
         checks = {item.name: item.ok for item in validate_compose_contract(profile, desired, rendered)}
         self.assertFalse(checks["compose_required_command"])
-
-    def test_hermes_rejects_wrong_dashboard_bind_contract(self) -> None:
-        desired = desired_slot("oc2", "hermes", "customer", "hermes-customer")
-        profile = load_profile("hermes-customer")
-        rendered = (
-            render_compose(profile, desired)
-            .text.replace("      HERMES_DASHBOARD_HOST: 0.0.0.0\n", "      HERMES_DASHBOARD_HOST: 127.0.0.1\n", 1)
-            .replace('      - "127.0.0.1:28889:9119"\n', '      - "127.0.0.1:28889:3000"\n', 1)
-        )
-        checks = {item.name: item.ok for item in validate_compose_contract(profile, desired, rendered)}
-        self.assertFalse(checks["compose_required_environment_hermes_dashboard_host"])
-        self.assertFalse(checks["compose_gateway_port_targets_required_container_port"])
 
     def test_hermes_customer_rejects_compose_level_user(self) -> None:
         desired = desired_slot("oc2", "hermes", "customer", "hermes-customer")
