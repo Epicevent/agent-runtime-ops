@@ -1,0 +1,9 @@
+checks:
+  - container_running
+  - image_digest_match
+  - runtime_user_match
+  - nas_host_cifs
+  - nas_container_cifs
+  - nas_runtime_user_read
+  - nas_read_only
+  - source_mode_absent

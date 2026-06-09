@@ -2,9 +2,6 @@ services:
   openclaw-gateway:
     image: "{{ image_ref }}"
     restart: unless-stopped
-    command:
-      - gateway
-      - run
     env_file:
       - .env
     environment:
@@ -49,4 +46,4 @@ services:
         read_only: true
         bind:
           propagation: rslave
-    working_dir: /opt/data/home
+    working_dir: /app

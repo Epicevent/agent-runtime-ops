@@ -2,9 +2,6 @@ services:
   openclaw-gateway:
     image: "{{ image_ref }}"
     restart: unless-stopped
-    command:
-      - gateway
-      - run
     env_file:
       - .env
     environment:
@@ -42,11 +39,10 @@ services:
     volumes:
       - "{{ target_home }}/.hermes:/opt/data"
       - "{{ target_home }}/.hermes/workspace:/workspace"
-      - "{{ source_output }}:/opt/hermes-workspace:ro"
       - type: bind
         source: "{{ target_home }}/nas_docs"
         target: /workspace/nas_docs
         read_only: true
         bind:
           propagation: rslave
-    working_dir: /opt/data/home
+    working_dir: /app

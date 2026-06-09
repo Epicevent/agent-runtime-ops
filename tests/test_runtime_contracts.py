@@ -65,29 +65,53 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertTrue(results["compose_customer_source_mount_absent"])
 
     def test_hermes_customer_contract(self) -> None:
-        desired = desired_slot("oc2", "hermes", "customer", "hermes-customer", product_repo="hermes-workspace")
+        desired = desired_slot("oc2", "hermes", "customer", "hermes-customer", product_repo="openclaw-nas-agent")
         results = contract_results("hermes-customer", desired)
         self.assertTrue(results["compose_runtime_user_model"])
-        self.assertTrue(results["compose_uses_image_default_command"])
-        self.assertTrue(results["compose_working_dir_matches_product_component"])
+        self.assertTrue(results["compose_required_command"])
+        self.assertTrue(results["compose_required_working_dir"])
         self.assertTrue(results["compose_nas_root_bind_present"])
         self.assertTrue(results["compose_nas_root_readonly"])
         self.assertTrue(results["compose_nas_root_propagation"])
         self.assertTrue(results["compose_customer_surface_port"])
         self.assertTrue(results["compose_customer_source_mount_absent"])
 
-    def test_hermes_customer_combined_runtime_keeps_gateway_command(self) -> None:
-        desired = desired_slot("oc2", "hermes", "customer", "hermes-customer", product_repo="openclaw-nas-agent")
-        results = contract_results("hermes-customer", desired)
-        self.assertTrue(results["compose_required_command"])
-        self.assertTrue(results["compose_working_dir_matches_product_component"])
-
-    def test_hermes_dev_contract(self) -> None:
-        desired = desired_slot("dev-hermess", "hermes", "dev", "hermes-dev", product_repo="hermes-workspace")
-        results = contract_results("hermes-dev", desired)
+    def test_hermes_workspace_customer_contract(self) -> None:
+        desired = desired_slot(
+            "oc2",
+            "hermes",
+            "customer",
+            "hermes-workspace-customer",
+            product_repo="hermes-workspace",
+        )
+        results = contract_results("hermes-workspace-customer", desired)
         self.assertTrue(results["compose_runtime_user_model"])
         self.assertTrue(results["compose_uses_image_default_command"])
-        self.assertTrue(results["compose_working_dir_matches_product_component"])
+        self.assertTrue(results["compose_required_working_dir"])
+        self.assertTrue(results["compose_nas_root_bind_present"])
+        self.assertTrue(results["compose_customer_source_mount_absent"])
+
+    def test_hermes_dev_contract(self) -> None:
+        desired = desired_slot("dev-hermess", "hermes", "dev", "hermes-dev", product_repo="openclaw-nas-agent")
+        results = contract_results("hermes-dev", desired)
+        self.assertTrue(results["compose_runtime_user_model"])
+        self.assertTrue(results["compose_required_command"])
+        self.assertTrue(results["compose_required_working_dir"])
+        self.assertTrue(results["compose_customer_surface_port"])
+        self.assertTrue(results["compose_dev_source_mount_present"])
+
+    def test_hermes_workspace_dev_contract(self) -> None:
+        desired = desired_slot(
+            "dev-hermess",
+            "hermes",
+            "dev",
+            "hermes-workspace-dev",
+            product_repo="hermes-workspace",
+        )
+        results = contract_results("hermes-workspace-dev", desired)
+        self.assertTrue(results["compose_runtime_user_model"])
+        self.assertTrue(results["compose_uses_image_default_command"])
+        self.assertTrue(results["compose_required_working_dir"])
         self.assertTrue(results["compose_customer_surface_port"])
         self.assertTrue(results["compose_dev_source_mount_present"])
 
@@ -103,8 +127,8 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertFalse(checks["compose_required_command"])
 
     def test_hermes_workspace_rejects_command_override(self) -> None:
-        desired = desired_slot("oc2", "hermes", "customer", "hermes-customer", product_repo="hermes-workspace")
-        profile = load_profile("hermes-customer")
+        desired = desired_slot("oc2", "hermes", "customer", "hermes-workspace-customer", product_repo="hermes-workspace")
+        profile = load_profile("hermes-workspace-customer")
         rendered = render_compose(profile, desired).text.replace(
             "    env_file:\n",
             "    command:\n      - gateway\n      - run\n    env_file:\n",

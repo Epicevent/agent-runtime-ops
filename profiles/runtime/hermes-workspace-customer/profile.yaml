@@ -1,26 +1,24 @@
-id: hermes-customer
+id: hermes-workspace-customer
 family: hermes
 mode: image
 slot_class: customer
 service: openclaw-gateway
 runtime_contract: hermes-workspace-http-3000
 customer_surface: workspace-ui@3000
-product_component: combined-runtime
+product_component: hermes-workspace
 expected_image_components:
   - hermes-workspace-server
   - hermes-gateway
   - hermes-dashboard
 compatible_product_image_prefixes:
-  - "ghcr.io/epicevent/openclaw-nas-agent@sha256:"
+  - "ghcr.io/epicevent/hermes-workspace@sha256:"
 container_nas_root: /workspace/nas_docs
 allow_source_mount: false
 required_mount_propagation: rslave
 required_read_only_nas: true
 runtime_user_mode: image-managed
-required_command:
-  - gateway
-  - run
-required_working_dir: /opt/data/home
+image_default_command: true
+required_working_dir: /app
 http_smoke_path: /
 required_http_container_port: 3000
 startup_timeout_seconds: 240

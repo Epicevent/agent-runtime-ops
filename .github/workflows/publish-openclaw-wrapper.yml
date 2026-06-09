@@ -41,6 +41,14 @@ jobs:
             --build-arg BASE_IMAGE="${{ inputs.product_image }}" \
             --build-arg PRODUCT_IMAGE="${{ inputs.product_image }}" \
             --build-arg OPS_REPO_COMMIT="${{ github.sha }}" \
+            --build-arg PRODUCT_COMPONENT="openclaw-control" \
+            --build-arg RUNTIME_PROFILE_CUSTOMER="openclaw-customer" \
+            --build-arg RUNTIME_PROFILE_DEV="openclaw-dev" \
+            --build-arg RUNTIME_CONTRACT_CUSTOMER="openclaw-gateway-http-18789" \
+            --build-arg RUNTIME_CONTRACT_DEV="openclaw-gateway-source-http-18789" \
+            --build-arg RUNTIME_COMMAND_MODE="compose-command" \
+            --build-arg RUNTIME_WORKING_DIR="" \
+            --build-arg RUNTIME_HTTP_PORT="18789" \
             -t "$image_ref" \
             -f images/openclaw-wrapper/Dockerfile .
 
@@ -53,6 +61,10 @@ jobs:
           docker cp "$cid:/usr/local/share/agent-runtime-ops/wrapper.manifest" ./wrapper.manifest
           grep -Fx "family=openclaw" ./wrapper.manifest
           grep -Fx "product_image=${{ inputs.product_image }}" ./wrapper.manifest
+          grep -Fx "runtime_profile_customer=openclaw-customer" ./wrapper.manifest
+          grep -Fx "runtime_profile_dev=openclaw-dev" ./wrapper.manifest
+          docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.recipe.schema" }}' | grep -Fx v1
+          docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.product-image" }}' | grep -Fx "${{ inputs.product_image }}"
 
       - name: Push wrapper
         run: docker push "$IMAGE_REPOSITORY:${{ inputs.image_tag }}"

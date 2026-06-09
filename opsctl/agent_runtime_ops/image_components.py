@@ -27,12 +27,3 @@ def image_repo(image_ref: object) -> str:
 def image_component_name(image_ref: object) -> str:
     repo = image_repo(image_ref)
     return IMAGE_COMPONENTS.get(repo, repo.rsplit("/", 1)[-1] if repo else "unknown")
-
-
-def release_product_component(release_data: dict) -> str:
-    components = release_data.get("components")
-    if isinstance(components, dict):
-        product_component = components.get("product_component")
-        if product_component:
-            return str(product_component)
-    return image_component_name(release_data.get("product_image"))

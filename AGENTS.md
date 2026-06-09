@@ -98,6 +98,16 @@ The runtime contract is what the slot must expose to users. The image recipe is 
 the image. The runtime profile is how that image is executed on the server. The release state is
 which digest a lane or slot points at.
 
+For wrapped product images, the image recipe must come from immutable OCI labels on the wrapper
+image digest. Do not treat a sidecar file, release-import argument, or install-time repair as the
+source of truth. `opsctl release import` should read the wrapper image labels, store the declared
+recipe in release state, and rollout should select the runtime profile declared by that recipe.
+
+`install.sh` and `opsctl self-update` install tools and profile definitions only. They must not
+silently rewrite slot, lane, release, or profile state to make a broken deployment look fixed. Any
+state change must be a separate operator-visible command such as release import, canary, promote,
+rollback, or apply, with before/after verification.
+
 Do not treat a live HTTP failure as a profile problem until the old working image and the new
 candidate image are compared against the same runtime contract. For Hermes customer slots, the
 current contract is `hermes-workspace-http-3000`: the customer-facing surface is the workspace UI on

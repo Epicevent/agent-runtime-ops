@@ -59,6 +59,8 @@ SAFE_TEXT_RE = re.compile(r"^[^\r\n\t]*$")
 ROLLOUT_STATE_NAME = "rollout-state.yaml"
 DEV_RECIPE_STATE_NAME = "dev-recipes.yaml"
 DEV_RECIPE_STAGE_ROOT = "agent-runtime-source"
+IMAGE_RECIPE_LABEL_PREFIX = "com.epicevent.agent-runtime."
+IMAGE_RECIPE_SCHEMA = "v1"
 
 
 def _state_root(args: argparse.Namespace) -> Path:
@@ -420,16 +422,19 @@ def _profile_customer_surface(profile) -> str:
 def _release_recipe_payload(release_data: dict) -> dict[str, object]:
     product_image = release_data.get("product_image")
     wrapper_image = release_data.get("wrapper_image")
+    image_recipe = _release_image_recipe(release_data)
     payload: dict[str, object] = {
         "mode": release_data.get("compatibility_mode") or "unknown",
-        "product_component": _image_component_name(product_image),
-        "wrapper_component": _image_component_name(wrapper_image),
+        "product_component": image_recipe.get("product_component") or _image_component_name(product_image),
+        "wrapper_component": image_recipe.get("wrapper_component") or _image_component_name(wrapper_image),
         "product_repo": _image_repo(product_image),
         "wrapper_repo": _image_repo(wrapper_image),
     }
     components = release_data.get("components")
     if isinstance(components, dict):
         payload["components"] = {str(key): str(value) for key, value in components.items()}
+    if image_recipe:
+        payload["image_recipe"] = image_recipe
     return payload
 
 
@@ -472,12 +477,133 @@ def _derived_release_components(product_image: str, wrapper_image: str) -> dict[
     }
 
 
+def _image_recipe_labels_from_wrapper(wrapper_image: str) -> dict[str, str]:
+    docker = shutil.which("docker")
+    if not docker:
+        raise ValueError("docker is required to inspect wrapper image recipe labels")
+    inspect = _run_text([docker, "image", "inspect", wrapper_image, "--format", "{{json .Config.Labels}}"], timeout=60)
+    if inspect.returncode != 0:
+        pull = _run_text([docker, "pull", wrapper_image], timeout=600)
+        if pull.returncode != 0:
+            raise ValueError(f"failed to pull wrapper image for recipe labels: {pull.stderr.strip() or pull.stdout.strip()}")
+        inspect = _run_text([docker, "image", "inspect", wrapper_image, "--format", "{{json .Config.Labels}}"], timeout=60)
+    if inspect.returncode != 0:
+        raise ValueError(f"failed to inspect wrapper image recipe labels: {inspect.stderr.strip() or inspect.stdout.strip()}")
+    try:
+        labels = json.loads(inspect.stdout.strip() or "{}")
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"wrapper image labels are not valid JSON: {exc}") from exc
+    if not isinstance(labels, dict):
+        raise ValueError("wrapper image labels are missing")
+    return {str(key): str(value) for key, value in labels.items()}
+
+
+def _recipe_label(labels: dict[str, str], name: str) -> str:
+    return str(labels.get(IMAGE_RECIPE_LABEL_PREFIX + name) or "")
+
+
+def _image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product_image: str) -> dict[str, object]:
+    labels = _image_recipe_labels_from_wrapper(wrapper_image)
+    schema = _recipe_label(labels, "recipe.schema")
+    if schema != IMAGE_RECIPE_SCHEMA:
+        raise ValueError(
+            "wrapper image is missing agent-runtime recipe labels; rebuild wrapper with current publish workflow"
+        )
+    label_family = _recipe_label(labels, "family")
+    label_product_image = _recipe_label(labels, "product-image")
+    if label_family != family:
+        raise ValueError(f"wrapper image recipe family mismatch: label={label_family or 'missing'} requested={family}")
+    if label_product_image != product_image:
+        raise ValueError("wrapper image recipe product-image does not match --product-image")
+    customer_profile = _recipe_label(labels, "runtime-profile.customer")
+    dev_profile = _recipe_label(labels, "runtime-profile.dev")
+    customer_contract = _recipe_label(labels, "runtime-contract.customer")
+    dev_contract = _recipe_label(labels, "runtime-contract.dev")
+    product_component = _recipe_label(labels, "product-component")
+    wrapper_component = _recipe_label(labels, "wrapper-component")
+    command_mode = _recipe_label(labels, "command-mode")
+    http_port = _recipe_label(labels, "http-port")
+    required = {
+        "product-component": product_component,
+        "wrapper-component": wrapper_component,
+        "runtime-profile.customer": customer_profile,
+        "runtime-profile.dev": dev_profile,
+        "runtime-contract.customer": customer_contract,
+        "runtime-contract.dev": dev_contract,
+        "command-mode": command_mode,
+        "http-port": http_port,
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        raise ValueError("wrapper image recipe labels are incomplete: " + ",".join(missing))
+    derived_product_component = _image_component_name(product_image)
+    derived_wrapper_component = _image_component_name(wrapper_image)
+    if product_component != derived_product_component:
+        raise ValueError(
+            f"wrapper image recipe product-component mismatch: label={product_component} derived={derived_product_component}"
+        )
+    if wrapper_component != derived_wrapper_component:
+        raise ValueError(
+            f"wrapper image recipe wrapper-component mismatch: label={wrapper_component} derived={derived_wrapper_component}"
+        )
+    recipe = {
+        "schema": schema,
+        "source": "wrapper_image_labels",
+        "family": label_family,
+        "product_image": label_product_image,
+        "product_component": product_component,
+        "wrapper_component": wrapper_component,
+        "runtime_profiles": {
+            "customer": customer_profile,
+            "dev": dev_profile,
+        },
+        "runtime_contracts": {
+            "customer": customer_contract,
+            "dev": dev_contract,
+        },
+        "command_mode": command_mode,
+        "working_dir": _recipe_label(labels, "working-dir"),
+        "http_port": http_port,
+        "ops_repo_commit": _recipe_label(labels, "ops-repo-commit"),
+    }
+    for slot_class, profile_name in recipe["runtime_profiles"].items():
+        profile = load_profile(str(profile_name))
+        if profile.metadata.get("family") != family:
+            raise ValueError(f"recipe {slot_class} profile family mismatch: {profile_name}")
+        if profile.metadata.get("slot_class") != slot_class:
+            raise ValueError(f"recipe {slot_class} profile slot_class mismatch: {profile_name}")
+        expected_contract = recipe["runtime_contracts"][slot_class]
+        if profile.metadata.get("runtime_contract") != expected_contract:
+            raise ValueError(f"recipe {slot_class} profile contract mismatch: {profile_name}")
+        profile_component = str(profile.metadata.get("product_component") or "")
+        if profile_component and profile_component != product_component:
+            raise ValueError(f"recipe {slot_class} profile product_component mismatch: {profile_name}")
+    return recipe
+
+
+def _release_image_recipe(release_data: dict) -> dict[str, object]:
+    recipe = release_data.get("image_recipe")
+    return recipe if isinstance(recipe, dict) else {}
+
+
+def _release_runtime_profile_name(release_data: dict, slot_class: str, fallback: str | None = None) -> str:
+    recipe = _release_image_recipe(release_data)
+    profiles = recipe.get("runtime_profiles")
+    if isinstance(profiles, dict) and profiles.get(slot_class):
+        return str(profiles[slot_class])
+    if release_data.get("compatibility_mode") == "wrapped_product_image":
+        raise ValueError("wrapped release is missing image recipe runtime profile; reimport a labeled wrapper image")
+    return str(fallback or "")
+
+
 def _release_profile_contract_checks(release_data: dict, profile) -> list[tuple[bool, str, str | None]]:
     runtime_contract = _profile_runtime_contract(profile)
     customer_surface = _profile_customer_surface(profile)
     expected_components = _metadata_list(profile.metadata.get("expected_image_components"))
     compatible_product_prefixes = _metadata_list(profile.metadata.get("compatible_product_image_prefixes"))
     product_image = str(release_data.get("product_image") or "")
+    slot_class = str(profile.metadata.get("slot_class") or "")
+    image_recipe = _release_image_recipe(release_data)
     checks: list[tuple[bool, str, str | None]] = [
         (bool(runtime_contract), "runtime_contract_declared", f"contract={runtime_contract or 'missing'}"),
         (
@@ -486,6 +612,41 @@ def _release_profile_contract_checks(release_data: dict, profile) -> list[tuple[
             f"surface={customer_surface or 'missing'}",
         ),
     ]
+    if image_recipe:
+        runtime_profiles = image_recipe.get("runtime_profiles")
+        expected_profile = runtime_profiles.get(slot_class) if isinstance(runtime_profiles, dict) else ""
+        checks.append(
+            (
+                expected_profile == profile.name,
+                "image_recipe_profile_matches_runtime_profile",
+                f"recipe={expected_profile or 'missing'} profile={profile.name}",
+            )
+        )
+        runtime_contracts = image_recipe.get("runtime_contracts")
+        expected_contract = runtime_contracts.get(slot_class) if isinstance(runtime_contracts, dict) else ""
+        checks.append(
+            (
+                expected_contract == runtime_contract,
+                "image_recipe_contract_matches_profile",
+                f"recipe={expected_contract or 'missing'} profile={runtime_contract or 'missing'}",
+            )
+        )
+        checks.append(
+            (
+                image_recipe.get("product_image") == product_image,
+                "image_recipe_product_image_matches_release",
+                f"recipe={image_recipe.get('product_image') or 'missing'} release={product_image or 'missing'}",
+            )
+        )
+        profile_component = str(profile.metadata.get("product_component") or "")
+        if profile_component:
+            checks.append(
+                (
+                    image_recipe.get("product_component") == profile_component,
+                    "image_recipe_product_component_matches_profile",
+                    f"recipe={image_recipe.get('product_component') or 'missing'} profile={profile_component}",
+                )
+            )
     if expected_components:
         checks.append(
             (
@@ -2533,6 +2694,7 @@ def cmd_release_import(args: argparse.Namespace) -> int:
         _validate_release_name(name)
         if family not in {"openclaw", "hermes"}:
             raise ValueError("family must be openclaw or hermes")
+        image_recipe: dict[str, object] = {}
         if args.compat_combined:
             if not args.image:
                 raise ValueError("--compat-combined requires --image")
@@ -2555,7 +2717,26 @@ def cmd_release_import(args: argparse.Namespace) -> int:
             raise ValueError(f"product image repository is not allowed for {family}")
         if not _allowed_image_ref(family, "wrapper", wrapper_image):
             raise ValueError(f"wrapper image repository is not allowed for {family}")
+        if compatibility_mode == "wrapped_product_image":
+            image_recipe = _image_recipe_from_wrapper_image(wrapper_image, family=family, product_image=product_image)
         components = _derived_release_components(product_image, wrapper_image)
+        if image_recipe:
+            components.update(
+                {
+                    "product_component": str(image_recipe.get("product_component") or components["product_component"]),
+                    "wrapper_component": str(image_recipe.get("wrapper_component") or components["wrapper_component"]),
+                    "runtime_profile_customer": str(
+                        (image_recipe.get("runtime_profiles") or {}).get("customer")
+                        if isinstance(image_recipe.get("runtime_profiles"), dict)
+                        else ""
+                    ),
+                    "runtime_profile_dev": str(
+                        (image_recipe.get("runtime_profiles") or {}).get("dev")
+                        if isinstance(image_recipe.get("runtime_profiles"), dict)
+                        else ""
+                    ),
+                }
+            )
         components.update(_release_components_from_args(getattr(args, "component", None)))
 
         releases_data = load_yaml(state_root / "releases.yaml", default={})
@@ -2577,6 +2758,8 @@ def cmd_release_import(args: argparse.Namespace) -> int:
             "imported_by": os.environ.get("SUDO_USER") or os.environ.get("USER") or "",
             "compatibility_mode": compatibility_mode,
         }
+        if image_recipe:
+            releases[name]["image_recipe"] = image_recipe
         backup_path = _write_state_yaml_file(state_root, "releases.yaml", releases_data)
         _append_action_log(state_root, "release_import", "-", name, "ok", f"family={family} digest={wrapper_digest}")
     except Exception as exc:
@@ -2595,6 +2778,11 @@ def cmd_release_import(args: argparse.Namespace) -> int:
     print(f"product_image={product_image}")
     print(f"recipe_mode={compatibility_mode}")
     print(f"product_component={components.get('product_component', '')}")
+    if image_recipe:
+        profiles = image_recipe.get("runtime_profiles") if isinstance(image_recipe, dict) else {}
+        if isinstance(profiles, dict):
+            print(f"runtime_profile_customer={profiles.get('customer', '')}")
+            print(f"runtime_profile_dev={profiles.get('dev', '')}")
     print(f"release_digest={wrapper_digest}")
     if backup_path:
         print(f"backup={backup_path}")
@@ -2669,7 +2857,8 @@ def cmd_rollout_plan(args: argparse.Namespace) -> int:
         lanes = lanes_data.get("lanes") or {}
         fleet_release = str((lanes.get(fleet_lane) or {}).get("release") or "")
         fleet_profile_name = str((lanes.get(fleet_lane) or {}).get("runtime_profile") or "")
-        fleet_profile = load_profile(fleet_profile_name)
+        target_profile_name = _release_runtime_profile_name(release_data, "customer", fleet_profile_name)
+        fleet_profile = load_profile(target_profile_name)
         contract_checks = [
             {"ok": ok, "name": name, "detail": detail}
             for ok, name, detail in _release_profile_contract_checks(release_data, fleet_profile)
@@ -2682,6 +2871,7 @@ def cmd_rollout_plan(args: argparse.Namespace) -> int:
             "product_image": release_data.get("product_image"),
             "recipe": _release_recipe_payload(release_data),
             "runtime_profile": fleet_profile.name,
+            "fleet_runtime_profile": fleet_profile_name,
             "runtime_contract": _profile_runtime_contract(fleet_profile),
             "customer_surface": _profile_customer_surface(fleet_profile),
             "contract_checks": contract_checks,
@@ -2731,11 +2921,13 @@ def cmd_rollout_canary(args: argparse.Namespace) -> int:
         profile_before = load_profile(desired_before.runtime_profile)
         if desired_before.lane_data.get("family") != family or desired_before.lane_data.get("slot_class") != "customer":
             raise ValueError(f"slot is not a {family} customer slot: {slot}")
-        contract_failures = _release_profile_contract_failures(release_data, profile_before)
+        target_profile_name = _release_runtime_profile_name(release_data, "customer", profile_before.name)
+        target_profile = load_profile(target_profile_name)
+        contract_failures = _release_profile_contract_failures(release_data, target_profile)
         if contract_failures:
             raise ValueError(
                 "release does not satisfy runtime contract "
-                f"{_profile_runtime_contract(profile_before) or profile_before.name}:"
+                f"{_profile_runtime_contract(target_profile) or target_profile.name}:"
                 + ",".join(contract_failures)
             )
         fleet_lane = _fleet_lane_for_family(lanes_data, family)
@@ -2756,7 +2948,7 @@ def cmd_rollout_canary(args: argparse.Namespace) -> int:
             "family": family,
             "slot_class": "customer",
             "release": release,
-            "runtime_profile": profile_before.name,
+            "runtime_profile": target_profile.name,
         }
         _set_slot_lane(slots_data, slot, canary_lane)
         _write_state_yaml_file(state_root, "lanes.yaml", lanes_data)
@@ -2775,6 +2967,7 @@ def cmd_rollout_canary(args: argparse.Namespace) -> int:
     print(f"slot={slot}")
     print(f"canary_lane={canary_lane}")
     print(f"release={release}")
+    print(f"runtime_profile={target_profile.name}")
     apply_rc = cmd_apply(
         argparse.Namespace(
             slot=slot,
@@ -2797,7 +2990,8 @@ def cmd_rollout_canary(args: argparse.Namespace) -> int:
         "lane": canary_lane,
         "previous_lane": previous_lane,
         "previous_release": previous_release,
-        "runtime_profile": profile_before.name,
+        "previous_runtime_profile": profile_before.name,
+        "runtime_profile": target_profile.name,
         "status": "ok",
         "checked_at": _now_iso(),
     }
@@ -2818,7 +3012,7 @@ def cmd_rollout_promote(args: argparse.Namespace) -> int:
         if family not in {"openclaw", "hermes"}:
             raise ValueError("family must be openclaw or hermes")
         slots_data, lanes_data, releases_data = _load_slots_lanes_releases(state_root)
-        _validate_release_for_family(releases_data, release, family)
+        release_data = _validate_release_for_family(releases_data, release, family)
         rollout_state = _load_rollout_state(state_root)
         record = _family_rollout_record(rollout_state, family).get("canary")
         if not isinstance(record, dict) or record.get("status") != "ok" or record.get("release") != release:
@@ -2832,7 +3026,18 @@ def cmd_rollout_promote(args: argparse.Namespace) -> int:
         if not isinstance(fleet_data, dict):
             raise ValueError(f"fleet lane is invalid: {fleet_lane}")
         previous_release = str(fleet_data.get("release") or "")
+        previous_profile = str(fleet_data.get("runtime_profile") or "")
+        target_profile_name = _release_runtime_profile_name(release_data, "customer", previous_profile)
+        target_profile = load_profile(target_profile_name)
+        contract_failures = _release_profile_contract_failures(release_data, target_profile)
+        if contract_failures:
+            raise ValueError(
+                "release does not satisfy runtime contract "
+                f"{_profile_runtime_contract(target_profile) or target_profile.name}:"
+                + ",".join(contract_failures)
+            )
         fleet_data["release"] = release
+        fleet_data["runtime_profile"] = target_profile.name
         _set_slot_lane(slots_data, canary_slot, fleet_lane)
         _write_state_yaml_file(state_root, "lanes.yaml", lanes_data)
         _write_state_yaml_file(state_root, "slots.yaml", slots_data)
@@ -2850,7 +3055,9 @@ def cmd_rollout_promote(args: argparse.Namespace) -> int:
     print(f"family={family}")
     print(f"fleet_lane={fleet_lane}")
     print(f"previous_release={previous_release}")
+    print(f"previous_runtime_profile={previous_profile}")
     print(f"release={release}")
+    print(f"runtime_profile={target_profile.name}")
     print(f"slots={','.join(slots_to_apply)}")
     for slot in slots_to_apply:
         rc = cmd_apply(argparse.Namespace(slot=slot, state_root=str(state_root), allow_first_apply=False))
@@ -2877,6 +3084,7 @@ def cmd_rollout_promote(args: argparse.Namespace) -> int:
         canary["promoted_at"] = _now_iso()
     record["promotion"] = {
         "release": release,
+        "runtime_profile": target_profile.name,
         "status": "ok",
         "slots": slots_to_apply,
         "updated_at": _now_iso(),

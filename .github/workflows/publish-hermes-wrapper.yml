@@ -28,7 +28,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "${{ inputs.image_tag }}" =~ ^hermes-[A-Za-z0-9._-]+$ ]]
-          [[ "${{ inputs.product_image }}" =~ ^ghcr\.io/epicevent/(hermes-jitech|hermes-workspace|openclaw-nas-agent)@sha256:[0-9a-f]{64}$ ]]
+          [[ "${{ inputs.product_image }}" =~ ^ghcr\.io/epicevent/(hermes-workspace|openclaw-nas-agent)@sha256:[0-9a-f]{64}$ ]]
 
       - name: Login to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
@@ -37,10 +37,40 @@ jobs:
         run: |
           set -euo pipefail
           image_ref="$IMAGE_REPOSITORY:${{ inputs.image_tag }}"
+          product_repo="${{ inputs.product_image }}"
+          product_repo="${product_repo%@sha256:*}"
+          case "$product_repo" in
+            ghcr.io/epicevent/hermes-workspace)
+              product_component="hermes-workspace"
+              runtime_profile_customer="hermes-workspace-customer"
+              runtime_profile_dev="hermes-workspace-dev"
+              command_mode="image-default"
+              working_dir="/app"
+              ;;
+            ghcr.io/epicevent/openclaw-nas-agent)
+              product_component="combined-runtime"
+              runtime_profile_customer="hermes-customer"
+              runtime_profile_dev="hermes-dev"
+              command_mode="gateway-run"
+              working_dir="/opt/data/home"
+              ;;
+            *)
+              echo "unsupported Hermes product image repo: $product_repo" >&2
+              exit 1
+              ;;
+          esac
           docker build \
             --build-arg BASE_IMAGE="${{ inputs.product_image }}" \
             --build-arg PRODUCT_IMAGE="${{ inputs.product_image }}" \
             --build-arg OPS_REPO_COMMIT="${{ github.sha }}" \
+            --build-arg PRODUCT_COMPONENT="$product_component" \
+            --build-arg RUNTIME_PROFILE_CUSTOMER="$runtime_profile_customer" \
+            --build-arg RUNTIME_PROFILE_DEV="$runtime_profile_dev" \
+            --build-arg RUNTIME_CONTRACT_CUSTOMER="hermes-workspace-http-3000" \
+            --build-arg RUNTIME_CONTRACT_DEV="hermes-workspace-source-http-3000" \
+            --build-arg RUNTIME_COMMAND_MODE="$command_mode" \
+            --build-arg RUNTIME_WORKING_DIR="$working_dir" \
+            --build-arg RUNTIME_HTTP_PORT="3000" \
             -t "$image_ref" \
             -f images/hermes-wrapper/Dockerfile .
 
@@ -53,6 +83,10 @@ jobs:
           docker cp "$cid:/usr/local/share/agent-runtime-ops/wrapper.manifest" ./wrapper.manifest
           grep -Fx "family=hermes" ./wrapper.manifest
           grep -Fx "product_image=${{ inputs.product_image }}" ./wrapper.manifest
+          grep -E "^runtime_profile_customer=hermes(-workspace)?-customer$" ./wrapper.manifest
+          grep -E "^runtime_profile_dev=hermes(-workspace)?-dev$" ./wrapper.manifest
+          docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.recipe.schema" }}' | grep -Fx v1
+          docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.product-image" }}' | grep -Fx "${{ inputs.product_image }}"
 
       - name: Push wrapper
         run: docker push "$IMAGE_REPOSITORY:${{ inputs.image_tag }}"

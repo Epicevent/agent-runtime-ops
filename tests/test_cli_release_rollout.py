@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from agent_runtime_ops.cli import (
+    IMAGE_RECIPE_LABEL_PREFIX,
     cmd_apply,
     cmd_check,
     cmd_diagnostics_show,
@@ -21,12 +22,94 @@ from agent_runtime_ops.cli import (
     cmd_rollout_plan,
     cmd_rollout_promote,
     cmd_rollout_rollback_canary,
+    _image_recipe_from_wrapper_image,
 )
 from agent_runtime_ops.yamlio import dump_yaml, load_yaml
 
 
 def image_ref(digest_char: str) -> str:
     return "ghcr.io/epicevent/openclaw-nas-agent@sha256:" + digest_char * 64
+
+
+def wrapper_image_ref(repo: str, digest_char: str) -> str:
+    return f"ghcr.io/epicevent/{repo}@sha256:" + digest_char * 64
+
+
+def hermes_image_recipe(
+    *,
+    product_image: str | None = None,
+    product_component: str = "hermes-workspace",
+    customer_profile: str = "hermes-workspace-customer",
+    dev_profile: str = "hermes-workspace-dev",
+) -> dict[str, object]:
+    product_image = product_image or wrapper_image_ref("hermes-workspace", "2")
+    return {
+        "schema": "v1",
+        "source": "wrapper_image_labels",
+        "family": "hermes",
+        "product_image": product_image,
+        "product_component": product_component,
+        "wrapper_component": "hermes-wrapper",
+        "runtime_profiles": {
+            "customer": customer_profile,
+            "dev": dev_profile,
+        },
+        "runtime_contracts": {
+            "customer": "hermes-workspace-http-3000",
+            "dev": "hermes-workspace-source-http-3000",
+        },
+        "command_mode": "image-default",
+        "working_dir": "/app",
+        "http_port": "3000",
+        "ops_repo_commit": "8be9e466c28f821a907a40ab2b0068910c6762cf",
+    }
+
+
+def hermes_recipe_labels(**overrides: str) -> dict[str, str]:
+    product_image = overrides.pop("product_image", wrapper_image_ref("hermes-workspace", "2"))
+    values = {
+        "recipe.schema": "v1",
+        "family": "hermes",
+        "product-image": product_image,
+        "product-component": "hermes-workspace",
+        "wrapper-component": "hermes-wrapper",
+        "runtime-profile.customer": "hermes-workspace-customer",
+        "runtime-profile.dev": "hermes-workspace-dev",
+        "runtime-contract.customer": "hermes-workspace-http-3000",
+        "runtime-contract.dev": "hermes-workspace-source-http-3000",
+        "command-mode": "image-default",
+        "working-dir": "/app",
+        "http-port": "3000",
+        "ops-repo-commit": "8be9e466c28f821a907a40ab2b0068910c6762cf",
+    }
+    values.update(overrides)
+    return {IMAGE_RECIPE_LABEL_PREFIX + key: value for key, value in values.items()}
+
+
+def hermes_release_entry(candidate_product_repo: str = "hermes-workspace") -> str:
+    candidate_digest = "sha256:" + "2" * 64
+    wrapper_digest = "sha256:" + "3" * 64
+    product_image = f"ghcr.io/epicevent/{candidate_product_repo}@{candidate_digest}"
+    recipe = hermes_image_recipe(
+        product_image=product_image,
+        product_component="hermes-workspace" if candidate_product_repo == "hermes-workspace" else "hermes-agent",
+    )
+    return f"""
+  hermes-candidate:
+    family: hermes
+    wrapper_image: ghcr.io/epicevent/agent-runtime-hermes@{wrapper_digest}
+    product_image: {product_image}
+    digest: {wrapper_digest}
+    compatibility_mode: wrapped_product_image
+    image_recipe: {json.dumps(recipe)}
+    components:
+      product_image: {product_image}
+      wrapper_image: ghcr.io/epicevent/agent-runtime-hermes@{wrapper_digest}
+      product_component: {recipe["product_component"]}
+      wrapper_component: hermes-wrapper
+      runtime_profile_customer: hermes-workspace-customer
+      runtime_profile_dev: hermes-workspace-dev
+"""
 
 
 def import_args(root: Path, **overrides: object) -> argparse.Namespace:
@@ -47,8 +130,6 @@ def import_args(root: Path, **overrides: object) -> argparse.Namespace:
 
 def write_hermes_state(root: Path, *, candidate_product_repo: str = "hermes-workspace") -> None:
     current_digest = "sha256:" + "1" * 64
-    candidate_digest = "sha256:" + "2" * 64
-    wrapper_digest = "sha256:" + "3" * 64
     (root / "slots.yaml").write_text(
         """
 slots:
@@ -76,11 +157,7 @@ releases:
     wrapper_image: ghcr.io/epicevent/openclaw-nas-agent@{current_digest}
     product_image: ghcr.io/epicevent/openclaw-nas-agent@{current_digest}
     digest: {current_digest}
-  hermes-candidate:
-    family: hermes
-    wrapper_image: ghcr.io/epicevent/agent-runtime-hermes@{wrapper_digest}
-    product_image: ghcr.io/epicevent/{candidate_product_repo}@{candidate_digest}
-    digest: {wrapper_digest}
+{hermes_release_entry(candidate_product_repo)}
 """.lstrip(),
         encoding="utf-8",
     )
@@ -334,6 +411,83 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertIn("release_digest=sha256:" + "2" * 64, output.getvalue())
             self.assertIn("product_component=combined-runtime", output.getvalue())
 
+    def test_wrapper_image_recipe_reads_oci_labels(self) -> None:
+        product_image = wrapper_image_ref("hermes-workspace", "2")
+        wrapper_image = wrapper_image_ref("agent-runtime-hermes", "3")
+        with patch("agent_runtime_ops.cli._image_recipe_labels_from_wrapper", return_value=hermes_recipe_labels()):
+            recipe = _image_recipe_from_wrapper_image(wrapper_image, family="hermes", product_image=product_image)
+        self.assertEqual(recipe["source"], "wrapper_image_labels")
+        self.assertEqual(recipe["runtime_profiles"]["customer"], "hermes-workspace-customer")
+        self.assertEqual(recipe["product_component"], "hermes-workspace")
+
+    def test_wrapper_image_recipe_rejects_component_mismatch(self) -> None:
+        product_image = wrapper_image_ref("hermes-workspace", "2")
+        wrapper_image = wrapper_image_ref("agent-runtime-hermes", "3")
+        labels = hermes_recipe_labels(**{"product-component": "combined-runtime"})
+        with patch("agent_runtime_ops.cli._image_recipe_labels_from_wrapper", return_value=labels):
+            with self.assertRaisesRegex(ValueError, "product-component mismatch"):
+                _image_recipe_from_wrapper_image(wrapper_image, family="hermes", product_image=product_image)
+
+    def test_release_import_registers_labeled_wrapper_recipe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_hermes_state(root)
+            product_image = wrapper_image_ref("hermes-workspace", "2")
+            wrapper_image = wrapper_image_ref("agent-runtime-hermes", "3")
+            recipe = hermes_image_recipe(product_image=product_image)
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.cli._image_recipe_from_wrapper_image", return_value=recipe),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_release_import(
+                    import_args(
+                        root,
+                        name="hermes-labeled",
+                        family="hermes",
+                        image=None,
+                        product_image=product_image,
+                        wrapper_image=wrapper_image,
+                        compat_combined=False,
+                    )
+                )
+            self.assertEqual(rc, 0, output.getvalue())
+            release = load_yaml(root / "releases.yaml")["releases"]["hermes-labeled"]
+            self.assertEqual(release["compatibility_mode"], "wrapped_product_image")
+            self.assertEqual(release["image_recipe"]["runtime_profiles"]["customer"], "hermes-workspace-customer")
+            self.assertEqual(release["components"]["runtime_profile_customer"], "hermes-workspace-customer")
+            self.assertIn("runtime_profile_customer=hermes-workspace-customer", output.getvalue())
+
+    def test_release_import_rejects_split_wrapper_without_recipe_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_hermes_state(root)
+            product_image = wrapper_image_ref("hermes-workspace", "2")
+            wrapper_image = wrapper_image_ref("agent-runtime-hermes", "3")
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch(
+                    "agent_runtime_ops.cli._image_recipe_from_wrapper_image",
+                    side_effect=ValueError("wrapper image is missing agent-runtime recipe labels"),
+                ),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_release_import(
+                    import_args(
+                        root,
+                        name="hermes-unlabeled",
+                        family="hermes",
+                        image=None,
+                        product_image=product_image,
+                        wrapper_image=wrapper_image,
+                        compat_combined=False,
+                    )
+                )
+            self.assertEqual(rc, 1)
+            self.assertIn("missing agent-runtime recipe labels", output.getvalue())
+
     def test_release_import_rejects_tag_only_image(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -402,9 +556,24 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertEqual(rc, 0, output.getvalue())
             plan = json.loads(output.getvalue())
             self.assertFalse(plan["contract_compatible"])
+            self.assertEqual(plan["runtime_profile"], "hermes-workspace-customer")
             self.assertEqual(plan["runtime_contract"], "hermes-workspace-http-3000")
             failed = [item["name"] for item in plan["contract_checks"] if not item["ok"]]
             self.assertIn("product_image_matches_runtime_contract", failed)
+
+    def test_rollout_plan_uses_image_recipe_runtime_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_hermes_state(root)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                rc = cmd_rollout_plan(argparse.Namespace(state_root=str(root), family="hermes", release="hermes-candidate"))
+
+            self.assertEqual(rc, 0, output.getvalue())
+            plan = json.loads(output.getvalue())
+            self.assertTrue(plan["contract_compatible"], output.getvalue())
+            self.assertEqual(plan["fleet_runtime_profile"], "hermes-customer")
+            self.assertEqual(plan["runtime_profile"], "hermes-workspace-customer")
 
     def test_rollout_canary_rejects_hermes_agent_only_image_before_state_change(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -431,6 +600,33 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertIn("release does not satisfy runtime contract", output.getvalue())
             self.assertEqual((root / "slots.yaml").read_text(encoding="utf-8"), before_slots)
             apply.assert_not_called()
+
+    def test_rollout_canary_records_image_recipe_runtime_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_hermes_state(root)
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.cli.cmd_apply", return_value=0) as apply,
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_rollout_canary(
+                    argparse.Namespace(
+                        state_root=str(root),
+                        family="hermes",
+                        release="hermes-candidate",
+                        slot="oc20",
+                        allow_first_apply=False,
+                    )
+                )
+            self.assertEqual(rc, 0, output.getvalue())
+            lanes = load_yaml(root / "lanes.yaml")["lanes"]
+            self.assertEqual(lanes["hermes-canary"]["release"], "hermes-candidate")
+            self.assertEqual(lanes["hermes-canary"]["runtime_profile"], "hermes-workspace-customer")
+            rollout = load_yaml(root / "rollout-state.yaml")
+            self.assertEqual(rollout["families"]["hermes"]["canary"]["runtime_profile"], "hermes-workspace-customer")
+            self.assertEqual(apply.call_args.args[0].slot, "oc20")
 
     def test_rollout_canary_moves_only_target_slot_and_records_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
