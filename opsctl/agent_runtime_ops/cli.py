@@ -1122,7 +1122,7 @@ def _restore_backup(slot: str, runtime_dir: Path, backup_dir: Path, state_root: 
     if config.returncode != 0:
         return False, (config.stderr or config.stdout).strip() or "rollback_compose_config_failed"
     up = _run_text_cwd(
-        _docker_compose_command(slot, compose_path, "up", "-d", "--remove-orphans"),
+        _docker_compose_command(slot, compose_path, "up", "-d", "--force-recreate", "--remove-orphans"),
         runtime_dir,
         timeout=180,
     )
@@ -1275,7 +1275,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
         return config.returncode or 1
 
     up = _run_text_cwd(
-        _docker_compose_command(desired.slot, compose_path, "up", "-d", "--remove-orphans"),
+        _docker_compose_command(desired.slot, compose_path, "up", "-d", "--force-recreate", "--remove-orphans"),
         runtime_dir,
         timeout=240,
     )

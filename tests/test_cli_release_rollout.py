@@ -4,11 +4,13 @@ import argparse
 import contextlib
 import io
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from agent_runtime_ops.cli import (
+    cmd_apply,
     cmd_recipe_dev_apply,
     cmd_recipe_dev_status,
     cmd_release_import,
@@ -91,6 +93,41 @@ def import_candidate(root: Path, name: str = "openclaw-candidate") -> None:
 
 
 class CliReleaseRolloutTests(unittest.TestCase):
+    def test_apply_force_recreates_compose_container(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            runtime_dir = root / "home" / "oc3" / "openclaw"
+            runtime_dir.mkdir(parents=True)
+            (runtime_dir / ".env").write_text(
+                "RUNTIME_UID=993\nRUNTIME_GID=980\nDATA_GID=980\n",
+                encoding="utf-8",
+            )
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], cwd: Path, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.cli._slot_runtime_dir", return_value=runtime_dir),
+                patch("agent_runtime_ops.cli._run_text_cwd", side_effect=fake_run),
+                patch(
+                    "agent_runtime_ops.cli._run_live_slot_checks_with_wait",
+                    return_value=[(True, "live_runtime_recreated", "ok")],
+                ),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_apply(argparse.Namespace(state_root=str(root), slot="oc3", allow_first_apply=True))
+
+            self.assertEqual(rc, 0, output.getvalue())
+            up_calls = [call for call in calls if "up" in call]
+            self.assertEqual(len(up_calls), 1)
+            self.assertIn("--force-recreate", up_calls[0])
+            self.assertIn("--remove-orphans", up_calls[0])
+
     def test_recipe_apply_dev_records_source_output_without_image_bake(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
