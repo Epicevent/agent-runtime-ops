@@ -11,5 +11,9 @@ runtime_user_mode: image-managed
 required_command:
   - gateway
   - run
+required_environment:
+  HERMES_DASHBOARD_HOST: 0.0.0.0
+  HERMES_DASHBOARD_PORT: "9119"
+required_gateway_container_port: "9119"
 http_smoke_path: /
 startup_timeout_seconds: 240
