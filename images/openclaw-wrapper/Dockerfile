@@ -1,9 +1,11 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
+ARG BASE_IMAGE
 ARG PRODUCT_IMAGE=""
 ARG OPS_REPO_COMMIT=""
 ARG RUNTIME_FAMILY="openclaw"
+ARG RUNTIME_USER="node"
 
 LABEL org.opencontainers.image.title="JI TECH OpenClaw runtime wrapper"
 LABEL org.opencontainers.image.description="OpenClaw product image wrapped with JI TECH runtime document tooling"
@@ -11,6 +13,8 @@ LABEL org.opencontainers.image.family="openclaw"
 LABEL org.opencontainers.image.base.name="${BASE_IMAGE}"
 LABEL org.opencontainers.image.product.image="${PRODUCT_IMAGE}"
 LABEL org.opencontainers.image.revision="${OPS_REPO_COMMIT}"
+
+USER root
 
 COPY images/shared-document-tools/ /usr/local/share/agent-runtime-document-tools/
 
@@ -23,3 +27,4 @@ RUN set -eu; \
       echo "ops_repo_commit=${OPS_REPO_COMMIT}"; \
     } > /usr/local/share/agent-runtime-ops/wrapper.manifest
 
+USER ${RUNTIME_USER}
