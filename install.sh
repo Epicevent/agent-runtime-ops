@@ -363,6 +363,17 @@ if [[ -r "\$GEMINI_ENV" ]]; then
 fi
 if [[ "\$(id -un 2>/dev/null || true)" == "\$OPS_USER" ]]; then
   export GEMINI_CLI_TRUST_WORKSPACE="\${GEMINI_CLI_TRUST_WORKSPACE:-true}"
+  skip_agent_runtime_mcp_default=0
+  for arg in "\$@"; do
+    case "\$arg" in
+      --)
+        break
+        ;;
+      mcp|extensions|extension|skills|skill|hooks|hook|gemma)
+        skip_agent_runtime_mcp_default=1
+        ;;
+    esac
+  done
   has_allowed_mcp=0
   for arg in "\$@"; do
     case "\$arg" in
@@ -371,7 +382,7 @@ if [[ "\$(id -un 2>/dev/null || true)" == "\$OPS_USER" ]]; then
         ;;
     esac
   done
-  if [[ "\$has_allowed_mcp" -eq 0 ]]; then
+  if [[ "\$skip_agent_runtime_mcp_default" -eq 0 && "\$has_allowed_mcp" -eq 0 ]]; then
     set -- --allowed-mcp-server-names agent-runtime-ops "\$@"
   fi
 fi
