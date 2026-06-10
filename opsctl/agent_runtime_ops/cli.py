@@ -2096,9 +2096,9 @@ def _print_process_result(prefix: str, proc: subprocess.CompletedProcess[str], l
         print(f"{prefix}={detail[:limit]}")
 
 
-def _write_failed_container_diagnostics(slot: str, profile, backup_dir: Path) -> Path | None:
+def _write_failed_container_diagnostics(binding: RuntimeBinding, profile, backup_dir: Path) -> Path | None:
     try:
-        container, lookup = _find_gateway_container(slot, profile)
+        container, lookup = _find_gateway_container(binding, profile)
         diag_dir = backup_dir / "failed-container"
         diag_dir.mkdir(mode=0o700, exist_ok=True)
         (diag_dir / "lookup.txt").write_text(f"container={container or ''}\nlookup={lookup or ''}\n", encoding="utf-8")
@@ -2375,7 +2375,7 @@ def _apply_desired_slot(
         if not ok:
             failed += 1
     if failed:
-        diagnostics_dir = _write_failed_container_diagnostics(desired.slot, profile, backup_dir)
+        diagnostics_dir = _write_failed_container_diagnostics(desired.route, profile, backup_dir)
         ok, reason = _restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
         print(f"apply_status=fail live_failed={failed}")
         if diagnostics_dir:
@@ -2632,7 +2632,7 @@ def _run_runtime_secret_container_checks(desired, profile, keys: set[str]) -> li
     checks.append((bool(docker), "runtime_secret_docker_cli_available", docker))
     if not docker:
         return checks
-    container, lookup = _find_gateway_container(desired.slot, profile)
+    container, lookup = _find_gateway_container(desired.route, profile)
     checks.append((bool(container), "runtime_secret_container_lookup", lookup))
     if not container:
         return checks
