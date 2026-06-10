@@ -23,6 +23,12 @@ PROVIDER_SECRET_KEYS = {
     "XAI_API_KEY",
 }
 
+INTERNAL_RUNTIME_SECRET_KEYS = {
+    "API_SERVER_KEY",
+}
+
+RUNTIME_SECRET_KEYS = PROVIDER_SECRET_KEYS | INTERNAL_RUNTIME_SECRET_KEYS
+
 SECRET_ENV_RE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$")
 
 
@@ -61,7 +67,11 @@ def parse_secret_env_text(text: str, *, source: str = "<env>") -> dict[str, str]
 
 
 def validate_provider_secret_values(values: dict[str, str]) -> dict[str, str]:
-    unknown = sorted(set(values) - PROVIDER_SECRET_KEYS)
+    return validate_runtime_secret_values(values)
+
+
+def validate_runtime_secret_values(values: dict[str, str]) -> dict[str, str]:
+    unknown = sorted(set(values) - RUNTIME_SECRET_KEYS)
     if unknown:
         raise ValueError("unsupported runtime secret key(s): " + ",".join(unknown))
     supported = {key: value for key, value in values.items() if value}

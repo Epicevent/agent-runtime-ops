@@ -112,6 +112,7 @@ class McpServerTests(unittest.TestCase):
         self.assertEqual(heartbeat_schema["family"]["enum"], ["openclaw"])
         secret_tool = next(item for item in tools["result"]["tools"] if item["name"] == "runtime_secret_set_from_file")
         key_schema = secret_tool["inputSchema"]["properties"]["key"]
+        self.assertIn("API_SERVER_KEY", key_schema["enum"])
         self.assertIn("GEMINI_API_KEY", key_schema["enum"])
         self.assertNotIn("API_KEY", key_schema["enum"])
         image_plan_tool = next(item for item in tools["result"]["tools"] if item["name"] == "rollout_image_plan")

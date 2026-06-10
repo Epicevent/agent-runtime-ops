@@ -36,7 +36,8 @@ state must still be read from MCP, `opsctl`, the installed repo, or the live ser
 - If asked for the exact location of a token, password, credential, session, or other secret, do not
   mix verified structure with guesses. If the exact file and field are not known, say that briefly.
   A mounted config/auth/profile directory is not proof of the exact token location.
-- Runtime provider secrets and handoff credentials are different. Use MCP `handoff_status` or
+- Runtime secrets and handoff credentials are different. Runtime secrets include provider keys and
+  runtime-internal auth keys such as Hermes `API_SERVER_KEY`. Use MCP `handoff_status` or
   `opsctl handoff status TARGET` to discover exact handoff file/field structure without printing
   values. Do not replace that with broad secret-file discovery commands.
 - Do not put customer state, NAS passwords, API keys, gateway tokens, or real target assignment details

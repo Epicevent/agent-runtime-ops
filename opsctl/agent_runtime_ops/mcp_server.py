@@ -12,7 +12,7 @@ from typing import Any, TextIO
 
 from .paths import REPO_ROOT
 from .redaction import redact
-from .runtime_secrets import PROVIDER_SECRET_KEYS
+from .runtime_secrets import RUNTIME_SECRET_KEYS
 
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -384,7 +384,7 @@ class McpServer:
                 "name": "runtime_secret_status",
                 "title": "Runtime Secret Status",
                 "description": (
-                    "Check whether supported provider secret keys exist without printing values. "
+                    "Check whether supported runtime secret keys exist without printing values. "
                     "For dev or customer groups, prefer runtime_class over parallel per-target calls."
                 ),
                 "inputSchema": {
@@ -402,12 +402,12 @@ class McpServer:
             {
                 "name": "runtime_secret_set_from_file",
                 "title": "Set Runtime Secret From File",
-                "description": "Inject one provider secret from an allowed local file through opsctl stdin.",
+                "description": "Inject one runtime secret from an allowed local file through opsctl stdin.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "target": {"type": "string"},
-                        "key": {"type": "string", "enum": sorted(PROVIDER_SECRET_KEYS)},
+                        "key": {"type": "string", "enum": sorted(RUNTIME_SECRET_KEYS)},
                         "secret_file": {"type": "string"},
                         "check": {"type": "boolean", "default": True},
                         "no_restart": {"type": "boolean", "default": False},
@@ -924,7 +924,7 @@ class McpServer:
         self._reject_sensitive_raw_args(args, allowed={"secret_file"})
         slot = self._slot(args.get("target"))
         key = str(args.get("key") or "")
-        if key not in PROVIDER_SECRET_KEYS:
+        if key not in RUNTIME_SECRET_KEYS:
             raise ToolError(f"unsupported runtime secret key: {key}")
         value = self._read_allowed_secret_file(args.get("secret_file"))
         argv = [self.sudo, self.opsctl, "runtime-secret", "set", slot, "--key", key, "--value-stdin"]

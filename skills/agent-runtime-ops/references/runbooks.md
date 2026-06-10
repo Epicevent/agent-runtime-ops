@@ -288,7 +288,9 @@ ssh svcops "sudo /usr/local/bin/opsctl check --live dev-oc"
 
 ## Runtime Secret Injection
 
-Runtime provider secrets are target secrets, not Gemini CLI credentials for the `svcops` account.
+Runtime secrets are target secrets, not Gemini CLI credentials for the `svcops` account. They include
+provider keys such as `GEMINI_API_KEY` and runtime-internal auth keys such as Hermes
+`API_SERVER_KEY`.
 
 Never print the secret value. Preferred terminal stdin pattern:
 
@@ -304,9 +306,17 @@ sudo /usr/local/bin/opsctl runtime-secret status dev-oc
 MCP may use `runtime_secret_set_from_file` only with an allowed `secret_file` path. Do not pass raw
 keys as JSON arguments.
 
+For Hermes Workspace `HTTP 401` on backend verification, first check whether `API_SERVER_KEY` is
+present. Rotate it without printing the value:
+
+```bash
+ssh svcops "sudo /usr/local/bin/opsctl runtime-secret status TARGET"
+ssh svcops "openssl rand -hex 32 | sudo /usr/local/bin/opsctl runtime-secret set TARGET --key API_SERVER_KEY --value-stdin --check"
+```
+
 ## Handoff Credentials
 
-Gateway tokens and workspace passwords are handoff credentials, not runtime provider secrets.
+Gateway tokens and workspace passwords are handoff credentials, not runtime secrets.
 
 Discover structure and presence without printing values:
 

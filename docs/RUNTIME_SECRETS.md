@@ -1,10 +1,12 @@
 # Runtime Secrets
 
-Runtime secrets are provider/API keys that must stay outside the public repo and
-outside `/srv/openclaw-ops` desired state.
+Runtime secrets are provider/API keys or runtime-internal auth keys that must
+stay outside the public repo and outside `/srv/openclaw-ops` desired state.
 
 Gemini/API keys here are runtime slot secrets. They are not used to install or
-authenticate a Gemini CLI on the `svcops` account.
+authenticate a Gemini CLI on the `svcops` account. Hermes `API_SERVER_KEY` is
+also a runtime slot secret; it must match the workspace-side `HERMES_API_TOKEN`
+that the compose layer derives from it.
 
 The supported path is repo-owned and explicit:
 
@@ -72,7 +74,31 @@ sudo /usr/local/bin/opsctl runtime-secret set dev-oc \
   --check
 ```
 
-Only provider/API secret key names are accepted.
+Only supported runtime secret key names are accepted.
+
+## Hermes Backend Auth
+
+Hermes Workspace talks to the embedded Hermes Agent gateway with bearer auth.
+If the browser shows `HTTP 401` while the container health and root HTTP smoke
+pass, check `API_SERVER_KEY` presence first:
+
+```bash
+sudo /usr/local/bin/opsctl runtime-secret status oc16
+```
+
+Generate or rotate the internal gateway key without printing it:
+
+```bash
+openssl rand -hex 32 | sudo /usr/local/bin/opsctl runtime-secret set \
+  oc16 \
+  --key API_SERVER_KEY \
+  --value-stdin \
+  --check
+```
+
+`--check` verifies that both `API_SERVER_KEY` and the derived
+`HERMES_API_TOKEN` are present in the recreated container and match without
+printing either value.
 
 ## Status
 

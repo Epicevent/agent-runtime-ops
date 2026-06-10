@@ -7,6 +7,7 @@ from agent_runtime_ops.runtime_secrets import (
     parse_secret_env_text,
     primary_profile_secret_file,
     render_upserted_secret_env,
+    validate_runtime_secret_values,
     validate_provider_secret_values,
 )
 
@@ -27,6 +28,10 @@ class RuntimeSecretTests(unittest.TestCase):
     def test_validate_provider_secret_values_rejects_unknown_key(self) -> None:
         with self.assertRaisesRegex(ValueError, "unsupported runtime secret"):
             validate_provider_secret_values({"DATABASE_URL": "postgres://example"})
+
+    def test_validate_runtime_secret_values_accepts_internal_api_server_key(self) -> None:
+        values = validate_runtime_secret_values({"API_SERVER_KEY": "internal-token"})
+        self.assertEqual(values["API_SERVER_KEY"], "internal-token")
 
     def test_render_upserted_secret_env_preserves_other_lines(self) -> None:
         rendered = render_upserted_secret_env(

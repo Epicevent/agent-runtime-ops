@@ -75,11 +75,11 @@ from .routing import (
     validate_public_host as validate_binding_public_host,
 )
 from .runtime_secrets import (
-    PROVIDER_SECRET_KEYS,
+    RUNTIME_SECRET_KEYS,
     parse_secret_env_text,
     primary_profile_secret_file,
     render_upserted_secret_env,
-    validate_provider_secret_values,
+    validate_runtime_secret_values,
 )
 from .state import RuntimeTarget, digest_from_image_ref, image_spec_from_manifest, load_runtime_target, runtime_manifest_path
 from .yamlio import dump_yaml, load_yaml
@@ -2536,14 +2536,14 @@ def _secret_values_from_args(args: argparse.Namespace) -> dict[str, str]:
     if args.env_file and (args.key or args.value_stdin):
         raise ValueError("use either --env-file or --key/--value-stdin, not both")
     if args.env_file:
-        return validate_provider_secret_values(_read_root_secret_env_file(Path(args.env_file)))
+        return validate_runtime_secret_values(_read_root_secret_env_file(Path(args.env_file)))
     if not args.key or not args.value_stdin:
         raise ValueError("use --env-file FILE or --key KEY --value-stdin")
     key = str(args.key)
-    if key not in PROVIDER_SECRET_KEYS:
+    if key not in RUNTIME_SECRET_KEYS:
         raise ValueError(f"unsupported runtime secret key: {key}")
     value = sys.stdin.read().rstrip("\r\n")
-    return validate_provider_secret_values({key: value})
+    return validate_runtime_secret_values({key: value})
 
 
 def _safe_write_secret_env(path: Path, text: str, uid: int, gid: int) -> None:
@@ -2654,6 +2654,24 @@ def _run_runtime_secret_container_checks(desired, profile, keys: set[str]) -> li
     for key in sorted(keys):
         proc = _run_text(["docker", "exec", container, "sh", "-lc", f'test -n "${{{key}:-}}"'])
         checks.append((proc.returncode == 0, f"runtime_secret_{key.lower()}_present_in_container", "secret_value_printed=no"))
+        if key == "API_SERVER_KEY":
+            token_proc = _run_text(
+                [
+                    "docker",
+                    "exec",
+                    container,
+                    "sh",
+                    "-lc",
+                    'test -n "${HERMES_API_TOKEN:-}" && test "${API_SERVER_KEY:-}" = "${HERMES_API_TOKEN:-}"',
+                ]
+            )
+            checks.append(
+                (
+                    token_proc.returncode == 0,
+                    "runtime_secret_hermes_api_token_matches_api_server_key",
+                    "secret_value_printed=no",
+                )
+            )
     return checks
 
 
@@ -2681,7 +2699,7 @@ def _secret_status_rows(path: Path) -> tuple[str, dict[str, bool]]:
         values = parse_secret_env_text(path.read_text(encoding="utf-8", errors="replace"), source=str(path))
     except Exception:
         return "parse_failed", {}
-    return "present", {key: bool(values.get(key)) for key in sorted(PROVIDER_SECRET_KEYS)}
+    return "present", {key: bool(values.get(key)) for key in sorted(RUNTIME_SECRET_KEYS)}
 
 
 def cmd_runtime_secret_set(args: argparse.Namespace) -> int:
@@ -2766,7 +2784,7 @@ def cmd_runtime_secret_status(args: argparse.Namespace) -> int:
     print(f"runtime_profile={profile.name}")
     print(f"secret_file={secret_file.path}")
     print(f"secret_file_state={file_state}")
-    for key in sorted(PROVIDER_SECRET_KEYS):
+    for key in sorted(RUNTIME_SECRET_KEYS):
         if key in key_state:
             print(f"{key.lower()}={'present' if key_state[key] else 'absent'}")
     print("secret_value_printed=no")
