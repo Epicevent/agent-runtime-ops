@@ -704,6 +704,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
     def test_install_sudoers_allows_capture_dev_and_live_check_argument_orders(self) -> None:
         text = Path("install.sh").read_text(encoding="utf-8")
         self.assertIn(" check --live *", text)
+        self.assertIn(" check * --live", text)
         self.assertIn(" check * --live *", text)
         self.assertIn(" recipe apply-dev *", text)
         self.assertIn(" recipe capture-dev *", text)
