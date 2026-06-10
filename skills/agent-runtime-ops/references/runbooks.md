@@ -209,8 +209,8 @@ directory, secrets, NAS, containers, labels, backups, and state.
 
 ## Image Rollout
 
-Use digest-pinned wrapper and product images. Do not use release-state rollout commands for normal
-OpenClaw/Hermes rollout work.
+Use digest-pinned wrapper and product images. Do not use release-state rollout commands; the public
+operating path is the image rollout toolset below.
 
 Plan:
 
@@ -306,8 +306,8 @@ terminal, and tell them not to paste the secret value back into chat. Record onl
 
 ## Apply and Rollback
 
-Normal rollouts should use image rollout tools, not legacy release-state apply. Use `apply` only for
-an explicit legacy-state recovery or migration operation after checks identify the intended target:
+Normal rollouts use image rollout tools. Use single-slot `apply` only to re-apply the slot's current
+runtime manifest after checks identify that exact target:
 
 ```bash
 ssh svcops "/usr/local/bin/opsctl binding status SLOT"

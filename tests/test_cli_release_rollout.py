@@ -11,6 +11,7 @@ import unittest
 import uuid
 from unittest.mock import patch
 
+import agent_runtime_ops.cli as cli
 from agent_runtime_ops.cli import (
     IMAGE_RECIPE_LABEL_PREFIX,
     cmd_apply,
@@ -20,17 +21,14 @@ from agent_runtime_ops.cli import (
     cmd_recipe_dev_apply,
     cmd_recipe_dev_status,
     cmd_recipe_validate_canonical,
-    cmd_release_import,
-    cmd_rollout_canary,
-    cmd_rollout_dev_apply,
-    cmd_rollout_dev_plan,
+    cmd_rollout_image_canary,
+    cmd_rollout_image_dev_apply,
     cmd_rollout_image_plan,
-    cmd_rollout_plan,
-    cmd_rollout_promote,
-    cmd_rollout_rollback_canary,
+    cmd_rollout_image_promote,
     cmd_rollout_status,
     _image_recipe_from_wrapper_image,
     _live_image_truth_from_info,
+    build_parser,
 )
 from agent_runtime_ops.canonical_recipes import load_canonical_recipe
 from agent_runtime_ops.profiles import load_profile
@@ -61,6 +59,10 @@ def binding(account: str, family: str, runtime_class: str, gateway: int, bridge:
 
 def hermes_workspace_recipe_digest() -> str:
     return load_canonical_recipe("hermes-workspace").digest
+
+
+def hermes_combined_recipe_digest() -> str:
+    return load_canonical_recipe("hermes-combined").digest
 
 
 def openclaw_control_recipe_digest() -> str:
@@ -124,6 +126,32 @@ def hermes_image_recipe(
     }
 
 
+def hermes_combined_image_recipe(*, product_image: str | None = None) -> dict[str, object]:
+    product_image = product_image or image_ref("1")
+    return {
+        "schema": "v1",
+        "source": "runtime_manifest_test",
+        "canonical_recipe_name": "hermes-combined",
+        "canonical_recipe_digest": hermes_combined_recipe_digest(),
+        "family": "hermes",
+        "product_image": product_image,
+        "product_component": "combined-runtime",
+        "wrapper_component": "hermes-wrapper",
+        "runtime_profiles": {
+            "customer": "hermes-customer",
+            "dev": "hermes-dev",
+        },
+        "runtime_contracts": {
+            "customer": "hermes-workspace-http-3000",
+            "dev": "hermes-workspace-source-http-3000",
+        },
+        "command_mode": "gateway-run",
+        "working_dir": "/opt/data/home",
+        "http_port": "3000",
+        "ops_repo_commit": "8be9e466c28f821a907a40ab2b0068910c6762cf",
+    }
+
+
 def hermes_recipe_labels(**overrides: str) -> dict[str, str]:
     product_image = overrides.pop("product_image", wrapper_image_ref("hermes-workspace", "2"))
     values = {
@@ -147,46 +175,76 @@ def hermes_recipe_labels(**overrides: str) -> dict[str, str]:
     return {IMAGE_RECIPE_LABEL_PREFIX + key: value for key, value in values.items()}
 
 
-def hermes_release_entry(candidate_product_repo: str = "hermes-workspace") -> str:
-    candidate_digest = "sha256:" + "2" * 64
-    wrapper_digest = "sha256:" + "3" * 64
-    product_image = f"ghcr.io/epicevent/{candidate_product_repo}@{candidate_digest}"
-    recipe = hermes_image_recipe(
-        product_image=product_image,
-        product_component="hermes-workspace" if candidate_product_repo == "hermes-workspace" else "hermes-agent",
-    )
-    return f"""
-  hermes-candidate:
-    family: hermes
-    wrapper_image: ghcr.io/epicevent/agent-runtime-hermes@{wrapper_digest}
-    product_image: {product_image}
-    digest: {wrapper_digest}
-    compatibility_mode: wrapped_product_image
-    image_recipe: {json.dumps(recipe)}
-    components:
-      product_image: {product_image}
-      wrapper_image: ghcr.io/epicevent/agent-runtime-hermes@{wrapper_digest}
-      product_component: {recipe["product_component"]}
-      wrapper_component: hermes-wrapper
-      runtime_profile_customer: hermes-workspace-customer
-      runtime_profile_dev: hermes-workspace-dev
-"""
-
-
-def import_args(root: Path, **overrides: object) -> argparse.Namespace:
-    values: dict[str, object] = {
-        "state_root": str(root),
-        "name": "openclaw-candidate",
+def openclaw_recipe_labels(**overrides: str) -> dict[str, str]:
+    product_image = overrides.pop("product_image", wrapper_image_ref("openclaw-jitech", "8"))
+    values = {
+        "recipe.schema": "v1",
+        "recipe.name": "openclaw-control",
+        "recipe.digest": openclaw_control_recipe_digest(),
         "family": "openclaw",
-        "image": image_ref("2"),
-        "product_image": None,
-        "wrapper_image": None,
-        "image_name": None,
-        "compat_combined": True,
-        "replace": False,
+        "product-image": product_image,
+        "product-component": "openclaw-control",
+        "wrapper-component": "openclaw-wrapper",
+        "runtime-profile.customer": "openclaw-customer",
+        "runtime-profile.dev": "openclaw-dev",
+        "runtime-contract.customer": "openclaw-gateway-http-18789",
+        "runtime-contract.dev": "openclaw-gateway-source-http-18789",
+        "command-mode": "compose-command",
+        "working-dir": "",
+        "http-port": "18789",
+        "ops-repo-commit": "ec892a32f9ca846f390e2dd19c577dd13d4f044f",
     }
     values.update(overrides)
-    return argparse.Namespace(**values)
+    return {IMAGE_RECIPE_LABEL_PREFIX + key: value for key, value in values.items()}
+
+
+def write_runtime_manifest(
+    root: Path,
+    *,
+    slot: str,
+    family: str,
+    slot_class: str,
+    runtime_profile: str,
+    wrapper_image: str,
+    product_image: str,
+    image_recipe: dict[str, object],
+) -> None:
+    manifest_dir = root / "runtime" / slot
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    (manifest_dir / "manifest.yaml").write_text(
+        dump_yaml(
+            {
+                "schema_version": 1,
+                "slot": slot,
+                "release": "direct-image",
+                "lane": f"image-{family}-{slot_class}",
+                "family": family,
+                "slot_class": slot_class,
+                "runtime_profile": runtime_profile,
+                "wrapper_image": wrapper_image,
+                "product_image": product_image,
+                "release_digest": wrapper_image.rsplit("@", 1)[-1],
+                "product_image_digest": product_image.rsplit("@", 1)[-1],
+                "recipe": {
+                    "mode": "wrapped_product_image",
+                    "product_component": image_recipe["product_component"],
+                    "wrapper_component": image_recipe["wrapper_component"],
+                    "components": {
+                        "product_image": product_image,
+                        "wrapper_image": wrapper_image,
+                        "product_component": image_recipe["product_component"],
+                        "wrapper_component": image_recipe["wrapper_component"],
+                        "canonical_recipe_name": image_recipe["canonical_recipe_name"],
+                        "canonical_recipe_digest": image_recipe["canonical_recipe_digest"],
+                    },
+                    "image_recipe": image_recipe,
+                    "canonical_recipe_name": image_recipe["canonical_recipe_name"],
+                    "canonical_recipe_digest": image_recipe["canonical_recipe_digest"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def write_slot_registry(root: Path, slots: list[str]) -> None:
@@ -215,7 +273,7 @@ def write_slot_registry(root: Path, slots: list[str]) -> None:
     (root / "runtime-bindings.json").write_text(dump_runtime_bindings(bindings), encoding="utf-8")
 
 
-def write_hermes_state(root: Path, *, candidate_product_repo: str = "hermes-workspace") -> None:
+def write_hermes_state(root: Path) -> None:
     current_digest = "sha256:" + "1" * 64
     (root / "slots.yaml").write_text(
         """
@@ -251,11 +309,32 @@ releases:
     wrapper_image: ghcr.io/epicevent/openclaw-nas-agent@{current_digest}
     product_image: ghcr.io/epicevent/openclaw-nas-agent@{current_digest}
     digest: {current_digest}
-{hermes_release_entry(candidate_product_repo)}
 """.lstrip(),
         encoding="utf-8",
     )
     write_slot_registry(root, ["oc20", "dev-hermess"])
+    product_image = image_ref("1")
+    wrapper_image = wrapper_image_ref("agent-runtime-hermes", "1")
+    write_runtime_manifest(
+        root,
+        slot="oc20",
+        family="hermes",
+        slot_class="customer",
+        runtime_profile="hermes-customer",
+        wrapper_image=wrapper_image,
+        product_image=product_image,
+        image_recipe=hermes_combined_image_recipe(product_image=product_image),
+    )
+    write_runtime_manifest(
+        root,
+        slot="dev-hermess",
+        family="hermes",
+        slot_class="dev",
+        runtime_profile="hermes-dev",
+        wrapper_image=wrapper_image,
+        product_image=product_image,
+        image_recipe=hermes_combined_image_recipe(product_image=product_image),
+    )
 
 
 def write_state(root: Path) -> None:
@@ -300,24 +379,47 @@ releases:
         encoding="utf-8",
     )
     write_slot_registry(root, ["oc3", "oc4", "dev-oc"])
-
-
-def import_candidate(root: Path, name: str = "openclaw-candidate") -> None:
-    output = io.StringIO()
-    with patch("agent_runtime_ops.cli._is_root", return_value=True), contextlib.redirect_stdout(output):
-        rc = cmd_release_import(import_args(root, name=name))
-    assert rc == 0, output.getvalue()
-
-
+    product_image = wrapper_image_ref("openclaw-jitech", "1")
+    wrapper_image = wrapper_image_ref("agent-runtime-openclaw", "1")
+    write_runtime_manifest(
+        root,
+        slot="oc3",
+        family="openclaw",
+        slot_class="customer",
+        runtime_profile="openclaw-customer",
+        wrapper_image=wrapper_image,
+        product_image=product_image,
+        image_recipe=openclaw_image_recipe(product_image=product_image),
+    )
+    write_runtime_manifest(
+        root,
+        slot="oc4",
+        family="openclaw",
+        slot_class="customer",
+        runtime_profile="openclaw-customer",
+        wrapper_image=wrapper_image,
+        product_image=product_image,
+        image_recipe=openclaw_image_recipe(product_image=product_image),
+    )
+    write_runtime_manifest(
+        root,
+        slot="dev-oc",
+        family="openclaw",
+        slot_class="dev",
+        runtime_profile="openclaw-dev",
+        wrapper_image=wrapper_image,
+        product_image=product_image,
+        image_recipe=openclaw_image_recipe(product_image=product_image),
+    )
 class CliReleaseRolloutTests(unittest.TestCase):
-    def test_rollout_status_reports_runtime_manifest_truth(self) -> None:
+    def test_rollout_status_uses_runtime_manifests_not_legacy_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write_hermes_state(root)
             wrapper_image = wrapper_image_ref("agent-runtime-hermes", "3")
             product_image = wrapper_image_ref("hermes-workspace", "2")
             manifest_dir = root / "runtime" / "oc20"
-            manifest_dir.mkdir(parents=True)
+            manifest_dir.mkdir(parents=True, exist_ok=True)
             (manifest_dir / "manifest.yaml").write_text(
                 dump_yaml(
                     {
@@ -342,11 +444,35 @@ class CliReleaseRolloutTests(unittest.TestCase):
 
             text = output.getvalue()
             self.assertEqual(rc, 0, text)
-            self.assertIn("status_source=legacy_rollout_state", text)
-            self.assertIn("runtime_status_source=runtime_manifests", text)
+            self.assertIn("status_source=runtime_manifests", text)
+            self.assertIn("binding_slots=oc20,dev-hermess", text)
             self.assertIn("runtime_manifest_direct_image_slots=oc20", text)
-            self.assertIn("runtime_manifest_canonical_recipe_names=hermes-workspace", text)
-            self.assertIn("status_warning=legacy_rollout_state_is_not_runtime_truth", text)
+            self.assertIn("runtime_manifest_missing_slots=", text)
+            self.assertIn("runtime_manifest_canonical_recipe_names=hermes-combined,hermes-workspace", text)
+            self.assertNotIn("legacy_rollout_state", text)
+
+    def test_release_state_rollout_commands_do_not_exist_on_public_or_internal_surface(self) -> None:
+        parser = build_parser()
+        rollout = next(action for action in parser._actions if action.dest == "command").choices["rollout"]
+        rollout_choices = next(action for action in rollout._actions if action.dest == "rollout_command").choices
+
+        self.assertEqual(
+            set(rollout_choices),
+            {"status", "image-plan", "image-dev-apply", "image-canary", "image-promote"},
+        )
+        self.assertNotIn("release", next(action for action in parser._actions if action.dest == "command").choices)
+        for name in (
+            "cmd_release_import",
+            "cmd_release_add",
+            "cmd_release_promote",
+            "cmd_rollout_plan",
+            "cmd_rollout_dev_plan",
+            "cmd_rollout_dev_apply",
+            "cmd_rollout_canary",
+            "cmd_rollout_promote",
+            "cmd_rollout_rollback_canary",
+        ):
+            self.assertFalse(hasattr(cli, name), name)
 
     def test_apply_force_recreates_compose_container(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -622,24 +748,105 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertEqual(plan["slots"][0]["gateway_port"], 30689)
             self.assertEqual(plan["slots"][0]["runtime_profile"], "hermes-workspace-customer")
 
-    def test_release_import_registers_combined_digest_release(self) -> None:
+    def test_rollout_image_canary_builds_target_from_wrapper_labels_and_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_hermes_state(root)
+            wrapper = wrapper_image_ref("agent-runtime-hermes", "3")
+            product = wrapper_image_ref("hermes-workspace", "2")
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.cli._image_recipe_labels_from_wrapper", return_value=hermes_recipe_labels(product_image=product)),
+                patch("agent_runtime_ops.cli._apply_desired_slot", return_value=0) as apply,
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_rollout_image_canary(
+                    argparse.Namespace(
+                        state_root=str(root),
+                        slot="oc20",
+                        wrapper_image=wrapper,
+                        product_image=product,
+                        allow_first_apply=False,
+                    )
+                )
+
+            self.assertEqual(rc, 0, output.getvalue())
+            desired = apply.call_args.kwargs["desired"]
+            self.assertEqual(desired.slot, "oc20")
+            self.assertEqual(desired.lane, "image-hermes-customer")
+            self.assertEqual(desired.release_name, "direct-image")
+            self.assertEqual(desired.runtime_profile, "hermes-workspace-customer")
+            self.assertEqual(desired.release_data["wrapper_image"], wrapper)
+            self.assertEqual(desired.release_data["product_image"], product)
+            self.assertIn("canonical_recipe_name=hermes-workspace", output.getvalue())
+
+    def test_rollout_image_dev_apply_uses_dev_projection_from_same_wrapper_recipe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_hermes_state(root)
+            wrapper = wrapper_image_ref("agent-runtime-hermes", "3")
+            product = wrapper_image_ref("hermes-workspace", "2")
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.cli._image_recipe_labels_from_wrapper", return_value=hermes_recipe_labels(product_image=product)),
+                patch("agent_runtime_ops.cli._apply_desired_slot", return_value=0) as apply,
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_rollout_image_dev_apply(
+                    argparse.Namespace(
+                        state_root=str(root),
+                        slot="dev-hermess",
+                        wrapper_image=wrapper,
+                        product_image=product,
+                        allow_first_apply=True,
+                    )
+                )
+
+            self.assertEqual(rc, 0, output.getvalue())
+            desired = apply.call_args.kwargs["desired"]
+            self.assertEqual(desired.slot, "dev-hermess")
+            self.assertEqual(desired.lane, "image-hermes-dev")
+            self.assertEqual(desired.release_name, "direct-image")
+            self.assertEqual(desired.runtime_profile, "hermes-workspace-dev")
+            self.assertTrue(apply.call_args.kwargs["allow_first_apply"])
+
+    def test_rollout_image_promote_uses_live_canary_truth_and_explicit_targets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write_state(root)
+            wrapper = wrapper_image_ref("agent-runtime-openclaw", "9")
+            product = wrapper_image_ref("openclaw-jitech", "8")
+            source_truth = {
+                "truth_status": "ok",
+                "wrapper_image": wrapper,
+                "product_image": product,
+            }
             output = io.StringIO()
-            with patch("agent_runtime_ops.cli._is_root", return_value=True), contextlib.redirect_stdout(output):
-                rc = cmd_release_import(import_args(root))
+            with (
+                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.cli._live_runtime_truth", return_value=(source_truth, [])),
+                patch(
+                    "agent_runtime_ops.cli._image_recipe_labels_from_wrapper",
+                    return_value=openclaw_recipe_labels(product_image=product),
+                ),
+                patch("agent_runtime_ops.cli._apply_desired_slot", return_value=0) as apply,
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_rollout_image_promote(
+                    argparse.Namespace(
+                        state_root=str(root),
+                        from_slot="oc3",
+                        slots="oc3,oc4",
+                    )
+                )
+
             self.assertEqual(rc, 0, output.getvalue())
-            releases = load_yaml(root / "releases.yaml")["releases"]
-            candidate = releases["openclaw-candidate"]
-            self.assertEqual(candidate["family"], "openclaw")
-            self.assertEqual(candidate["wrapper_image"], image_ref("2"))
-            self.assertEqual(candidate["product_image"], image_ref("2"))
-            self.assertEqual(candidate["digest"], "sha256:" + "2" * 64)
-            self.assertEqual(candidate["compatibility_mode"], "combined_runtime_image")
-            self.assertEqual(candidate["components"]["product_component"], "combined-runtime")
-            self.assertIn("release_digest=sha256:" + "2" * 64, output.getvalue())
-            self.assertIn("product_component=combined-runtime", output.getvalue())
+            self.assertEqual([call.kwargs["desired"].slot for call in apply.call_args_list], ["oc3", "oc4"])
+            self.assertEqual([call.kwargs["desired"].release_name for call in apply.call_args_list], ["direct-image", "direct-image"])
+            self.assertIn(f"wrapper_image={wrapper}", output.getvalue())
+            self.assertIn(f"product_image={product}", output.getvalue())
 
     def test_wrapper_image_recipe_reads_oci_labels(self) -> None:
         product_image = wrapper_image_ref("hermes-workspace", "2")
@@ -690,96 +897,6 @@ class CliReleaseRolloutTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "product-component mismatch"):
                 _image_recipe_from_wrapper_image(wrapper_image, family="hermes", product_image=product_image)
 
-    def test_release_import_registers_labeled_wrapper_recipe(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            write_hermes_state(root)
-            product_image = wrapper_image_ref("hermes-workspace", "2")
-            wrapper_image = wrapper_image_ref("agent-runtime-hermes", "3")
-            recipe = hermes_image_recipe(product_image=product_image)
-            output = io.StringIO()
-            with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
-                patch("agent_runtime_ops.cli._image_recipe_from_wrapper_image", return_value=recipe),
-                contextlib.redirect_stdout(output),
-            ):
-                rc = cmd_release_import(
-                    import_args(
-                        root,
-                        name="hermes-labeled",
-                        family="hermes",
-                        image=None,
-                        product_image=product_image,
-                        wrapper_image=wrapper_image,
-                        compat_combined=False,
-                    )
-                )
-            self.assertEqual(rc, 0, output.getvalue())
-            release = load_yaml(root / "releases.yaml")["releases"]["hermes-labeled"]
-            self.assertEqual(release["compatibility_mode"], "wrapped_product_image")
-            self.assertEqual(release["image_recipe"]["canonical_recipe_name"], "hermes-workspace")
-            self.assertEqual(release["image_recipe"]["canonical_recipe_digest"], hermes_workspace_recipe_digest())
-            self.assertEqual(release["components"]["canonical_recipe_name"], "hermes-workspace")
-            self.assertEqual(release["image_recipe"]["runtime_profiles"]["customer"], "hermes-workspace-customer")
-            self.assertEqual(release["components"]["runtime_profile_customer"], "hermes-workspace-customer")
-            self.assertIn("canonical_recipe_name=hermes-workspace", output.getvalue())
-            self.assertIn("runtime_profile_customer=hermes-workspace-customer", output.getvalue())
-
-    def test_release_import_rejects_split_wrapper_without_recipe_labels(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            write_hermes_state(root)
-            product_image = wrapper_image_ref("hermes-workspace", "2")
-            wrapper_image = wrapper_image_ref("agent-runtime-hermes", "3")
-            output = io.StringIO()
-            with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
-                patch(
-                    "agent_runtime_ops.cli._image_recipe_from_wrapper_image",
-                    side_effect=ValueError("wrapper image is missing agent-runtime recipe labels"),
-                ),
-                contextlib.redirect_stdout(output),
-            ):
-                rc = cmd_release_import(
-                    import_args(
-                        root,
-                        name="hermes-unlabeled",
-                        family="hermes",
-                        image=None,
-                        product_image=product_image,
-                        wrapper_image=wrapper_image,
-                        compat_combined=False,
-                    )
-                )
-            self.assertEqual(rc, 1)
-            self.assertIn("missing agent-runtime recipe labels", output.getvalue())
-
-    def test_release_import_rejects_tag_only_image(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            write_state(root)
-            output = io.StringIO()
-            with patch("agent_runtime_ops.cli._is_root", return_value=True), contextlib.redirect_stdout(output):
-                rc = cmd_release_import(import_args(root, name="openclaw-bad", image="ghcr.io/epicevent/openclaw-nas-agent:latest"))
-            self.assertEqual(rc, 1)
-            self.assertIn("pinned by digest", output.getvalue())
-
-    def test_rollout_plan_is_non_mutating(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            write_state(root)
-            import_candidate(root)
-            before = (root / "lanes.yaml").read_text(encoding="utf-8")
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                rc = cmd_rollout_plan(
-                    argparse.Namespace(state_root=str(root), family="openclaw", release="openclaw-candidate")
-                )
-            self.assertEqual(rc, 0, output.getvalue())
-            self.assertIn('"mutates": false', output.getvalue())
-            self.assertIn('"release_digest": "sha256:' + "2" * 64 + '"', output.getvalue())
-            self.assertEqual((root / "lanes.yaml").read_text(encoding="utf-8"), before)
-
     def test_live_check_prefers_live_image_truth_over_legacy_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -828,10 +945,10 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertNotIn(image_ref("1"), text)
             self.assertIn("PASS live_container_image_matches_release", text)
 
-    def test_hermes_customer_rejects_agent_only_product_image_contract(self) -> None:
+    def test_check_ignores_legacy_lane_release_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            write_hermes_state(root, candidate_product_repo="hermes-jitech")
+            write_hermes_state(root)
             lanes = load_yaml(root / "lanes.yaml")
             lanes["lanes"]["hermes"]["release"] = "hermes-candidate"
             (root / "lanes.yaml").write_text(dump_yaml(lanes), encoding="utf-8")
@@ -840,10 +957,11 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 rc = cmd_check(argparse.Namespace(state_root=str(root), slot="oc20", live=False))
 
             text = output.getvalue()
-            self.assertEqual(rc, 1, text)
+            self.assertEqual(rc, 0, text)
+            self.assertIn("release=direct-image", text)
             self.assertIn("runtime_contract=hermes-workspace-http-3000", text)
-            self.assertIn("FAIL product_image_matches_runtime_contract", text)
-            self.assertIn("product_component=hermes-agent", text)
+            self.assertIn("PASS product_image_matches_runtime_contract", text)
+            self.assertIn("canonical_recipe_name=hermes-combined", text)
 
     def test_hermes_customer_accepts_current_combined_runtime_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -859,353 +977,6 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertIn("PASS product_image_matches_runtime_contract", text)
             self.assertIn("product_component=combined-runtime", text)
             self.assertIn("canonical_recipe_name=hermes-combined", text)
-
-    def test_rollout_plan_shows_hermes_contract_incompatibility(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            write_hermes_state(root, candidate_product_repo="hermes-jitech")
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                rc = cmd_rollout_plan(argparse.Namespace(state_root=str(root), family="hermes", release="hermes-candidate"))
-
-            self.assertEqual(rc, 0, output.getvalue())
-            plan = json.loads(output.getvalue())
-            self.assertFalse(plan["contract_compatible"])
-            self.assertEqual(plan["runtime_profile"], "hermes-workspace-customer")
-            self.assertEqual(plan["runtime_contract"], "hermes-workspace-http-3000")
-            failed = [item["name"] for item in plan["contract_checks"] if not item["ok"]]
-            self.assertIn("product_image_matches_runtime_contract", failed)
-
-    def test_rollout_plan_uses_image_recipe_runtime_profile(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            write_hermes_state(root)
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                rc = cmd_rollout_plan(argparse.Namespace(state_root=str(root), family="hermes", release="hermes-candidate"))
-
-            self.assertEqual(rc, 0, output.getvalue())
-            plan = json.loads(output.getvalue())
-            self.assertTrue(plan["contract_compatible"], output.getvalue())
-            self.assertEqual(plan["fleet_runtime_profile"], "hermes-customer")
-            self.assertEqual(plan["runtime_profile"], "hermes-workspace-customer")
-            self.assertEqual(plan["recipe"]["canonical_recipe_name"], "hermes-workspace")
-            self.assertEqual(plan["recipe"]["canonical_recipe_digest"], hermes_workspace_recipe_digest())
-
-    def test_rollout_dev_plan_uses_image_recipe_dev_runtime_profile(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            write_hermes_state(root)
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                rc = cmd_rollout_dev_plan(
-                    argparse.Namespace(
-                        state_root=str(root),
-                        family="hermes",
-                        release="hermes-candidate",
-                        slot="dev-hermess",
-                    )
-                )
-
-            self.assertEqual(rc, 0, output.getvalue())
-            plan = json.loads(output.getvalue())
-            self.assertTrue(plan["contract_compatible"], output.getvalue())
-            self.assertEqual(plan["current_runtime_profile"], "hermes-dev")
-            self.assertEqual(plan["runtime_profile"], "hermes-workspace-dev")
-            self.assertEqual(plan["lane_slots"], ["dev-hermess"])
-            self.assertEqual(plan["recipe"]["canonical_recipe_name"], "hermes-workspace")
-
-    def test_rollout_dev_apply_records_image_recipe_dev_runtime_profile(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            write_hermes_state(root)
-            output = io.StringIO()
-            with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
-                patch("agent_runtime_ops.cli.cmd_apply", return_value=0) as apply,
-                contextlib.redirect_stdout(output),
-            ):
-                rc = cmd_rollout_dev_apply(
-                    argparse.Namespace(
-                        state_root=str(root),
-                        family="hermes",
-                        release="hermes-candidate",
-                        slot="dev-hermess",
-                        allow_first_apply=False,
-                    )
-                )
-            self.assertEqual(rc, 0, output.getvalue())
-            lanes = load_yaml(root / "lanes.yaml")["lanes"]
-            self.assertEqual(lanes["dev-hermes"]["release"], "hermes-candidate")
-            self.assertEqual(lanes["dev-hermes"]["runtime_profile"], "hermes-workspace-dev")
-            rollout = load_yaml(root / "rollout-state.yaml")
-            self.assertEqual(rollout["families"]["hermes"]["dev_slots"]["dev-hermess"]["runtime_profile"], "hermes-workspace-dev")
-            self.assertEqual(
-                rollout["families"]["hermes"]["dev_slots"]["dev-hermess"]["canonical_recipe_name"],
-                "hermes-workspace",
-            )
-            self.assertEqual(apply.call_args.args[0].slot, "dev-hermess")
-
-    def test_rollout_dev_apply_restores_lane_when_apply_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            write_hermes_state(root)
-            lanes_before = load_yaml(root / "lanes.yaml")
-            output = io.StringIO()
-            with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
-                patch("agent_runtime_ops.cli.cmd_apply", return_value=1),
-                contextlib.redirect_stdout(output),
-            ):
-                rc = cmd_rollout_dev_apply(
-                    argparse.Namespace(
-                        state_root=str(root),
-                        family="hermes",
-                        release="hermes-candidate",
-                        slot="dev-hermess",
-                        allow_first_apply=False,
-                    )
-                )
-            self.assertEqual(rc, 1)
-            self.assertIn("reason=dev_apply_failed", output.getvalue())
-            self.assertEqual(load_yaml(root / "lanes.yaml"), lanes_before)
-
-    def test_rollout_canary_rejects_hermes_agent_only_image_before_state_change(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            write_hermes_state(root, candidate_product_repo="hermes-jitech")
-            before_slots = (root / "slots.yaml").read_text(encoding="utf-8")
-            output = io.StringIO()
-            with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
-                patch("agent_runtime_ops.cli.cmd_apply") as apply,
-                contextlib.redirect_stdout(output),
-            ):
-                rc = cmd_rollout_canary(
-                    argparse.Namespace(
-                        state_root=str(root),
-                        family="hermes",
-                        release="hermes-candidate",
-                        slot="oc20",
-                        allow_first_apply=False,
-                    )
-                )
-
-            self.assertEqual(rc, 1)
-            self.assertIn("release does not satisfy runtime contract", output.getvalue())
-            self.assertEqual((root / "slots.yaml").read_text(encoding="utf-8"), before_slots)
-            apply.assert_not_called()
-
-    def test_rollout_canary_records_image_recipe_runtime_profile(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            write_hermes_state(root)
-            output = io.StringIO()
-            with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
-                patch("agent_runtime_ops.cli.cmd_apply", return_value=0) as apply,
-                contextlib.redirect_stdout(output),
-            ):
-                rc = cmd_rollout_canary(
-                    argparse.Namespace(
-                        state_root=str(root),
-                        family="hermes",
-                        release="hermes-candidate",
-                        slot="oc20",
-                        allow_first_apply=False,
-                    )
-                )
-            self.assertEqual(rc, 0, output.getvalue())
-            lanes = load_yaml(root / "lanes.yaml")["lanes"]
-            self.assertEqual(lanes["hermes-canary"]["release"], "hermes-candidate")
-            self.assertEqual(lanes["hermes-canary"]["runtime_profile"], "hermes-workspace-customer")
-            rollout = load_yaml(root / "rollout-state.yaml")
-            self.assertEqual(rollout["families"]["hermes"]["canary"]["runtime_profile"], "hermes-workspace-customer")
-            self.assertEqual(rollout["families"]["hermes"]["canary"]["canonical_recipe_name"], "hermes-workspace")
-            self.assertEqual(apply.call_args.args[0].slot, "oc20")
-
-    def test_rollout_canary_moves_only_target_slot_and_records_success(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            write_state(root)
-            import_candidate(root)
-            output = io.StringIO()
-            with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
-                patch("agent_runtime_ops.cli.cmd_apply", return_value=0) as apply,
-                contextlib.redirect_stdout(output),
-            ):
-                rc = cmd_rollout_canary(
-                    argparse.Namespace(
-                        state_root=str(root),
-                        family="openclaw",
-                        release="openclaw-candidate",
-                        slot="oc3",
-                        allow_first_apply=False,
-                    )
-                )
-            self.assertEqual(rc, 0, output.getvalue())
-            slots = load_yaml(root / "slots.yaml")["slots"]
-            lanes = load_yaml(root / "lanes.yaml")["lanes"]
-            self.assertEqual(next(item for item in slots if item["slot"] == "oc3")["lane"], "openclaw-canary")
-            self.assertEqual(next(item for item in slots if item["slot"] == "oc4")["lane"], "openclaw")
-            self.assertEqual(lanes["openclaw"]["release"], "openclaw-current")
-            self.assertEqual(lanes["openclaw-canary"]["release"], "openclaw-candidate")
-            rollout = load_yaml(root / "rollout-state.yaml")
-            self.assertEqual(rollout["families"]["openclaw"]["canary"]["status"], "ok")
-            self.assertEqual(apply.call_args.args[0].slot, "oc3")
-
-    def test_rollout_canary_restores_state_when_apply_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            write_state(root)
-            import_candidate(root)
-            lanes_before = load_yaml(root / "lanes.yaml")
-            slots_before = load_yaml(root / "slots.yaml")
-            output = io.StringIO()
-            with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
-                patch("agent_runtime_ops.cli.cmd_apply", return_value=1),
-                contextlib.redirect_stdout(output),
-            ):
-                rc = cmd_rollout_canary(
-                    argparse.Namespace(
-                        state_root=str(root),
-                        family="openclaw",
-                        release="openclaw-candidate",
-                        slot="oc3",
-                        allow_first_apply=False,
-                    )
-                )
-            self.assertEqual(rc, 1)
-            self.assertIn("reason=canary_apply_failed", output.getvalue())
-            self.assertEqual(load_yaml(root / "lanes.yaml"), lanes_before)
-            self.assertEqual(load_yaml(root / "slots.yaml"), slots_before)
-
-    def test_rollout_promote_requires_matching_canary_record(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            write_state(root)
-            import_candidate(root)
-            output = io.StringIO()
-            with patch("agent_runtime_ops.cli._is_root", return_value=True), contextlib.redirect_stdout(output):
-                rc = cmd_rollout_promote(
-                    argparse.Namespace(state_root=str(root), family="openclaw", release="openclaw-candidate")
-                )
-            self.assertEqual(rc, 1)
-            self.assertIn("matching successful canary", output.getvalue())
-
-    def test_rollout_promote_returns_canary_to_fleet_and_applies_all_fleet_slots(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            write_state(root)
-            import_candidate(root)
-            with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
-                patch("agent_runtime_ops.cli.cmd_apply", return_value=0),
-                contextlib.redirect_stdout(io.StringIO()),
-            ):
-                self.assertEqual(
-                    cmd_rollout_canary(
-                        argparse.Namespace(
-                            state_root=str(root),
-                            family="openclaw",
-                            release="openclaw-candidate",
-                            slot="oc3",
-                            allow_first_apply=False,
-                        )
-                    ),
-                    0,
-                )
-            output = io.StringIO()
-            with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
-                patch("agent_runtime_ops.cli.cmd_apply", return_value=0) as apply,
-                contextlib.redirect_stdout(output),
-            ):
-                rc = cmd_rollout_promote(
-                    argparse.Namespace(state_root=str(root), family="openclaw", release="openclaw-candidate")
-                )
-            self.assertEqual(rc, 0, output.getvalue())
-            slots = load_yaml(root / "slots.yaml")["slots"]
-            lanes = load_yaml(root / "lanes.yaml")["lanes"]
-            self.assertEqual(next(item for item in slots if item["slot"] == "oc3")["lane"], "openclaw")
-            self.assertEqual(lanes["openclaw"]["release"], "openclaw-candidate")
-            self.assertEqual([call.args[0].slot for call in apply.call_args_list], ["oc3", "oc4"])
-            rollout = load_yaml(root / "rollout-state.yaml")
-            self.assertEqual(rollout["families"]["openclaw"]["promotion"]["status"], "ok")
-
-    def test_rollout_rollback_canary_restores_previous_lane(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            write_state(root)
-            import_candidate(root)
-            with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
-                patch("agent_runtime_ops.cli.cmd_apply", return_value=0),
-                contextlib.redirect_stdout(io.StringIO()),
-            ):
-                self.assertEqual(
-                    cmd_rollout_canary(
-                        argparse.Namespace(
-                            state_root=str(root),
-                            family="openclaw",
-                            release="openclaw-candidate",
-                            slot="oc3",
-                            allow_first_apply=False,
-                        )
-                    ),
-                    0,
-                )
-            output = io.StringIO()
-            with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
-                patch("agent_runtime_ops.cli.cmd_apply", return_value=0) as apply,
-                contextlib.redirect_stdout(output),
-            ):
-                rc = cmd_rollout_rollback_canary(argparse.Namespace(state_root=str(root), family="openclaw"))
-            self.assertEqual(rc, 0, output.getvalue())
-            slots = load_yaml(root / "slots.yaml")["slots"]
-            self.assertEqual(next(item for item in slots if item["slot"] == "oc3")["lane"], "openclaw")
-            self.assertEqual(apply.call_args.args[0].slot, "oc3")
-            rollout = load_yaml(root / "rollout-state.yaml")
-            self.assertEqual(rollout["families"]["openclaw"]["canary"]["status"], "rolled_back")
-
-    def test_rollout_rollback_canary_recovers_single_canary_slot_without_record(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            write_state(root)
-            import_candidate(root)
-            lanes = load_yaml(root / "lanes.yaml")
-            slots = load_yaml(root / "slots.yaml")
-            lanes["lanes"]["openclaw-canary"] = {
-                "family": "openclaw",
-                "slot_class": "customer",
-                "release": "openclaw-candidate",
-                "runtime_profile": "openclaw-customer",
-            }
-            for item in slots["slots"]:
-                if item["slot"] == "oc3":
-                    item["lane"] = "openclaw-canary"
-            (root / "lanes.yaml").write_text(dump_yaml(lanes), encoding="utf-8")
-            (root / "slots.yaml").write_text(dump_yaml(slots), encoding="utf-8")
-            output = io.StringIO()
-            with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
-                patch("agent_runtime_ops.cli.cmd_apply", return_value=0) as apply,
-                contextlib.redirect_stdout(output),
-            ):
-                rc = cmd_rollout_rollback_canary(argparse.Namespace(state_root=str(root), family="openclaw"))
-            self.assertEqual(rc, 0, output.getvalue())
-            self.assertIn("inferred_without_record=true", output.getvalue())
-            slots_after = load_yaml(root / "slots.yaml")["slots"]
-            self.assertEqual(next(item for item in slots_after if item["slot"] == "oc3")["lane"], "openclaw")
-            self.assertEqual(apply.call_args.args[0].slot, "oc3")
-            rollout = load_yaml(root / "rollout-state.yaml")
-            canary = rollout["families"]["openclaw"]["canary"]
-            self.assertEqual(canary["status"], "rolled_back_without_record")
-            self.assertEqual(canary["release"], "openclaw-candidate")
-
 
 if __name__ == "__main__":
     unittest.main()

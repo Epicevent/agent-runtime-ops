@@ -1,23 +1,15 @@
 # Agent Runtime Ops
 
-JI TECH AI 에이전트 서비스의 런타임 운영 도구 저장소다.
+Public operations tooling for JI TECH AI runtime accounts.
 
-이 저장소는 실제 고객 상태를 저장하지 않는다. 실제 운영 상태는 서버의
-`/srv/openclaw-ops`에 둔다.
+This repository owns the operator-facing tools, runtime profiles, canonical runtime recipes, wrapper
+image contract, MCP server, and runbooks. It does not store customer documents, passwords, API keys,
+gateway tokens, or mutable production state. Private state lives on the server under
+`/srv/openclaw-ops`.
 
-## Runbooks
+## Install
 
-```text
-docs/NAS_RUNBOOK.md
-  NAS mount/unmount 절차와 host/container 두 층위 확인 기준
-
-docs/RUNTIME_SECRETS.md
-  Gemini/API key 같은 runtime secret 주입과 상태 확인 절차
-```
-
-## 첫 설치
-
-실행 주체: **sudo 가능한 관리자 계정**
+First install or bootstrap from a full commit SHA:
 
 ```bash
 OPS_REF="FULL_40_CHARACTER_COMMIT_SHA"
@@ -26,298 +18,149 @@ curl -fsSL "https://raw.githubusercontent.com/Epicevent/agent-runtime-ops/$OPS_R
   | sudo bash -s -- "$OPS_REF"
 ```
 
-이 명령은 서버에 `opsctl`이 아직 없을 때 쓰는 bootstrap이다. `OPS_REF`에는
-검토한 commit 전체 SHA를 넣는다. branch 이름은 허용하지 않는다.
+The normal update flow is:
 
-## 업데이트 승인
+```text
+commit/push -> root approve full SHA -> svcops self-update -> status/check/live verification
+```
 
-실행 주체: **root 관리자**
-
-업데이트할 commit을 먼저 승인한다. 이 명령은 서버 private 상태인
-`/srv/openclaw-ops/ops-update.yaml`만 갱신한다.
+Root approval command:
 
 ```bash
 sudo /usr/local/bin/opsctl update approve FULL_40_CHARACTER_COMMIT_SHA
 ```
 
-승인 상태 확인:
+Install the approved SHA:
 
 ```bash
-opsctl update status
+ssh svcops "sudo /usr/local/bin/opsctl self-update"
 ```
 
-## 이후 갱신
-
-실행 주체: **svcops 또는 sudo 가능한 관리자 계정**
-
-승인이 끝난 뒤 실제 갱신은 아래 명령만 사용한다.
+Verify after install:
 
 ```bash
-sudo /usr/local/bin/opsctl self-update
+ssh svcops "/usr/local/bin/opsctl update status"
+ssh svcops "/usr/local/bin/opsctl profile list"
+ssh svcops "/usr/local/bin/opsctl binding list"
 ```
 
-이 명령은 `main` 같은 움직이는 branch를 설치하지 않는다. 오직
-`/srv/openclaw-ops/ops-update.yaml`에 승인된 full commit만 설치한다.
-설치 스크립트는 `svcops`에 정해진 운영 명령만 비밀번호 없이 열어 둔다.
-`update approve` 권한은 열지 않는다.
+## Runtime Truth
 
-설치 확인:
-
-```bash
-sudo bash /opt/agent-runtime-ops/install.sh --check
-sudo -iu svcops -- opsctl profile list
-```
-
-`svcops`로 이미 로그인한 상태에서는 `sudo -u svcops`를 붙이지 않는다.
-
-```bash
-opsctl profile list
-opsctl check oc1
-```
-
-`opsctl check SLOT`은 `/srv/openclaw-ops`의 desired state와 runtime profile
-계약만 확인한다. 실제 Docker 컨테이너와 NAS mount 상태까지 보려면 live
-검사를 실행한다.
-
-```bash
-sudo /usr/local/bin/opsctl check --live oc1
-```
-
-live 검사는 파일을 쓰지 않는다. host에는 NAS가 mount되어 있는데 컨테이너
-안에서 child CIFS mount로 보이지 않거나, 컨테이너의 NAS root가 read-only가
-아니면 실패한다.
-
-## 설치 계정과 운영계정
-
-설치한 계정이 운영계정이 되는 구조가 아니다.
+Image rollout truth is not `releases.yaml` or a rollout ledger. The public rollout path is:
 
 ```text
-설치 실행 계정:
-  sudo 가능한 관리자 계정
-
-운영계정:
-  기본값 svcops
+digest-pinned wrapper image + digest-pinned product image
+wrapper image labels
+runtime binding
+runtime manifest
+live container image labels
 ```
 
-관리자는 패키지를 설치하고 권한을 배치한다. 설치 후 일상 운영 명령은
-`svcops`가 실행한다.
-
-## 왜 svcops를 쓰나
-
-`svcops`라는 이름 자체가 중요한 것이 아니라, **root도 고객 계정도 아닌 제한
-운영계정**이 필요하다.
-
-현재 서버에는 이미 `svcops`가 있으므로 기본 운영계정으로 사용한다.
-
-이 계정으로 얻는 것:
+The routing registry stays intentionally small. It owns the Apache-facing contract only:
 
 ```text
-/srv/openclaw-ops를 운영자가 읽을 수 있음
-root shell 없이 상태 조회와 점검을 수행함
-제한된 root helper로 live check, 단일 slot apply/rollback, NAS mount/unmount를 수행함
-고객 계정과 운영 권한을 분리함
+linux_account, public_host, gateway_port, bridge_port, enabled
 ```
 
-이 계정으로 하지 않는 것:
+It must not become the source of image, runtime profile, canonical recipe, or applied-result truth.
 
-```text
-제품 소스 수정
-이미지 직접 빌드
-고객 secret 원문 열람
-Docker compose 파일 직접 수정
-root shell 임의 작업
+## Core Commands
+
+Read-only orientation:
+
+```bash
+ssh svcops "/usr/local/bin/opsctl status SLOT"
+ssh svcops "/usr/local/bin/opsctl plan SLOT"
+ssh svcops "/usr/local/bin/opsctl check SLOT"
+ssh svcops "sudo /usr/local/bin/opsctl check --live SLOT"
+ssh svcops "sudo /usr/local/bin/opsctl runtime truth SLOT"
+ssh svcops "sudo /usr/local/bin/opsctl runtime truth --all"
+ssh svcops "/usr/local/bin/opsctl binding status TARGET"
+ssh svcops "/usr/local/bin/opsctl apache status TARGET"
 ```
 
-`opsctl apply`는 runtime profile에서 렌더링한 compose 파일만 쓴다. 운영자가
-compose를 직접 고치는 작업과는 다른 층위다.
+Single-slot re-apply and rollback:
 
-운영계정을 바꾸려면 설치 전에 의도적으로 정해야 한다. 기본 운영 기준은
-`svcops`다.
+```bash
+ssh svcops "sudo /usr/local/bin/opsctl apply SLOT"
+ssh svcops "sudo /usr/local/bin/opsctl apply SLOT --allow-first-apply"
+ssh svcops "sudo /usr/local/bin/opsctl rollback SLOT"
+```
 
-## 설치 결과
+Normal product rollout uses only image rollout commands:
+
+```bash
+ssh svcops "sudo /usr/local/bin/opsctl rollout status --family hermes"
+ssh svcops "sudo /usr/local/bin/opsctl rollout image-plan --wrapper-image WRAP@sha256:... --product-image PROD@sha256:..."
+ssh svcops "sudo /usr/local/bin/opsctl rollout image-dev-apply --slot dev-oc --wrapper-image WRAP@sha256:... --product-image PROD@sha256:..."
+ssh svcops "sudo /usr/local/bin/opsctl rollout image-canary --slot oc3 --wrapper-image WRAP@sha256:... --product-image PROD@sha256:..."
+ssh svcops "sudo /usr/local/bin/opsctl rollout image-promote --from-slot oc3 --slots oc1,oc2,oc4"
+```
+
+The old release command group and release-state rollout flow are absent from the public CLI.
+
+## Secrets
+
+Never pass raw secrets through MCP JSON arguments or chat. Use terminal stdin or a restricted secret
+file path.
+
+Runtime provider secret example:
+
+```bash
+ssh svcops
+read -rsp "GEMINI_API_KEY for dev-oc: " GEMINI_API_KEY
+printf '\n'
+printf '%s' "$GEMINI_API_KEY" | sudo /usr/local/bin/opsctl runtime-secret set dev-oc --key GEMINI_API_KEY --value-stdin --check
+unset GEMINI_API_KEY
+sudo /usr/local/bin/opsctl runtime-secret status dev-oc
+```
+
+Handoff credentials are different from runtime provider secrets:
+
+```bash
+ssh svcops "sudo /usr/local/bin/opsctl handoff status SLOT"
+```
+
+If value retrieval is explicitly authorized, use only the exact manual command printed by
+`handoff status`. Do not paste the secret value back into chat.
+
+## NAS
+
+NAS requests and managed mounts:
+
+```bash
+ssh svcops "/usr/local/bin/opsctl nas requests"
+ssh svcops "/usr/local/bin/opsctl nas mounted SLOT"
+ssh svcops "sudo /usr/local/bin/opsctl nas approve-auto"
+ssh svcops "sudo /usr/local/bin/opsctl nas mount SLOT //HOST/SHARE"
+ssh svcops "sudo /usr/local/bin/opsctl nas unmount SLOT //HOST/SHARE"
+ssh svcops "sudo /usr/local/bin/opsctl nas remove SLOT //HOST/SHARE"
+```
+
+Manual credential injection uses stdin:
+
+```bash
+printf '%s' "$NAS_PASSWORD" | ssh svcops "sudo /usr/local/bin/opsctl nas mount SLOT //HOST/SHARE --username NAS_USER --password-stdin"
+```
+
+## Codex and MCP
+
+Install activates:
 
 ```text
-/opt/agent-runtime-ops
-  공개 운영 도구 설치 root
-
-/opt/agent-runtime-ops/releases/<commit>
-  commit별 설치본
-
-/opt/agent-runtime-ops/current
-  현재 활성 설치본 symlink
-
 /usr/local/bin/opsctl
-  current 설치본의 opsctl로 연결되는 명령
-
-/srv/openclaw-ops
-  서버 private 운영 상태
+/usr/local/bin/agent-runtime-ops-mcp
+/home/svcops/AGENTS.md
+/home/svcops/GEMINI.md
+/home/svcops/.codex/skills/agent-runtime-ops
 ```
 
-권한 기준:
+The MCP server wraps `opsctl` with structured tools for agents. It does not approve updates and does
+not accept raw secret values.
 
-```text
-/opt/agent-runtime-ops   root:svcops
-/usr/local/bin/opsctl    current 설치본을 실행하는 wrapper
-/srv/openclaw-ops        root:svcops
-```
+Smoke checks:
 
-## 현재 서버에서 추가로 필요한 private state
-
-`opsctl profile list`는 설치 직후 확인할 수 있다.
-
-slot 상태까지 보려면 `/srv/openclaw-ops`에 아래 파일이 있어야 한다.
-
-```text
-slots.yaml
-lanes.yaml
-releases.yaml
-nas-policy.yaml
-```
-
-현재 기존 서버에는 `slots.yaml`, `images.yaml`, `nas-policy.yaml`은 있고,
-`lanes.yaml`, `releases.yaml`은 아직 없을 수 있다. 이 경우 설치는 성공해도
-`opsctl status oc1`은 준비되지 않은 상태가 맞다.
-
-## 저장소 책임
-
-```text
-Epicevent/openclaw-jitech
-  OpenClaw 제품 소스
-  OpenClaw 제품 이미지
-
-Epicevent/hermes-jitech
-  Hermes 제품 소스
-  Hermes 제품 이미지
-
-Epicevent/agent-runtime-ops
-  runtime profile
-  wrapper image recipe
-  opsctl
-  admin console
-  단일 slot apply/check/rollback 도구
-  lane rollout 도구
-  NAS grant 판정 로직
-  schema 정의
-
-/srv/openclaw-ops
-  실제 서버 운영 상태
-  slots.yaml
-  lanes.yaml
-  releases.yaml
-  nas-policy.yaml
-  actions.log
-  drift report
-```
-
-이 저장소에 넣지 않는 것:
-
-```text
-고객명
-NAS password
-API key
-gateway token
-고객 문서
-실제 slot 배정 상세
-```
-
-## 핵심 기준
-
-slot은 두 가지 기준으로 실행한다.
-
-```text
-image release + runtime profile
-```
-
-`image release`는 컨테이너 안에 무엇이 들어있는지를 정한다.
-
-`runtime profile`은 그 이미지를 서버에서 어떻게 실행할지를 정한다.
-
-운영 명령은 compose 조각을 즉석에서 만들지 않는다. compose는
-`profiles/runtime/*/compose.yml.tpl`에서만 렌더링한다.
-
-## Runtime Profiles
-
-```text
-profiles/runtime/
-  openclaw-customer/
-  hermes-customer/
-  openclaw-dev/
-  hermes-dev/
-```
-
-profile 이름에는 `v1` 같은 숫자를 붙이지 않는다.
-
-```text
-profile name:
-  의미
-
-profile digest:
-  실제 버전
-
-ops repo commit:
-  변경 이력
-```
-
-## opsctl 명령 형태
-
-```text
-opsctl status SLOT
-opsctl slot list
-opsctl plan SLOT
-sudo /usr/local/bin/opsctl apply SLOT
-sudo /usr/local/bin/opsctl apply SLOT --allow-first-apply
-sudo /usr/local/bin/opsctl rollback SLOT
-opsctl check SLOT
-sudo /usr/local/bin/opsctl check --live SLOT
-sudo /usr/local/bin/opsctl runtime-secret set SLOT --key GEMINI_API_KEY --value-stdin
-sudo /usr/local/bin/opsctl runtime-secret status SLOT
-
-opsctl rollout LANE
-
-opsctl release add NAME IMAGE
-opsctl release promote NAME LANE
-
-opsctl nas requests
-sudo /usr/local/bin/opsctl nas approve-auto
-sudo /usr/local/bin/opsctl nas approve-auto --watch --interval 15
-opsctl nas request //HOST/SHARE
-opsctl nas credential set //HOST/SHARE --username NAS_USER --password-stdin
-sudo /usr/local/bin/opsctl nas credential status SLOT //HOST/SHARE
-opsctl nas mounted SLOT
-opsctl nas policy-check SLOT //HOST/SHARE
-sudo /usr/local/bin/opsctl nas mount SLOT //HOST/SHARE
-printf '%s' "$NAS_PASSWORD" | sudo /usr/local/bin/opsctl nas mount SLOT //HOST/SHARE --username NAS_USER --password-stdin
-sudo /usr/local/bin/opsctl nas unmount SLOT //HOST/SHARE
-sudo /usr/local/bin/opsctl nas remove SLOT //HOST/SHARE
-
-opsctl admin serve
-```
-
-`status`, `plan`, `check`, `nas policy-check`, `nas mounted`, `nas requests`는
-비쓰기 명령이다. `runtime-secret status`도 secret 값을 출력하지 않는 상태 확인
-명령이다.
-
-`runtime-secret set`, `nas mount`, `nas unmount`는 쓰기 명령이지만 compose template을
-수정하지 않는다.
-동적 NAS 변화는 `/home/ocN/nas_docs/*` child mount에서만 처리한다.
-
-고객 요청 경로는 고객 계정이 `opsctl nas request`와 `opsctl nas credential set`을
-실행하고, root 권한의 `nas approve-auto`가 grant, credential, fstab, mount를
-수렴한다.
-
-운영자가 NAS credential까지 알고 있는 실험/긴급 경로에서는
-`opsctl nas mount SLOT //HOST/SHARE --username ... --password-stdin` 한 번으로
-root 전용 credential, managed fstab entry, child CIFS mount를 만든다.
-
-`apply`와 `rollback`은 단일 slot 기준으로 동작한다. 기존 legacy 상태에서 첫 적용을
-할 때는 명시적으로 `--allow-first-apply`를 붙인다. `rollout`은 단일 slot migration
-검증 뒤에 연다.
-
-아직 열지 않은 명령:
-
-```text
-opsctl rollout LANE
-opsctl release add NAME IMAGE
-opsctl release promote NAME LANE
-opsctl nas approve-auto
+```bash
+ssh svcops "codex mcp list"
+ssh svcops "printf '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"smoke\",\"version\":\"0\"}}}\n' | /usr/local/bin/agent-runtime-ops-mcp"
 ```

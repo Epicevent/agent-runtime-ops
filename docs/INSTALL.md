@@ -151,11 +151,11 @@ Docker compose 직접 수정
 있어야 한다.
 
 ```text
-slots.yaml
-lanes.yaml
-releases.yaml
+runtime-bindings.json
+slot-registry.json
+runtime/<slot>/manifest.yaml
 nas-policy.yaml
 ```
 
-기존 서버에 `lanes.yaml` 또는 `releases.yaml`이 없으면 설치는 성공해도 slot
-상태 조회는 아직 준비되지 않은 상태다.
+Old slot/lane/release files may still exist as migration or compatibility inputs, but new image
+rollout verification should use runtime bindings, runtime manifests, and live image truth.

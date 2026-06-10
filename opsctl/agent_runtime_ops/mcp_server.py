@@ -22,7 +22,7 @@ TARGET_RE = re.compile(
     r"^(?:[a-z][a-z0-9-]{0,31}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|"
     r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63})$"
 )
-RELEASE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 IMAGE_REF_RE = re.compile(r"^[A-Za-z0-9./:_-]+@sha256:[0-9a-f]{64}$")
 SAFE_TEXT_RE = re.compile(r"^[^\r\n\t]*$")
 HOST_RE = re.compile(r"^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$")
@@ -817,7 +817,7 @@ class McpServer:
 
     def _tool_canonical_recipe_validate(self, args: dict[str, Any]) -> dict[str, Any]:
         self._reject_unknown(args, {"name"})
-        name = self._release(args.get("name"))
+        name = self._safe_name(args.get("name"))
         runs = [self._run([self.opsctl, "recipe", "validate-canonical", name], timeout=60)]
         return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
 
@@ -855,7 +855,7 @@ class McpServer:
         argv = [self.sudo, self.opsctl, "recipe", "apply-dev", slot]
         recipe_name = args.get("recipe_name")
         if recipe_name:
-            argv.extend(["--recipe-name", self._release(recipe_name)])
+            argv.extend(["--recipe-name", self._safe_name(recipe_name)])
         if has_source_output:
             argv.extend(["--source-output", self._path_text(args.get("source_output"), "source_output")])
         else:
@@ -1035,11 +1035,11 @@ class McpServer:
             raise ToolError("family must be hermes or openclaw")
         return family
 
-    def _release(self, value: Any) -> str:
-        release = str(value or "")
-        if not RELEASE_RE.match(release):
-            raise ToolError("release name must contain only letters, numbers, '.', '_', or '-'")
-        return release
+    def _safe_name(self, value: Any) -> str:
+        name = str(value or "")
+        if not SAFE_NAME_RE.match(name):
+            raise ToolError("name must contain only letters, numbers, '.', '_', or '-'")
+        return name
 
     def _image_ref(self, value: Any) -> str:
         image_ref = str(value or "")

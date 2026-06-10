@@ -72,11 +72,10 @@ from .yamlio import dump_yaml, load_yaml
 DEFAULT_REPO_URL = "https://github.com/Epicevent/agent-runtime-ops.git"
 UPDATE_POLICY_NAME = "ops-update.yaml"
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-RELEASE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 IMAGE_REF_RE = re.compile(r"^[A-Za-z0-9./:_-]+@sha256:[0-9a-f]{64}$")
 SAFE_TEXT_RE = re.compile(r"^[^\r\n\t]*$")
-ROLLOUT_STATE_NAME = "rollout-state.yaml"
 DEV_RECIPE_STATE_NAME = "dev-recipes.yaml"
 DEV_RECIPE_STAGE_ROOT = "agent-runtime-source"
 IMAGE_RECIPE_LABEL_PREFIX = "com.epicevent.agent-runtime."
@@ -604,8 +603,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_plan(args: argparse.Namespace) -> int:
     try:
-        desired = load_desired_slot(args.slot, _state_root(args))
-        profile = load_profile(desired.runtime_profile)
+        desired, profile = _desired_from_runtime_manifest(args.slot, _state_root(args))
     except Exception as exc:
         plan = {
             "slot": args.slot,
@@ -661,9 +659,9 @@ def _digest_from_image_ref(value: object) -> str | None:
     return "sha256:" + value.rsplit("@sha256:", 1)[1]
 
 
-def _validate_release_name(name: str) -> None:
-    if not RELEASE_NAME_RE.match(name):
-        raise ValueError("release name must contain only letters, numbers, '.', '_', or '-'")
+def _validate_safe_name(name: str) -> None:
+    if not SAFE_NAME_RE.match(name):
+        raise ValueError("name must contain only letters, numbers, '.', '_', or '-'")
 
 
 def _validate_image_digest_ref(image_ref: str) -> str:
@@ -765,27 +763,6 @@ def _release_recipe_tokens(release_data: dict) -> dict[str, str]:
         "canonical_recipe_name": str(recipe.get("canonical_recipe_name") or "unknown"),
         "canonical_recipe_digest": str(recipe.get("canonical_recipe_digest") or "unknown"),
     }
-
-
-def _release_components_from_args(raw_components: object) -> dict[str, str]:
-    components: dict[str, str] = {}
-    if raw_components is None or raw_components == "":
-        return components
-    if not isinstance(raw_components, list):
-        raise ValueError("--component must be repeatable NAME=VALUE entries")
-    for raw_item in raw_components:
-        item = str(raw_item or "")
-        if "=" not in item:
-            raise ValueError("--component must use NAME=VALUE")
-        name, value = item.split("=", 1)
-        name = name.strip()
-        value = value.strip()
-        if not RELEASE_NAME_RE.match(name):
-            raise ValueError(f"invalid component name: {name}")
-        if not value or not SAFE_TEXT_RE.match(value):
-            raise ValueError(f"invalid component value for {name}")
-        components[name] = value
-    return components
 
 
 def _derived_release_components(product_image: str, wrapper_image: str) -> dict[str, str]:
@@ -1797,14 +1774,9 @@ def cmd_check(args: argparse.Namespace) -> int:
     try:
         state_root = _state_root(args)
         if args.live:
-            try:
-                desired, profile = _desired_from_live_image_truth(args.slot, state_root)
-            except Exception:
-                desired = load_desired_slot(args.slot, state_root)
-                profile = load_profile(desired.runtime_profile)
+            desired, profile = _desired_from_live_image_truth(args.slot, state_root)
         else:
-            desired = load_desired_slot(args.slot, state_root)
-            profile = load_profile(desired.runtime_profile)
+            desired, profile = _desired_from_runtime_manifest(args.slot, state_root)
         rendered = render_compose(profile, desired)
     except Exception as exc:
         print(f"slot={args.slot}")
@@ -1982,6 +1954,82 @@ def _manifest_payload(
     if previous_manifest is not None:
         payload["previous_manifest"] = str(previous_manifest)
     return payload
+
+
+def _release_data_from_runtime_manifest(manifest: dict) -> dict[str, object]:
+    recipe = manifest.get("recipe")
+    recipe_data = recipe if isinstance(recipe, dict) else {}
+    components = recipe_data.get("components")
+    image_recipe = recipe_data.get("image_recipe")
+    component_data = components if isinstance(components, dict) else {}
+    image_recipe_data = image_recipe if isinstance(image_recipe, dict) else {}
+    wrapper_image = str(manifest.get("wrapper_image") or component_data.get("wrapper_image") or "")
+    product_image = str(manifest.get("product_image") or component_data.get("product_image") or "")
+    if not wrapper_image:
+        raise ValueError("runtime manifest is missing wrapper_image")
+    if not product_image:
+        raise ValueError("runtime manifest is missing product_image")
+    family = str(manifest.get("family") or image_recipe_data.get("family") or "")
+    if family not in {"openclaw", "hermes"}:
+        raise ValueError(f"runtime manifest has invalid family: {family or 'missing'}")
+    release_data: dict[str, object] = {
+        "family": family,
+        "image_name": manifest.get("release") or IMAGE_ROLLOUT_RELEASE_NAME,
+        "wrapper_image": wrapper_image,
+        "product_image": product_image,
+        "digest": manifest.get("release_digest") or _digest_from_image_ref(wrapper_image),
+        "product_digest": manifest.get("product_image_digest") or _digest_from_image_ref(product_image),
+        "compatibility_mode": recipe_data.get("mode") or "wrapped_product_image",
+    }
+    if isinstance(components, dict):
+        release_data["components"] = {str(key): str(value) for key, value in components.items()}
+    if image_recipe_data:
+        release_data["image_recipe"] = image_recipe_data
+    return release_data
+
+
+def _desired_from_runtime_manifest(slot: str, state_root: Path):
+    binding = get_runtime_binding(slot, state_root)
+    path = _state_manifest_path(state_root, binding.linux_account)
+    if path.exists() and path.is_symlink():
+        raise ValueError(f"managed runtime manifest must not be symlink: {path}")
+    if not path.is_file():
+        raise FileNotFoundError(f"runtime manifest not found: {path}")
+    manifest = load_yaml(path)
+    if not isinstance(manifest, dict):
+        raise ValueError(f"runtime manifest is not a mapping: {path}")
+    manifest_slot = str(manifest.get("slot") or "")
+    if manifest_slot and manifest_slot != binding.linux_account:
+        raise ValueError(f"runtime manifest slot mismatch: manifest={manifest_slot} binding={binding.linux_account}")
+    family = str(manifest.get("family") or "")
+    slot_class = str(manifest.get("slot_class") or "")
+    if family != binding.family:
+        raise ValueError(f"runtime manifest family mismatch: manifest={family or 'missing'} binding={binding.family}")
+    if slot_class != binding.runtime_class:
+        raise ValueError(
+            f"runtime manifest slot_class mismatch: manifest={slot_class or 'missing'} binding={binding.runtime_class}"
+        )
+    runtime_profile = str(manifest.get("runtime_profile") or "")
+    if not runtime_profile:
+        raise ValueError("runtime manifest is missing runtime_profile")
+    profile = load_profile(runtime_profile)
+    if profile.metadata.get("family") != family:
+        raise ValueError(f"runtime manifest profile family mismatch: profile={profile.metadata.get('family')} manifest={family}")
+    if profile.metadata.get("slot_class") != slot_class:
+        raise ValueError(
+            f"runtime manifest profile slot_class mismatch: profile={profile.metadata.get('slot_class')} manifest={slot_class}"
+        )
+    release_data = _release_data_from_runtime_manifest(manifest)
+    desired = DesiredSlot(
+        slot=binding.linux_account,
+        lane=str(manifest.get("lane") or f"image-{family}-{slot_class}"),
+        lane_data={"family": family, "slot_class": slot_class},
+        release_name=str(manifest.get("release") or IMAGE_ROLLOUT_RELEASE_NAME),
+        release_data=release_data,
+        runtime_profile=profile.name,
+        route=binding,
+    )
+    return desired, profile
 
 
 def _write_slot_manifest(
@@ -2531,8 +2579,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
         return 2
     state_root = _state_root(args)
     try:
-        desired = load_desired_slot(args.slot, state_root)
-        profile = load_profile(desired.runtime_profile)
+        desired, profile = _desired_from_runtime_manifest(args.slot, state_root)
     except Exception as exc:
         print(f"slot={args.slot}")
         print("apply_status=fail")
@@ -3060,127 +3107,6 @@ def _state_meta(source: str | None = None) -> dict[str, object]:
     return meta
 
 
-def _load_slots_lanes_releases(state_root: Path) -> tuple[dict, dict, dict]:
-    return (
-        load_yaml(state_root / "slots.yaml"),
-        load_yaml(state_root / "lanes.yaml"),
-        load_yaml(state_root / "releases.yaml"),
-    )
-
-
-def _iter_slot_lanes(slots_data: dict) -> list[tuple[str, str]]:
-    slots = slots_data.get("slots") or {}
-    rows: list[tuple[str, str]] = []
-    if isinstance(slots, dict):
-        for slot, data in slots.items():
-            lane = data.get("lane") if isinstance(data, dict) else None
-            if lane:
-                rows.append((str(slot), str(lane)))
-    elif isinstance(slots, list):
-        for item in slots:
-            if isinstance(item, dict) and item.get("slot") and item.get("lane"):
-                rows.append((str(item["slot"]), str(item["lane"])))
-    return sorted(rows)
-
-
-def _set_slot_lane(slots_data: dict, slot: str, lane: str) -> None:
-    slots = slots_data.get("slots")
-    if isinstance(slots, dict):
-        entry = slots.setdefault(slot, {})
-        if not isinstance(entry, dict):
-            raise ValueError(f"slot entry is not a mapping: {slot}")
-        entry["lane"] = lane
-        return
-    if isinstance(slots, list):
-        for item in slots:
-            if isinstance(item, dict) and item.get("slot") == slot:
-                item["lane"] = lane
-                return
-        slots.append({"slot": slot, "lane": lane})
-        return
-    raise ValueError("slots.yaml must contain slots as a mapping or list")
-
-
-def _slots_for_lane(slots_data: dict, lane: str) -> list[str]:
-    return [slot for slot, slot_lane in _iter_slot_lanes(slots_data) if slot_lane == lane]
-
-
-def _fleet_lane_for_family(lanes_data: dict, family: str) -> str:
-    lanes = lanes_data.get("lanes") or {}
-    if not isinstance(lanes, dict):
-        raise ValueError("lanes.yaml must contain a lanes mapping")
-    if family in lanes and isinstance(lanes[family], dict):
-        data = lanes[family]
-        if data.get("family") == family and data.get("slot_class") == "customer":
-            return family
-    candidates = [
-        name
-        for name, data in lanes.items()
-        if isinstance(data, dict)
-        and data.get("family") == family
-        and data.get("slot_class") == "customer"
-        and not str(name).endswith("-canary")
-    ]
-    if len(candidates) != 1:
-        raise ValueError(f"expected exactly one customer fleet lane for {family}, found {len(candidates)}")
-    return str(candidates[0])
-
-
-def _canary_lane_for_family(family: str) -> str:
-    return f"{family}-canary"
-
-
-def _release_entry(releases_data: dict, release_name: str) -> dict:
-    releases = releases_data.get("releases") or {}
-    entry = releases.get(release_name)
-    if not isinstance(entry, dict):
-        raise KeyError(f"release not found: {release_name}")
-    return entry
-
-
-def _validate_release_for_family(releases_data: dict, release_name: str, family: str) -> dict:
-    _validate_release_name(release_name)
-    entry = _release_entry(releases_data, release_name)
-    if entry.get("family") != family:
-        raise ValueError(f"release family mismatch: release={entry.get('family')} requested={family}")
-    wrapper_image = str(entry.get("wrapper_image") or "")
-    product_image = str(entry.get("product_image") or "")
-    wrapper_digest = _validate_image_digest_ref(wrapper_image)
-    _validate_image_digest_ref(product_image)
-    if entry.get("digest") != wrapper_digest:
-        raise ValueError(f"release digest must match wrapper image digest: {release_name}")
-    if not _allowed_image_ref(family, "wrapper", wrapper_image):
-        raise ValueError(f"wrapper image repository is not allowed for {family}")
-    if not _allowed_image_ref(family, "product", product_image):
-        raise ValueError(f"product image repository is not allowed for {family}")
-    return entry
-
-
-def _load_rollout_state(state_root: Path) -> dict:
-    data = load_yaml(state_root / ROLLOUT_STATE_NAME, default={})
-    if not isinstance(data, dict):
-        return {}
-    data.setdefault("meta", _state_meta("opsctl rollout"))
-    data.setdefault("families", {})
-    return data
-
-
-def _write_rollout_state(state_root: Path, data: dict) -> Path | None:
-    data["meta"] = _state_meta("opsctl rollout")
-    data.setdefault("families", {})
-    return _write_state_yaml_file(state_root, ROLLOUT_STATE_NAME, data)
-
-
-def _family_rollout_record(rollout_state: dict, family: str) -> dict:
-    families = rollout_state.setdefault("families", {})
-    if not isinstance(families, dict):
-        raise ValueError("rollout state families must be a mapping")
-    record = families.setdefault(family, {})
-    if not isinstance(record, dict):
-        raise ValueError(f"rollout state family record must be a mapping: {family}")
-    return record
-
-
 def _load_dev_recipe_state(state_root: Path) -> dict:
     data = load_yaml(state_root / DEV_RECIPE_STATE_NAME, default={})
     if not isinstance(data, dict):
@@ -3197,7 +3123,7 @@ def _write_dev_recipe_state(state_root: Path, data: dict) -> Path | None:
 
 
 def _validate_recipe_name(name: str) -> None:
-    _validate_release_name(name)
+    _validate_safe_name(name)
 
 
 def _build_arg_lines_for_canonical_recipe(name: str) -> list[str]:
@@ -3517,128 +3443,9 @@ def cmd_recipe_dev_apply(args: argparse.Namespace) -> int:
     return rc
 
 
-def cmd_release_import(args: argparse.Namespace) -> int:
-    if not _is_root():
-        print("error: run as root/admin: sudo /usr/local/bin/opsctl release import ...", file=sys.stderr)
-        return 2
-    state_root = _state_root(args)
-    try:
-        name = str(args.name)
-        family = str(args.family)
-        _validate_release_name(name)
-        if family not in {"openclaw", "hermes"}:
-            raise ValueError("family must be openclaw or hermes")
-        image_recipe: dict[str, object] = {}
-        if args.compat_combined:
-            if not args.image:
-                raise ValueError("--compat-combined requires --image")
-            if args.product_image or args.wrapper_image:
-                raise ValueError("--compat-combined cannot be mixed with --product-image/--wrapper-image")
-            product_image = str(args.image)
-            wrapper_image = str(args.image)
-            compatibility_mode = "combined_runtime_image"
-        else:
-            if args.image:
-                raise ValueError("--image is only valid with --compat-combined")
-            if not args.product_image or not args.wrapper_image:
-                raise ValueError("split releases require --product-image and --wrapper-image")
-            product_image = str(args.product_image)
-            wrapper_image = str(args.wrapper_image)
-            compatibility_mode = "wrapped_product_image"
-        product_digest = _validate_image_digest_ref(product_image)
-        wrapper_digest = _validate_image_digest_ref(wrapper_image)
-        if not _allowed_image_ref(family, "product", product_image):
-            raise ValueError(f"product image repository is not allowed for {family}")
-        if not _allowed_image_ref(family, "wrapper", wrapper_image):
-            raise ValueError(f"wrapper image repository is not allowed for {family}")
-        if compatibility_mode == "wrapped_product_image":
-            image_recipe = _image_recipe_from_wrapper_image(wrapper_image, family=family, product_image=product_image)
-        components = _derived_release_components(product_image, wrapper_image)
-        if image_recipe:
-            components.update(
-                {
-                    "product_component": str(image_recipe.get("product_component") or components["product_component"]),
-                    "wrapper_component": str(image_recipe.get("wrapper_component") or components["wrapper_component"]),
-                    "canonical_recipe_name": str(image_recipe.get("canonical_recipe_name") or ""),
-                    "canonical_recipe_digest": str(image_recipe.get("canonical_recipe_digest") or ""),
-                    "runtime_profile_customer": str(
-                        (image_recipe.get("runtime_profiles") or {}).get("customer")
-                        if isinstance(image_recipe.get("runtime_profiles"), dict)
-                        else ""
-                    ),
-                    "runtime_profile_dev": str(
-                        (image_recipe.get("runtime_profiles") or {}).get("dev")
-                        if isinstance(image_recipe.get("runtime_profiles"), dict)
-                        else ""
-                    ),
-                }
-            )
-        components.update(_release_components_from_args(getattr(args, "component", None)))
-
-        releases_data = load_yaml(state_root / "releases.yaml", default={})
-        releases = releases_data.setdefault("releases", {})
-        if not isinstance(releases, dict):
-            raise ValueError("releases.yaml must contain a releases mapping")
-        if name in releases and not args.replace:
-            raise ValueError(f"release already exists: {name}; use --replace to overwrite")
-        releases_data["meta"] = _state_meta("opsctl release import")
-        releases[name] = {
-            "family": family,
-            "image_name": args.image_name or name,
-            "product_image": product_image,
-            "wrapper_image": wrapper_image,
-            "digest": wrapper_digest,
-            "product_digest": product_digest,
-            "components": components,
-            "imported_at": _now_iso(),
-            "imported_by": os.environ.get("SUDO_USER") or os.environ.get("USER") or "",
-            "compatibility_mode": compatibility_mode,
-        }
-        if image_recipe:
-            releases[name]["image_recipe"] = image_recipe
-        backup_path = _write_state_yaml_file(state_root, "releases.yaml", releases_data)
-        _append_action_log(state_root, "release_import", "-", name, "ok", f"family={family} digest={wrapper_digest}")
-    except Exception as exc:
-        print("release_import_status=fail")
-        print(f"reason={exc}")
-        try:
-            _append_action_log(state_root, "release_import", "-", str(getattr(args, "name", "")), "fail", str(exc))
-        except Exception:
-            pass
-        return 1
-
-    print("release_import_status=ok")
-    print(f"release={name}")
-    print(f"family={family}")
-    print(f"wrapper_image={wrapper_image}")
-    print(f"product_image={product_image}")
-    print(f"recipe_mode={compatibility_mode}")
-    print(f"product_component={components.get('product_component', '')}")
-    if image_recipe:
-        print(f"canonical_recipe_name={image_recipe.get('canonical_recipe_name', '')}")
-        print(f"canonical_recipe_digest={image_recipe.get('canonical_recipe_digest', '')}")
-        profiles = image_recipe.get("runtime_profiles") if isinstance(image_recipe, dict) else {}
-        if isinstance(profiles, dict):
-            print(f"runtime_profile_customer={profiles.get('customer', '')}")
-            print(f"runtime_profile_dev={profiles.get('dev', '')}")
-    print(f"release_digest={wrapper_digest}")
-    if backup_path:
-        print(f"backup={backup_path}")
-    return 0
-
-
-def cmd_release_add(args: argparse.Namespace) -> int:
-    print("error: release add is deprecated; use release import", file=sys.stderr)
-    return 2
-
-
-def cmd_release_promote(args: argparse.Namespace) -> int:
-    print("error: release promote is deprecated; use rollout promote", file=sys.stderr)
-    return 2
-
-
 def _runtime_manifest_rollup(state_root: Path, slots: list[str], family: str) -> dict[str, object]:
     rows: list[dict[str, object]] = []
+    seen_slots: set[str] = set()
     for slot in slots:
         path = _state_manifest_path(state_root, slot)
         if path.exists() and path.is_symlink():
@@ -3649,8 +3456,11 @@ def _runtime_manifest_rollup(state_root: Path, slots: list[str], family: str) ->
         if not isinstance(manifest, dict) or str(manifest.get("family") or "") != family:
             continue
         rows.append(manifest)
+        seen_slots.add(slot)
 
     direct_slots = [str(item.get("slot") or "") for item in rows if item.get("release") == IMAGE_ROLLOUT_RELEASE_NAME]
+    customer_slots = [str(item.get("slot") or "") for item in rows if item.get("slot_class") == "customer"]
+    dev_slots = [str(item.get("slot") or "") for item in rows if item.get("slot_class") == "dev"]
     recipes: list[str] = []
     recipe_digests: list[str] = []
     wrapper_images: list[str] = []
@@ -3674,7 +3484,10 @@ def _runtime_manifest_rollup(state_root: Path, slots: list[str], family: str) ->
     return {
         "count": len(rows),
         "slots": [str(item.get("slot") or "") for item in rows],
+        "customer_slots": customer_slots,
+        "dev_slots": dev_slots,
         "direct_slots": direct_slots,
+        "missing_slots": [slot for slot in slots if slot not in seen_slots],
         "wrapper_images": sorted(set(wrapper_images)),
         "product_images": sorted(set(product_images)),
         "canonical_recipe_names": sorted(set(recipes)),
@@ -3688,135 +3501,28 @@ def cmd_rollout_status(args: argparse.Namespace) -> int:
         family = str(args.family)
         if family not in {"openclaw", "hermes"}:
             raise ValueError("family must be openclaw or hermes")
-        slots_data, lanes_data, releases_data = _load_slots_lanes_releases(state_root)
-        fleet_lane = _fleet_lane_for_family(lanes_data, family)
-        canary_lane = _canary_lane_for_family(family)
-        lanes = lanes_data.get("lanes") or {}
-        fleet = lanes.get(fleet_lane) or {}
-        canary = lanes.get(canary_lane) or {}
-        rollout_state = _load_rollout_state(state_root)
-        record = _family_rollout_record(rollout_state, family).get("canary") or {}
-        fleet_release = str(fleet.get("release") or "")
-        _validate_release_for_family(releases_data, fleet_release, family)
-        canary_release = str(canary.get("release") or "") if isinstance(canary, dict) else ""
-        if canary_release:
-            _validate_release_for_family(releases_data, canary_release, family)
-        runtime_slots = sorted(set(_slots_for_lane(slots_data, fleet_lane) + _slots_for_lane(slots_data, canary_lane)))
+        bindings = [binding for binding in load_runtime_bindings(state_root) if binding.enabled and binding.family == family]
+        runtime_slots = [binding.linux_account for binding in bindings]
         runtime_rollup = _runtime_manifest_rollup(state_root, runtime_slots, family)
     except Exception as exc:
         print("rollout_status=fail")
         print(f"reason={exc}")
         return 1
     print("rollout_status=ok")
-    print("status_source=legacy_rollout_state")
+    print("status_source=runtime_manifests")
     print(f"family={family}")
-    print(f"fleet_lane={fleet_lane}")
-    print(f"fleet_release={fleet_release}")
-    print(f"fleet_slots={','.join(_slots_for_lane(slots_data, fleet_lane))}")
-    if isinstance(canary, dict) and canary:
-        print(f"canary_lane={canary_lane}")
-        print(f"canary_release={canary_release}")
-        print(f"canary_slots={','.join(_slots_for_lane(slots_data, canary_lane))}")
-    else:
-        print(f"canary_lane={canary_lane}")
-        print("canary_release=")
-        print("canary_slots=")
-    if isinstance(record, dict) and record:
-        print(f"recorded_canary_slot={record.get('slot', '')}")
-        print(f"recorded_canary_release={record.get('release', '')}")
-        print(f"recorded_canary_canonical_recipe_name={record.get('canonical_recipe_name', '')}")
-        print(f"recorded_canary_canonical_recipe_digest={record.get('canonical_recipe_digest', '')}")
-        print(f"recorded_canary_status={record.get('status', '')}")
-        print(f"recorded_canary_checked_at={record.get('checked_at', '')}")
-    promotion = _family_rollout_record(rollout_state, family).get("promotion") or {}
-    if isinstance(promotion, dict) and promotion:
-        print(f"recorded_promotion_release={promotion.get('release', '')}")
-        print(f"recorded_promotion_canonical_recipe_name={promotion.get('canonical_recipe_name', '')}")
-        print(f"recorded_promotion_canonical_recipe_digest={promotion.get('canonical_recipe_digest', '')}")
-        print(f"recorded_promotion_status={promotion.get('status', '')}")
-    print("runtime_status_source=runtime_manifests")
+    print(f"binding_slots={','.join(runtime_slots)}")
     print(f"runtime_manifest_count={runtime_rollup['count']}")
     print(f"runtime_manifest_slots={','.join(runtime_rollup['slots'])}")
+    print(f"runtime_manifest_customer_slots={','.join(runtime_rollup['customer_slots'])}")
+    print(f"runtime_manifest_dev_slots={','.join(runtime_rollup['dev_slots'])}")
     print(f"runtime_manifest_direct_image_slots={','.join(runtime_rollup['direct_slots'])}")
+    print(f"runtime_manifest_missing_slots={','.join(runtime_rollup['missing_slots'])}")
     print(f"runtime_manifest_wrapper_images={','.join(runtime_rollup['wrapper_images'])}")
     print(f"runtime_manifest_product_images={','.join(runtime_rollup['product_images'])}")
     print(f"runtime_manifest_canonical_recipe_names={','.join(runtime_rollup['canonical_recipe_names'])}")
     print(f"runtime_manifest_canonical_recipe_digests={','.join(runtime_rollup['canonical_recipe_digests'])}")
-    if runtime_rollup["direct_slots"]:
-        print("status_warning=legacy_rollout_state_is_not_runtime_truth_use_runtime_manifest_or_runtime_truth")
     return 0
-
-
-def cmd_rollout_plan(args: argparse.Namespace) -> int:
-    state_root = _state_root(args)
-    try:
-        family = str(args.family)
-        release = str(args.release)
-        if family not in {"openclaw", "hermes"}:
-            raise ValueError("family must be openclaw or hermes")
-        slots_data, lanes_data, releases_data = _load_slots_lanes_releases(state_root)
-        release_data = _validate_release_for_family(releases_data, release, family)
-        fleet_lane = _fleet_lane_for_family(lanes_data, family)
-        canary_lane = _canary_lane_for_family(family)
-        lanes = lanes_data.get("lanes") or {}
-        fleet_release = str((lanes.get(fleet_lane) or {}).get("release") or "")
-        fleet_profile_name = str((lanes.get(fleet_lane) or {}).get("runtime_profile") or "")
-        target_profile_name = _release_runtime_profile_name(release_data, "customer", fleet_profile_name)
-        fleet_profile = load_profile(target_profile_name)
-        contract_checks = [
-            {"ok": ok, "name": name, "detail": detail}
-            for ok, name, detail in _release_profile_contract_checks(release_data, fleet_profile)
-        ]
-        plan = {
-            "family": family,
-            "release": release,
-            "release_digest": release_data.get("digest"),
-            "wrapper_image": release_data.get("wrapper_image"),
-            "product_image": release_data.get("product_image"),
-            "recipe": _release_recipe_payload(release_data),
-            "runtime_profile": fleet_profile.name,
-            "fleet_runtime_profile": fleet_profile_name,
-            "runtime_contract": _profile_runtime_contract(fleet_profile),
-            "customer_surface": _profile_customer_surface(fleet_profile),
-            "contract_checks": contract_checks,
-            "contract_compatible": all(item["ok"] for item in contract_checks),
-            "fleet_lane": fleet_lane,
-            "fleet_current_release": fleet_release,
-            "fleet_slots": _slots_for_lane(slots_data, fleet_lane),
-            "canary_lane": canary_lane,
-            "canary_slots": _slots_for_lane(slots_data, canary_lane),
-            "mutates": False,
-            "steps": [
-                "rollout canary --family FAMILY --release RELEASE --slot SLOT",
-                "verify canary live checks",
-                "rollout promote --family FAMILY --release RELEASE",
-            ],
-        }
-    except Exception as exc:
-        print(json.dumps({"rollout_plan_status": "fail", "reason": str(exc), "mutates": False}, ensure_ascii=False, indent=2))
-        return 1
-    print(json.dumps(plan, ensure_ascii=False, indent=2))
-    return 0
-
-
-def _restore_state_files(state_root: Path, *, slots_data: dict, lanes_data: dict) -> None:
-    _write_state_yaml_file(state_root, "slots.yaml", slots_data)
-    _write_state_yaml_file(state_root, "lanes.yaml", lanes_data)
-
-
-def _desired_with_release_and_profile(desired: DesiredSlot, release: str, release_data: dict, runtime_profile: str) -> DesiredSlot:
-    lane_data = dict(desired.lane_data)
-    lane_data["release"] = release
-    lane_data["runtime_profile"] = runtime_profile
-    return DesiredSlot(
-        slot=desired.slot,
-        lane=desired.lane,
-        lane_data=lane_data,
-        release_name=release,
-        release_data=release_data,
-        runtime_profile=runtime_profile,
-        route=desired.route,
-    )
 
 
 def _release_canonical_record(release_data: dict) -> dict[str, str]:
@@ -3862,358 +3568,6 @@ def _desired_from_live_image_truth(slot: str, state_root: Path):
     product_image = str(truth.get("product_image") or "")
     release_data = _release_data_from_direct_images(wrapper_image, product_image)
     return _desired_from_direct_images(slot, release_data, state_root)
-
-
-def _dev_rollout_target(state_root: Path, family: str, release: str, slot: str) -> tuple[dict, dict, dict, DesiredSlot, object, object]:
-    if family not in {"openclaw", "hermes"}:
-        raise ValueError("family must be openclaw or hermes")
-    binding = get_runtime_binding(slot, state_root)
-    if binding.runtime_class != "dev":
-        raise ValueError(f"dev rollout target must have runtime_class=dev: {slot}")
-    slots_data, lanes_data, releases_data = _load_slots_lanes_releases(state_root)
-    release_data = _validate_release_for_family(releases_data, release, family)
-    desired_before = load_desired_slot(slot, state_root)
-    if desired_before.lane_data.get("family") != family or desired_before.lane_data.get("slot_class") != "dev":
-        raise ValueError(f"slot is not a {family} dev slot: {slot}")
-    lane_slots = _slots_for_lane(slots_data, desired_before.lane)
-    if lane_slots != [slot]:
-        raise ValueError(
-            f"dev lane must be slot-scoped before mutation: lane={desired_before.lane} slots={','.join(lane_slots)}"
-        )
-    target_profile_name = _release_runtime_profile_name(release_data, "dev", desired_before.runtime_profile)
-    target_profile = load_profile(target_profile_name)
-    target_desired = _desired_with_release_and_profile(desired_before, release, release_data, target_profile.name)
-    return slots_data, lanes_data, releases_data, target_desired, load_profile(desired_before.runtime_profile), target_profile
-
-
-def cmd_rollout_dev_plan(args: argparse.Namespace) -> int:
-    state_root = _state_root(args)
-    family = str(args.family)
-    release = str(args.release)
-    slot = str(args.slot)
-    try:
-        slots_data, lanes_data, _releases_data, target_desired, profile_before, target_profile = _dev_rollout_target(
-            state_root, family, release, slot
-        )
-        rendered = render_compose(target_profile, target_desired)
-        contract_checks = [
-            {"ok": ok, "name": name, "detail": detail}
-            for ok, name, detail in _release_profile_contract_checks(target_desired.release_data, target_profile)
-        ]
-        static_checks = [
-            {"ok": ok, "name": name, "detail": detail}
-            for ok, name, detail in _run_static_slot_checks(target_desired, target_profile, rendered)
-        ]
-        plan = {
-            "family": family,
-            "slot": slot,
-            "lane": target_desired.lane,
-            "lane_slots": _slots_for_lane(slots_data, target_desired.lane),
-            "release": release,
-            "current_release": load_desired_slot(slot, state_root).release_name,
-            "runtime_profile": target_profile.name,
-            "current_runtime_profile": profile_before.name,
-            "runtime_contract": _profile_runtime_contract(target_profile),
-            "customer_surface": _profile_customer_surface(target_profile),
-            "recipe": _release_recipe_payload(target_desired.release_data),
-            "contract_checks": contract_checks,
-            "static_checks": static_checks,
-            "contract_compatible": all(item["ok"] for item in contract_checks + static_checks),
-            "compose_sha256": rendered.sha256,
-            "mutates": False,
-            "steps": [
-                "rollout dev-apply --family FAMILY --release RELEASE --slot DEV_SLOT",
-                "verify dev live checks",
-                "rollout canary --family FAMILY --release RELEASE --slot CUSTOMER_SLOT",
-                "rollout promote --family FAMILY --release RELEASE",
-            ],
-        }
-    except Exception as exc:
-        print(json.dumps({"rollout_dev_plan_status": "fail", "reason": str(exc), "mutates": False}, ensure_ascii=False, indent=2))
-        return 1
-    print(json.dumps(plan, ensure_ascii=False, indent=2))
-    return 0
-
-
-def cmd_rollout_dev_apply(args: argparse.Namespace) -> int:
-    if not _is_root():
-        print("error: run as root/admin: sudo /usr/local/bin/opsctl rollout dev-apply ...", file=sys.stderr)
-        return 2
-    state_root = _state_root(args)
-    family = str(args.family)
-    release = str(args.release)
-    slot = str(args.slot)
-    try:
-        slots_data, lanes_data, _releases_data, target_desired, profile_before, target_profile = _dev_rollout_target(
-            state_root, family, release, slot
-        )
-        original_lanes_data = copy.deepcopy(lanes_data)
-        rendered = render_compose(target_profile, target_desired)
-        static_failures = [
-            name for ok, name, _ in _run_static_slot_checks(target_desired, target_profile, rendered) if not ok
-        ]
-        if static_failures:
-            raise ValueError(f"static contract check failed: {','.join(static_failures)}")
-        lanes = lanes_data.get("lanes") or {}
-        lane_data = lanes.get(target_desired.lane)
-        if not isinstance(lane_data, dict):
-            raise ValueError(f"dev lane is invalid: {target_desired.lane}")
-        previous_release = str(lane_data.get("release") or "")
-        previous_runtime_profile = str(lane_data.get("runtime_profile") or "")
-        lane_data["release"] = release
-        lane_data["runtime_profile"] = target_profile.name
-        _write_state_yaml_file(state_root, "lanes.yaml", lanes_data)
-    except Exception as exc:
-        print("rollout_dev_apply_status=fail")
-        print(f"reason={exc}")
-        try:
-            _append_action_log(state_root, "rollout_dev_apply", slot, release, "fail", str(exc))
-        except Exception:
-            pass
-        return 1
-
-    print("rollout_dev_apply_state=updated")
-    print(f"family={family}")
-    print(f"slot={slot}")
-    print(f"lane={target_desired.lane}")
-    print(f"previous_release={previous_release}")
-    print(f"previous_runtime_profile={previous_runtime_profile}")
-    print(f"release={release}")
-    print(f"runtime_profile={target_profile.name}")
-    apply_rc = cmd_apply(
-        argparse.Namespace(
-            slot=slot,
-            state_root=str(state_root),
-            allow_first_apply=bool(getattr(args, "allow_first_apply", False)),
-        )
-    )
-    if apply_rc != 0:
-        _write_state_yaml_file(state_root, "lanes.yaml", original_lanes_data)
-        print("rollout_dev_apply_status=fail")
-        print("reason=dev_apply_failed")
-        _append_action_log(state_root, "rollout_dev_apply", slot, release, "fail", "dev_apply_failed")
-        return apply_rc or 1
-
-    rollout_state = _load_rollout_state(state_root)
-    record = _family_rollout_record(rollout_state, family)
-    dev_slots = record.setdefault("dev_slots", {})
-    if not isinstance(dev_slots, dict):
-        raise ValueError("rollout state dev_slots must be a mapping")
-    dev_slots[slot] = {
-        "slot": slot,
-        "lane": target_desired.lane,
-        "release": release,
-        "previous_release": previous_release,
-        "previous_runtime_profile": previous_runtime_profile,
-        "runtime_profile": target_profile.name,
-        **_release_canonical_record(target_desired.release_data),
-        "status": "ok",
-        "checked_at": _now_iso(),
-    }
-    _write_rollout_state(state_root, rollout_state)
-    print("rollout_dev_apply_status=ok")
-    _append_action_log(state_root, "rollout_dev_apply", slot, release, "ok", f"profile={target_profile.name}")
-    return 0
-
-
-def cmd_rollout_canary(args: argparse.Namespace) -> int:
-    if not _is_root():
-        print("error: run as root/admin: sudo /usr/local/bin/opsctl rollout canary ...", file=sys.stderr)
-        return 2
-    state_root = _state_root(args)
-    family = str(args.family)
-    release = str(args.release)
-    slot = str(args.slot)
-    try:
-        if family not in {"openclaw", "hermes"}:
-            raise ValueError("family must be openclaw or hermes")
-        binding = get_runtime_binding(slot, state_root)
-        if binding.runtime_class != "customer":
-            raise ValueError(f"canary target must have runtime_class=customer: {slot}")
-        slots_data, lanes_data, releases_data = _load_slots_lanes_releases(state_root)
-        original_slots_data = copy.deepcopy(slots_data)
-        original_lanes_data = copy.deepcopy(lanes_data)
-        release_data = _validate_release_for_family(releases_data, release, family)
-        desired_before = load_desired_slot(slot, state_root)
-        profile_before = load_profile(desired_before.runtime_profile)
-        if desired_before.lane_data.get("family") != family or desired_before.lane_data.get("slot_class") != "customer":
-            raise ValueError(f"slot is not a {family} customer slot: {slot}")
-        target_profile_name = _release_runtime_profile_name(release_data, "customer", profile_before.name)
-        target_profile = load_profile(target_profile_name)
-        contract_failures = _release_profile_contract_failures(release_data, target_profile)
-        if contract_failures:
-            raise ValueError(
-                "release does not satisfy runtime contract "
-                f"{_profile_runtime_contract(target_profile) or target_profile.name}:"
-                + ",".join(contract_failures)
-            )
-        fleet_lane = _fleet_lane_for_family(lanes_data, family)
-        canary_lane = _canary_lane_for_family(family)
-        existing_rollout_state = _load_rollout_state(state_root)
-        existing_canary = _family_rollout_record(existing_rollout_state, family).get("canary")
-        if desired_before.lane == canary_lane and isinstance(existing_canary, dict):
-            previous_lane = str(existing_canary.get("previous_lane") or fleet_lane)
-            previous_release = str(existing_canary.get("previous_release") or desired_before.release_name)
-        else:
-            previous_lane = desired_before.lane if desired_before.lane != canary_lane else fleet_lane
-            previous_release = str(desired_before.lane_data.get("release") or desired_before.release_name)
-        lanes = lanes_data.setdefault("lanes", {})
-        fleet_data = lanes.get(fleet_lane)
-        if not isinstance(fleet_data, dict):
-            raise ValueError(f"fleet lane is invalid: {fleet_lane}")
-        lanes[canary_lane] = {
-            "family": family,
-            "slot_class": "customer",
-            "release": release,
-            "runtime_profile": target_profile.name,
-        }
-        _set_slot_lane(slots_data, slot, canary_lane)
-        _write_state_yaml_file(state_root, "lanes.yaml", lanes_data)
-        _write_state_yaml_file(state_root, "slots.yaml", slots_data)
-    except Exception as exc:
-        print("rollout_canary_status=fail")
-        print(f"reason={exc}")
-        try:
-            _append_action_log(state_root, "rollout_canary", slot, release, "fail", str(exc))
-        except Exception:
-            pass
-        return 1
-
-    print("rollout_canary_state=updated")
-    print(f"family={family}")
-    print(f"slot={slot}")
-    print(f"canary_lane={canary_lane}")
-    print(f"release={release}")
-    print(f"runtime_profile={target_profile.name}")
-    apply_rc = cmd_apply(
-        argparse.Namespace(
-            slot=slot,
-            state_root=str(state_root),
-            allow_first_apply=bool(getattr(args, "allow_first_apply", False)),
-        )
-    )
-    if apply_rc != 0:
-        _restore_state_files(state_root, slots_data=original_slots_data, lanes_data=original_lanes_data)
-        print("rollout_canary_status=fail")
-        print("reason=canary_apply_failed")
-        _append_action_log(state_root, "rollout_canary", slot, release, "fail", "canary_apply_failed")
-        return apply_rc or 1
-
-    rollout_state = _load_rollout_state(state_root)
-    record = _family_rollout_record(rollout_state, family)
-    record["canary"] = {
-        "slot": slot,
-        "release": release,
-        "lane": canary_lane,
-        "previous_lane": previous_lane,
-        "previous_release": previous_release,
-        "previous_runtime_profile": profile_before.name,
-        "runtime_profile": target_profile.name,
-        **_release_canonical_record(release_data),
-        "status": "ok",
-        "checked_at": _now_iso(),
-    }
-    _write_rollout_state(state_root, rollout_state)
-    print("rollout_canary_status=ok")
-    _append_action_log(state_root, "rollout_canary", slot, release, "ok", f"lane={canary_lane}")
-    return 0
-
-
-def cmd_rollout_promote(args: argparse.Namespace) -> int:
-    if not _is_root():
-        print("error: run as root/admin: sudo /usr/local/bin/opsctl rollout promote ...", file=sys.stderr)
-        return 2
-    state_root = _state_root(args)
-    family = str(args.family)
-    release = str(args.release)
-    try:
-        if family not in {"openclaw", "hermes"}:
-            raise ValueError("family must be openclaw or hermes")
-        slots_data, lanes_data, releases_data = _load_slots_lanes_releases(state_root)
-        release_data = _validate_release_for_family(releases_data, release, family)
-        rollout_state = _load_rollout_state(state_root)
-        record = _family_rollout_record(rollout_state, family).get("canary")
-        if not isinstance(record, dict) or record.get("status") != "ok" or record.get("release") != release:
-            raise ValueError("matching successful canary record is required before promote")
-        fleet_lane = _fleet_lane_for_family(lanes_data, family)
-        canary_slot = str(record.get("slot") or "")
-        canary_binding = get_runtime_binding(canary_slot, state_root)
-        if canary_binding.runtime_class != "customer":
-            raise ValueError("canary record is not bound to runtime_class=customer")
-        lanes = lanes_data.get("lanes") or {}
-        fleet_data = lanes.get(fleet_lane)
-        if not isinstance(fleet_data, dict):
-            raise ValueError(f"fleet lane is invalid: {fleet_lane}")
-        previous_release = str(fleet_data.get("release") or "")
-        previous_profile = str(fleet_data.get("runtime_profile") or "")
-        target_profile_name = _release_runtime_profile_name(release_data, "customer", previous_profile)
-        target_profile = load_profile(target_profile_name)
-        contract_failures = _release_profile_contract_failures(release_data, target_profile)
-        if contract_failures:
-            raise ValueError(
-                "release does not satisfy runtime contract "
-                f"{_profile_runtime_contract(target_profile) or target_profile.name}:"
-                + ",".join(contract_failures)
-            )
-        fleet_data["release"] = release
-        fleet_data["runtime_profile"] = target_profile.name
-        _set_slot_lane(slots_data, canary_slot, fleet_lane)
-        _write_state_yaml_file(state_root, "lanes.yaml", lanes_data)
-        _write_state_yaml_file(state_root, "slots.yaml", slots_data)
-        slots_to_apply = _slots_for_lane(slots_data, fleet_lane)
-    except Exception as exc:
-        print("rollout_promote_status=fail")
-        print(f"reason={exc}")
-        try:
-            _append_action_log(state_root, "rollout_promote", "-", release, "fail", str(exc))
-        except Exception:
-            pass
-        return 1
-
-    print("rollout_promote_state=updated")
-    print(f"family={family}")
-    print(f"fleet_lane={fleet_lane}")
-    print(f"previous_release={previous_release}")
-    print(f"previous_runtime_profile={previous_profile}")
-    print(f"release={release}")
-    print(f"runtime_profile={target_profile.name}")
-    print(f"slots={','.join(slots_to_apply)}")
-    for slot in slots_to_apply:
-        rc = cmd_apply(argparse.Namespace(slot=slot, state_root=str(state_root), allow_first_apply=False))
-        if rc != 0:
-            rollout_state = _load_rollout_state(state_root)
-            record = _family_rollout_record(rollout_state, family)
-            record["promotion"] = {
-                "release": release,
-                **_release_canonical_record(release_data),
-                "status": "partial",
-                "failed_slot": slot,
-                "updated_at": _now_iso(),
-            }
-            _write_rollout_state(state_root, rollout_state)
-            print("rollout_promote_status=partial")
-            print(f"failed_slot={slot}")
-            _append_action_log(state_root, "rollout_promote", slot, release, "partial", "slot_apply_failed")
-            return rc or 1
-
-    rollout_state = _load_rollout_state(state_root)
-    record = _family_rollout_record(rollout_state, family)
-    canary = record.get("canary")
-    if isinstance(canary, dict):
-        canary["status"] = "promoted"
-        canary["promoted_at"] = _now_iso()
-    record["promotion"] = {
-        "release": release,
-        "runtime_profile": target_profile.name,
-        **_release_canonical_record(release_data),
-        "status": "ok",
-        "slots": slots_to_apply,
-        "updated_at": _now_iso(),
-    }
-    _write_rollout_state(state_root, rollout_state)
-    print("rollout_promote_status=ok")
-    _append_action_log(state_root, "rollout_promote", "-", release, "ok", f"slots={len(slots_to_apply)}")
-    return 0
 
 
 def _direct_image_release_from_args(args: argparse.Namespace) -> dict[str, object]:
@@ -4366,92 +3720,6 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
     print(f"wrapper_image={release_data.get('wrapper_image')}")
     print(f"product_image={release_data.get('product_image')}")
     _append_action_log(state_root, "rollout_image_promote", from_slot, str(release_data.get("wrapper_image") or ""), "ok", f"slots={len(applied)}")
-    return 0
-
-
-def cmd_rollout_rollback_canary(args: argparse.Namespace) -> int:
-    if not _is_root():
-        print("error: run as root/admin: sudo /usr/local/bin/opsctl rollout rollback-canary ...", file=sys.stderr)
-        return 2
-    state_root = _state_root(args)
-    family = str(args.family)
-    try:
-        if family not in {"openclaw", "hermes"}:
-            raise ValueError("family must be openclaw or hermes")
-        slots_data, lanes_data, releases_data = _load_slots_lanes_releases(state_root)
-        rollout_state = _load_rollout_state(state_root)
-        record = _family_rollout_record(rollout_state, family).get("canary")
-        inferred_without_record = False
-        if isinstance(record, dict) and record.get("slot") and record.get("previous_lane"):
-            slot = str(record["slot"])
-            previous_lane = str(record["previous_lane"])
-            previous_release = str(record.get("previous_release") or "")
-            canary_release = str(record.get("release") or "")
-        else:
-            fleet_lane = _fleet_lane_for_family(lanes_data, family)
-            canary_lane = _canary_lane_for_family(family)
-            canary_slots = _slots_for_lane(slots_data, canary_lane)
-            if len(canary_slots) != 1:
-                raise ValueError(
-                    f"no canary record to roll back and expected exactly one {canary_lane} slot, found {len(canary_slots)}"
-                )
-            lanes = lanes_data.get("lanes") or {}
-            fleet_data = lanes.get(fleet_lane)
-            canary_data = lanes.get(canary_lane)
-            if not isinstance(fleet_data, dict):
-                raise ValueError(f"fleet lane is invalid: {fleet_lane}")
-            slot = canary_slots[0]
-            previous_lane = fleet_lane
-            previous_release = str(fleet_data.get("release") or "")
-            canary_release = str(canary_data.get("release") or "") if isinstance(canary_data, dict) else ""
-            inferred_without_record = True
-        if previous_lane not in (lanes_data.get("lanes") or {}):
-            raise ValueError(f"previous lane no longer exists: {previous_lane}")
-        _validate_release_for_family(releases_data, previous_release, family)
-        _set_slot_lane(slots_data, slot, previous_lane)
-        _write_state_yaml_file(state_root, "slots.yaml", slots_data)
-    except Exception as exc:
-        print("rollout_rollback_canary_status=fail")
-        print(f"reason={exc}")
-        try:
-            _append_action_log(state_root, "rollout_rollback_canary", "-", family, "fail", str(exc))
-        except Exception:
-            pass
-        return 1
-
-    print("rollout_rollback_canary_state=updated")
-    print(f"family={family}")
-    print(f"slot={slot}")
-    print(f"lane={previous_lane}")
-    print(f"release={previous_release}")
-    if inferred_without_record:
-        print("inferred_without_record=true")
-    rc = cmd_apply(argparse.Namespace(slot=slot, state_root=str(state_root), allow_first_apply=False))
-    if rc != 0:
-        print("rollout_rollback_canary_status=fail")
-        print("reason=rollback_apply_failed")
-        _append_action_log(state_root, "rollout_rollback_canary", slot, previous_release, "fail", "rollback_apply_failed")
-        return rc or 1
-    rollout_state = _load_rollout_state(state_root)
-    record = _family_rollout_record(rollout_state, family)
-    canary = record.get("canary")
-    if isinstance(canary, dict):
-        canary["status"] = "rolled_back"
-        canary["rolled_back_at"] = _now_iso()
-    elif inferred_without_record:
-        record["canary"] = {
-            "slot": slot,
-            "release": canary_release,
-            "lane": _canary_lane_for_family(family),
-            "previous_lane": previous_lane,
-            "previous_release": previous_release,
-            "status": "rolled_back_without_record",
-            "rolled_back_at": _now_iso(),
-            "recovered_from": "canary_state_without_rollout_record",
-        }
-    _write_rollout_state(state_root, rollout_state)
-    print("rollout_rollback_canary_status=ok")
-    _append_action_log(state_root, "rollout_rollback_canary", slot, previous_release, "ok")
     return 0
 
 
@@ -5444,40 +4712,11 @@ def build_parser() -> argparse.ArgumentParser:
     diagnostics_show.add_argument("--tail", type=int, default=120)
     diagnostics_show.set_defaults(func=cmd_diagnostics_show)
 
-    rollout = sub.add_parser("rollout", description="Prefer image-* commands. Release-state commands are legacy recovery compatibility.")
+    rollout = sub.add_parser("rollout", description="Inspect runtime manifests and apply digest-pinned wrapper/product images.")
     rollout_sub = rollout.add_subparsers(dest="rollout_command", required=True)
-    legacy_rollout_help = "legacy recovery compatibility; prefer image-* rollout commands"
-    rollout_status = rollout_sub.add_parser("status", help=legacy_rollout_help, description=legacy_rollout_help)
+    rollout_status = rollout_sub.add_parser("status", help="summarize runtime manifests for a product family")
     rollout_status.add_argument("--family", required=True, choices=["hermes", "openclaw"])
     rollout_status.set_defaults(func=cmd_rollout_status)
-    rollout_plan = rollout_sub.add_parser("plan", help=legacy_rollout_help, description=legacy_rollout_help)
-    rollout_plan.add_argument("--family", required=True, choices=["hermes", "openclaw"])
-    rollout_plan.add_argument("--release", required=True)
-    rollout_plan.set_defaults(func=cmd_rollout_plan)
-    rollout_dev_plan = rollout_sub.add_parser("dev-plan", help=legacy_rollout_help, description=legacy_rollout_help)
-    rollout_dev_plan.add_argument("--family", required=True, choices=["hermes", "openclaw"])
-    rollout_dev_plan.add_argument("--release", required=True)
-    rollout_dev_plan.add_argument("--slot", required=True)
-    rollout_dev_plan.set_defaults(func=cmd_rollout_dev_plan)
-    rollout_dev_apply = rollout_sub.add_parser("dev-apply", help=legacy_rollout_help, description=legacy_rollout_help)
-    rollout_dev_apply.add_argument("--family", required=True, choices=["hermes", "openclaw"])
-    rollout_dev_apply.add_argument("--release", required=True)
-    rollout_dev_apply.add_argument("--slot", required=True)
-    rollout_dev_apply.add_argument("--allow-first-apply", action="store_true")
-    rollout_dev_apply.set_defaults(func=cmd_rollout_dev_apply)
-    rollout_canary = rollout_sub.add_parser("canary", help=legacy_rollout_help, description=legacy_rollout_help)
-    rollout_canary.add_argument("--family", required=True, choices=["hermes", "openclaw"])
-    rollout_canary.add_argument("--release", required=True)
-    rollout_canary.add_argument("--slot", required=True)
-    rollout_canary.add_argument("--allow-first-apply", action="store_true")
-    rollout_canary.set_defaults(func=cmd_rollout_canary)
-    rollout_promote = rollout_sub.add_parser("promote", help=legacy_rollout_help, description=legacy_rollout_help)
-    rollout_promote.add_argument("--family", required=True, choices=["hermes", "openclaw"])
-    rollout_promote.add_argument("--release", required=True)
-    rollout_promote.set_defaults(func=cmd_rollout_promote)
-    rollout_rollback_canary = rollout_sub.add_parser("rollback-canary", help=legacy_rollout_help, description=legacy_rollout_help)
-    rollout_rollback_canary.add_argument("--family", required=True, choices=["hermes", "openclaw"])
-    rollout_rollback_canary.set_defaults(func=cmd_rollout_rollback_canary)
     rollout_image_plan = rollout_sub.add_parser("image-plan", help="validate digest-pinned images without release state")
     rollout_image_plan.add_argument("--wrapper-image", required=True)
     rollout_image_plan.add_argument("--product-image", required=True)
@@ -5522,34 +4761,6 @@ def build_parser() -> argparse.ArgumentParser:
     recipe_apply_dev.add_argument("--allow-first-apply", action="store_true")
     recipe_apply_dev.add_argument("--no-apply", action="store_true")
     recipe_apply_dev.set_defaults(func=cmd_recipe_dev_apply)
-
-    release = sub.add_parser("release", description="Legacy release-state compatibility. Prefer digest-pinned rollout image-* commands.")
-    release_sub = release.add_subparsers(dest="release_command", required=True)
-    legacy_release_help = "legacy release-state compatibility; prefer rollout image-* commands"
-    release_import = release_sub.add_parser("import", help=legacy_release_help, description=legacy_release_help)
-    release_import.add_argument("name")
-    release_import.add_argument("--family", required=True, choices=["hermes", "openclaw"])
-    release_import.add_argument("--image")
-    release_import.add_argument("--product-image")
-    release_import.add_argument("--wrapper-image")
-    release_import.add_argument("--image-name")
-    release_import.add_argument(
-        "--component",
-        action="append",
-        default=[],
-        help="repeatable release recipe component in NAME=VALUE form, such as hermes-workspace=repo@sha",
-    )
-    release_import.add_argument("--compat-combined", action="store_true")
-    release_import.add_argument("--replace", action="store_true")
-    release_import.set_defaults(func=cmd_release_import)
-    release_add = release_sub.add_parser("add", help=legacy_release_help, description=legacy_release_help)
-    release_add.add_argument("name")
-    release_add.add_argument("image")
-    release_add.set_defaults(func=cmd_release_add)
-    release_promote = release_sub.add_parser("promote", help=legacy_release_help, description=legacy_release_help)
-    release_promote.add_argument("name")
-    release_promote.add_argument("lane")
-    release_promote.set_defaults(func=cmd_release_promote)
 
     runtime_secret = sub.add_parser("runtime-secret")
     runtime_secret_sub = runtime_secret.add_subparsers(dest="runtime_secret_command", required=True)

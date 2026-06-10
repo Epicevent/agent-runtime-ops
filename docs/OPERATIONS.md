@@ -8,8 +8,7 @@ status -> plan -> apply -> check
 
 `status`, `plan`, `check`는 파일을 쓰지 않는다.
 
-`opsctl check SLOT`은 private state, release, runtime profile이 유효한 compose를
-렌더링할 수 있는지 확인한다.
+`opsctl check SLOT` validates the slot's runtime manifest, runtime profile, and rendered compose.
 
 `sudo /usr/local/bin/opsctl check --live SLOT`은 Docker metadata와 mount namespace를
 읽어서 실제 container, image digest, runtime user, NAS root bind, child CIFS mount를
@@ -91,13 +90,13 @@ opsctl nas mounted oc3
 sudo /usr/local/bin/opsctl nas unmount oc3 //192.168.0.222/hanpass
 ```
 
-`rollout`은 단일 slot apply/rollback migration 검증이 끝날 때까지 닫아 둔다.
+Product rollouts use the digest-pinned image rollout commands below.
 
 ## Canonical runtime recipe
 
 Runtime recipe identity starts in this repo, under `recipes/runtime/*.yaml`.
-Wrapper image labels must attest to that repo-owned recipe. Release state is legacy rollout
-metadata; it is not runtime truth.
+Wrapper image labels must attest to that repo-owned recipe. Runtime manifests and live image labels
+are the operational truth. Release-state rollout commands are not operating commands.
 
 ## Routing registry and live image truth
 
@@ -125,8 +124,6 @@ sudo /usr/local/bin/opsctl rollout image-canary --slot oc3 --wrapper-image WRAP@
 sudo /usr/local/bin/opsctl rollout image-promote --from-slot oc3 --slots oc1,oc2,oc4
 ```
 
-The legacy release-state rollout commands remain for compatibility only.
-
 Useful read-only checks:
 
 ```bash
@@ -142,9 +139,10 @@ Wrapper publish workflows use:
 opsctl recipe validate-canonical RECIPE --emit-build-args
 ```
 
-`opsctl check SLOT`, `opsctl rollout plan`, and `opsctl rollout dev-plan` should report the same
-`canonical_recipe_name` and `canonical_recipe_digest` for dev and customer projections when they are
-part of the same runtime recipe.
+`opsctl runtime truth SLOT`, `opsctl check SLOT`, `opsctl check --live SLOT`, and
+`opsctl rollout image-plan` should report the same `canonical_recipe_name` and
+`canonical_recipe_digest` for dev and customer projections when they are part of the same runtime
+recipe.
 
 `opsctl recipe apply-dev` records source provenance separately under `dev-recipes.yaml`. Treat that
 as product source evidence, not as the runtime recipe source of truth.

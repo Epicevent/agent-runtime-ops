@@ -217,14 +217,7 @@ install_ops_sudoers() {
     printf '%s ALL=(root) NOPASSWD: %s apache set-host *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s runtime truth *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s recipe apply-dev *\n' "$OPS_USER" "$BIN_LINK"
-    printf '%s ALL=(root) NOPASSWD: %s release import *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s rollout status *\n' "$OPS_USER" "$BIN_LINK"
-    printf '%s ALL=(root) NOPASSWD: %s rollout plan *\n' "$OPS_USER" "$BIN_LINK"
-    printf '%s ALL=(root) NOPASSWD: %s rollout dev-plan *\n' "$OPS_USER" "$BIN_LINK"
-    printf '%s ALL=(root) NOPASSWD: %s rollout dev-apply *\n' "$OPS_USER" "$BIN_LINK"
-    printf '%s ALL=(root) NOPASSWD: %s rollout canary *\n' "$OPS_USER" "$BIN_LINK"
-    printf '%s ALL=(root) NOPASSWD: %s rollout promote *\n' "$OPS_USER" "$BIN_LINK"
-    printf '%s ALL=(root) NOPASSWD: %s rollout rollback-canary *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s rollout image-plan *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s rollout image-dev-apply *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s rollout image-canary *\n' "$OPS_USER" "$BIN_LINK"
@@ -251,7 +244,7 @@ repair_private_state_permissions() {
   chgrp "$OPS_GROUP" "$STATE_ROOT" 2>/dev/null || true
   chmod 0750 "$STATE_ROOT" 2>/dev/null || true
   local name path
-  for name in slots.yaml lanes.yaml releases.yaml rollout-state.yaml dev-recipes.yaml nas-policy.yaml runtime-bindings.json slot-registry.json; do
+  for name in slots.yaml lanes.yaml releases.yaml dev-recipes.yaml nas-policy.yaml runtime-bindings.json slot-registry.json; do
     path="$STATE_ROOT/$name"
     if [[ -f "$path" && ! -L "$path" ]]; then
       chgrp "$OPS_GROUP" "$path" 2>/dev/null || true
