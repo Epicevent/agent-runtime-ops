@@ -353,12 +353,27 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 # agent-runtime-ops managed gemini wrapper
+OPS_USER="$OPS_USER"
 GEMINI_ENV="\${AGENT_RUNTIME_GEMINI_ENV:-$GEMINI_HOME/.env}"
 if [[ -r "\$GEMINI_ENV" ]]; then
   set -a
   # shellcheck disable=SC1090
   . "\$GEMINI_ENV"
   set +a
+fi
+if [[ "\$(id -un 2>/dev/null || true)" == "\$OPS_USER" ]]; then
+  export GEMINI_CLI_TRUST_WORKSPACE="\${GEMINI_CLI_TRUST_WORKSPACE:-true}"
+  has_allowed_mcp=0
+  for arg in "\$@"; do
+    case "\$arg" in
+      --allowed-mcp-server-names|--allowed-mcp-server-names=*)
+        has_allowed_mcp=1
+        ;;
+    esac
+  done
+  if [[ "\$has_allowed_mcp" -eq 0 ]]; then
+    set -- --allowed-mcp-server-names agent-runtime-ops "\$@"
+  fi
 fi
 exec "$CURRENT_LINK/agent-clis/gemini-cli/node_modules/.bin/gemini" "\$@"
 EOF

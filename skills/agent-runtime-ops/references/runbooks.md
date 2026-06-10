@@ -68,8 +68,13 @@ umask 077
 printf 'GEMINI_API_KEY=%s\n' "$GEMINI_API_KEY" > ~/.gemini/.env
 unset GEMINI_API_KEY
 gemini --version
-GEMINI_CLI_TRUST_WORKSPACE=true gemini "Reply exactly: OK"
+cd /opt/agent-runtime-ops/current
+gemini "Reply exactly: OK"
 ```
+
+The managed `/usr/local/bin/gemini` wrapper sets the trusted workspace default and allows the
+`agent-runtime-ops` MCP server automatically when the executing Unix account is `svcops`. Do not ask
+operators to type trust/MCP flags for normal `svcops` Gemini sessions.
 
 Do not put the Codex login token or Gemini API key in chat, command arguments, MCP JSON arguments,
 or repo files.
