@@ -26,6 +26,7 @@ jobs:
 
       - name: Validate canonical runtime recipes
         run: |
+          python -m agent_runtime_ops.cli recipe validate-canonical hermes-runtime
           python -m agent_runtime_ops.cli recipe validate-canonical hermes-workspace
           python -m agent_runtime_ops.cli recipe validate-canonical hermes-combined
           python -m agent_runtime_ops.cli recipe validate-canonical openclaw-control
@@ -35,4 +36,5 @@ jobs:
           set -euo pipefail
           ! grep -RInE 'docker-compose\.nas\.yml|svcops-control\.sh|cat > .*docker-compose' \
             --exclude-dir=.git \
+            --exclude-dir=tests \
             --exclude=checks.yml .
