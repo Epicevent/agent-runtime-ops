@@ -212,6 +212,15 @@ directory, secrets, NAS, containers, labels, backups, and state.
 Use digest-pinned wrapper and product images. Do not use release-state rollout commands; the public
 operating path is the image rollout toolset below.
 
+Rollout order is dev first, then customer canary, then explicit customer targets. A customer canary
+is a bridge for promotion, not the first place to discover whether the slot image recipe works.
+The same wrapper digest should carry the runtime recipe for both dev and customer projections.
+
+Treat NAS as part of the slot image runtime contract. Do not "fix" NAS by hand on one customer
+account and then promote that image. The wrapper image must declare the NAS root, read-only policy,
+mount propagation, and host-propagated child CIFS mode; `runtime truth` and `check --live` must then
+confirm that the rendered compose and running container preserve that contract.
+
 Plan:
 
 ```bash

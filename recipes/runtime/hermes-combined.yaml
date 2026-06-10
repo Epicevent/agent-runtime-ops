@@ -17,6 +17,10 @@ expected_image_components:
   - hermes-gateway
   - hermes-dashboard
 container_nas_root: /workspace/nas_docs
+host_nas_root_template: /home/{slot}/nas_docs
+nas_read_only: true
+nas_mount_propagation: rslave
+nas_child_mount_mode: host-propagated-cifs
 source_output_target: /opt/hermes-workspace
 runtime_user_mode: image-managed
 command_mode: gateway-run

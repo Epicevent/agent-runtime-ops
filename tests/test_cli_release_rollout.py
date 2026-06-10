@@ -90,6 +90,12 @@ def openclaw_image_recipe(*, product_image: str) -> dict[str, object]:
         "command_mode": "compose-command",
         "working_dir": "",
         "http_port": "18789",
+        "source_output_target": "/app/dist/control-ui",
+        "container_nas_root": "/home/node/nas_docs",
+        "host_nas_root_template": "/home/{slot}/nas_docs",
+        "nas_read_only": "true",
+        "nas_mount_propagation": "rslave",
+        "nas_child_mount_mode": "host-propagated-cifs",
         "ops_repo_commit": "ec892a32f9ca846f390e2dd19c577dd13d4f044f",
     }
 
@@ -122,6 +128,12 @@ def hermes_image_recipe(
         "command_mode": "image-default",
         "working_dir": "/app",
         "http_port": "3000",
+        "source_output_target": "/opt/hermes-workspace",
+        "container_nas_root": "/workspace/nas_docs",
+        "host_nas_root_template": "/home/{slot}/nas_docs",
+        "nas_read_only": "true",
+        "nas_mount_propagation": "rslave",
+        "nas_child_mount_mode": "host-propagated-cifs",
         "ops_repo_commit": "8be9e466c28f821a907a40ab2b0068910c6762cf",
     }
 
@@ -148,6 +160,12 @@ def hermes_combined_image_recipe(*, product_image: str | None = None) -> dict[st
         "command_mode": "gateway-run",
         "working_dir": "/opt/data/home",
         "http_port": "3000",
+        "source_output_target": "/opt/hermes-workspace",
+        "container_nas_root": "/workspace/nas_docs",
+        "host_nas_root_template": "/home/{slot}/nas_docs",
+        "nas_read_only": "true",
+        "nas_mount_propagation": "rslave",
+        "nas_child_mount_mode": "host-propagated-cifs",
         "ops_repo_commit": "8be9e466c28f821a907a40ab2b0068910c6762cf",
     }
 
@@ -169,6 +187,12 @@ def hermes_recipe_labels(**overrides: str) -> dict[str, str]:
         "command-mode": "image-default",
         "working-dir": "/app",
         "http-port": "3000",
+        "source-output-target": "/opt/hermes-workspace",
+        "nas.container-root": "/workspace/nas_docs",
+        "nas.host-root-template": "/home/{slot}/nas_docs",
+        "nas.read-only": "true",
+        "nas.propagation": "rslave",
+        "nas.child-mount-mode": "host-propagated-cifs",
         "ops-repo-commit": "8be9e466c28f821a907a40ab2b0068910c6762cf",
     }
     values.update(overrides)
@@ -192,6 +216,12 @@ def openclaw_recipe_labels(**overrides: str) -> dict[str, str]:
         "command-mode": "compose-command",
         "working-dir": "",
         "http-port": "18789",
+        "source-output-target": "/app/dist/control-ui",
+        "nas.container-root": "/home/node/nas_docs",
+        "nas.host-root-template": "/home/{slot}/nas_docs",
+        "nas.read-only": "true",
+        "nas.propagation": "rslave",
+        "nas.child-mount-mode": "host-propagated-cifs",
         "ops-repo-commit": "ec892a32f9ca846f390e2dd19c577dd13d4f044f",
     }
     values.update(overrides)
@@ -675,6 +705,12 @@ class CliReleaseRolloutTests(unittest.TestCase):
         self.assertIn("CANONICAL_RECIPE_NAME=hermes-workspace", text)
         self.assertIn(f"CANONICAL_RECIPE_DIGEST={hermes_workspace_recipe_digest()}", text)
         self.assertIn("RUNTIME_PROFILE_DEV=hermes-workspace-dev", text)
+        self.assertIn("RUNTIME_SOURCE_OUTPUT_TARGET=/opt/hermes-workspace", text)
+        self.assertIn("RUNTIME_NAS_CONTAINER_ROOT=/workspace/nas_docs", text)
+        self.assertIn("RUNTIME_NAS_HOST_ROOT_TEMPLATE=/home/{slot}/nas_docs", text)
+        self.assertIn("RUNTIME_NAS_READ_ONLY=true", text)
+        self.assertIn("RUNTIME_NAS_PROPAGATION=rslave", text)
+        self.assertIn("RUNTIME_NAS_CHILD_MOUNT_MODE=host-propagated-cifs", text)
 
     def test_binding_normalize_migrates_legacy_registry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -858,6 +894,11 @@ class CliReleaseRolloutTests(unittest.TestCase):
         self.assertEqual(recipe["canonical_recipe_digest"], hermes_workspace_recipe_digest())
         self.assertEqual(recipe["runtime_profiles"]["customer"], "hermes-workspace-customer")
         self.assertEqual(recipe["product_component"], "hermes-workspace")
+        self.assertEqual(recipe["container_nas_root"], "/workspace/nas_docs")
+        self.assertEqual(recipe["host_nas_root_template"], "/home/{slot}/nas_docs")
+        self.assertEqual(recipe["nas_read_only"], "true")
+        self.assertEqual(recipe["nas_mount_propagation"], "rslave")
+        self.assertEqual(recipe["nas_child_mount_mode"], "host-propagated-cifs")
 
     def test_wrapper_image_recipe_rejects_canonical_digest_mismatch(self) -> None:
         product_image = wrapper_image_ref("hermes-workspace", "2")
@@ -875,6 +916,22 @@ class CliReleaseRolloutTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "missing canonical recipe name"):
                 _image_recipe_from_wrapper_image(wrapper_image, family="hermes", product_image=product_image)
 
+    def test_wrapper_image_recipe_rejects_missing_nas_contract_labels(self) -> None:
+        product_image = wrapper_image_ref("openclaw-jitech", "8")
+        wrapper_image = wrapper_image_ref("agent-runtime-openclaw", "9")
+        labels = openclaw_recipe_labels(**{"nas.propagation": ""})
+        with patch("agent_runtime_ops.cli._image_recipe_labels_from_wrapper", return_value=labels):
+            with self.assertRaisesRegex(ValueError, "recipe labels are incomplete: .*nas.propagation"):
+                _image_recipe_from_wrapper_image(wrapper_image, family="openclaw", product_image=product_image)
+
+    def test_wrapper_image_recipe_rejects_nas_contract_mismatch(self) -> None:
+        product_image = wrapper_image_ref("openclaw-jitech", "8")
+        wrapper_image = wrapper_image_ref("agent-runtime-openclaw", "9")
+        labels = openclaw_recipe_labels(**{"nas.propagation": "private"})
+        with patch("agent_runtime_ops.cli._image_recipe_labels_from_wrapper", return_value=labels):
+            with self.assertRaisesRegex(ValueError, "canonical recipe mismatch: nas.propagation"):
+                _image_recipe_from_wrapper_image(wrapper_image, family="openclaw", product_image=product_image)
+
     def test_live_image_truth_rejects_partial_recipe_labels(self) -> None:
         route = binding("oc20", "hermes", "customer", 30689, 30690)
         labels = hermes_recipe_labels(**{"recipe.name": "", "recipe.digest": ""})
@@ -888,6 +945,25 @@ class CliReleaseRolloutTests(unittest.TestCase):
         self.assertEqual(truth["truth_status"], "incomplete_recipe_labels")
         self.assertEqual(truth["canonical_recipe_name"], "")
         self.assertEqual(truth["canonical_recipe_digest"], "")
+
+    def test_live_image_truth_reports_nas_contract_from_image_labels(self) -> None:
+        route = binding("dev-oc", "openclaw", "dev", 30789, 30790)
+        product_image = wrapper_image_ref("openclaw-jitech", "8")
+        labels = openclaw_recipe_labels(product_image=product_image)
+        info = {
+            "Config": {
+                "Image": wrapper_image_ref("agent-runtime-openclaw", "9"),
+                "Labels": labels,
+            }
+        }
+        truth = _live_image_truth_from_info(route, info, route)
+        self.assertEqual(truth["truth_status"], "ok")
+        self.assertEqual(truth["runtime_profile"], "openclaw-dev")
+        self.assertEqual(truth["container_nas_root"], "/home/node/nas_docs")
+        self.assertEqual(truth["host_nas_root_template"], "/home/{slot}/nas_docs")
+        self.assertEqual(truth["nas_read_only"], "true")
+        self.assertEqual(truth["nas_mount_propagation"], "rslave")
+        self.assertEqual(truth["nas_child_mount_mode"], "host-propagated-cifs")
 
     def test_wrapper_image_recipe_rejects_component_mismatch(self) -> None:
         product_image = wrapper_image_ref("hermes-workspace", "2")

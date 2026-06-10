@@ -58,6 +58,16 @@ def _string_map(value: Any) -> dict[str, str]:
     return {str(key): str(item) for key, item in value.items()}
 
 
+def _bool_label(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "false"}:
+            return lowered
+    return ""
+
+
 def canonical_recipe_for_product(family: str, product_image: object) -> CanonicalRuntimeRecipe | None:
     product_repo = image_repo(product_image)
     for name in list_canonical_recipe_names():
@@ -102,6 +112,12 @@ def canonical_label_values(recipe: CanonicalRuntimeRecipe) -> dict[str, str]:
         "command-mode": str(recipe.data.get("command_mode") or ""),
         "working-dir": str(recipe.data.get("working_dir") or ""),
         "http-port": str(recipe.data.get("http_port") or ""),
+        "source-output-target": str(recipe.data.get("source_output_target") or ""),
+        "nas.container-root": str(recipe.data.get("container_nas_root") or ""),
+        "nas.host-root-template": str(recipe.data.get("host_nas_root_template") or ""),
+        "nas.read-only": _bool_label(recipe.data.get("nas_read_only")),
+        "nas.propagation": str(recipe.data.get("nas_mount_propagation") or ""),
+        "nas.child-mount-mode": str(recipe.data.get("nas_child_mount_mode") or ""),
     }
 
 
@@ -139,6 +155,10 @@ def projection_checks(recipe: CanonicalRuntimeRecipe, slot_class: str) -> list[t
     expected_source_mount = slot_class == "dev"
     expected_working_dir = str(recipe.data.get("working_dir") or "")
     expected_http_port = str(recipe.data.get("http_port") or "")
+    expected_source_output = str(recipe.data.get("source_output_target") or "")
+    expected_nas_root = str(recipe.data.get("container_nas_root") or "")
+    expected_nas_propagation = str(recipe.data.get("nas_mount_propagation") or "")
+    expected_host_nas_template = str(recipe.data.get("host_nas_root_template") or "")
     expected_components = _metadata_list(recipe.data.get("expected_image_components"))
     profile_components = _metadata_list(profile.metadata.get("expected_image_components"))
     checks.extend(
@@ -174,9 +194,24 @@ def projection_checks(recipe: CanonicalRuntimeRecipe, slot_class: str) -> list[t
                 f"recipe={','.join(expected_components)} profile={','.join(profile_components)}",
             ),
             (
-                profile.metadata.get("container_nas_root") == recipe.data.get("container_nas_root"),
+                profile.metadata.get("container_nas_root") == expected_nas_root,
                 "canonical_nas_root_matches",
-                f"recipe={recipe.data.get('container_nas_root') or 'missing'} profile={profile.metadata.get('container_nas_root') or 'missing'}",
+                f"recipe={expected_nas_root or 'missing'} profile={profile.metadata.get('container_nas_root') or 'missing'}",
+            ),
+            (
+                expected_host_nas_template == "/home/{slot}/nas_docs",
+                "canonical_host_nas_root_template_declared",
+                f"recipe={expected_host_nas_template or 'missing'}",
+            ),
+            (
+                profile.metadata.get("required_read_only_nas") is recipe.data.get("nas_read_only"),
+                "canonical_nas_read_only_matches",
+                f"recipe={_bool_label(recipe.data.get('nas_read_only')) or 'missing'} profile={profile.metadata.get('required_read_only_nas')}",
+            ),
+            (
+                str(profile.metadata.get("required_mount_propagation") or "") == expected_nas_propagation,
+                "canonical_nas_propagation_matches",
+                f"recipe={expected_nas_propagation or 'missing'} profile={profile.metadata.get('required_mount_propagation') or 'missing'}",
             ),
             (
                 profile.metadata.get("allow_source_mount") is expected_source_mount,
@@ -185,9 +220,9 @@ def projection_checks(recipe: CanonicalRuntimeRecipe, slot_class: str) -> list[t
             ),
             (
                 slot_class == "customer"
-                or profile.metadata.get("source_output_target") == recipe.data.get("source_output_target"),
+                or profile.metadata.get("source_output_target") == expected_source_output,
                 "canonical_source_mount_target_matches",
-                f"recipe={recipe.data.get('source_output_target') or 'missing'} profile={profile.metadata.get('source_output_target') or 'missing'}",
+                f"recipe={expected_source_output or 'missing'} profile={profile.metadata.get('source_output_target') or 'missing'}",
             ),
             (
                 profile.metadata.get("runtime_user_mode") == recipe.data.get("runtime_user_mode"),
@@ -227,8 +262,27 @@ def validate_canonical_recipe(recipe: CanonicalRuntimeRecipe) -> list[tuple[bool
             "canonical_wrapper_repo_declared",
             f"repo={recipe.data.get('wrapper_repo') or 'missing'}",
         ),
+        (
+            str(recipe.data.get("host_nas_root_template") or "") == "/home/{slot}/nas_docs",
+            "canonical_host_nas_root_template_declared",
+            f"template={recipe.data.get('host_nas_root_template') or 'missing'}",
+        ),
+        (
+            recipe.data.get("nas_read_only") is True,
+            "canonical_nas_read_only_declared",
+            f"read_only={recipe.data.get('nas_read_only')}",
+        ),
+        (
+            bool(recipe.data.get("nas_mount_propagation")),
+            "canonical_nas_propagation_declared",
+            f"propagation={recipe.data.get('nas_mount_propagation') or 'missing'}",
+        ),
+        (
+            str(recipe.data.get("nas_child_mount_mode") or "") == "host-propagated-cifs",
+            "canonical_nas_child_mount_mode_declared",
+            f"mode={recipe.data.get('nas_child_mount_mode') or 'missing'}",
+        ),
     ]
     checks.extend(projection_checks(recipe, "customer"))
     checks.extend(projection_checks(recipe, "dev"))
     return checks
-

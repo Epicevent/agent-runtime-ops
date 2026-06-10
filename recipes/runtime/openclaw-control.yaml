@@ -15,6 +15,10 @@ customer_surface: openclaw-gateway@18789
 expected_image_components:
   - openclaw-control-server
 container_nas_root: /home/node/nas_docs
+host_nas_root_template: /home/{slot}/nas_docs
+nas_read_only: true
+nas_mount_propagation: rslave
+nas_child_mount_mode: host-propagated-cifs
 source_output_target: /app/dist/control-ui
 runtime_user_mode: compose
 command_mode: compose-command

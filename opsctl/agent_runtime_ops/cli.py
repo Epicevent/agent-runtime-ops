@@ -820,6 +820,12 @@ def _image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product
     wrapper_component = _recipe_label(labels, "wrapper-component")
     command_mode = _recipe_label(labels, "command-mode")
     http_port = _recipe_label(labels, "http-port")
+    source_output_target = _recipe_label(labels, "source-output-target")
+    nas_container_root = _recipe_label(labels, "nas.container-root")
+    nas_host_root_template = _recipe_label(labels, "nas.host-root-template")
+    nas_read_only = _recipe_label(labels, "nas.read-only")
+    nas_propagation = _recipe_label(labels, "nas.propagation")
+    nas_child_mount_mode = _recipe_label(labels, "nas.child-mount-mode")
     canonical_name = _recipe_label(labels, "recipe.name")
     canonical_digest = _recipe_label(labels, "recipe.digest")
     if not canonical_name:
@@ -837,6 +843,12 @@ def _image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product
         "runtime-contract.dev": dev_contract,
         "command-mode": command_mode,
         "http-port": http_port,
+        "source-output-target": source_output_target,
+        "nas.container-root": nas_container_root,
+        "nas.host-root-template": nas_host_root_template,
+        "nas.read-only": nas_read_only,
+        "nas.propagation": nas_propagation,
+        "nas.child-mount-mode": nas_child_mount_mode,
     }
     missing = [name for name, value in required.items() if not value]
     if missing:
@@ -866,6 +878,12 @@ def _image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product
         "command-mode": command_mode,
         "working-dir": _recipe_label(labels, "working-dir"),
         "http-port": http_port,
+        "source-output-target": source_output_target,
+        "nas.container-root": nas_container_root,
+        "nas.host-root-template": nas_host_root_template,
+        "nas.read-only": nas_read_only,
+        "nas.propagation": nas_propagation,
+        "nas.child-mount-mode": nas_child_mount_mode,
     }
     for label_name, actual in label_checks.items():
         expected = expected_labels[label_name]
@@ -899,6 +917,12 @@ def _image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product
         "command_mode": command_mode,
         "working_dir": _recipe_label(labels, "working-dir"),
         "http_port": http_port,
+        "source_output_target": source_output_target,
+        "container_nas_root": nas_container_root,
+        "host_nas_root_template": nas_host_root_template,
+        "nas_read_only": nas_read_only,
+        "nas_mount_propagation": nas_propagation,
+        "nas_child_mount_mode": nas_child_mount_mode,
         "ops_repo_commit": _recipe_label(labels, "ops-repo-commit"),
     }
     for slot_class, profile_name in recipe["runtime_profiles"].items():
@@ -1398,6 +1422,12 @@ def _live_image_truth_from_info(binding: RuntimeBinding, info: dict, apache_rout
         "runtime_contract": runtime_contract,
         "canonical_recipe_name": canonical_recipe_name,
         "canonical_recipe_digest": canonical_recipe_digest,
+        "source_output_target": _recipe_label(labels, "source-output-target"),
+        "container_nas_root": _recipe_label(labels, "nas.container-root"),
+        "host_nas_root_template": _recipe_label(labels, "nas.host-root-template"),
+        "nas_read_only": _recipe_label(labels, "nas.read-only"),
+        "nas_mount_propagation": _recipe_label(labels, "nas.propagation"),
+        "nas_child_mount_mode": _recipe_label(labels, "nas.child-mount-mode"),
         "ops_repo_commit": _recipe_label(labels, "ops-repo-commit"),
     }
 
@@ -3142,6 +3172,12 @@ def _build_arg_lines_for_canonical_recipe(name: str) -> list[str]:
         f"RUNTIME_COMMAND_MODE={labels['command-mode']}",
         f"RUNTIME_WORKING_DIR={labels['working-dir']}",
         f"RUNTIME_HTTP_PORT={labels['http-port']}",
+        f"RUNTIME_SOURCE_OUTPUT_TARGET={labels['source-output-target']}",
+        f"RUNTIME_NAS_CONTAINER_ROOT={labels['nas.container-root']}",
+        f"RUNTIME_NAS_HOST_ROOT_TEMPLATE={labels['nas.host-root-template']}",
+        f"RUNTIME_NAS_READ_ONLY={labels['nas.read-only']}",
+        f"RUNTIME_NAS_PROPAGATION={labels['nas.propagation']}",
+        f"RUNTIME_NAS_CHILD_MOUNT_MODE={labels['nas.child-mount-mode']}",
     ]
 
 

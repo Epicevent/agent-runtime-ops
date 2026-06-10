@@ -61,6 +61,12 @@ jobs:
             --build-arg RUNTIME_COMMAND_MODE="$RUNTIME_COMMAND_MODE" \
             --build-arg RUNTIME_WORKING_DIR="$RUNTIME_WORKING_DIR" \
             --build-arg RUNTIME_HTTP_PORT="$RUNTIME_HTTP_PORT" \
+            --build-arg RUNTIME_SOURCE_OUTPUT_TARGET="$RUNTIME_SOURCE_OUTPUT_TARGET" \
+            --build-arg RUNTIME_NAS_CONTAINER_ROOT="$RUNTIME_NAS_CONTAINER_ROOT" \
+            --build-arg RUNTIME_NAS_HOST_ROOT_TEMPLATE="$RUNTIME_NAS_HOST_ROOT_TEMPLATE" \
+            --build-arg RUNTIME_NAS_READ_ONLY="$RUNTIME_NAS_READ_ONLY" \
+            --build-arg RUNTIME_NAS_PROPAGATION="$RUNTIME_NAS_PROPAGATION" \
+            --build-arg RUNTIME_NAS_CHILD_MOUNT_MODE="$RUNTIME_NAS_CHILD_MOUNT_MODE" \
             --build-arg CANONICAL_RECIPE_NAME="$CANONICAL_RECIPE_NAME" \
             --build-arg CANONICAL_RECIPE_DIGEST="$CANONICAL_RECIPE_DIGEST" \
             -t "$image_ref" \
@@ -79,10 +85,21 @@ jobs:
           grep -Fx "runtime_profile_dev=openclaw-dev" ./wrapper.manifest
           grep -Fx "canonical_recipe_name=openclaw-control" ./wrapper.manifest
           grep -E "^canonical_recipe_digest=sha256:[0-9a-f]{64}$" ./wrapper.manifest
+          grep -Fx "source_output_target=/app/dist/control-ui" ./wrapper.manifest
+          grep -Fx "nas_container_root=/home/node/nas_docs" ./wrapper.manifest
+          grep -Fx "nas_host_root_template=/home/{slot}/nas_docs" ./wrapper.manifest
+          grep -Fx "nas_read_only=true" ./wrapper.manifest
+          grep -Fx "nas_mount_propagation=rslave" ./wrapper.manifest
+          grep -Fx "nas_child_mount_mode=host-propagated-cifs" ./wrapper.manifest
           docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.recipe.schema" }}' | grep -Fx v1
           docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.recipe.name" }}' | grep -Fx openclaw-control
           docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.recipe.digest" }}' | grep -E '^sha256:[0-9a-f]{64}$'
           docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.product-image" }}' | grep -Fx "${{ inputs.product_image }}"
+          docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.nas.container-root" }}' | grep -Fx /home/node/nas_docs
+          docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.nas.host-root-template" }}' | grep -Fx '/home/{slot}/nas_docs'
+          docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.nas.read-only" }}' | grep -Fx true
+          docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.nas.propagation" }}' | grep -Fx rslave
+          docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.nas.child-mount-mode" }}' | grep -Fx host-propagated-cifs
 
       - name: Push wrapper
         run: docker push "$IMAGE_REPOSITORY:${{ inputs.image_tag }}"
