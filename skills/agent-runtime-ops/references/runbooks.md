@@ -10,8 +10,8 @@ Start here before server-impacting work:
 ```bash
 git status --short --branch
 ssh svcops "/usr/local/bin/opsctl update status"
-ssh svcops "/usr/local/bin/opsctl slot list"
-ssh svcops "/usr/local/bin/opsctl routing status"
+ssh svcops "/usr/local/bin/opsctl binding list"
+ssh svcops "/usr/local/bin/opsctl binding status"
 ssh svcops "/usr/local/bin/opsctl apache status"
 ssh svcops "/usr/local/bin/opsctl profile list"
 ```
@@ -22,15 +22,15 @@ Expected update status when current:
 approved_matches_installed=yes
 ```
 
-For slot-specific work, establish layers in this order:
+For runtime-target-specific work, establish layers in this order:
 
 ```text
-port allocation -> Apache public host -> live image truth -> canonical runtime recipe -> runtime profile -> applied manifest
+intended runtime binding -> actual Apache route -> live image truth -> canonical runtime recipe -> runtime profile -> applied manifest
 ```
 
-The routing registry is only slot port allocation. Public host truth comes from Apache route status.
-Runtime family, product image, wrapper image, profile, contract, and canonical recipe identity come
-from live wrapper image labels.
+The binding registry declares the intended relationship between immutable instance id, Linux
+account, public host, family, runtime class, and ports. Apache is actual route state. Running wrapper
+image labels are actual runtime state.
 
 ## Operating Agent Surface
 
@@ -98,7 +98,8 @@ Verify:
 
 ```bash
 ssh svcops "/usr/local/bin/opsctl update status"
-ssh svcops "/usr/local/bin/opsctl routing status"
+ssh svcops "/usr/local/bin/opsctl binding list"
+ssh svcops "/usr/local/bin/opsctl binding status"
 ssh svcops "/usr/local/bin/opsctl apache status"
 ssh svcops "/usr/local/bin/opsctl profile list"
 ssh svcops "codex mcp list"
@@ -142,7 +143,7 @@ ssh svcops "printf '%s\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize
 
 The server must write only valid MCP JSON-RPC messages to stdout.
 
-## Check a Slot
+## Check a Runtime Binding
 
 Preferred MCP tool:
 
@@ -154,7 +155,7 @@ Manual equivalent:
 
 ```bash
 ssh svcops "/usr/local/bin/opsctl status SLOT"
-ssh svcops "/usr/local/bin/opsctl routing status SLOT"
+ssh svcops "/usr/local/bin/opsctl binding status TARGET"
 ssh svcops "/usr/local/bin/opsctl apache status SLOT"
 ssh svcops "sudo /usr/local/bin/opsctl runtime truth SLOT"
 ssh svcops "sudo /usr/local/bin/opsctl check --live SLOT"
@@ -163,45 +164,48 @@ ssh svcops "sudo /usr/local/bin/opsctl check --live SLOT"
 For group checks, prefer MCP selector arguments such as `slot_class` or `family` instead of many
 parallel per-slot calls.
 
-## Route and Public Host Diagnosis
+## Binding and Public Host Diagnosis
 
 MCP tool names do not fully explain the layering. Always keep these facts separate:
 
 ```text
-routing_status = slot -> host port allocation only
-apache_status = public host and Apache proxy port truth
-runtime_truth = running image labels and runtime recipe/profile truth
+binding_status = intended instance/account/host/family/class/port binding
+apache_status = actual Apache public host and proxy port state
+runtime_truth = running image labels and runtime recipe/profile state
 ```
 
-For a router/subdomain/public-host question, inspect both route layers before drawing conclusions:
+For a router/subdomain/public-host question, inspect intended binding and actual route before
+drawing conclusions:
 
 ```bash
-ssh svcops "/usr/local/bin/opsctl routing status SLOT"
-ssh svcops "/usr/local/bin/opsctl apache status SLOT"
-ssh svcops "sudo /usr/local/bin/opsctl runtime truth SLOT"
+ssh svcops "/usr/local/bin/opsctl binding status TARGET"
+ssh svcops "/usr/local/bin/opsctl apache status TARGET"
+ssh svcops "sudo /usr/local/bin/opsctl runtime truth LINUX_ACCOUNT"
 ```
 
 Interpretation:
 
 ```text
-registry gateway_port must equal Apache gateway_port
-Apache public_host is the current external name
+binding public_host is the intended external name
+Apache public_host is the current configured external name
+binding gateway_port must equal Apache gateway_port
 DNS/wildcard acceptance is not enough to prove Apache dispatch to the slot
-image labels do not prove public host or host port allocation
+image labels do not prove intended public host, Linux account, or host port allocation
 ```
 
-Changing the visible slot name means changing Apache public host, not renaming the slot id. Use the
-dedicated command and verify the full path:
+Changing the visible site name means changing the binding public host and Apache ServerName
+together. Use the dedicated command and verify the full path:
 
 ```bash
-ssh svcops "sudo /usr/local/bin/opsctl apache set-host SLOT NEW-NAME.ji-tech.co.kr"
-ssh svcops "/usr/local/bin/opsctl apache status SLOT"
-ssh svcops "sudo /usr/local/bin/opsctl check --live SLOT"
+ssh svcops "sudo /usr/local/bin/opsctl binding set-public-host TARGET NEW-NAME.ji-tech.co.kr"
+ssh svcops "/usr/local/bin/opsctl binding status TARGET"
+ssh svcops "/usr/local/bin/opsctl apache status TARGET"
+ssh svcops "sudo /usr/local/bin/opsctl check --live LINUX_ACCOUNT"
 ```
 
-Do not hand-edit `/srv/openclaw-ops/slot-registry.json` to rename a slot. The registry is not public
-host truth. Do not rename `ocN`/`dev-*` slot ids unless there is a separate migration plan covering
-Unix account, home directory, secrets, NAS, containers, labels, backups, and state.
+Do not hand-edit Apache alone for a normal public host change. `apache set-host` is a low-level
+repair path. Do not rename Linux accounts unless there is a separate migration plan covering home
+directory, secrets, NAS, containers, labels, backups, and state.
 
 ## Image Rollout
 
@@ -306,7 +310,7 @@ Normal rollouts should use image rollout tools, not legacy release-state apply. 
 an explicit legacy-state recovery or migration operation after checks identify the intended target:
 
 ```bash
-ssh svcops "/usr/local/bin/opsctl routing status SLOT"
+ssh svcops "/usr/local/bin/opsctl binding status SLOT"
 ssh svcops "/usr/local/bin/opsctl apache status SLOT"
 ssh svcops "sudo /usr/local/bin/opsctl runtime truth SLOT"
 ssh svcops "sudo /usr/local/bin/opsctl apply SLOT"

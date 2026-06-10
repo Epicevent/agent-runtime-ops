@@ -8,19 +8,19 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+import uuid
 from unittest.mock import patch
 
 from agent_runtime_ops.cli import (
     IMAGE_RECIPE_LABEL_PREFIX,
     cmd_apply,
     cmd_check,
+    cmd_binding_normalize,
     cmd_diagnostics_show,
     cmd_recipe_dev_apply,
     cmd_recipe_dev_status,
     cmd_recipe_validate_canonical,
     cmd_release_import,
-    cmd_routing_normalize,
-    cmd_routing_seed_legacy,
     cmd_rollout_canary,
     cmd_rollout_dev_apply,
     cmd_rollout_dev_plan,
@@ -32,7 +32,7 @@ from agent_runtime_ops.cli import (
 )
 from agent_runtime_ops.canonical_recipes import load_canonical_recipe
 from agent_runtime_ops.profiles import load_profile
-from agent_runtime_ops.routing import SlotRoute, dump_routing_registry, load_routing_registry
+from agent_runtime_ops.routing import RuntimeBinding, dump_runtime_bindings, load_runtime_bindings
 from agent_runtime_ops.state import DesiredSlot
 from agent_runtime_ops.yamlio import dump_yaml, load_yaml
 
@@ -43,6 +43,18 @@ def image_ref(digest_char: str) -> str:
 
 def wrapper_image_ref(repo: str, digest_char: str) -> str:
     return f"ghcr.io/epicevent/{repo}@sha256:" + digest_char * 64
+
+
+def binding(account: str, family: str, runtime_class: str, gateway: int, bridge: int) -> RuntimeBinding:
+    return RuntimeBinding(
+        instance_id=str(uuid.uuid5(uuid.NAMESPACE_DNS, account)),
+        linux_account=account,
+        public_host=f"{account}.ji-tech.co.kr",
+        family=family,
+        runtime_class=runtime_class,
+        gateway_port=gateway,
+        bridge_port=bridge,
+    )
 
 
 def hermes_workspace_recipe_digest() -> str:
@@ -183,17 +195,22 @@ def write_slot_registry(root: Path, slots: list[str]) -> None:
         "dev-oc": (30789, 30790),
         "dev-hermess": (30889, 30890),
     }
-    routes = []
+    slot_family = {}
+    slot_class = {}
+    slots_data = load_yaml(root / "slots.yaml")
+    lanes_data = load_yaml(root / "lanes.yaml")
+    lanes = lanes_data.get("lanes") or {}
+    for item in slots_data.get("slots") or []:
+        if isinstance(item, dict):
+            lane = item.get("lane")
+            lane_data = lanes.get(lane) if lane else {}
+            slot_family[str(item.get("slot"))] = str(lane_data.get("family") or "openclaw")
+            slot_class[str(item.get("slot"))] = str(lane_data.get("slot_class") or "customer")
+    bindings = []
     for index, slot in enumerate(slots):
         gateway_port, bridge_port = default_ports.get(slot, (32000 + index * 2, 32001 + index * 2))
-        routes.append(
-            SlotRoute(
-                slot=slot,
-                gateway_port=gateway_port,
-                bridge_port=bridge_port,
-            )
-        )
-    (root / "slot-registry.json").write_text(dump_routing_registry(routes), encoding="utf-8")
+        bindings.append(binding(slot, slot_family.get(slot, "openclaw"), slot_class.get(slot, "customer"), gateway_port, bridge_port))
+    (root / "runtime-bindings.json").write_text(dump_runtime_bindings(bindings), encoding="utf-8")
 
 
 def write_hermes_state(root: Path, *, candidate_product_repo: str = "hermes-workspace") -> None:
@@ -493,43 +510,50 @@ class CliReleaseRolloutTests(unittest.TestCase):
         self.assertIn(f"CANONICAL_RECIPE_DIGEST={hermes_workspace_recipe_digest()}", text)
         self.assertIn("RUNTIME_PROFILE_DEV=hermes-workspace-dev", text)
 
-    def test_routing_seed_legacy_writes_minimal_registry(self) -> None:
+    def test_binding_normalize_migrates_legacy_registry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write_state(root)
-            (root / "slot-registry.json").unlink()
+            (root / "runtime-bindings.json").unlink()
+            (root / "slot-registry.json").write_text(
+                json.dumps(
+                    {
+                        "schema": "v2",
+                        "slots": [
+                            {"slot": "oc3", "gateway_port": 28989, "bridge_port": 28990},
+                            {"slot": "dev-oc", "gateway_port": 30789, "bridge_port": 30790},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
             output = io.StringIO()
             with patch("agent_runtime_ops.cli._is_root", return_value=True), contextlib.redirect_stdout(output):
-                rc = cmd_routing_seed_legacy(argparse.Namespace(state_root=str(root), write=True, replace=False))
+                rc = cmd_binding_normalize(argparse.Namespace(state_root=str(root), write=True))
             self.assertEqual(rc, 0, output.getvalue())
-            routes = {route.slot: route for route in load_routing_registry(root)}
-            self.assertEqual(routes["oc3"].gateway_port, 28989)
-            self.assertEqual(routes["dev-oc"].gateway_port, 30789)
-            text = (root / "slot-registry.json").read_text(encoding="utf-8")
-            self.assertIn('"schema": "v2"', text)
-            self.assertNotIn("public_host", text)
+            bindings = {item.linux_account: item for item in load_runtime_bindings(root)}
+            self.assertEqual(bindings["oc3"].gateway_port, 28989)
+            self.assertEqual(bindings["oc3"].family, "openclaw")
+            self.assertEqual(bindings["dev-oc"].runtime_class, "dev")
+            text = (root / "runtime-bindings.json").read_text(encoding="utf-8")
+            self.assertIn('"schema": "v1"', text)
+            self.assertIn("public_host", text)
             self.assertNotIn("notes", text)
             self.assertNotIn("runtime_profile", text)
             self.assertNotIn("release", text)
 
-    def test_routing_normalize_removes_legacy_public_host_fields(self) -> None:
+    def test_binding_normalize_rewrites_runtime_bindings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write_state(root)
-            legacy_text = (root / "slot-registry.json").read_text(encoding="utf-8")
-            legacy_text = legacy_text.replace('"schema": "v2"', '"schema": "v1"')
-            legacy_text = legacy_text.replace('"gateway_port"', '"public_host": "legacy.example.com",\n      "notes": "legacy",\n      "gateway_port"', 1)
-            (root / "slot-registry.json").write_text(legacy_text, encoding="utf-8")
             output = io.StringIO()
             with patch("agent_runtime_ops.cli._is_root", return_value=True), contextlib.redirect_stdout(output):
-                rc = cmd_routing_normalize(argparse.Namespace(state_root=str(root), write=True))
-            text = (root / "slot-registry.json").read_text(encoding="utf-8")
+                rc = cmd_binding_normalize(argparse.Namespace(state_root=str(root), write=True))
+            text = (root / "runtime-bindings.json").read_text(encoding="utf-8")
             self.assertEqual(rc, 0, output.getvalue())
-            self.assertIn('"schema": "v2"', text)
-            self.assertNotIn("public_host", text)
-            self.assertNotIn("notes", text)
-            routes = {route.slot: route for route in load_routing_registry(root)}
-            self.assertEqual(routes["oc3"].gateway_port, 28989)
+            self.assertIn('"schema": "v1"', text)
+            bindings = {item.linux_account: item for item in load_runtime_bindings(root)}
+            self.assertEqual(bindings["oc3"].public_host, "oc3.ji-tech.co.kr")
 
     def test_rollout_image_plan_uses_wrapper_labels_and_routing_ports(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -698,7 +722,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write_state(root)
-            route = next(route for route in load_routing_registry(root) if route.slot == "dev-oc")
+            route = next(route for route in load_runtime_bindings(root) if route.linux_account == "dev-oc")
             wrapper_image = wrapper_image_ref("agent-runtime-openclaw", "9")
             product_image = wrapper_image_ref("openclaw-jitech", "8")
             release_data = {

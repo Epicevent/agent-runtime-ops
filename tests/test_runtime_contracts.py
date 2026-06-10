@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import unittest
+import uuid
 
 from agent_runtime_ops.compose_contract import validate_compose_contract
 from agent_runtime_ops.image_components import image_component_name, image_repo
 from agent_runtime_ops.profiles import load_profile
 from agent_runtime_ops.renderer import render_compose
-from agent_runtime_ops.routing import SlotRoute
+from agent_runtime_ops.routing import RuntimeBinding
 from agent_runtime_ops.state import DesiredSlot
 
 
-def test_route(slot: str) -> SlotRoute:
+def test_route(slot: str, family: str = "openclaw", runtime_class: str = "customer") -> RuntimeBinding:
     ports = {
         "oc1": (28789, 28790),
         "oc2": (28889, 28890),
@@ -18,8 +19,12 @@ def test_route(slot: str) -> SlotRoute:
         "dev-openclaw": (30789, 30790),
     }
     gateway_port, bridge_port = ports.get(slot, (29989, 29990))
-    return SlotRoute(
-        slot=slot,
+    return RuntimeBinding(
+        instance_id=str(uuid.uuid5(uuid.NAMESPACE_DNS, slot)),
+        linux_account=slot,
+        public_host=f"{slot}.ji-tech.co.kr",
+        family=family,
+        runtime_class=runtime_class,
         gateway_port=gateway_port,
         bridge_port=bridge_port,
     )
@@ -46,7 +51,7 @@ def desired_slot(
             "digest": digest,
         },
         runtime_profile=runtime_profile,
-        route=test_route(slot),
+        route=test_route(slot, family, slot_class),
     )
 
 

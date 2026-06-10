@@ -46,7 +46,11 @@ def render_compose(profile: RuntimeProfile, desired: DesiredSlot, variables: dic
     gateway_port, bridge_port = _slot_ports(desired)
     merged = {
         "slot": desired.slot,
+        "instance_id": desired.route.instance_id if desired.route else "",
+        "linux_account": desired.route.linux_account if desired.route else desired.slot,
+        "public_host": desired.route.public_host if desired.route else "",
         "family": desired.lane_data.get("family"),
+        "runtime_class": desired.route.runtime_class if desired.route else desired.lane_data.get("slot_class"),
         "slot_class": desired.lane_data.get("slot_class"),
         "release": desired.release_name,
         "runtime_profile": desired.runtime_profile,

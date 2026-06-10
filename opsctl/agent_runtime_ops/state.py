@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .paths import DEFAULT_STATE_ROOT, state_path
-from .routing import SlotRoute, get_slot_route
+from .routing import RuntimeBinding, get_runtime_binding
 from .yamlio import load_yaml
 
 
@@ -16,7 +16,7 @@ class DesiredSlot:
     release_name: str
     release_data: dict
     runtime_profile: str
-    route: SlotRoute | None = None
+    route: RuntimeBinding | None = None
 
 
 def _lookup_slot(slots_data: dict, slot: str) -> dict:
@@ -65,5 +65,5 @@ def load_desired_slot(slot: str, state_root: Path = DEFAULT_STATE_ROOT) -> Desir
         release_name=release_name,
         release_data=release_data,
         runtime_profile=runtime_profile,
-        route=get_slot_route(slot, state_root),
+        route=get_runtime_binding(slot, state_root),
     )

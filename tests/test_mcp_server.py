@@ -54,7 +54,7 @@ class McpServerTests(unittest.TestCase):
         )
         self.assertEqual(response["result"]["protocolVersion"], "2025-06-18")
         self.assertIn("one MCP tool at a time", response["result"]["instructions"])
-        self.assertIn("routing contract", response["result"]["instructions"])
+        self.assertIn("runtime binding", response["result"]["instructions"])
         self.assertIn("live image truth", response["result"]["instructions"])
         self.assertIn("slot_class", response["result"]["instructions"])
 
@@ -62,7 +62,10 @@ class McpServerTests(unittest.TestCase):
         names = {item["name"] for item in tools["result"]["tools"]}
         self.assertIn("ops_orientation", names)
         self.assertIn("slot_list", names)
-        self.assertIn("routing_status", names)
+        self.assertIn("binding_list", names)
+        self.assertIn("binding_status", names)
+        self.assertIn("binding_set_public_host", names)
+        self.assertNotIn("routing_status", names)
         self.assertIn("apache_status", names)
         self.assertIn("apache_set_host", names)
         self.assertIn("runtime_truth", names)
@@ -174,30 +177,41 @@ class McpServerTests(unittest.TestCase):
         runner = FakeRunner(
             [
                 (0, "update_status=current\n", ""),
-                (0, "slot=dev-oc slot_class=dev runtime_profile=openclaw-dev\n", ""),
+                (0, "linux_account=dev-oc runtime_class=dev family=openclaw\n", ""),
                 (0, "openclaw-dev sha256:abc\n", ""),
             ]
         )
         server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
         payload = call_tool(server, "ops_orientation")
         self.assertTrue(payload["ok"])
-        self.assertIn("slot=dev-oc", payload["stdout"])
+        self.assertIn("linux_account=dev-oc", payload["stdout"])
         self.assertEqual(runner.calls[0]["argv"], ["opsctl", "update", "status"])
-        self.assertEqual(runner.calls[1]["argv"], ["opsctl", "slot", "list"])
+        self.assertEqual(runner.calls[1]["argv"], ["opsctl", "binding", "list"])
         self.assertEqual(runner.calls[2]["argv"], ["opsctl", "profile", "list"])
 
     def test_slot_list_uses_argv_list(self) -> None:
-        runner = FakeRunner([(0, "slot=dev-oc slot_class=dev runtime_profile=openclaw-dev\n", "")])
+        runner = FakeRunner([(0, "linux_account=dev-oc runtime_class=dev family=openclaw\n", "")])
         server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
         payload = call_tool(server, "slot_list")
         self.assertTrue(payload["ok"])
         self.assertFalse(payload["mutated"])
         self.assertEqual(runner.calls[0]["argv"], ["opsctl", "slot", "list"])
 
+    def test_binding_set_public_host_uses_sudo_opsctl_argv(self) -> None:
+        runner = FakeRunner([(0, "binding_set_public_host_status=ok\n", "")])
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        payload = call_tool(server, "binding_set_public_host", {"target": "oc3", "host": "Demo.JI-TECH.CO.KR."})
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["mutated"])
+        self.assertEqual(
+            runner.calls[0]["argv"],
+            ["sudo", "opsctl", "binding", "set-public-host", "oc3", "demo.ji-tech.co.kr"],
+        )
+
     def test_apache_set_host_uses_sudo_opsctl_argv(self) -> None:
         runner = FakeRunner([(0, "apache_set_host_status=ok\n", "")])
         server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
-        payload = call_tool(server, "apache_set_host", {"slot": "oc3", "host": "Demo.JI-TECH.CO.KR."})
+        payload = call_tool(server, "apache_set_host", {"linux_account": "oc3", "host": "Demo.JI-TECH.CO.KR."})
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["mutated"])
         self.assertEqual(runner.calls[0]["argv"], ["sudo", "opsctl", "apache", "set-host", "oc3", "demo.ji-tech.co.kr"])
@@ -205,7 +219,7 @@ class McpServerTests(unittest.TestCase):
     def test_slot_check_uses_argv_lists(self) -> None:
         runner = FakeRunner(
             [
-                (0, "routing_status=ok\n", ""),
+                (0, "binding_status=ok\n", ""),
                 (0, "apache_status=ok\n", ""),
                 (0, "truth_status=ok\n", ""),
                 (0, "PASS live\n", ""),
@@ -215,7 +229,7 @@ class McpServerTests(unittest.TestCase):
         payload = call_tool(server, "slot_check", {"slot": "oc1"})
         self.assertTrue(payload["ok"])
         self.assertFalse(payload["mutated"])
-        self.assertEqual(runner.calls[0]["argv"], ["opsctl", "routing", "status", "oc1"])
+        self.assertEqual(runner.calls[0]["argv"], ["opsctl", "binding", "status", "oc1"])
         self.assertEqual(runner.calls[1]["argv"], ["opsctl", "apache", "status", "oc1"])
         self.assertEqual(runner.calls[2]["argv"], ["sudo", "opsctl", "runtime", "truth", "oc1"])
         self.assertEqual(runner.calls[3]["argv"], ["sudo", "opsctl", "check", "--live", "oc1"])
@@ -224,7 +238,7 @@ class McpServerTests(unittest.TestCase):
     def test_slot_check_failure_is_structured_result_not_mcp_error(self) -> None:
         runner = FakeRunner(
             [
-                (0, "routing_status=ok\n", ""),
+                (0, "binding_status=ok\n", ""),
                 (0, "apache_status=ok\n", ""),
                 (0, "truth_status=ok\n", ""),
                 (1, "FAIL live_container_nas_root_propagation\ncheck_status=fail failed=1\n", ""),
@@ -245,19 +259,19 @@ class McpServerTests(unittest.TestCase):
                     0,
                     "\n".join(
                         [
-                            "slot=dev-hermess slot_class=dev",
-                            "slot=dev-oc slot_class=dev",
-                            "slot=oc1 slot_class=customer",
+                            "linux_account=dev-hermess runtime_class=dev family=hermes",
+                            "linux_account=dev-oc runtime_class=dev family=openclaw",
+                            "linux_account=oc1 runtime_class=customer family=openclaw",
                         ]
                     )
                     + "\n",
                     "",
                 ),
-                (0, "routing_status=ok slot=dev-hermess\n", ""),
+                (0, "binding_status=ok linux_account=dev-hermess\n", ""),
                 (0, "apache_status=ok slot=dev-hermess\n", ""),
                 (0, "slot=dev-hermess truth_status=ok\n", ""),
                 (0, "PASS dev-hermess\n", ""),
-                (0, "routing_status=ok slot=dev-oc\n", ""),
+                (0, "binding_status=ok linux_account=dev-oc\n", ""),
                 (0, "apache_status=ok slot=dev-oc\n", ""),
                 (0, "slot=dev-oc truth_status=ok\n", ""),
                 (1, "FAIL dev-oc\ncheck_status=fail failed=1\n", ""),
@@ -271,8 +285,8 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("PASS dev-hermess", payload["stdout"])
         self.assertIn("check_status=fail", payload["stdout"])
         self.assertEqual(runner.calls[0]["argv"], ["opsctl", "slot", "list"])
-        self.assertEqual(runner.calls[1]["argv"], ["opsctl", "routing", "status", "dev-hermess"])
-        self.assertEqual(runner.calls[5]["argv"], ["opsctl", "routing", "status", "dev-oc"])
+        self.assertEqual(runner.calls[1]["argv"], ["opsctl", "binding", "status", "dev-hermess"])
+        self.assertEqual(runner.calls[5]["argv"], ["opsctl", "binding", "status", "dev-oc"])
 
     def test_secret_raw_argument_is_rejected_and_redacted(self) -> None:
         secret = "AIza" + "A" * 32
@@ -353,9 +367,9 @@ class McpServerTests(unittest.TestCase):
                     0,
                     "\n".join(
                         [
-                            "slot=dev-hermess lane=dev-hermes family=hermes slot_class=dev runtime_profile=hermes-dev",
-                            "slot=dev-oc lane=dev-openclaw family=openclaw slot_class=dev runtime_profile=openclaw-dev",
-                            "slot=oc1 lane=openclaw family=openclaw slot_class=customer runtime_profile=openclaw-customer",
+                            "linux_account=dev-hermess family=hermes runtime_class=dev",
+                            "linux_account=dev-oc family=openclaw runtime_class=dev",
+                            "linux_account=oc1 family=openclaw runtime_class=customer",
                         ]
                     )
                     + "\n",
@@ -388,19 +402,8 @@ class McpServerTests(unittest.TestCase):
                     0,
                     "\n".join(
                         [
-                            "slot=dev-hermess slot_class=dev",
-                            "slot=dev-oc slot_class=dev",
-                        ]
-                    )
-                    + "\n",
-                    "",
-                ),
-                (
-                    0,
-                    "\n".join(
-                        [
-                            "slot=dev-hermess truth_status=ok family=hermes",
-                            "slot=dev-oc truth_status=ok family=openclaw",
+                            "linux_account=dev-hermess runtime_class=dev family=hermes",
+                            "linux_account=dev-oc runtime_class=dev family=openclaw",
                         ]
                     )
                     + "\n",
@@ -413,7 +416,6 @@ class McpServerTests(unittest.TestCase):
         payload = call_tool(server, "runtime_secret_status", {"slot_class": "dev", "family": "openclaw"})
         self.assertTrue(payload["ok"])
         self.assertIn("slot=dev-oc", payload["stdout"])
-        self.assertEqual(runner.calls[1]["argv"], ["sudo", "opsctl", "runtime", "truth", "--all"])
         self.assertEqual(runner.calls[-1]["argv"], ["sudo", "opsctl", "runtime-secret", "status", "dev-oc"])
 
     def test_runtime_secret_status_requires_one_slot_shape(self) -> None:
@@ -429,8 +431,8 @@ class McpServerTests(unittest.TestCase):
                     0,
                     "\n".join(
                         [
-                            "slot=dev-hermess lane=dev-hermes family=hermes slot_class=dev runtime_profile=hermes-dev",
-                            "slot=dev-oc lane=dev-openclaw family=openclaw slot_class=dev runtime_profile=openclaw-dev",
+                            "linux_account=dev-hermess family=hermes runtime_class=dev",
+                            "linux_account=dev-oc family=openclaw runtime_class=dev",
                         ]
                     )
                     + "\n",

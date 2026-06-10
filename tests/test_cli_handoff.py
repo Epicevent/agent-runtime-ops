@@ -6,10 +6,23 @@ import io
 from pathlib import Path
 import tempfile
 import unittest
+import uuid
 from unittest.mock import patch
 
 from agent_runtime_ops.cli import cmd_handoff_status
-from agent_runtime_ops.routing import SlotRoute, dump_routing_registry
+from agent_runtime_ops.routing import RuntimeBinding, dump_runtime_bindings
+
+
+def binding(account: str, family: str, gateway: int, bridge: int) -> RuntimeBinding:
+    return RuntimeBinding(
+        instance_id=str(uuid.uuid5(uuid.NAMESPACE_DNS, account)),
+        linux_account=account,
+        public_host=f"{account}.ji-tech.co.kr",
+        family=family,
+        runtime_class="dev",
+        gateway_port=gateway,
+        bridge_port=bridge,
+    )
 
 
 def write_state(root: Path) -> None:
@@ -56,11 +69,11 @@ releases:
 """.lstrip(),
         encoding="utf-8",
     )
-    (root / "slot-registry.json").write_text(
-        dump_routing_registry(
+    (root / "runtime-bindings.json").write_text(
+        dump_runtime_bindings(
             [
-                SlotRoute("dev-oc", 30789, 30790),
-                SlotRoute("dev-hermess", 30889, 30890),
+                binding("dev-oc", "openclaw", 30789, 30790),
+                binding("dev-hermess", "hermes", 30889, 30890),
             ]
         ),
         encoding="utf-8",

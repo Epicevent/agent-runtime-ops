@@ -7,11 +7,11 @@ import re
 from pathlib import Path
 
 from .paths import state_path
+from .routing import validate_linux_account
 from .state import load_desired_slot
 from .yamlio import load_yaml
 
 SMB_SHARE_RE = re.compile(r"^//([^/\\]+)/([^/\\]+)$")
-CUSTOMER_SLOT_RE = re.compile(r"^oc[0-9]+$")
 SAFE_SHARE_COMPONENT_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 AGENT_NAS_DIR = ".agent-runtime-nas"
 
@@ -53,9 +53,7 @@ def share_component(share: str) -> str:
 
 
 def nas_root(slot: str) -> Path:
-    if not CUSTOMER_SLOT_RE.match(slot):
-        raise ValueError(f"NAS customer mount is only allowed for ocN slots: {slot}")
-    return Path("/home") / slot / "nas_docs"
+    return Path("/home") / validate_linux_account(slot) / "nas_docs"
 
 
 def mountpoint_for_share(slot: str, share: SmbShare) -> Path:

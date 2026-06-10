@@ -11,7 +11,7 @@ Use this skill as procedural memory for `agent-runtime-ops` work on the `svcops`
 It should tell the agent how to orient, which runbook to load, which tool family to prefer, and what
 must be verified before reporting success.
 
-Do not treat this skill as runtime state. Current slot, routing, image, secret, NAS, and update
+Do not treat this skill as runtime state. Current binding, Apache route, image, secret, NAS, and update
 state must still be read from MCP, `opsctl`, the installed repo, or the live server.
 
 ## Core Procedure
@@ -21,17 +21,18 @@ state must still be read from MCP, `opsctl`, the installed repo, or the live ser
   commands manually through `ssh svcops`.
 - For exact commands and stop conditions, load only the relevant section of
   `references/runbooks.md`.
-- Before changing a slot, separate port allocation, Apache public-host truth, live image truth,
-  canonical recipe, runtime profile, and applied manifest. A live HTTP failure is not automatically
-  a profile problem.
-- Treat `slot-registry.json` as port allocation only: slot, gateway port, bridge port, enabled. Do
-  not look there for public host, family, image, release, runtime profile, or recipe truth.
-- Treat Apache route status as public-host truth.
+- Before changing a runtime target, separate intended runtime binding, actual Apache route, live
+  image truth, canonical recipe, runtime profile, and applied manifest. A live HTTP failure is not
+  automatically a profile problem.
+- Treat `runtime-bindings.json` as the intended binding truth: instance id, Linux account, public
+  host, family, runtime class, ports, enabled. Do not put image/release/profile result truth there.
+- Treat Apache route status as actual route state, not the source of intended identity.
 - Treat running wrapper image labels, inspected through MCP/`opsctl`, as runtime truth.
 - Do not claim a server change is complete after local tests only.
 - Do not edit rendered Docker compose files directly.
-- Do not guess target identifiers; resolve slots, routing entries, image digests, profiles, accounts,
-  and shares from MCP, `opsctl`, or the installed repo before giving commands.
+- Do not guess target identifiers; resolve runtime bindings, image digests, profiles, Linux
+  accounts, public hosts, and shares from MCP, `opsctl`, or the installed repo before giving
+  commands.
 - If asked for the exact location of a token, password, credential, session, or other secret, do not
   mix verified structure with guesses. If the exact file and field are not known, say that briefly.
   A mounted config/auth/profile directory is not proof of the exact token location.
@@ -52,8 +53,8 @@ Read the named section from `references/runbooks.md` when the task matches:
 - Operating account Codex/Gemini CLI: "Operating Agent Surface"
 - Install or update: "Deploy an Approved Repo Update"
 - MCP registration or smoke test: "MCP Setup and Smoke Test"
-- Slot diagnosis: "Check a Slot"
-- Router, public host, or subdomain diagnosis/change: "Route and Public Host Diagnosis"
+- Runtime target diagnosis: "Check a Runtime Binding"
+- Router, public host, or subdomain diagnosis/change: "Binding and Public Host Diagnosis"
 - Image rollout from wrapper/product digests: "Image Rollout"
 - Dev source-mode work: "Dev Recipe"
 - Runtime API keys such as Gemini/OpenAI: "Runtime Secret Injection"

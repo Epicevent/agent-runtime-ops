@@ -7,7 +7,7 @@ import re
 import shutil
 import subprocess
 
-from .routing import slot_class_from_name
+from .routing import validate_linux_account
 
 DEFAULT_APACHE_OPENCLAW_DIR = Path(os.environ.get("AGENT_RUNTIME_APACHE_OPENCLAW_DIR", "/etc/apache2/openclaw"))
 HOST_RE = re.compile(r"^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$")
@@ -18,7 +18,7 @@ WS_PROXY_RE = re.compile(r"ws://127\.0\.0\.1:(\d+)/")
 
 @dataclass(frozen=True)
 class ApacheRoute:
-    slot: str
+    linux_account: str
     public_host: str
     gateway_port: int
     websocket_port: int | None
@@ -27,7 +27,7 @@ class ApacheRoute:
 
 @dataclass(frozen=True)
 class ApacheHostChange:
-    slot: str
+    linux_account: str
     old_host: str
     new_host: str
     path: Path
@@ -45,9 +45,9 @@ def validate_public_host(host: str) -> str:
     return value
 
 
-def apache_route_path(slot: str, apache_dir: Path | None = None) -> Path:
-    slot_class_from_name(slot)
-    return (apache_dir or DEFAULT_APACHE_OPENCLAW_DIR) / f"apache-subdomain-{slot}.conf"
+def apache_route_path(linux_account: str, apache_dir: Path | None = None) -> Path:
+    account = validate_linux_account(linux_account)
+    return (apache_dir or DEFAULT_APACHE_OPENCLAW_DIR) / f"apache-subdomain-{account}.conf"
 
 
 def _active_lines(text: str) -> list[str]:
@@ -60,8 +60,9 @@ def _active_lines(text: str) -> list[str]:
     return lines
 
 
-def parse_apache_route(slot: str, apache_dir: Path | None = None) -> ApacheRoute:
-    path = apache_route_path(slot, apache_dir)
+def parse_apache_route(linux_account: str, apache_dir: Path | None = None) -> ApacheRoute:
+    account = validate_linux_account(linux_account)
+    path = apache_route_path(account, apache_dir)
     if path.is_symlink():
         raise ValueError(f"apache route file must not be symlink: {path}")
     text = path.read_text(encoding="utf-8")
@@ -90,7 +91,7 @@ def parse_apache_route(slot: str, apache_dir: Path | None = None) -> ApacheRoute
     if ws_ports and ws_ports[0] != http_ports[0]:
         raise ValueError(f"websocket port does not match ProxyPass port in {path}: ws={ws_ports[0]} http={http_ports[0]}")
     return ApacheRoute(
-        slot=slot,
+        linux_account=account,
         public_host=host,
         gateway_port=http_ports[0],
         websocket_port=ws_ports[0] if ws_ports else None,
@@ -119,13 +120,14 @@ def replace_server_name(text: str, host: str) -> tuple[str, str]:
 
 
 def set_apache_host(
-    slot: str,
+    linux_account: str,
     host: str,
     *,
     apache_dir: Path | None = None,
     backup_suffix: str,
 ) -> ApacheHostChange:
-    path = apache_route_path(slot, apache_dir)
+    account = validate_linux_account(linux_account)
+    path = apache_route_path(account, apache_dir)
     if path.is_symlink():
         raise ValueError(f"apache route file must not be symlink: {path}")
     original = path.read_text(encoding="utf-8")
@@ -133,7 +135,7 @@ def set_apache_host(
     new_host = validate_public_host(host)
     if old_host == new_host:
         backup_path = path.with_name(f"{path.name}.{backup_suffix}.bak")
-        return ApacheHostChange(slot, old_host, new_host, path, backup_path, "", "", "", "")
+        return ApacheHostChange(account, old_host, new_host, path, backup_path, "", "", "", "")
 
     backup_path = path.with_name(f"{path.name}.{backup_suffix}.bak")
     shutil.copy2(path, backup_path)
@@ -149,7 +151,7 @@ def set_apache_host(
         subprocess.run(["systemctl", "reload", "apache2"], text=True, capture_output=True, check=False)
         raise RuntimeError((reload_proc.stderr or reload_proc.stdout).strip() or "apache reload failed")
     return ApacheHostChange(
-        slot=slot,
+        linux_account=account,
         old_host=old_host,
         new_host=new_host,
         path=path,

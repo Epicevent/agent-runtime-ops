@@ -6,6 +6,7 @@ import io
 from pathlib import Path
 import tempfile
 import unittest
+import uuid
 from unittest.mock import patch
 
 from agent_runtime_ops.cli import (
@@ -20,7 +21,19 @@ from agent_runtime_ops.cli import (
     cmd_slot_list,
 )
 from agent_runtime_ops.nas import parse_smb_share
-from agent_runtime_ops.routing import SlotRoute, dump_routing_registry
+from agent_runtime_ops.routing import RuntimeBinding, dump_runtime_bindings
+
+
+def binding(account: str, family: str, runtime_class: str, gateway: int, bridge: int) -> RuntimeBinding:
+    return RuntimeBinding(
+        instance_id=str(uuid.uuid5(uuid.NAMESPACE_DNS, account)),
+        linux_account=account,
+        public_host=f"{account}.ji-tech.co.kr",
+        family=family,
+        runtime_class=runtime_class,
+        gateway_port=gateway,
+        bridge_port=bridge,
+    )
 
 
 def write_state(root: Path) -> None:
@@ -62,11 +75,11 @@ releases:
 """.lstrip(),
         encoding="utf-8",
     )
-    (root / "slot-registry.json").write_text(
-        dump_routing_registry(
+    (root / "runtime-bindings.json").write_text(
+        dump_runtime_bindings(
             [
-                SlotRoute("oc3", 28989, 28990),
-                SlotRoute("dev-oc", 30789, 30790),
+                binding("oc3", "openclaw", "customer", 28989, 28990),
+                binding("dev-oc", "openclaw", "dev", 30789, 30790),
             ]
         ),
         encoding="utf-8",
@@ -89,7 +102,7 @@ class CliNasTests(unittest.TestCase):
         self.assertIn("pending_request_count=0", output.getvalue())
         self.assertIn("nas_requests_status=ok", output.getvalue())
 
-    def test_slot_list_reports_routing_registry(self) -> None:
+    def test_slot_list_reports_runtime_bindings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write_state(root)
@@ -98,10 +111,10 @@ class CliNasTests(unittest.TestCase):
                 rc = cmd_slot_list(argparse.Namespace(state_root=str(root)))
         text = output.getvalue()
         self.assertEqual(rc, 0)
-        self.assertIn("slot=dev-oc", text)
-        self.assertIn("slot_class=dev", text)
+        self.assertIn("linux_account=dev-oc", text)
+        self.assertIn("runtime_class=dev", text)
         self.assertIn("gateway_port=30789", text)
-        self.assertNotIn("public_host=", text)
+        self.assertIn("public_host=dev-oc.ji-tech.co.kr", text)
         self.assertIn("slot_list_status=ok count=2", text)
 
     def test_approve_auto_accepts_slots_yaml_list(self) -> None:

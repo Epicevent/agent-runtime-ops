@@ -27,7 +27,8 @@ details live in `references/runbooks.md`, MCP, `opsctl --help`, and the repo.
 
 ## Layering
 
-- Routing truth: `/srv/openclaw-ops/slot-registry.json` only owns slot host-port allocation.
-- Public-host truth: Apache route status.
-- Runtime truth: running wrapper image labels inspected through MCP/`opsctl`.
+- Intended binding truth: `/srv/openclaw-ops/runtime-bindings.json` owns instance id, Linux account,
+  public host, family, runtime class, ports, and enabled state.
+- Actual route state: Apache route status.
+- Actual runtime state: running wrapper image labels inspected through MCP/`opsctl`.
 - Applied manifests and legacy state files are evidence or recovery inputs, not runtime truth.

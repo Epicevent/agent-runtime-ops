@@ -17,7 +17,11 @@ from .runtime_secrets import PROVIDER_SECRET_KEYS
 
 PROTOCOL_VERSION = "2025-06-18"
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-SLOT_RE = re.compile(r"^(?:oc[0-9]+|dev-[a-z0-9-]+)$")
+LINUX_ACCOUNT_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+TARGET_RE = re.compile(
+    r"^(?:[a-z][a-z0-9-]{0,31}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|"
+    r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63})$"
+)
 RELEASE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 IMAGE_REF_RE = re.compile(r"^[A-Za-z0-9./:_-]+@sha256:[0-9a-f]{64}$")
 SAFE_TEXT_RE = re.compile(r"^[^\r\n\t]*$")
@@ -164,7 +168,7 @@ class McpServer:
             },
             "instructions": (
                 "Use these tools to inspect and operate the svcops runtime through opsctl. "
-                "Separate routing contract, live image truth, canonical recipe, runtime profile, and applied manifest before changing a slot. "
+                "Separate intended runtime binding, actual Apache route state, live image truth, canonical recipe, runtime profile, and applied manifest before changing a target. "
                 "Call one MCP tool at a time and wait for its response before calling another tool. "
                 "Use selector arguments such as slot_class for group queries instead of parallel per-slot calls. "
                 "Do not pass raw secret values as tool arguments."
@@ -182,37 +186,54 @@ class McpServer:
             {
                 "name": "slot_list",
                 "title": "List Slots",
-                "description": "List known slot names for targeting; use routing_status and runtime_truth for authoritative details.",
+                "description": "Legacy alias that lists linux_account targets; prefer binding_list.",
                 "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
             },
             {
-                "name": "routing_status",
-                "title": "Routing Status",
-                "description": "Inspect slot port allocation for one slot or all slots. Public host truth lives in Apache.",
+                "name": "binding_list",
+                "title": "List Runtime Bindings",
+                "description": "List intended runtime bindings: instance id, linux account, public host, family, runtime class, and ports.",
+                "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+            {
+                "name": "binding_status",
+                "title": "Runtime Binding Status",
+                "description": "Compare intended binding truth with actual Apache route state for one target or all targets.",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {"slot": {"type": "string"}},
+                    "properties": {"target": {"type": "string"}},
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "binding_set_public_host",
+                "title": "Set Binding Public Host",
+                "description": "Change intended public host and Apache ServerName together for one runtime binding.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"target": {"type": "string"}, "host": {"type": "string"}},
+                    "required": ["target", "host"],
                     "additionalProperties": False,
                 },
             },
             {
                 "name": "apache_status",
                 "title": "Apache Route Status",
-                "description": "Inspect public host and Apache proxy port truth for one slot or all slots.",
+                "description": "Inspect actual Apache route state and compare it to binding truth.",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {"slot": {"type": "string"}},
+                    "properties": {"target": {"type": "string"}},
                     "additionalProperties": False,
                 },
             },
             {
                 "name": "apache_set_host",
                 "title": "Set Apache Public Host",
-                "description": "Change the Apache ServerName for one slot while preserving registry ports.",
+                "description": "Low-level Apache-only repair command. Prefer binding_set_public_host for normal changes.",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {"slot": {"type": "string"}, "host": {"type": "string"}},
-                    "required": ["slot", "host"],
+                    "properties": {"linux_account": {"type": "string"}, "host": {"type": "string"}},
+                    "required": ["linux_account", "host"],
                     "additionalProperties": False,
                 },
             },
@@ -233,7 +254,7 @@ class McpServer:
                 "name": "slot_check",
                 "title": "Check Slot",
                 "description": (
-                    "Run routing status, Apache route status, live image truth, and live contract check. "
+                    "Run binding status, Apache route status, live image truth, and live contract check. "
                     "For dev or customer groups, prefer slot_class over repeated per-slot calls."
                 ),
                 "inputSchema": {
@@ -261,7 +282,7 @@ class McpServer:
             {
                 "name": "rollout_image_plan",
                 "title": "Plan Image Rollout",
-                "description": "Validate wrapper/product image labels directly against routing slots without using release state.",
+                "description": "Validate wrapper/product image labels directly against runtime bindings without using release state.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -277,7 +298,7 @@ class McpServer:
             {
                 "name": "rollout_image_dev_apply",
                 "title": "Apply Dev Image",
-                "description": "Apply a digest-pinned wrapper/product image directly to a dev slot using routing registry ports.",
+                "description": "Apply a digest-pinned wrapper/product image directly to a dev runtime binding.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -515,7 +536,9 @@ class McpServer:
         handlers = {
             "ops_orientation": self._tool_ops_orientation,
             "slot_list": self._tool_slot_list,
-            "routing_status": self._tool_routing_status,
+            "binding_list": self._tool_binding_list,
+            "binding_status": self._tool_binding_status,
+            "binding_set_public_host": self._tool_binding_set_public_host,
             "apache_status": self._tool_apache_status,
             "apache_set_host": self._tool_apache_set_host,
             "runtime_truth": self._tool_runtime_truth,
@@ -603,7 +626,7 @@ class McpServer:
         self._reject_unknown(args, set())
         runs = [
             self._run([self.opsctl, "update", "status"]),
-            self._run([self.opsctl, "slot", "list"]),
+            self._run([self.opsctl, "binding", "list"]),
             self._run([self.opsctl, "profile", "list"]),
         ]
         ok = all(item["returncode"] == 0 for item in runs)
@@ -614,27 +637,39 @@ class McpServer:
         runs = [self._run([self.opsctl, "slot", "list"], timeout=60)]
         return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
 
-    def _tool_routing_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"slot"})
-        argv = [self.opsctl, "routing", "status"]
-        if args.get("slot"):
-            argv.append(self._slot(args.get("slot")))
+    def _tool_binding_list(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(args, set())
+        runs = [self._run([self.opsctl, "binding", "list"], timeout=60)]
+        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
+
+    def _tool_binding_status(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(args, {"target"})
+        argv = [self.opsctl, "binding", "status"]
+        if args.get("target"):
+            argv.append(self._target(args.get("target")))
         runs = [self._run(argv, timeout=60)]
         return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
 
+    def _tool_binding_set_public_host(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(args, {"target", "host"})
+        target = self._target(args.get("target"))
+        host = self._host(args.get("host"))
+        runs = [self._run([self.sudo, self.opsctl, "binding", "set-public-host", target, host], timeout=120)]
+        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=True, runs=runs)
+
     def _tool_apache_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"slot"})
+        self._reject_unknown(args, {"target"})
         argv = [self.opsctl, "apache", "status"]
-        if args.get("slot"):
-            argv.append(self._slot(args.get("slot")))
+        if args.get("target"):
+            argv.append(self._target(args.get("target")))
         runs = [self._run(argv, timeout=60)]
         return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
 
     def _tool_apache_set_host(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"slot", "host"})
-        slot = self._slot(args.get("slot"))
+        self._reject_unknown(args, {"linux_account", "host"})
+        linux_account = self._linux_account(args.get("linux_account"))
         host = self._host(args.get("host"))
-        runs = [self._run([self.sudo, self.opsctl, "apache", "set-host", slot, host], timeout=120)]
+        runs = [self._run([self.sudo, self.opsctl, "apache", "set-host", linux_account, host], timeout=120)]
         return self._common_response(ok=runs[0]["returncode"] == 0, mutated=True, runs=runs)
 
     def _tool_runtime_truth(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -653,7 +688,7 @@ class McpServer:
         self._reject_unknown(args, {"slot", "slots", "slot_class", "family"})
         slots, runs = self._resolve_slots(args)
         for slot in slots:
-            runs.append(self._run([self.opsctl, "routing", "status", slot]))
+            runs.append(self._run([self.opsctl, "binding", "status", slot]))
             runs.append(self._run([self.opsctl, "apache", "status", slot]))
             runs.append(self._run([self.sudo, self.opsctl, "runtime", "truth", slot], timeout=120))
             runs.append(self._run([self.sudo, self.opsctl, "check", "--live", slot], timeout=120))
@@ -980,10 +1015,19 @@ class McpServer:
                 raise ToolError("raw secret argument rejected; pass an allowed secret_file path or a manual stdin flow")
 
     def _slot(self, value: Any) -> str:
-        slot = str(value or "")
-        if not SLOT_RE.match(slot):
-            raise ToolError("slot must look like ocN or dev-name")
-        return slot
+        return self._linux_account(value)
+
+    def _linux_account(self, value: Any) -> str:
+        account = str(value or "").strip()
+        if not LINUX_ACCOUNT_RE.match(account):
+            raise ToolError("linux_account must be a safe Unix account name")
+        return account
+
+    def _target(self, value: Any) -> str:
+        target = str(value or "").strip().lower().rstrip(".")
+        if not TARGET_RE.match(target):
+            raise ToolError("target must be a linux account, public host, or instance UUID")
+        return target
 
     def _family(self, value: Any) -> str:
         family = str(value or "")
@@ -1051,24 +1095,16 @@ class McpServer:
         if slot_list["returncode"] != 0:
             return [], [slot_list]
         runs = [slot_list]
-        family_by_slot: dict[str, str] = {}
-        if family:
-            truth = self._run([self.sudo, self.opsctl, "runtime", "truth", "--all"], timeout=120)
-            runs.append(truth)
-            for raw_line in truth["stdout"].splitlines():
-                row = _parse_key_value_tokens(raw_line)
-                if row.get("slot") and row.get("family"):
-                    family_by_slot[row["slot"]] = row["family"]
         slots: list[str] = []
         for raw_line in slot_list["stdout"].splitlines():
             row = _parse_key_value_tokens(raw_line)
-            if row.get("slot_class") != slot_class:
+            if (row.get("runtime_class") or row.get("slot_class")) != slot_class:
                 continue
-            slot = row.get("slot")
-            if family and family_by_slot.get(str(slot)) != family:
+            slot = row.get("linux_account") or row.get("slot")
+            if family and row.get("family") != family:
                 continue
             if slot:
-                slots.append(self._slot(slot))
+                slots.append(self._linux_account(slot))
         if not slots:
             raise ToolError("no slots matched slot_class/family")
         return slots, runs

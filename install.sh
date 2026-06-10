@@ -212,8 +212,8 @@ install_ops_sudoers() {
     printf '%s ALL=(root) NOPASSWD: %s apply *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s rollback *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s diagnostics show *\n' "$OPS_USER" "$BIN_LINK"
-    printf '%s ALL=(root) NOPASSWD: %s routing seed-legacy *\n' "$OPS_USER" "$BIN_LINK"
-    printf '%s ALL=(root) NOPASSWD: %s routing normalize *\n' "$OPS_USER" "$BIN_LINK"
+    printf '%s ALL=(root) NOPASSWD: %s binding normalize *\n' "$OPS_USER" "$BIN_LINK"
+    printf '%s ALL=(root) NOPASSWD: %s binding set-public-host *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s apache set-host *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s runtime truth *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s recipe apply-dev *\n' "$OPS_USER" "$BIN_LINK"
@@ -251,7 +251,7 @@ repair_private_state_permissions() {
   chgrp "$OPS_GROUP" "$STATE_ROOT" 2>/dev/null || true
   chmod 0750 "$STATE_ROOT" 2>/dev/null || true
   local name path
-  for name in slots.yaml lanes.yaml releases.yaml rollout-state.yaml dev-recipes.yaml nas-policy.yaml slot-registry.json; do
+  for name in slots.yaml lanes.yaml releases.yaml rollout-state.yaml dev-recipes.yaml nas-policy.yaml runtime-bindings.json slot-registry.json; do
     path="$STATE_ROOT/$name"
     if [[ -f "$path" && ! -L "$path" ]]; then
       chgrp "$OPS_GROUP" "$path" 2>/dev/null || true
@@ -260,21 +260,15 @@ repair_private_state_permissions() {
   done
 }
 
-seed_routing_registry() {
+seed_runtime_bindings() {
   [[ -d "$STATE_ROOT" ]] || return 0
-  if [[ -f "$STATE_ROOT/slot-registry.json" ]]; then
-    if "$BIN_LINK" --state-root "$STATE_ROOT" routing normalize --write >/dev/null; then
-      info "routing_registry=normalized"
+  if [[ -f "$STATE_ROOT/runtime-bindings.json" || -f "$STATE_ROOT/slot-registry.json" ]]; then
+    if "$BIN_LINK" --state-root "$STATE_ROOT" binding normalize --write >/dev/null; then
+      info "runtime_bindings=normalized"
     else
-      info "routing_registry=normalize_failed"
+      info "runtime_bindings=normalize_failed"
     fi
     return 0
-  fi
-  [[ -f "$STATE_ROOT/slots.yaml" ]] || return 0
-  if "$BIN_LINK" --state-root "$STATE_ROOT" routing seed-legacy --write >/dev/null; then
-    info "routing_registry=seeded_from_legacy_slots"
-  else
-    info "routing_registry=seed_failed"
   fi
 }
 
@@ -541,7 +535,7 @@ install_package() {
   register_codex_mcp
 
   repair_private_state_permissions
-  seed_routing_registry
+  seed_runtime_bindings
   repair_private_state_permissions
 
   info "installed_dir=$release_dir"
@@ -629,14 +623,14 @@ check_install() {
   runuser -u "$OPS_USER" -- bash -lc "cd / && exec '$BIN_LINK' profile list"
 
   local missing=0
-  for name in slot-registry.json nas-policy.yaml; do
+  for name in runtime-bindings.json nas-policy.yaml; do
     state_file_status "$name" || missing=1
   done
   if [[ "$missing" -eq 0 ]]; then
     info "private_state_ready=yes"
   else
     info "private_state_ready=no"
-    info "next_action=create_or_fix_/srv/openclaw-ops/slot-registry.json_and_nas-policy.yaml"
+    info "next_action=create_or_fix_/srv/openclaw-ops/runtime-bindings.json_and_nas-policy.yaml"
   fi
 }
 

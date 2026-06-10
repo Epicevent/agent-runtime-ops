@@ -49,13 +49,15 @@ from .profiles import list_profile_names, load_profile
 from .redaction import redact
 from .renderer import render_compose
 from .routing import (
-    SlotRoute,
-    dump_routing_registry,
-    get_slot_route,
-    load_routing_registry,
-    routing_registry_path,
-    seed_routes_from_legacy_slots,
-    slot_class_from_name,
+    RuntimeBinding,
+    dump_runtime_bindings,
+    get_runtime_binding,
+    load_runtime_bindings,
+    migrate_legacy_runtime_bindings,
+    replace_runtime_binding,
+    runtime_bindings_path,
+    validate_linux_account,
+    validate_public_host as validate_binding_public_host,
 )
 from .runtime_secrets import (
     PROVIDER_SECRET_KEYS,
@@ -70,8 +72,6 @@ from .yamlio import dump_yaml, load_yaml
 DEFAULT_REPO_URL = "https://github.com/Epicevent/agent-runtime-ops.git"
 UPDATE_POLICY_NAME = "ops-update.yaml"
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-CUSTOMER_SLOT_RE = re.compile(r"^oc[0-9]+$")
-DEV_SLOT_RE = re.compile(r"^dev-[a-z0-9-]+$")
 RELEASE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 IMAGE_REF_RE = re.compile(r"^[A-Za-z0-9./:_-]+@sha256:[0-9a-f]{64}$")
@@ -177,128 +177,205 @@ def cmd_profile_list(args: argparse.Namespace) -> int:
 def cmd_slot_list(args: argparse.Namespace) -> int:
     state_root = _state_root(args)
     try:
-        routes = load_routing_registry(state_root)
+        bindings = load_runtime_bindings(state_root)
     except Exception as exc:
         print("slot_list_status=fail")
         print(f"reason={exc}")
         return 1
 
     count = 0
-    for route in routes:
+    for binding in bindings:
         count += 1
         print(
-            f"slot={route.slot} "
-            f"slot_class={route.slot_class} "
-            f"gateway_port={route.gateway_port} "
-            f"bridge_port={route.bridge_port} "
-            f"enabled={'yes' if route.enabled else 'no'}"
+            f"linux_account={binding.linux_account} "
+            f"public_host={binding.public_host} "
+            f"family={binding.family} "
+            f"runtime_class={binding.runtime_class} "
+            f"gateway_port={binding.gateway_port} "
+            f"bridge_port={binding.bridge_port} "
+            f"enabled={'yes' if binding.enabled else 'no'}"
         )
     print(f"slot_list_status=ok count={count}")
     return 0
 
 
-def cmd_routing_status(args: argparse.Namespace) -> int:
+def cmd_binding_list(args: argparse.Namespace) -> int:
     state_root = _state_root(args)
     try:
-        routes = load_routing_registry(state_root)
-        if getattr(args, "slot", None):
-            wanted = str(args.slot)
-            routes = [route for route in routes if route.slot == wanted]
-            if not routes:
-                raise KeyError(f"slot route not found: {wanted}")
+        bindings = load_runtime_bindings(state_root)
     except Exception as exc:
-        print("routing_status=fail")
+        print("binding_list_status=fail")
         print(f"reason={exc}")
         return 1
-    for route in routes:
+    for binding in bindings:
         print(
-            f"slot={route.slot} "
-            f"slot_class={route.slot_class} "
-            f"gateway_port={route.gateway_port} "
-            f"bridge_port={route.bridge_port} "
-            f"enabled={'yes' if route.enabled else 'no'}"
+            f"instance_id={binding.instance_id} "
+            f"linux_account={binding.linux_account} "
+            f"public_host={binding.public_host} "
+            f"family={binding.family} "
+            f"runtime_class={binding.runtime_class} "
+            f"gateway_port={binding.gateway_port} "
+            f"bridge_port={binding.bridge_port} "
+            f"enabled={'yes' if binding.enabled else 'no'}"
         )
-    print(f"routing_status=ok count={len(routes)}")
+    print(f"binding_list_status=ok count={len(bindings)}")
     return 0
 
 
-def cmd_routing_seed_legacy(args: argparse.Namespace) -> int:
+def cmd_binding_status(args: argparse.Namespace) -> int:
     state_root = _state_root(args)
     try:
-        routes = seed_routes_from_legacy_slots(state_root)
-        text = dump_routing_registry(routes)
-        path = routing_registry_path(state_root)
+        target = getattr(args, "target", None)
+        bindings = [get_runtime_binding(str(target), state_root)] if target else load_runtime_bindings(state_root)
+    except Exception as exc:
+        print("binding_status=fail")
+        print(f"reason={exc}")
+        return 1
+    failed = 0
+    for binding in bindings:
+        try:
+            apache_route = parse_apache_route(binding.linux_account)
+            print(
+                f"instance_id={binding.instance_id} "
+                f"linux_account={binding.linux_account} "
+                f"public_host={binding.public_host} "
+                f"family={binding.family} "
+                f"runtime_class={binding.runtime_class} "
+                f"gateway_port={binding.gateway_port} "
+                f"bridge_port={binding.bridge_port} "
+                f"enabled={'yes' if binding.enabled else 'no'} "
+                f"actual_public_host={apache_route.public_host} "
+                f"actual_gateway_port={apache_route.gateway_port}"
+            )
+            for ok, name, detail in _apache_route_checks(binding, apache_route):
+                if target:
+                    _check_line(ok, name, detail)
+                if not ok:
+                    failed += 1
+        except Exception as exc:
+            failed += 1
+            print(f"linux_account={binding.linux_account} binding_status=fail reason={exc}")
+    print(f"binding_status={'ok' if failed == 0 else 'fail'} count={len(bindings)} failed={failed}")
+    return 0 if failed == 0 else 1
+
+
+def _write_runtime_bindings_file(state_root: Path, bindings: list[RuntimeBinding]) -> Path:
+    path = runtime_bindings_path(state_root)
+    if path.exists() and path.is_symlink():
+        raise ValueError(f"runtime bindings must not be symlink: {path}")
+    tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    tmp_path.write_text(dump_runtime_bindings(bindings), encoding="utf-8")
+    if hasattr(os, "chown"):
+        os.chown(tmp_path, 0, state_root.stat().st_gid)
+    os.chmod(tmp_path, 0o640)
+    os.replace(tmp_path, path)
+    return path
+
+
+def cmd_binding_normalize(args: argparse.Namespace) -> int:
+    state_root = _state_root(args)
+    try:
+        path = runtime_bindings_path(state_root)
+        if path.exists():
+            bindings = load_runtime_bindings(state_root)
+        else:
+            bindings = migrate_legacy_runtime_bindings(state_root)
+        text = dump_runtime_bindings(bindings)
         if getattr(args, "write", False):
             if not _is_root():
-                print("error: run as root/admin: sudo /usr/local/bin/opsctl routing seed-legacy --write", file=sys.stderr)
+                print("error: run as root/admin: sudo /usr/local/bin/opsctl binding normalize --write", file=sys.stderr)
                 return 2
-            if path.exists() and not getattr(args, "replace", False):
-                raise ValueError(f"routing registry already exists: {path}; use --replace")
             if path.exists() and path.is_symlink():
-                raise ValueError(f"routing registry must not be symlink: {path}")
-            tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
-            tmp_path.write_text(text, encoding="utf-8")
-            if hasattr(os, "chown"):
-                os.chown(tmp_path, 0, state_root.stat().st_gid)
-            os.chmod(tmp_path, 0o640)
-            os.replace(tmp_path, path)
-            print(f"routing_registry={path}")
+                raise ValueError(f"runtime bindings must not be symlink: {path}")
+            if path.exists():
+                backup_path = path.with_name(f"{path.name}.{datetime.now(timezone.utc).astimezone().strftime('%Y%m%d%H%M%S')}.bak")
+                shutil.copy2(path, backup_path)
+                print(f"backup_file={backup_path}")
+            _write_runtime_bindings_file(state_root, bindings)
+            print(f"runtime_bindings={path}")
         else:
             print(text, end="")
     except Exception as exc:
-        print("routing_seed_status=fail")
+        print("binding_normalize_status=fail")
         print(f"reason={exc}")
         return 1
-    print(f"routing_seed_status=ok count={len(routes)} write={'yes' if getattr(args, 'write', False) else 'no'}")
+    print(f"binding_normalize_status=ok count={len(bindings)} write={'yes' if getattr(args, 'write', False) else 'no'}")
     return 0
 
 
-def cmd_routing_normalize(args: argparse.Namespace) -> int:
+def cmd_binding_set_public_host(args: argparse.Namespace) -> int:
+    if not _is_root():
+        print("error: run as root/admin: sudo /usr/local/bin/opsctl binding set-public-host TARGET HOST", file=sys.stderr)
+        return 2
     state_root = _state_root(args)
+    target = str(args.target)
+    host = validate_binding_public_host(str(args.host))
+    old_text = ""
+    path = runtime_bindings_path(state_root)
     try:
-        path = routing_registry_path(state_root)
-        routes = load_routing_registry(state_root)
-        text = dump_routing_registry(routes)
-        if getattr(args, "write", False):
-            if not _is_root():
-                print("error: run as root/admin: sudo /usr/local/bin/opsctl routing normalize --write", file=sys.stderr)
-                return 2
-            if path.exists() and path.is_symlink():
-                raise ValueError(f"routing registry must not be symlink: {path}")
-            backup_path = path.with_name(f"{path.name}.{datetime.now(timezone.utc).astimezone().strftime('%Y%m%d%H%M%S')}.bak")
-            shutil.copy2(path, backup_path)
-            tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
-            tmp_path.write_text(text, encoding="utf-8")
-            if hasattr(os, "chown"):
-                os.chown(tmp_path, 0, state_root.stat().st_gid)
-            os.chmod(tmp_path, 0o640)
-            os.replace(tmp_path, path)
-            print(f"routing_registry={path}")
-            print(f"backup_file={backup_path}")
-        else:
-            print(text, end="")
+        old_text = path.read_text(encoding="utf-8")
+        bindings = load_runtime_bindings(state_root)
+        binding = get_runtime_binding(target, state_root)
+        replacement = RuntimeBinding(
+            instance_id=binding.instance_id,
+            linux_account=binding.linux_account,
+            public_host=host,
+            family=binding.family,
+            runtime_class=binding.runtime_class,
+            gateway_port=binding.gateway_port,
+            bridge_port=binding.bridge_port,
+            enabled=binding.enabled,
+        )
+        bindings = replace_runtime_binding(bindings, binding.instance_id, replacement)
+        suffix = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d%H%M%S")
+        change = set_apache_host(binding.linux_account, host, backup_suffix=suffix)
+        try:
+            _write_runtime_bindings_file(state_root, bindings)
+        except Exception:
+            if old_text:
+                path.write_text(old_text, encoding="utf-8")
+            set_apache_host(binding.linux_account, binding.public_host, backup_suffix=f"{suffix}.rollback")
+            raise
+        after = parse_apache_route(binding.linux_account)
+        for ok, name, detail in _apache_route_checks(replacement, after):
+            if not ok:
+                raise ValueError(f"{name}: {detail}")
     except Exception as exc:
-        print("routing_normalize_status=fail")
+        print(f"target={target}")
+        print("binding_set_public_host_status=fail")
         print(f"reason={exc}")
         return 1
-    print(f"routing_normalize_status=ok count={len(routes)} write={'yes' if getattr(args, 'write', False) else 'no'}")
+    print(f"instance_id={binding.instance_id}")
+    print(f"linux_account={binding.linux_account}")
+    print(f"old_public_host={binding.public_host}")
+    print(f"public_host={host}")
+    print(f"gateway_port={after.gateway_port}")
+    print(f"runtime_bindings={path}")
+    print(f"apache_file={change.path}")
+    print(f"apache_backup_file={change.backup_path}")
+    print("binding_set_public_host_status=ok")
     return 0
 
 
-def _apache_route_checks(route: SlotRoute, apache_route) -> list[tuple[bool, str, str | None]]:
+def _apache_route_checks(binding: RuntimeBinding, apache_route) -> list[tuple[bool, str, str | None]]:
     checks = [
         (
-            apache_route.gateway_port == route.gateway_port,
-            "apache_gateway_port_matches_registry",
-            f"apache={apache_route.gateway_port} registry={route.gateway_port}",
+            apache_route.public_host == binding.public_host,
+            "apache_public_host_matches_binding",
+            f"apache={apache_route.public_host} binding={binding.public_host}",
+        ),
+        (
+            apache_route.gateway_port == binding.gateway_port,
+            "apache_gateway_port_matches_binding",
+            f"apache={apache_route.gateway_port} binding={binding.gateway_port}",
         )
     ]
     if apache_route.websocket_port is not None:
         checks.append(
             (
-                apache_route.websocket_port == route.gateway_port,
-                "apache_websocket_port_matches_registry",
-                f"apache={apache_route.websocket_port} registry={route.gateway_port}",
+                apache_route.websocket_port == binding.gateway_port,
+                "apache_websocket_port_matches_binding",
+                f"apache={apache_route.websocket_port} binding={binding.gateway_port}",
             )
         )
     return checks
@@ -307,75 +384,82 @@ def _apache_route_checks(route: SlotRoute, apache_route) -> list[tuple[bool, str
 def cmd_apache_status(args: argparse.Namespace) -> int:
     state_root = _state_root(args)
     try:
-        routes = load_routing_registry(state_root)
-        if getattr(args, "slot", None):
-            wanted = str(args.slot)
-            routes = [route for route in routes if route.slot == wanted]
-            if not routes:
-                raise KeyError(f"slot route not found: {wanted}")
+        bindings = load_runtime_bindings(state_root)
+        if getattr(args, "target", None):
+            bindings = [get_runtime_binding(str(args.target), state_root)]
     except Exception as exc:
         print("apache_status=fail")
         print(f"reason={exc}")
         return 1
     failed = 0
     count = 0
-    for route in routes:
+    for binding in bindings:
         count += 1
         try:
-            apache_route = parse_apache_route(route.slot)
+            apache_route = parse_apache_route(binding.linux_account)
             print(
-                f"slot={route.slot} "
-                f"slot_class={route.slot_class} "
+                f"linux_account={binding.linux_account} "
+                f"expected_public_host={binding.public_host} "
                 f"public_host={apache_route.public_host} "
                 f"gateway_port={apache_route.gateway_port} "
-                f"registry_gateway_port={route.gateway_port} "
-                f"bridge_port={route.bridge_port} "
-                f"enabled={'yes' if route.enabled else 'no'} "
+                f"binding_gateway_port={binding.gateway_port} "
+                f"bridge_port={binding.bridge_port} "
+                f"enabled={'yes' if binding.enabled else 'no'} "
                 f"apache_file={apache_route.path}"
             )
-            for ok, name, detail in _apache_route_checks(route, apache_route):
-                if getattr(args, "slot", None):
+            for ok, name, detail in _apache_route_checks(binding, apache_route):
+                if getattr(args, "target", None):
                     _check_line(ok, name, detail)
                 if not ok:
                     failed += 1
         except Exception as exc:
             failed += 1
-            print(f"slot={route.slot} apache_status=fail reason={exc}")
+            print(f"linux_account={binding.linux_account} apache_status=fail reason={exc}")
     print(f"apache_status={'ok' if failed == 0 else 'fail'} count={count} failed={failed}")
     return 0 if failed == 0 else 1
 
 
 def cmd_apache_set_host(args: argparse.Namespace) -> int:
     if not _is_root():
-        print("error: run as root/admin: sudo /usr/local/bin/opsctl apache set-host SLOT HOST", file=sys.stderr)
+        print("error: run as root/admin: sudo /usr/local/bin/opsctl apache set-host LINUX_ACCOUNT HOST", file=sys.stderr)
         return 2
     state_root = _state_root(args)
-    slot = str(args.slot)
+    linux_account = str(args.linux_account)
     try:
         host = validate_public_host(str(args.host))
-        route = get_slot_route(slot, state_root)
-        before = parse_apache_route(slot)
-        for ok, name, detail in _apache_route_checks(route, before):
-            if not ok:
-                raise ValueError(f"{name}: {detail}")
+        binding = get_runtime_binding(linux_account, state_root)
+        if binding.linux_account != linux_account:
+            raise ValueError("apache set-host repair target must be a linux_account, not public_host or instance_id")
+        before = parse_apache_route(linux_account)
         suffix = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d%H%M%S")
-        change = set_apache_host(slot, host, backup_suffix=suffix)
-        after = parse_apache_route(slot)
-        for ok, name, detail in _apache_route_checks(route, after):
+        change = set_apache_host(linux_account, host, backup_suffix=suffix)
+        after = parse_apache_route(linux_account)
+        repair_binding = RuntimeBinding(
+            instance_id=binding.instance_id,
+            linux_account=binding.linux_account,
+            public_host=host,
+            family=binding.family,
+            runtime_class=binding.runtime_class,
+            gateway_port=binding.gateway_port,
+            bridge_port=binding.bridge_port,
+            enabled=binding.enabled,
+        )
+        for ok, name, detail in _apache_route_checks(repair_binding, after):
             if not ok:
                 raise ValueError(f"{name}: {detail}")
     except Exception as exc:
-        print(f"slot={slot}")
+        print(f"linux_account={linux_account}")
         print("apache_set_host_status=fail")
         print(f"reason={exc}")
         return 1
-    print(f"slot={slot}")
+    print(f"linux_account={linux_account}")
     print(f"old_public_host={change.old_host}")
     print(f"public_host={change.new_host}")
     print(f"gateway_port={after.gateway_port}")
-    print(f"registry_gateway_port={route.gateway_port}")
+    print(f"binding_gateway_port={binding.gateway_port}")
     print(f"apache_file={change.path}")
     print(f"backup_file={change.backup_path}")
+    print("warning=apache_set_host_only_updates_apache_use_binding_set_public_host_for_normal_changes")
     print("apache_set_host_status=ok")
     return 0
 
@@ -462,20 +546,23 @@ def cmd_update_status(args: argparse.Namespace) -> int:
 def cmd_status(args: argparse.Namespace) -> int:
     state_root = _state_root(args)
     try:
-        route = get_slot_route(args.slot, state_root)
-        apache_route = parse_apache_route(route.slot)
+        binding = get_runtime_binding(args.slot, state_root)
+        apache_route = parse_apache_route(binding.linux_account)
     except Exception as exc:
         print(f"status=unknown")
         print(f"reason={exc}")
         return 1
-    print(f"slot={route.slot}")
-    print(f"slot_class={route.slot_class}")
-    print(f"public_host={apache_route.public_host}")
-    print(f"gateway_port={route.gateway_port}")
+    print(f"instance_id={binding.instance_id}")
+    print(f"linux_account={binding.linux_account}")
+    print(f"public_host={binding.public_host}")
+    print(f"actual_public_host={apache_route.public_host}")
+    print(f"family={binding.family}")
+    print(f"runtime_class={binding.runtime_class}")
+    print(f"gateway_port={binding.gateway_port}")
     print(f"apache_gateway_port={apache_route.gateway_port}")
-    print(f"bridge_port={route.bridge_port}")
-    print(f"enabled={'yes' if route.enabled else 'no'}")
-    for ok, name, detail in _apache_route_checks(route, apache_route):
+    print(f"bridge_port={binding.bridge_port}")
+    print(f"enabled={'yes' if binding.enabled else 'no'}")
+    for ok, name, detail in _apache_route_checks(binding, apache_route):
         _check_line(ok, name, detail)
         if not ok:
             print("status=fail")
@@ -483,17 +570,28 @@ def cmd_status(args: argparse.Namespace) -> int:
     if not _is_root():
         print("truth_source=live_image")
         print("truth_status=requires_live_root")
-        print(f"next_action=sudo /usr/local/bin/opsctl runtime truth {route.slot}")
+        print(f"next_action=sudo /usr/local/bin/opsctl runtime truth {binding.linux_account}")
         return 0
     try:
-        truth, checks = _live_runtime_truth(route.slot, state_root)
+        truth, checks = _live_runtime_truth(binding.linux_account, state_root)
     except Exception as exc:
         print("truth_source=live_image")
         print("truth_status=fail")
         print(f"reason={exc}")
         return 1
     for key, value in truth.items():
-        if key not in {"slot", "slot_class", "public_host", "gateway_port", "apache_gateway_port", "bridge_port", "enabled"}:
+        if key not in {
+            "instance_id",
+            "linux_account",
+            "public_host",
+            "actual_public_host",
+            "family",
+            "runtime_class",
+            "gateway_port",
+            "apache_gateway_port",
+            "bridge_port",
+            "enabled",
+        }:
             print(f"{key}={value}")
     failed = 0
     for ok, name, detail in checks:
@@ -1043,23 +1141,23 @@ def _run_text_cwd(command: list[str], cwd: Path, timeout: int = 20) -> subproces
 
 def _http_backend_smoke(slot: str, path: str, state_root: Path) -> tuple[bool, str]:
     try:
-        route = get_slot_route(slot, state_root)
-        apache_route = parse_apache_route(slot)
+        binding = get_runtime_binding(slot, state_root)
+        apache_route = parse_apache_route(binding.linux_account)
     except Exception as exc:
-        return False, f"route_truth_missing reason={exc}"
-    port = route.gateway_port
+        return False, f"binding_truth_missing reason={exc}"
+    port = binding.gateway_port
     smoke_path = path if path.startswith("/") else f"/{path}"
     url = f"http://127.0.0.1:{port}{smoke_path}"
-    request = urllib.request.Request(url, headers={"Host": apache_route.public_host})
+    request = urllib.request.Request(url, headers={"Host": binding.public_host})
     try:
         with urllib.request.urlopen(request, timeout=5) as response:
             status = int(response.getcode())
-            return 200 <= status < 500, f"url={url} host={apache_route.public_host} status={status}"
+            return 200 <= status < 500, f"url={url} host={binding.public_host} status={status}"
     except urllib.error.HTTPError as exc:
         status = int(exc.code)
-        return 200 <= status < 500, f"url={url} host={apache_route.public_host} status={status}"
+        return 200 <= status < 500, f"url={url} host={binding.public_host} status={status}"
     except Exception as exc:
-        return False, f"url={url} host={apache_route.public_host} reason={exc}"
+        return False, f"url={url} host={binding.public_host} reason={exc}"
 
 
 def _parse_findmnt_pairs(output: str) -> list[dict[str, str]]:
@@ -1181,7 +1279,7 @@ def _propagation_satisfies(actual: str | None, required: str | None) -> bool:
     return value == required
 
 
-def _find_gateway_container(slot: str, profile) -> tuple[str | None, str | None]:
+def _find_gateway_container(binding: RuntimeBinding, profile) -> tuple[str | None, str | None]:
     service_label = "gateway"
     by_label = _run_text(
         [
@@ -1189,7 +1287,7 @@ def _find_gateway_container(slot: str, profile) -> tuple[str | None, str | None]
             "ps",
             "-a",
             "--filter",
-            f"label=agent-runtime.slot={slot}",
+            f"label=agent-runtime.instance-id={binding.instance_id}",
             "--filter",
             f"label=agent-runtime.profile={profile.name}",
             "--filter",
@@ -1201,20 +1299,41 @@ def _find_gateway_container(slot: str, profile) -> tuple[str | None, str | None]
     if by_label.returncode == 0:
         ids = [line.strip() for line in by_label.stdout.splitlines() if line.strip()]
         if len(ids) == 1:
-            return ids[0], "label"
+            return ids[0], "instance_label"
         if len(ids) > 1:
-            return None, f"multiple_label_matches:{len(ids)}"
-    return _container_name(slot, profile), "fallback_name"
+            return None, f"multiple_instance_label_matches:{len(ids)}"
+    legacy = _run_text(
+        [
+            "docker",
+            "ps",
+            "-a",
+            "--filter",
+            f"label=agent-runtime.slot={binding.linux_account}",
+            "--filter",
+            f"label=agent-runtime.profile={profile.name}",
+            "--filter",
+            f"label=agent-runtime.service={service_label}",
+            "--format",
+            "{{.ID}}",
+        ]
+    )
+    if legacy.returncode == 0:
+        ids = [line.strip() for line in legacy.stdout.splitlines() if line.strip()]
+        if len(ids) == 1:
+            return ids[0], "legacy_linux_account_label"
+        if len(ids) > 1:
+            return None, f"multiple_legacy_label_matches:{len(ids)}"
+    return _container_name(binding.linux_account, profile), "fallback_name"
 
 
-def _find_gateway_container_by_slot(slot: str) -> tuple[str | None, str | None]:
+def _find_gateway_container_by_binding(binding: RuntimeBinding) -> tuple[str | None, str | None]:
     by_label = _run_text(
         [
             "docker",
             "ps",
             "-a",
             "--filter",
-            f"label=agent-runtime.slot={slot}",
+            f"label=agent-runtime.instance-id={binding.instance_id}",
             "--filter",
             "label=agent-runtime.service=gateway",
             "--format",
@@ -1225,9 +1344,29 @@ def _find_gateway_container_by_slot(slot: str) -> tuple[str | None, str | None]:
         return None, (by_label.stderr or by_label.stdout).strip() or "docker_ps_failed"
     ids = [line.strip() for line in by_label.stdout.splitlines() if line.strip()]
     if len(ids) == 1:
-        return ids[0], "slot_label"
+        return ids[0], "instance_label"
     if len(ids) > 1:
-        return None, f"multiple_slot_label_matches:{len(ids)}"
+        return None, f"multiple_instance_label_matches:{len(ids)}"
+    legacy = _run_text(
+        [
+            "docker",
+            "ps",
+            "-a",
+            "--filter",
+            f"label=agent-runtime.slot={binding.linux_account}",
+            "--filter",
+            "label=agent-runtime.service=gateway",
+            "--format",
+            "{{.ID}}",
+        ]
+    )
+    if legacy.returncode != 0:
+        return None, (legacy.stderr or legacy.stdout).strip() or "docker_ps_failed"
+    ids = [line.strip() for line in legacy.stdout.splitlines() if line.strip()]
+    if len(ids) == 1:
+        return ids[0], "legacy_linux_account_label"
+    if len(ids) > 1:
+        return None, f"multiple_legacy_label_matches:{len(ids)}"
     return None, "not_found"
 
 
@@ -1239,28 +1378,31 @@ def _labels_from_container_info(info: dict) -> dict[str, str]:
     return {str(key): str(value) for key, value in labels.items()}
 
 
-def _live_image_truth_from_info(slot: str, info: dict, route: SlotRoute, apache_route) -> dict[str, str]:
+def _live_image_truth_from_info(binding: RuntimeBinding, info: dict, apache_route) -> dict[str, str]:
     labels = _labels_from_container_info(info)
     config = info.get("Config") if isinstance(info, dict) else {}
     image = str((config or {}).get("Image") or "")
-    slot_class = route.slot_class
+    runtime_class = binding.runtime_class
     schema = _recipe_label(labels, "recipe.schema")
     family = _recipe_label(labels, "family")
     product_image = _recipe_label(labels, "product-image")
-    runtime_profile = _recipe_label(labels, f"runtime-profile.{slot_class}")
-    runtime_contract = _recipe_label(labels, f"runtime-contract.{slot_class}")
+    runtime_profile = _recipe_label(labels, f"runtime-profile.{runtime_class}")
+    runtime_contract = _recipe_label(labels, f"runtime-contract.{runtime_class}")
     return {
-        "slot": slot,
+        "instance_id": binding.instance_id,
+        "linux_account": binding.linux_account,
         "truth_source": "live_image",
         "truth_status": "ok" if schema == IMAGE_RECIPE_SCHEMA else "legacy_or_unlabeled",
-        "public_host": apache_route.public_host,
-        "gateway_port": str(route.gateway_port),
+        "public_host": binding.public_host,
+        "actual_public_host": apache_route.public_host,
+        "gateway_port": str(binding.gateway_port),
         "apache_gateway_port": str(apache_route.gateway_port),
-        "bridge_port": str(route.bridge_port),
-        "enabled": "yes" if route.enabled else "no",
-        "slot_class": slot_class,
+        "bridge_port": str(binding.bridge_port),
+        "enabled": "yes" if binding.enabled else "no",
+        "family": binding.family,
+        "runtime_class": runtime_class,
         "wrapper_image": image,
-        "family": family,
+        "image_family": family,
         "product_image": product_image,
         "product_component": _recipe_label(labels, "product-component"),
         "wrapper_component": _recipe_label(labels, "wrapper-component"),
@@ -1274,23 +1416,26 @@ def _live_image_truth_from_info(slot: str, info: dict, route: SlotRoute, apache_
 
 def _live_runtime_truth(slot: str, state_root: Path) -> tuple[dict[str, str], list[tuple[bool, str, str | None]]]:
     checks: list[tuple[bool, str, str | None]] = []
-    route = get_slot_route(slot, state_root)
-    apache_route = parse_apache_route(slot)
-    checks.extend(_apache_route_checks(route, apache_route))
-    container, lookup = _find_gateway_container_by_slot(slot)
+    binding = get_runtime_binding(slot, state_root)
+    apache_route = parse_apache_route(binding.linux_account)
+    checks.extend(_apache_route_checks(binding, apache_route))
+    container, lookup = _find_gateway_container_by_binding(binding)
     checks.append((bool(container), "truth_container_lookup", lookup))
     if not container:
         return (
             {
-                "slot": slot,
+                "instance_id": binding.instance_id,
+                "linux_account": binding.linux_account,
                 "truth_source": "live_image",
                 "truth_status": "not_running",
-                "public_host": apache_route.public_host,
-                "gateway_port": str(route.gateway_port),
+                "public_host": binding.public_host,
+                "actual_public_host": apache_route.public_host,
+                "gateway_port": str(binding.gateway_port),
                 "apache_gateway_port": str(apache_route.gateway_port),
-                "bridge_port": str(route.bridge_port),
-                "enabled": "yes" if route.enabled else "no",
-                "slot_class": route.slot_class,
+                "bridge_port": str(binding.bridge_port),
+                "enabled": "yes" if binding.enabled else "no",
+                "family": binding.family,
+                "runtime_class": binding.runtime_class,
             },
             checks,
         )
@@ -1300,7 +1445,7 @@ def _live_runtime_truth(slot: str, state_root: Path) -> tuple[dict[str, str], li
         detail = (inspect.stderr or inspect.stdout).strip()
         return (
             {
-                "slot": slot,
+                "linux_account": binding.linux_account,
                 "truth_source": "live_image",
                 "truth_status": "inspect_failed",
                 "reason": detail[:200],
@@ -1311,18 +1456,24 @@ def _live_runtime_truth(slot: str, state_root: Path) -> tuple[dict[str, str], li
         info = json.loads(inspect.stdout)[0]
     except Exception as exc:
         checks.append((False, "truth_container_inspect_parse_ok", str(exc)))
-        return ({"slot": slot, "truth_source": "live_image", "truth_status": "parse_failed", "reason": str(exc)}, checks)
-    truth = _live_image_truth_from_info(slot, info, route, apache_route)
+        return ({"linux_account": binding.linux_account, "truth_source": "live_image", "truth_status": "parse_failed", "reason": str(exc)}, checks)
+    truth = _live_image_truth_from_info(binding, info, apache_route)
     labels = _labels_from_container_info(info)
     checks.extend(
         [
             (truth["truth_status"] == "ok", "truth_image_labeled", truth["truth_status"]),
-            (bool(truth.get("family")), "truth_family_present", truth.get("family") or "missing"),
+            (truth.get("image_family") == binding.family, "truth_family_matches_binding", f"image={truth.get('image_family') or 'missing'} binding={binding.family}"),
             (bool(truth.get("runtime_profile")), "truth_runtime_profile_present", truth.get("runtime_profile") or "missing"),
             (
-                labels.get("agent-runtime.slot") in {None, slot},
-                "truth_container_slot_label_matches",
-                f"label={labels.get('agent-runtime.slot') or 'missing'} route={slot}",
+                labels.get("agent-runtime.instance-id") in {None, binding.instance_id},
+                "truth_container_instance_label_matches",
+                f"label={labels.get('agent-runtime.instance-id') or 'missing'} binding={binding.instance_id}",
+            ),
+            (
+                labels.get("agent-runtime.linux-account") in {None, binding.linux_account}
+                and labels.get("agent-runtime.slot") in {None, binding.linux_account},
+                "truth_container_linux_account_label_matches",
+                f"label={labels.get('agent-runtime.linux-account') or labels.get('agent-runtime.slot') or 'missing'} binding={binding.linux_account}",
             ),
         ]
     )
@@ -1347,7 +1498,7 @@ def cmd_runtime_truth(args: argparse.Namespace) -> int:
         if not all_slots and not slot_arg:
             raise ValueError("provide SLOT or --all")
         if all_slots:
-            slots = [route.slot for route in load_routing_registry(state_root) if route.enabled]
+            slots = [binding.linux_account for binding in load_runtime_bindings(state_root) if binding.enabled]
         else:
             slots = [str(slot_arg)]
         all_ok = True
@@ -1377,7 +1528,8 @@ def _run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool
     if not _is_root():
         return [(False, "live_check_requires_root", "run as root/admin or a restricted root helper")]
 
-    container, container_lookup = _find_gateway_container(desired.slot, profile)
+    binding = get_runtime_binding(desired.slot, state_root)
+    container, container_lookup = _find_gateway_container(binding, profile)
     checks.append((bool(container), "live_container_lookup", container_lookup))
     if not container:
         return checks
@@ -1597,7 +1749,11 @@ def _run_static_slot_checks(desired, profile, rendered=None) -> list[tuple[bool,
     if lane_slot_class == "customer":
         checks.extend(
             [
-                (bool(CUSTOMER_SLOT_RE.match(desired.slot)), "customer_slot_name_ok", desired.slot),
+                (
+                    bool(getattr(desired, "route", None)) and desired.route.runtime_class == "customer",
+                    "binding_runtime_class_customer",
+                    f"binding={getattr(desired.route, 'runtime_class', 'missing') if getattr(desired, 'route', None) else 'missing'}",
+                ),
                 (profile_mode == "image", "customer_profile_mode_image", f"mode={profile_mode}"),
                 (allow_source_mount is False, "customer_source_mount_disabled", f"allow_source_mount={allow_source_mount}"),
             ]
@@ -1605,7 +1761,11 @@ def _run_static_slot_checks(desired, profile, rendered=None) -> list[tuple[bool,
     elif lane_slot_class == "dev":
         checks.extend(
             [
-                (bool(DEV_SLOT_RE.match(desired.slot)), "dev_slot_name_ok", desired.slot),
+                (
+                    bool(getattr(desired, "route", None)) and desired.route.runtime_class == "dev",
+                    "binding_runtime_class_dev",
+                    f"binding={getattr(desired.route, 'runtime_class', 'missing') if getattr(desired, 'route', None) else 'missing'}",
+                ),
                 (profile_mode == "source", "dev_profile_mode_source", f"mode={profile_mode}"),
                 (allow_source_mount is True, "dev_source_mount_enabled", f"allow_source_mount={allow_source_mount}"),
             ]
@@ -1682,8 +1842,7 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 
 def _slot_runtime_dir(slot: str) -> Path:
-    if not CUSTOMER_SLOT_RE.match(slot) and not DEV_SLOT_RE.match(slot):
-        raise ValueError(f"invalid slot name: {slot}")
+    validate_linux_account(slot)
     target_home = Path("/home") / slot
     runtime_dir = target_home / "openclaw"
     for path in (target_home, runtime_dir):
@@ -2173,8 +2332,7 @@ def cmd_diagnostics_show(args: argparse.Namespace) -> int:
         return 2
     try:
         slot = str(args.slot)
-        if not (CUSTOMER_SLOT_RE.match(slot) or DEV_SLOT_RE.match(slot)):
-            raise ValueError(f"invalid slot: {slot}")
+        validate_linux_account(slot)
         diag_dir = _resolve_diagnostics_dir(slot, getattr(args, "dir", None))
         tail_lines = max(1, min(int(getattr(args, "tail", 120)), 300))
     except Exception as exc:
@@ -3195,12 +3353,12 @@ def _upsert_runtime_env_file(path: Path, updates: dict[str, str], uid: int, gid:
 
 def _dev_recipe_runtime_env(desired, state_root: Path) -> dict[str, str]:
     family = str(desired.lane_data.get("family") or "")
-    route = get_slot_route(desired.slot, state_root)
+    binding = get_runtime_binding(desired.slot, state_root)
     env = {
         "OPENCLAW_RUNTIME_FAMILY": family,
         "OPENCLAW_IMAGE": str(desired.release_data.get("wrapper_image") or ""),
-        "OPENCLAW_GATEWAY_PORT": str(route.gateway_port),
-        "OPENCLAW_BRIDGE_PORT": str(route.bridge_port),
+        "OPENCLAW_GATEWAY_PORT": str(binding.gateway_port),
+        "OPENCLAW_BRIDGE_PORT": str(binding.bridge_port),
     }
     return env
 
@@ -3597,8 +3755,8 @@ def _release_canonical_record(release_data: dict) -> dict[str, str]:
 
 
 def _desired_from_direct_images(slot: str, release_data: dict, state_root: Path):
-    route = get_slot_route(slot, state_root)
-    slot_class = route.slot_class
+    binding = get_runtime_binding(slot, state_root)
+    slot_class = binding.runtime_class
     image_recipe = _release_image_recipe(release_data)
     profiles = image_recipe.get("runtime_profiles") if isinstance(image_recipe, dict) else {}
     runtime_profile = profiles.get(slot_class) if isinstance(profiles, dict) else ""
@@ -3610,16 +3768,18 @@ def _desired_from_direct_images(slot: str, release_data: dict, state_root: Path)
         raise ValueError(f"slot image family/profile mismatch: image={family} profile={profile.metadata.get('family')}")
     if profile.metadata.get("slot_class") != slot_class:
         raise ValueError(
-            f"slot image slot_class/profile mismatch: slot={slot_class} profile={profile.metadata.get('slot_class')}"
+            f"binding image runtime_class/profile mismatch: binding={slot_class} profile={profile.metadata.get('slot_class')}"
         )
+    if family != binding.family:
+        raise ValueError(f"binding image family mismatch: image={family} binding={binding.family}")
     desired = DesiredSlot(
-        slot=slot,
+        slot=binding.linux_account,
         lane=f"image-{family}-{slot_class}",
         lane_data={"family": family, "slot_class": slot_class},
         release_name=IMAGE_ROLLOUT_RELEASE_NAME,
         release_data=release_data,
         runtime_profile=str(runtime_profile),
-        route=route,
+        route=binding,
     )
     return desired, profile
 
@@ -3638,8 +3798,9 @@ def _desired_from_live_image_truth(slot: str, state_root: Path):
 def _dev_rollout_target(state_root: Path, family: str, release: str, slot: str) -> tuple[dict, dict, dict, DesiredSlot, object, object]:
     if family not in {"openclaw", "hermes"}:
         raise ValueError("family must be openclaw or hermes")
-    if not DEV_SLOT_RE.match(slot):
-        raise ValueError("dev rollout slot must be a dev slot like dev-NAME")
+    binding = get_runtime_binding(slot, state_root)
+    if binding.runtime_class != "dev":
+        raise ValueError(f"dev rollout target must have runtime_class=dev: {slot}")
     slots_data, lanes_data, releases_data = _load_slots_lanes_releases(state_root)
     release_data = _validate_release_for_family(releases_data, release, family)
     desired_before = load_desired_slot(slot, state_root)
@@ -3797,8 +3958,9 @@ def cmd_rollout_canary(args: argparse.Namespace) -> int:
     try:
         if family not in {"openclaw", "hermes"}:
             raise ValueError("family must be openclaw or hermes")
-        if not CUSTOMER_SLOT_RE.match(slot):
-            raise ValueError("canary slot must be a customer slot like ocN")
+        binding = get_runtime_binding(slot, state_root)
+        if binding.runtime_class != "customer":
+            raise ValueError(f"canary target must have runtime_class=customer: {slot}")
         slots_data, lanes_data, releases_data = _load_slots_lanes_releases(state_root)
         original_slots_data = copy.deepcopy(slots_data)
         original_lanes_data = copy.deepcopy(lanes_data)
@@ -3906,8 +4068,9 @@ def cmd_rollout_promote(args: argparse.Namespace) -> int:
             raise ValueError("matching successful canary record is required before promote")
         fleet_lane = _fleet_lane_for_family(lanes_data, family)
         canary_slot = str(record.get("slot") or "")
-        if not CUSTOMER_SLOT_RE.match(canary_slot):
-            raise ValueError("canary record is missing a valid customer slot")
+        canary_binding = get_runtime_binding(canary_slot, state_root)
+        if canary_binding.runtime_class != "customer":
+            raise ValueError("canary record is not bound to runtime_class=customer")
         lanes = lanes_data.get("lanes") or {}
         fleet_data = lanes.get(fleet_lane)
         if not isinstance(fleet_data, dict):
@@ -3996,7 +4159,7 @@ def cmd_rollout_image_plan(args: argparse.Namespace) -> int:
         if getattr(args, "slot", None):
             slots.append(str(args.slot))
         if not slots:
-            slots = [route.slot for route in load_routing_registry(state_root) if route.enabled]
+            slots = [binding.linux_account for binding in load_runtime_bindings(state_root) if binding.enabled]
         plans = []
         for slot in slots:
             desired, profile = _desired_from_direct_images(slot, release_data, state_root)
@@ -4007,8 +4170,8 @@ def cmd_rollout_image_plan(args: argparse.Namespace) -> int:
             ]
             plans.append(
                 {
-                    "slot": slot,
-                    "slot_class": desired.lane_data.get("slot_class"),
+                    "linux_account": desired.slot,
+                    "runtime_class": desired.lane_data.get("slot_class"),
                     "public_host": _apache_public_host(slot),
                     "gateway_port": desired.route.gateway_port if desired.route else "",
                     "bridge_port": desired.route.bridge_port if desired.route else "",
@@ -4759,16 +4922,17 @@ def cmd_nas_policy_check(args: argparse.Namespace) -> int:
     return 0 if decision.allowed else 1
 
 
-def _caller_customer_slot() -> str:
+def _caller_customer_slot(state_root: Path) -> str:
     user = getpass.getuser()
-    if not CUSTOMER_SLOT_RE.match(user):
-        raise ValueError(f"this command must be run by an ocN customer slot account, got {user}")
+    binding = get_runtime_binding(user, state_root)
+    if binding.linux_account != user or binding.runtime_class != "customer":
+        raise ValueError(f"this command must be run by a customer linux_account, got {user}")
     return user
 
 
 def cmd_nas_request(args: argparse.Namespace) -> int:
     try:
-        slot = _caller_customer_slot()
+        slot = _caller_customer_slot(_state_root(args))
         decision = check_nas_policy(slot, args.share, _state_root(args))
         if not decision.allowed:
             raise ValueError(f"policy denied: {decision.reason}")
@@ -5155,26 +5319,28 @@ def build_parser() -> argparse.ArgumentParser:
     slot_list = slot_sub.add_parser("list")
     slot_list.set_defaults(func=cmd_slot_list)
 
-    routing = sub.add_parser("routing")
-    routing_sub = routing.add_subparsers(dest="routing_command", required=True)
-    routing_status = routing_sub.add_parser("status")
-    routing_status.add_argument("slot", nargs="?")
-    routing_status.set_defaults(func=cmd_routing_status)
-    routing_seed = routing_sub.add_parser("seed-legacy")
-    routing_seed.add_argument("--write", action="store_true")
-    routing_seed.add_argument("--replace", action="store_true")
-    routing_seed.set_defaults(func=cmd_routing_seed_legacy)
-    routing_normalize = routing_sub.add_parser("normalize")
-    routing_normalize.add_argument("--write", action="store_true")
-    routing_normalize.set_defaults(func=cmd_routing_normalize)
+    binding = sub.add_parser("binding")
+    binding_sub = binding.add_subparsers(dest="binding_command", required=True)
+    binding_list = binding_sub.add_parser("list")
+    binding_list.set_defaults(func=cmd_binding_list)
+    binding_status = binding_sub.add_parser("status")
+    binding_status.add_argument("target", nargs="?")
+    binding_status.set_defaults(func=cmd_binding_status)
+    binding_normalize = binding_sub.add_parser("normalize")
+    binding_normalize.add_argument("--write", action="store_true")
+    binding_normalize.set_defaults(func=cmd_binding_normalize)
+    binding_set_host = binding_sub.add_parser("set-public-host")
+    binding_set_host.add_argument("target")
+    binding_set_host.add_argument("host")
+    binding_set_host.set_defaults(func=cmd_binding_set_public_host)
 
     apache = sub.add_parser("apache")
     apache_sub = apache.add_subparsers(dest="apache_command", required=True)
     apache_status = apache_sub.add_parser("status")
-    apache_status.add_argument("slot", nargs="?")
+    apache_status.add_argument("target", nargs="?")
     apache_status.set_defaults(func=cmd_apache_status)
     apache_set_host = apache_sub.add_parser("set-host")
-    apache_set_host.add_argument("slot")
+    apache_set_host.add_argument("linux_account")
     apache_set_host.add_argument("host")
     apache_set_host.set_defaults(func=cmd_apache_set_host)
 

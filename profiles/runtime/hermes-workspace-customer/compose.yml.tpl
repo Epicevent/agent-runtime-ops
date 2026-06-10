@@ -30,6 +30,8 @@ services:
     ports:
       - "127.0.0.1:{{ gateway_port }}:3000"
     labels:
+      agent-runtime.instance-id: "{{ instance_id }}"
+      agent-runtime.linux-account: "{{ linux_account }}"
       agent-runtime.slot: "{{ slot }}"
       agent-runtime.family: "{{ family }}"
       agent-runtime.profile: "{{ runtime_profile }}"

@@ -122,11 +122,23 @@ def validate_compose_contract(profile: Any, desired: Any, rendered_text: str) ->
         return checks
 
     labels = _labels_as_dict(service.get("labels"))
+    instance_id = str(getattr(desired.route, "instance_id", "") or "")
+    linux_account = str(getattr(desired.route, "linux_account", "") or desired.slot)
     checks.extend(
         [
             ComposeContractCheck(
-                labels.get("agent-runtime.slot") == desired.slot,
-                "compose_slot_label_matches",
+                bool(instance_id) and labels.get("agent-runtime.instance-id") == instance_id,
+                "compose_instance_label_matches",
+                f"label={labels.get('agent-runtime.instance-id')}",
+            ),
+            ComposeContractCheck(
+                labels.get("agent-runtime.linux-account") == linux_account,
+                "compose_linux_account_label_matches",
+                f"label={labels.get('agent-runtime.linux-account')}",
+            ),
+            ComposeContractCheck(
+                labels.get("agent-runtime.slot") == linux_account,
+                "compose_legacy_slot_label_matches",
                 f"label={labels.get('agent-runtime.slot')}",
             ),
             ComposeContractCheck(

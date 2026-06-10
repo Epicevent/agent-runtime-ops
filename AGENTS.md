@@ -86,19 +86,25 @@ Report like an operator would expect: request interpreted, targets, actual actio
 mutated, before/after state, pass/fail, and the next recoverable step. Do not posture as the
 operator; the operator controls intent and risk, and the agent executes, verifies, and communicates.
 
-## Runtime Contract First
+## Runtime Binding First
 
-Before changing a slot, separate these layers and report them in that order:
+Before changing a runtime target, separate these layers and report them in that order:
 
 ```text
-port allocation -> Apache public host -> live image truth -> canonical runtime recipe -> runtime profile -> applied manifest
+intended runtime binding -> actual Apache route -> live image truth -> canonical runtime recipe -> runtime profile -> applied manifest
 ```
 
-The routing registry is only slot host-port allocation: slot, gateway port, bridge port, and
-enabled state. It lives in `/srv/openclaw-ops/slot-registry.json` and must not contain public host,
-image, release, runtime profile, family, or canonical recipe fields. Public host truth comes from
-Apache route status. Ports are not computed from `ocN`; they are registry-owned because Apache must
-agree with them.
+The runtime binding registry is the source of truth for the intended operating binding:
+`instance_id`, `linux_account`, `public_host`, `family`, `runtime_class`, gateway port, bridge port,
+and enabled state. It lives in `/srv/openclaw-ops/runtime-bindings.json`. Apache knows only the
+actual route implementation. The running image knows only the actual runtime implementation. Neither
+Apache nor the image can define which Linux account, public host, family, runtime class, and ports
+are intended to belong together.
+
+Do not treat `linux_account` as the public site name. They may match today, but they are allowed to
+differ. The internal immutable identity is `instance_id`; operators normally do not need to type it.
+The legacy `/srv/openclaw-ops/slot-registry.json` is only a migration input, not a normal truth
+source.
 
 Live image truth is the running container image and the wrapper OCI labels on that image. Treat
 those labels as the source of truth for family, product image, product component, runtime profiles,
@@ -127,10 +133,11 @@ a dev source tree, but that proves source lineage, not runtime shape. Do not use
 explain away a runtime recipe/profile mismatch.
 
 `install.sh` and `opsctl self-update` install tools, profile definitions, and the managed operation
-skill only. They may seed the minimal routing registry from legacy slots when it is missing, but
-they must not silently rewrite runtime image truth to make a broken deployment look fixed. Any
-runtime change must be a separate operator-visible command such as image-dev-apply, image-canary,
-image-promote, rollback, or an explicitly reported legacy command, with before/after verification.
+skill only. They may normalize `/srv/openclaw-ops/runtime-bindings.json`, including one-time
+migration from the legacy slot registry, but they must not silently rewrite runtime image truth to
+make a broken deployment look fixed. Any runtime change must be a separate operator-visible command
+such as image-dev-apply, image-canary, image-promote, rollback, or an explicitly reported legacy
+command, with before/after verification.
 
 Do not treat a live HTTP failure as a profile problem until the old working image and the new
 candidate image are compared against the same runtime contract. For Hermes customer slots, the
@@ -149,8 +156,7 @@ When work may affect the server, do all of the following before claiming complet
 ```bash
 git status --short --branch
 ssh svcops "/usr/local/bin/opsctl update status"
-ssh svcops "/usr/local/bin/opsctl slot list"
-ssh svcops "/usr/local/bin/opsctl routing status"
+ssh svcops "/usr/local/bin/opsctl binding list"
 ssh svcops "/usr/local/bin/opsctl profile list"
 ```
 
@@ -189,7 +195,8 @@ sudo /usr/local/bin/opsctl self-update
 
 ```bash
 /usr/local/bin/opsctl update status
-/usr/local/bin/opsctl routing status
+/usr/local/bin/opsctl binding list
+/usr/local/bin/opsctl binding status
 /usr/local/bin/opsctl profile list
 sudo /usr/local/bin/opsctl runtime truth SLOT
 sudo /usr/local/bin/opsctl check --live SLOT
@@ -212,7 +219,8 @@ Treat these as read-only unless the user is explicitly asking for an operation:
 ```bash
 /usr/local/bin/opsctl update status
 /usr/local/bin/opsctl profile list
-/usr/local/bin/opsctl routing status
+/usr/local/bin/opsctl binding list
+/usr/local/bin/opsctl binding status TARGET
 /usr/local/bin/opsctl status SLOT
 sudo /usr/local/bin/opsctl runtime truth SLOT
 sudo /usr/local/bin/opsctl check --live SLOT
