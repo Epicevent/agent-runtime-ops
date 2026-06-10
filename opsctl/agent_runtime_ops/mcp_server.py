@@ -506,7 +506,11 @@ class McpServer:
                 "description": "Policy-check and mount an already-credentialed NAS share for a target.",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {"target": {"type": "string"}, "share": {"type": "string"}},
+                    "properties": {
+                        "target": {"type": "string"},
+                        "share": {"type": "string"},
+                        "keep_fstab_on_failure": {"type": "boolean", "default": False},
+                    },
                     "required": ["target", "share"],
                     "additionalProperties": False,
                 },
@@ -982,63 +986,66 @@ class McpServer:
         runs = [self._run([self.opsctl, "nas", "requests"], timeout=60)]
         slot_value = args.get("target")
         if slot_value:
-            runs.append(self._run([self.opsctl, "nas", "mounted", self._slot(slot_value)], timeout=60))
+            runs.append(self._run([self.opsctl, "nas", "mounted", self._target(slot_value)], timeout=60))
         ok = all(item["returncode"] == 0 for item in runs)
         return self._common_response(ok=ok, mutated=False, runs=runs)
 
     def _tool_nas_mount(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"target", "share"})
+        self._reject_unknown(args, {"target", "share", "keep_fstab_on_failure"})
         self._reject_sensitive_raw_args(args)
-        slot = self._slot(args.get("target"))
+        target = self._target(args.get("target"))
         share = self._share(args.get("share"))
-        runs = [self._run([self.opsctl, "nas", "policy-check", slot, share], timeout=60)]
+        runs = [self._run([self.opsctl, "nas", "policy-check", target, share], timeout=60)]
         if runs[0]["returncode"] != 0:
             return self._common_response(ok=False, mutated=False, runs=runs, next_action="fix NAS policy or grant before mount")
-        runs.append(self._run([self.sudo, self.opsctl, "nas", "mount", slot, share], timeout=180))
-        runs.append(self._run([self.opsctl, "nas", "mounted", slot], timeout=60))
+        argv = [self.sudo, self.opsctl, "nas", "mount", target, share]
+        if bool(args.get("keep_fstab_on_failure", False)):
+            argv.append("--keep-fstab-on-failure")
+        runs.append(self._run(argv, timeout=180))
+        runs.append(self._run([self.opsctl, "nas", "mounted", target], timeout=60))
         ok = all(item["returncode"] == 0 for item in runs)
         return self._common_response(ok=ok, mutated=True, runs=runs)
 
     def _tool_nas_unmount(self, args: dict[str, Any]) -> dict[str, Any]:
         self._reject_unknown(args, {"target", "share", "lazy", "delete_empty_dir"})
-        slot = self._slot(args.get("target"))
+        target = self._target(args.get("target"))
         share = self._share(args.get("share"))
-        argv = [self.sudo, self.opsctl, "nas", "unmount", slot, share]
+        argv = [self.sudo, self.opsctl, "nas", "unmount", target, share]
         if bool(args.get("lazy", False)):
             argv.append("--lazy")
         if bool(args.get("delete_empty_dir", False)):
             argv.append("--delete-empty-dir")
         runs = [
-            self._run([self.opsctl, "nas", "mounted", slot], timeout=60),
+            self._run([self.opsctl, "nas", "mounted", target], timeout=60),
             self._run(argv, timeout=180),
-            self._run([self.opsctl, "nas", "mounted", slot], timeout=60),
+            self._run([self.opsctl, "nas", "mounted", target], timeout=60),
         ]
         ok = all(item["returncode"] == 0 for item in runs)
         return self._common_response(ok=ok, mutated=True, runs=runs)
 
     def _tool_nas_remove(self, args: dict[str, Any]) -> dict[str, Any]:
         self._reject_unknown(args, {"target", "share", "lazy", "delete_empty_dir"})
-        slot = self._slot(args.get("target"))
+        target = self._target(args.get("target"))
         share = self._share(args.get("share"))
-        argv = [self.sudo, self.opsctl, "nas", "remove", slot, share]
+        argv = [self.sudo, self.opsctl, "nas", "remove", target, share]
         if bool(args.get("lazy", False)):
             argv.append("--lazy")
         if bool(args.get("delete_empty_dir", False)):
             argv.append("--delete-empty-dir")
         runs = [
-            self._run([self.sudo, self.opsctl, "nas", "credential", "status", slot, share], timeout=60),
+            self._run([self.sudo, self.opsctl, "nas", "credential", "status", target, share], timeout=60),
             self._run(argv, timeout=180),
-            self._run([self.sudo, self.opsctl, "nas", "credential", "status", slot, share], timeout=60),
-            self._run([self.opsctl, "nas", "mounted", slot], timeout=60),
+            self._run([self.sudo, self.opsctl, "nas", "credential", "status", target, share], timeout=60),
+            self._run([self.opsctl, "nas", "mounted", target], timeout=60),
         ]
         ok = all(item["returncode"] == 0 for item in runs)
         return self._common_response(ok=ok, mutated=True, runs=runs)
 
     def _tool_nas_credential_status(self, args: dict[str, Any]) -> dict[str, Any]:
         self._reject_unknown(args, {"target", "share"})
-        slot = self._slot(args.get("target"))
+        target = self._target(args.get("target"))
         share = self._share(args.get("share"))
-        runs = [self._run([self.sudo, self.opsctl, "nas", "credential", "status", slot, share], timeout=60)]
+        runs = [self._run([self.sudo, self.opsctl, "nas", "credential", "status", target, share], timeout=60)]
         return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
 
     def _tool_nas_approve_auto_once(self, args: dict[str, Any]) -> dict[str, Any]:

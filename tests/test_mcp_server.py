@@ -612,6 +612,31 @@ class McpServerTests(unittest.TestCase):
             ["sudo", "opsctl", "nas", "credential", "status", "oc3", "//192.168.0.222/hanpass"],
         )
 
+    def test_nas_mount_accepts_public_host_target(self) -> None:
+        runner = FakeRunner(
+            [
+                (0, "policy_check_status=pass\n", ""),
+                (0, "target=oc3\nmount_status=ok\n", ""),
+                (0, "target=oc3\nmounted_child_cifs_count=1\n", ""),
+            ]
+        )
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        payload = call_tool(
+            server,
+            "nas_mount",
+            {"target": "oc3.ji-tech.co.kr", "share": "//192.168.0.222/hanpass"},
+        )
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["mutated"])
+        self.assertEqual(
+            runner.calls[0]["argv"],
+            ["opsctl", "nas", "policy-check", "oc3.ji-tech.co.kr", "//192.168.0.222/hanpass"],
+        )
+        self.assertEqual(
+            runner.calls[1]["argv"],
+            ["sudo", "opsctl", "nas", "mount", "oc3.ji-tech.co.kr", "//192.168.0.222/hanpass"],
+        )
+
     def test_nas_remove_uses_argv_lists_and_reports_mutation(self) -> None:
         runner = FakeRunner(
             [
