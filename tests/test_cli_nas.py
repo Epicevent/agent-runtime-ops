@@ -15,13 +15,12 @@ from agent_runtime_ops.cli import (
     _managed_fstab_marker,
     _official_credential_status,
     _remove_managed_fstab_entry,
-    _slot_names_from_config,
     cmd_nas_credential_status,
     cmd_nas_requests,
-    cmd_slot_list,
 )
 from agent_runtime_ops.nas import parse_smb_share
 from agent_runtime_ops.routing import RuntimeBinding, dump_runtime_bindings
+from agent_runtime_ops.yamlio import dump_yaml
 
 
 def binding(account: str, family: str, runtime_class: str, gateway: int, bridge: int) -> RuntimeBinding:
@@ -38,43 +37,6 @@ def binding(account: str, family: str, runtime_class: str, gateway: int, bridge:
 
 def write_state(root: Path) -> None:
     digest = "sha256:" + "1" * 64
-    (root / "slots.yaml").write_text(
-        """
-slots:
-  - slot: oc3
-    lane: openclaw-customer-stable
-  - slot: dev-oc
-    lane: openclaw-dev
-""".lstrip(),
-        encoding="utf-8",
-    )
-    (root / "lanes.yaml").write_text(
-        """
-lanes:
-  openclaw-customer-stable:
-    family: openclaw
-    slot_class: customer
-    release: openclaw-current
-    runtime_profile: openclaw-customer
-  openclaw-dev:
-    family: openclaw
-    slot_class: dev
-    release: openclaw-current
-    runtime_profile: openclaw-dev
-""".lstrip(),
-        encoding="utf-8",
-    )
-    (root / "releases.yaml").write_text(
-        f"""
-releases:
-  openclaw-current:
-    family: openclaw
-    wrapper_image: ghcr.io/epicevent/openclaw-nas-agent@{digest}
-    product_image: ghcr.io/epicevent/openclaw-nas-agent@{digest}
-    digest: {digest}
-""".lstrip(),
-        encoding="utf-8",
-    )
     (root / "runtime-bindings.json").write_text(
         dump_runtime_bindings(
             [
@@ -84,14 +46,34 @@ releases:
         ),
         encoding="utf-8",
     )
+    for target, runtime_class, profile in (
+        ("oc3", "customer", "openclaw-customer"),
+        ("dev-oc", "dev", "openclaw-dev"),
+    ):
+        manifest_dir = root / "runtime" / target
+        manifest_dir.mkdir(parents=True, exist_ok=True)
+        (manifest_dir / "manifest.yaml").write_text(
+            dump_yaml(
+                {
+                    "schema_version": 1,
+                    "target": target,
+                    "linux_account": target,
+                    "image_name": "direct-image",
+                    "family": "openclaw",
+                    "runtime_class": runtime_class,
+                    "runtime_profile": profile,
+                    "wrapper_image": f"ghcr.io/epicevent/agent-runtime-openclaw@{digest}",
+                    "product_image": f"ghcr.io/epicevent/openclaw-jitech@{digest}",
+                    "wrapper_image_digest": digest,
+                    "product_image_digest": digest,
+                }
+            ),
+            encoding="utf-8",
+        )
 
 
 class CliNasTests(unittest.TestCase):
-    def test_slot_names_from_list_config(self) -> None:
-        slots = [{"slot": "oc10"}, {"slot": "oc3"}, {"lane": "missing"}, "oc2"]
-        self.assertEqual(_slot_names_from_config(slots), ["oc10", "oc2", "oc3"])
-
-    def test_nas_requests_accepts_slots_yaml_list(self) -> None:
+    def test_nas_requests_accepts_runtime_bindings_list(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write_state(root)
@@ -102,22 +84,7 @@ class CliNasTests(unittest.TestCase):
         self.assertIn("pending_request_count=0", output.getvalue())
         self.assertIn("nas_requests_status=ok", output.getvalue())
 
-    def test_slot_list_reports_runtime_bindings(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            write_state(root)
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                rc = cmd_slot_list(argparse.Namespace(state_root=str(root)))
-        text = output.getvalue()
-        self.assertEqual(rc, 0)
-        self.assertIn("linux_account=dev-oc", text)
-        self.assertIn("runtime_class=dev", text)
-        self.assertIn("gateway_port=30789", text)
-        self.assertIn("public_host=dev-oc.ji-tech.co.kr", text)
-        self.assertIn("slot_list_status=ok count=2", text)
-
-    def test_approve_auto_accepts_slots_yaml_list(self) -> None:
+    def test_approve_auto_accepts_runtime_bindings_list(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write_state(root)

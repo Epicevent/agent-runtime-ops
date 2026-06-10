@@ -7,8 +7,7 @@ import re
 from pathlib import Path
 
 from .paths import state_path
-from .routing import validate_linux_account
-from .state import load_desired_slot
+from .routing import get_runtime_binding, validate_linux_account
 from .yamlio import load_yaml
 
 SMB_SHARE_RE = re.compile(r"^//([^/\\]+)/([^/\\]+)$")
@@ -122,19 +121,18 @@ def _source_matches(pattern: str, share: SmbShare) -> bool:
 
 
 def check_nas_policy(slot: str, source: str, state_root: Path) -> NasPolicyDecision:
-    desired = load_desired_slot(slot, state_root)
-    slot_class = desired.lane_data.get("slot_class")
-    if slot_class != "customer":
+    binding = get_runtime_binding(slot, state_root)
+    if binding.runtime_class != "customer":
         share = parse_smb_share(source)
-        return NasPolicyDecision(slot, share, False, f"slot_class_not_customer:{slot_class}", None, None, Path(""))
+        return NasPolicyDecision(binding.linux_account, share, False, f"runtime_class_not_customer:{binding.runtime_class}", None, None, Path(""))
 
     share = parse_smb_share(source)
-    mountpoint = mountpoint_for_share(slot, share)
+    mountpoint = mountpoint_for_share(binding.linux_account, share)
     policy = load_yaml(state_path(state_root, "nas-policy.yaml"))
-    auto_approve, grants, max_mounts = _grant_patterns(policy, slot)
+    auto_approve, grants, max_mounts = _grant_patterns(policy, binding.linux_account)
     if not auto_approve:
         return NasPolicyDecision(slot, share, False, "auto_approve_disabled", None, max_mounts, mountpoint)
     for pattern in grants:
         if _source_matches(pattern, share):
-            return NasPolicyDecision(slot, share, True, "grant_matched", pattern, max_mounts, mountpoint)
-    return NasPolicyDecision(slot, share, False, "grant_not_matched", None, max_mounts, mountpoint)
+            return NasPolicyDecision(binding.linux_account, share, True, "grant_matched", pattern, max_mounts, mountpoint)
+    return NasPolicyDecision(binding.linux_account, share, False, "grant_not_matched", None, max_mounts, mountpoint)

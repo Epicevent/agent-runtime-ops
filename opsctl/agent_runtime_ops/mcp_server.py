@@ -170,7 +170,7 @@ class McpServer:
                 "Use these tools to inspect and operate the svcops runtime through opsctl. "
                 "Separate intended runtime binding, actual Apache route state, live image truth, canonical recipe, runtime profile, and applied manifest before changing a target. "
                 "Call one MCP tool at a time and wait for its response before calling another tool. "
-                "Use selector arguments such as slot_class for group queries instead of parallel per-slot calls. "
+                "Use selector arguments such as runtime_class for group queries instead of parallel per-target calls. "
                 "Do not pass raw secret values as tool arguments."
             ),
         }
@@ -180,13 +180,7 @@ class McpServer:
             {
                 "name": "ops_orientation",
                 "title": "Orient Agent Runtime Ops",
-                "description": "Check installed update status, slots, repository root, and runtime profiles.",
-                "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
-            },
-            {
-                "name": "slot_list",
-                "title": "List Slots",
-                "description": "Legacy alias that lists linux_account targets; prefer binding_list.",
+                "description": "Check installed update status, runtime bindings, repository root, and runtime profiles.",
                 "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
             },
             {
@@ -244,28 +238,28 @@ class McpServer:
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "slot": {"type": "string"},
+                        "target": {"type": "string"},
                         "all": {"type": "boolean", "default": False},
                     },
                     "additionalProperties": False,
                 },
             },
             {
-                "name": "slot_check",
-                "title": "Check Slot",
+                "name": "target_check",
+                "title": "Check Target",
                 "description": (
                     "Run binding status, Apache route status, live image truth, and live contract check. "
-                    "For dev or customer groups, prefer slot_class over repeated per-slot calls."
+                    "For dev or customer groups, prefer runtime_class over repeated per-target calls."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "slot": {"type": "string"},
-                        "slots": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-                        "slot_class": {"type": "string", "enum": ["customer", "dev"]},
+                        "target": {"type": "string"},
+                        "targets": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                        "runtime_class": {"type": "string", "enum": ["customer", "dev"]},
                         "family": {"type": "string", "enum": ["hermes", "openclaw"]},
                     },
-                    "oneOf": [{"required": ["slot"]}, {"required": ["slots"]}, {"required": ["slot_class"]}],
+                    "oneOf": [{"required": ["target"]}, {"required": ["targets"]}, {"required": ["runtime_class"]}],
                     "additionalProperties": False,
                 },
             },
@@ -288,8 +282,8 @@ class McpServer:
                     "properties": {
                         "wrapper_image": {"type": "string"},
                         "product_image": {"type": "string"},
-                        "slot": {"type": "string"},
-                        "slots": {"type": "array", "items": {"type": "string"}},
+                        "target": {"type": "string"},
+                        "targets": {"type": "array", "items": {"type": "string"}},
                     },
                     "required": ["wrapper_image", "product_image"],
                     "additionalProperties": False,
@@ -302,42 +296,42 @@ class McpServer:
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "slot": {"type": "string"},
+                        "target": {"type": "string"},
                         "wrapper_image": {"type": "string"},
                         "product_image": {"type": "string"},
                         "allow_first_apply": {"type": "boolean", "default": False},
                     },
-                    "required": ["slot", "wrapper_image", "product_image"],
+                    "required": ["target", "wrapper_image", "product_image"],
                     "additionalProperties": False,
                 },
             },
             {
                 "name": "rollout_image_canary",
                 "title": "Apply Canary Image",
-                "description": "Apply a digest-pinned wrapper/product image directly to one customer canary slot.",
+                "description": "Apply a digest-pinned wrapper/product image directly to one customer canary target.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "slot": {"type": "string"},
+                        "target": {"type": "string"},
                         "wrapper_image": {"type": "string"},
                         "product_image": {"type": "string"},
                         "allow_first_apply": {"type": "boolean", "default": False},
                     },
-                    "required": ["slot", "wrapper_image", "product_image"],
+                    "required": ["target", "wrapper_image", "product_image"],
                     "additionalProperties": False,
                 },
             },
             {
                 "name": "rollout_image_promote",
                 "title": "Promote Live Image",
-                "description": "Read image truth from a canary slot and apply that exact image to explicit customer slots.",
+                "description": "Read image truth from a canary target and apply that exact image to explicit customer targets.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "from_slot": {"type": "string"},
-                        "slots": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                        "from_target": {"type": "string"},
+                        "targets": {"type": "array", "items": {"type": "string"}, "minItems": 1},
                     },
-                    "required": ["from_slot", "slots"],
+                    "required": ["from_target", "targets"],
                     "additionalProperties": False,
                 },
             },
@@ -355,11 +349,11 @@ class McpServer:
             {
                 "name": "dev_recipe_status",
                 "title": "Dev Recipe Status",
-                "description": "Inspect the source-mode recipe currently recorded for a dev slot.",
+                "description": "Inspect the source-mode recipe currently recorded for a dev target.",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {"slot": {"type": "string"}},
-                    "required": ["slot"],
+                    "properties": {"target": {"type": "string"}},
+                    "required": ["target"],
                     "additionalProperties": False,
                 },
             },
@@ -367,13 +361,13 @@ class McpServer:
                 "name": "dev_recipe_apply",
                 "title": "Apply Dev Recipe",
                 "description": (
-                    "Connect a source-mode dev slot to external dev output, optionally syncing it into the slot stage, "
-                    "then apply and live-check the slot."
+                    "Connect a source-mode dev target to external dev output, optionally syncing it into the target stage, "
+                    "then apply and live-check the target."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "slot": {"type": "string"},
+                        "target": {"type": "string"},
                         "recipe_name": {"type": "string"},
                         "source_output": {"type": "string"},
                         "sync_from": {"type": "string"},
@@ -381,7 +375,7 @@ class McpServer:
                         "allow_first_apply": {"type": "boolean", "default": False},
                         "no_apply": {"type": "boolean", "default": False},
                     },
-                    "required": ["slot"],
+                    "required": ["target"],
                     "oneOf": [{"required": ["source_output"]}, {"required": ["sync_from"]}],
                     "additionalProperties": False,
                 },
@@ -391,17 +385,17 @@ class McpServer:
                 "title": "Runtime Secret Status",
                 "description": (
                     "Check whether supported provider secret keys exist without printing values. "
-                    "For dev or customer groups, prefer slot_class over parallel per-slot calls."
+                    "For dev or customer groups, prefer runtime_class over parallel per-target calls."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "slot": {"type": "string"},
-                        "slots": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-                        "slot_class": {"type": "string", "enum": ["customer", "dev"]},
+                        "target": {"type": "string"},
+                        "targets": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                        "runtime_class": {"type": "string", "enum": ["customer", "dev"]},
                         "family": {"type": "string", "enum": ["hermes", "openclaw"]},
                     },
-                    "oneOf": [{"required": ["slot"]}, {"required": ["slots"]}, {"required": ["slot_class"]}],
+                    "oneOf": [{"required": ["target"]}, {"required": ["targets"]}, {"required": ["runtime_class"]}],
                     "additionalProperties": False,
                 },
             },
@@ -412,13 +406,13 @@ class McpServer:
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "slot": {"type": "string"},
+                        "target": {"type": "string"},
                         "key": {"type": "string", "enum": sorted(PROVIDER_SECRET_KEYS)},
                         "secret_file": {"type": "string"},
                         "check": {"type": "boolean", "default": True},
                         "no_restart": {"type": "boolean", "default": False},
                     },
-                    "required": ["slot", "key", "secret_file"],
+                    "required": ["target", "key", "secret_file"],
                     "additionalProperties": False,
                 },
             },
@@ -432,44 +426,44 @@ class McpServer:
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "slot": {"type": "string"},
-                        "slots": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-                        "slot_class": {"type": "string", "enum": ["customer", "dev"]},
+                        "target": {"type": "string"},
+                        "targets": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                        "runtime_class": {"type": "string", "enum": ["customer", "dev"]},
                         "family": {"type": "string", "enum": ["hermes", "openclaw"]},
                     },
-                    "oneOf": [{"required": ["slot"]}, {"required": ["slots"]}, {"required": ["slot_class"]}],
+                    "oneOf": [{"required": ["target"]}, {"required": ["targets"]}, {"required": ["runtime_class"]}],
                     "additionalProperties": False,
                 },
             },
             {
-                "name": "slot_rollback",
-                "title": "Rollback Slot",
-                "description": "Rollback one slot and run a live check.",
+                "name": "target_rollback",
+                "title": "Rollback Target",
+                "description": "Rollback one target and run a live check.",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {"slot": {"type": "string"}},
-                    "required": ["slot"],
+                    "properties": {"target": {"type": "string"}},
+                    "required": ["target"],
                     "additionalProperties": False,
                 },
             },
             {
                 "name": "nas_status",
                 "title": "NAS Status",
-                "description": "List pending NAS requests and optionally mounted child CIFS shares for a slot.",
+                "description": "List pending NAS requests and optionally mounted child CIFS shares for a target.",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {"slot": {"type": "string"}},
+                    "properties": {"target": {"type": "string"}},
                     "additionalProperties": False,
                 },
             },
             {
                 "name": "nas_mount",
                 "title": "Mount NAS Share",
-                "description": "Policy-check and mount an already-credentialed NAS share for a slot.",
+                "description": "Policy-check and mount an already-credentialed NAS share for a target.",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {"slot": {"type": "string"}, "share": {"type": "string"}},
-                    "required": ["slot", "share"],
+                    "properties": {"target": {"type": "string"}, "share": {"type": "string"}},
+                    "required": ["target", "share"],
                     "additionalProperties": False,
                 },
             },
@@ -480,12 +474,12 @@ class McpServer:
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "slot": {"type": "string"},
+                        "target": {"type": "string"},
                         "share": {"type": "string"},
                         "lazy": {"type": "boolean", "default": False},
                         "delete_empty_dir": {"type": "boolean", "default": False},
                     },
-                    "required": ["slot", "share"],
+                    "required": ["target", "share"],
                     "additionalProperties": False,
                 },
             },
@@ -496,12 +490,12 @@ class McpServer:
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "slot": {"type": "string"},
+                        "target": {"type": "string"},
                         "share": {"type": "string"},
                         "lazy": {"type": "boolean", "default": False},
                         "delete_empty_dir": {"type": "boolean", "default": False},
                     },
-                    "required": ["slot", "share"],
+                    "required": ["target", "share"],
                     "additionalProperties": False,
                 },
             },
@@ -511,8 +505,8 @@ class McpServer:
                 "description": "Report official root/customer credential presence for a NAS share without printing secrets.",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {"slot": {"type": "string"}, "share": {"type": "string"}},
-                    "required": ["slot", "share"],
+                    "properties": {"target": {"type": "string"}, "share": {"type": "string"}},
+                    "required": ["target", "share"],
                     "additionalProperties": False,
                 },
             },
@@ -535,14 +529,13 @@ class McpServer:
             raise ProtocolError(-32602, "tool arguments must be an object")
         handlers = {
             "ops_orientation": self._tool_ops_orientation,
-            "slot_list": self._tool_slot_list,
             "binding_list": self._tool_binding_list,
             "binding_status": self._tool_binding_status,
             "binding_set_public_host": self._tool_binding_set_public_host,
             "apache_status": self._tool_apache_status,
             "apache_set_host": self._tool_apache_set_host,
             "runtime_truth": self._tool_runtime_truth,
-            "slot_check": self._tool_slot_check,
+            "target_check": self._tool_target_check,
             "deploy_update": self._tool_deploy_update,
             "rollout_image_plan": self._tool_rollout_image_plan,
             "rollout_image_dev_apply": self._tool_rollout_image_dev_apply,
@@ -554,7 +547,7 @@ class McpServer:
             "runtime_secret_status": self._tool_runtime_secret_status,
             "runtime_secret_set_from_file": self._tool_runtime_secret_set_from_file,
             "handoff_status": self._tool_handoff_status,
-            "slot_rollback": self._tool_slot_rollback,
+            "target_rollback": self._tool_target_rollback,
             "nas_status": self._tool_nas_status,
             "nas_mount": self._tool_nas_mount,
             "nas_unmount": self._tool_nas_unmount,
@@ -632,11 +625,6 @@ class McpServer:
         ok = all(item["returncode"] == 0 for item in runs)
         return self._common_response(ok=ok, mutated=False, runs=runs, extra={"repo_root": str(REPO_ROOT)})
 
-    def _tool_slot_list(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, set())
-        runs = [self._run([self.opsctl, "slot", "list"], timeout=60)]
-        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
-
     def _tool_binding_list(self, args: dict[str, Any]) -> dict[str, Any]:
         self._reject_unknown(args, set())
         runs = [self._run([self.opsctl, "binding", "list"], timeout=60)]
@@ -673,19 +661,19 @@ class McpServer:
         return self._common_response(ok=runs[0]["returncode"] == 0, mutated=True, runs=runs)
 
     def _tool_runtime_truth(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"slot", "all"})
+        self._reject_unknown(args, {"target", "all"})
         argv = [self.sudo, self.opsctl, "runtime", "truth"]
         if bool(args.get("all", False)):
-            if args.get("slot") is not None:
-                raise ToolError("provide either slot or all, not both")
+            if args.get("target") is not None:
+                raise ToolError("provide either target or all, not both")
             argv.append("--all")
         else:
-            argv.append(self._slot(args.get("slot")))
+            argv.append(self._slot(args.get("target")))
         runs = [self._run(argv, timeout=120)]
         return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
 
-    def _tool_slot_check(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"slot", "slots", "slot_class", "family"})
+    def _tool_target_check(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(args, {"target", "targets", "runtime_class", "family"})
         slots, runs = self._resolve_slots(args)
         for slot in slots:
             runs.append(self._run([self.opsctl, "binding", "status", slot]))
@@ -749,7 +737,7 @@ class McpServer:
         )
 
     def _tool_rollout_image_plan(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"wrapper_image", "product_image", "slot", "slots"})
+        self._reject_unknown(args, {"wrapper_image", "product_image", "target", "targets"})
         argv = [
             self.sudo,
             self.opsctl,
@@ -760,13 +748,13 @@ class McpServer:
             "--product-image",
             self._image_ref(args.get("product_image")),
         ]
-        if args.get("slot"):
-            argv.extend(["--slot", self._slot(args.get("slot"))])
-        slots = args.get("slots")
+        if args.get("target"):
+            argv.extend(["--target", self._slot(args.get("target"))])
+        slots = args.get("targets")
         if slots is not None:
             if not isinstance(slots, list) or not slots:
-                raise ToolError("slots must be a non-empty array")
-            argv.append("--slots")
+                raise ToolError("targets must be a non-empty array")
+            argv.append("--targets")
             argv.extend(self._slot(item) for item in slots)
         runs = [self._run(argv, timeout=180)]
         return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
@@ -778,14 +766,14 @@ class McpServer:
         return self._tool_rollout_image_apply(args, command="image-canary")
 
     def _tool_rollout_image_apply(self, args: dict[str, Any], *, command: str) -> dict[str, Any]:
-        self._reject_unknown(args, {"slot", "wrapper_image", "product_image", "allow_first_apply"})
+        self._reject_unknown(args, {"target", "wrapper_image", "product_image", "allow_first_apply"})
         argv = [
             self.sudo,
             self.opsctl,
             "rollout",
             command,
-            "--slot",
-            self._slot(args.get("slot")),
+            "--target",
+            self._slot(args.get("target")),
             "--wrapper-image",
             self._image_ref(args.get("wrapper_image")),
             "--product-image",
@@ -797,19 +785,19 @@ class McpServer:
         return self._common_response(ok=runs[0]["returncode"] == 0, mutated=True, runs=runs)
 
     def _tool_rollout_image_promote(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"from_slot", "slots"})
-        slots = args.get("slots")
+        self._reject_unknown(args, {"from_target", "targets"})
+        slots = args.get("targets")
         if not isinstance(slots, list) or not slots:
-            raise ToolError("slots must be a non-empty array")
+            raise ToolError("targets must be a non-empty array")
         slot_values = [self._slot(item) for item in slots]
         argv = [
             self.sudo,
             self.opsctl,
             "rollout",
             "image-promote",
-            "--from-slot",
-            self._slot(args.get("from_slot")),
-            "--slots",
+            "--from-target",
+            self._slot(args.get("from_target")),
+            "--targets",
             ",".join(slot_values),
         ]
         runs = [self._run(argv, timeout=1800)]
@@ -822,10 +810,10 @@ class McpServer:
         return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
 
     def _tool_dev_recipe_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"slot"})
-        slot = self._slot(args.get("slot"))
+        self._reject_unknown(args, {"target"})
+        slot = self._slot(args.get("target"))
         if not slot.startswith("dev-"):
-            raise ToolError("dev recipe tools require a dev slot")
+            raise ToolError("dev recipe tools require a dev target")
         runs = [self._run([self.opsctl, "recipe", "status", slot], timeout=60)]
         return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
 
@@ -833,7 +821,7 @@ class McpServer:
         self._reject_unknown(
             args,
             {
-                "slot",
+                "target",
                 "recipe_name",
                 "source_output",
                 "sync_from",
@@ -842,9 +830,9 @@ class McpServer:
                 "no_apply",
             },
         )
-        slot = self._slot(args.get("slot"))
+        slot = self._slot(args.get("target"))
         if not slot.startswith("dev-"):
-            raise ToolError("dev recipe tools require a dev slot")
+            raise ToolError("dev recipe tools require a dev target")
         has_source_output = args.get("source_output") is not None
         has_sync_from = args.get("sync_from") is not None
         if has_source_output == has_sync_from:
@@ -872,7 +860,7 @@ class McpServer:
         return self._common_response(ok=ok, mutated=True, runs=runs)
 
     def _tool_runtime_secret_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"slot", "slots", "slot_class", "family"})
+        self._reject_unknown(args, {"target", "targets", "runtime_class", "family"})
         slots, runs = self._resolve_slots(args)
         runs.extend(
             self._run([self.sudo, self.opsctl, "runtime-secret", "status", slot], timeout=60)
@@ -881,9 +869,9 @@ class McpServer:
         return self._common_response(ok=all(item["returncode"] == 0 for item in runs), mutated=False, runs=runs)
 
     def _tool_runtime_secret_set_from_file(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"slot", "key", "secret_file", "check", "no_restart"})
+        self._reject_unknown(args, {"target", "key", "secret_file", "check", "no_restart"})
         self._reject_sensitive_raw_args(args, allowed={"secret_file"})
-        slot = self._slot(args.get("slot"))
+        slot = self._slot(args.get("target"))
         key = str(args.get("key") or "")
         if key not in PROVIDER_SECRET_KEYS:
             raise ToolError(f"unsupported runtime secret key: {key}")
@@ -897,7 +885,7 @@ class McpServer:
         return self._common_response(ok=runs[0]["returncode"] == 0, mutated=True, runs=runs)
 
     def _tool_handoff_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"slot", "slots", "slot_class", "family"})
+        self._reject_unknown(args, {"target", "targets", "runtime_class", "family"})
         slots, runs = self._resolve_slots(args)
         runs.extend(
             self._run([self.sudo, self.opsctl, "handoff", "status", slot], timeout=60)
@@ -905,44 +893,30 @@ class McpServer:
         )
         return self._common_response(ok=all(item["returncode"] == 0 for item in runs), mutated=False, runs=runs)
 
-    def _tool_slot_apply(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"slot", "allow_first_apply"})
-        slot = self._slot(args.get("slot"))
-        runs = [self._run([self.opsctl, "check", slot], timeout=90)]
-        if runs[0]["returncode"] != 0:
-            return self._common_response(ok=False, mutated=False, runs=runs, next_action="fix slot check failures before apply")
-        argv = [self.sudo, self.opsctl, "apply", slot]
-        if bool(args.get("allow_first_apply", False)):
-            argv.append("--allow-first-apply")
-        runs.append(self._run(argv, timeout=240))
-        runs.append(self._run([self.sudo, self.opsctl, "check", "--live", slot], timeout=180))
-        ok = all(item["returncode"] == 0 for item in runs)
-        return self._common_response(ok=ok, mutated=True, runs=runs)
-
-    def _tool_slot_rollback(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"slot"})
-        slot = self._slot(args.get("slot"))
+    def _tool_target_rollback(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(args, {"target"})
+        slot = self._slot(args.get("target"))
         runs = [self._run([self.opsctl, "status", slot], timeout=60)]
         if runs[0]["returncode"] != 0:
-            return self._common_response(ok=False, mutated=False, runs=runs, next_action="fix slot status before rollback")
+            return self._common_response(ok=False, mutated=False, runs=runs, next_action="fix target status before rollback")
         runs.append(self._run([self.sudo, self.opsctl, "rollback", slot], timeout=240))
         runs.append(self._run([self.sudo, self.opsctl, "check", "--live", slot], timeout=180))
         ok = all(item["returncode"] == 0 for item in runs)
         return self._common_response(ok=ok, mutated=True, runs=runs)
 
     def _tool_nas_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"slot"})
+        self._reject_unknown(args, {"target"})
         runs = [self._run([self.opsctl, "nas", "requests"], timeout=60)]
-        slot_value = args.get("slot")
+        slot_value = args.get("target")
         if slot_value:
             runs.append(self._run([self.opsctl, "nas", "mounted", self._slot(slot_value)], timeout=60))
         ok = all(item["returncode"] == 0 for item in runs)
         return self._common_response(ok=ok, mutated=False, runs=runs)
 
     def _tool_nas_mount(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"slot", "share"})
+        self._reject_unknown(args, {"target", "share"})
         self._reject_sensitive_raw_args(args)
-        slot = self._slot(args.get("slot"))
+        slot = self._slot(args.get("target"))
         share = self._share(args.get("share"))
         runs = [self._run([self.opsctl, "nas", "policy-check", slot, share], timeout=60)]
         if runs[0]["returncode"] != 0:
@@ -953,8 +927,8 @@ class McpServer:
         return self._common_response(ok=ok, mutated=True, runs=runs)
 
     def _tool_nas_unmount(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"slot", "share", "lazy", "delete_empty_dir"})
-        slot = self._slot(args.get("slot"))
+        self._reject_unknown(args, {"target", "share", "lazy", "delete_empty_dir"})
+        slot = self._slot(args.get("target"))
         share = self._share(args.get("share"))
         argv = [self.sudo, self.opsctl, "nas", "unmount", slot, share]
         if bool(args.get("lazy", False)):
@@ -970,8 +944,8 @@ class McpServer:
         return self._common_response(ok=ok, mutated=True, runs=runs)
 
     def _tool_nas_remove(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"slot", "share", "lazy", "delete_empty_dir"})
-        slot = self._slot(args.get("slot"))
+        self._reject_unknown(args, {"target", "share", "lazy", "delete_empty_dir"})
+        slot = self._slot(args.get("target"))
         share = self._share(args.get("share"))
         argv = [self.sudo, self.opsctl, "nas", "remove", slot, share]
         if bool(args.get("lazy", False)):
@@ -988,8 +962,8 @@ class McpServer:
         return self._common_response(ok=ok, mutated=True, runs=runs)
 
     def _tool_nas_credential_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"slot", "share"})
-        slot = self._slot(args.get("slot"))
+        self._reject_unknown(args, {"target", "share"})
+        slot = self._slot(args.get("target"))
         share = self._share(args.get("share"))
         runs = [self._run([self.sudo, self.opsctl, "nas", "credential", "status", slot, share], timeout=60)]
         return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
@@ -1066,47 +1040,47 @@ class McpServer:
         return text
 
     def _slots(self, args: dict[str, Any]) -> list[str]:
-        has_slot = args.get("slot") is not None
-        has_slots = args.get("slots") is not None
-        has_slot_class = args.get("slot_class") is not None
-        if sum([has_slot, has_slots, has_slot_class]) != 1:
-            raise ToolError("provide exactly one of slot, slots, or slot_class")
+        has_slot = args.get("target") is not None
+        has_slots = args.get("targets") is not None
+        has_runtime_class = args.get("runtime_class") is not None
+        if sum([has_slot, has_slots, has_runtime_class]) != 1:
+            raise ToolError("provide exactly one of target, targets, or runtime_class")
         if has_slot:
-            return [self._slot(args.get("slot"))]
-        if has_slot_class:
-            raise ToolError("slot_class requires current slot resolution")
-        raw_slots = args.get("slots")
+            return [self._slot(args.get("target"))]
+        if has_runtime_class:
+            raise ToolError("runtime_class requires current target resolution")
+        raw_slots = args.get("targets")
         if not isinstance(raw_slots, list) or not raw_slots:
-            raise ToolError("slots must be a non-empty array")
+            raise ToolError("targets must be a non-empty array")
         return [self._slot(item) for item in raw_slots]
 
     def _resolve_slots(self, args: dict[str, Any]) -> tuple[list[str], list[dict[str, Any]]]:
-        if args.get("slot_class") is None:
+        if args.get("runtime_class") is None:
             return self._slots(args), []
-        slot_class = str(args.get("slot_class") or "")
-        if slot_class not in {"customer", "dev"}:
-            raise ToolError("slot_class must be customer or dev")
+        runtime_class = str(args.get("runtime_class") or "")
+        if runtime_class not in {"customer", "dev"}:
+            raise ToolError("runtime_class must be customer or dev")
         family = args.get("family")
         if family is not None:
             family = str(family)
             if family not in {"hermes", "openclaw"}:
                 raise ToolError("family must be hermes or openclaw")
-        slot_list = self._run([self.opsctl, "slot", "list"], timeout=60)
-        if slot_list["returncode"] != 0:
-            return [], [slot_list]
-        runs = [slot_list]
+        binding_list = self._run([self.opsctl, "binding", "list"], timeout=60)
+        if binding_list["returncode"] != 0:
+            return [], [binding_list]
+        runs = [binding_list]
         slots: list[str] = []
-        for raw_line in slot_list["stdout"].splitlines():
+        for raw_line in binding_list["stdout"].splitlines():
             row = _parse_key_value_tokens(raw_line)
-            if (row.get("runtime_class") or row.get("slot_class")) != slot_class:
+            if (row.get("runtime_class") or row.get("runtime_class")) != runtime_class:
                 continue
-            slot = row.get("linux_account") or row.get("slot")
+            slot = row.get("linux_account") or row.get("target")
             if family and row.get("family") != family:
                 continue
             if slot:
                 slots.append(self._linux_account(slot))
         if not slots:
-            raise ToolError("no slots matched slot_class/family")
+            raise ToolError("no targets matched runtime_class/family")
         return slots, runs
 
     def _share(self, value: Any) -> str:

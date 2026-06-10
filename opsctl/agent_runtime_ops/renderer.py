@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from jinja2 import Environment, StrictUndefined
 
 from .profiles import RuntimeProfile
-from .state import DesiredSlot
+from .state import RuntimeTarget
 
 try:
     import grp
@@ -22,7 +22,7 @@ class RenderedCompose:
     sha256: str
 
 
-def _slot_ports(desired: DesiredSlot) -> tuple[str, str]:
+def _slot_ports(desired: RuntimeTarget) -> tuple[str, str]:
     if desired.route is None:
         raise ValueError(f"slot route is required to render compose: {desired.slot}")
     return str(desired.route.gateway_port), str(desired.route.bridge_port)
@@ -39,7 +39,7 @@ def _runtime_ids(slot: str) -> tuple[str, str, str]:
     return str(runtime.pw_uid), str(runtime.pw_gid), str(data_group.gr_gid)
 
 
-def render_compose(profile: RuntimeProfile, desired: DesiredSlot, variables: dict | None = None) -> RenderedCompose:
+def render_compose(profile: RuntimeProfile, desired: RuntimeTarget, variables: dict | None = None) -> RenderedCompose:
     env = Environment(undefined=StrictUndefined, autoescape=False, keep_trailing_newline=True)
     template = env.from_string((profile.path / "compose.yml.tpl").read_text(encoding="utf-8"))
     runtime_uid, runtime_gid, data_gid = _runtime_ids(desired.slot)
@@ -49,12 +49,12 @@ def render_compose(profile: RuntimeProfile, desired: DesiredSlot, variables: dic
         "instance_id": desired.route.instance_id if desired.route else "",
         "linux_account": desired.route.linux_account if desired.route else desired.slot,
         "public_host": desired.route.public_host if desired.route else "",
-        "family": desired.lane_data.get("family"),
-        "runtime_class": desired.route.runtime_class if desired.route else desired.lane_data.get("slot_class"),
-        "slot_class": desired.lane_data.get("slot_class"),
-        "release": desired.release_name,
+        "family": desired.family,
+        "runtime_class": desired.route.runtime_class if desired.route else desired.runtime_class,
+        "slot_class": desired.runtime_class,
+        "release": desired.image_name,
         "runtime_profile": desired.runtime_profile,
-        "image_ref": desired.release_data.get("wrapper_image"),
+        "image_ref": desired.image_spec.get("wrapper_image"),
         "target_home": f"/home/{desired.slot}",
         "runtime_uid": runtime_uid,
         "runtime_gid": runtime_gid,

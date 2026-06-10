@@ -105,11 +105,11 @@ ssh svcops "/usr/local/bin/opsctl profile list"
 ssh svcops "codex mcp list"
 ```
 
-If the work touched a slot, also verify:
+If the work touched a target, also verify:
 
 ```bash
-ssh svcops "sudo /usr/local/bin/opsctl runtime truth SLOT"
-ssh svcops "sudo /usr/local/bin/opsctl check --live SLOT"
+ssh svcops "sudo /usr/local/bin/opsctl runtime truth TARGET"
+ssh svcops "sudo /usr/local/bin/opsctl check --live TARGET"
 ```
 
 Do not claim server completion after local tests only.
@@ -148,21 +148,21 @@ The server must write only valid MCP JSON-RPC messages to stdout.
 Preferred MCP tool:
 
 ```text
-slot_check {"slot":"SLOT"}
+target_check {"target":"TARGET"}
 ```
 
 Manual equivalent:
 
 ```bash
-ssh svcops "/usr/local/bin/opsctl status SLOT"
+ssh svcops "/usr/local/bin/opsctl status TARGET"
 ssh svcops "/usr/local/bin/opsctl binding status TARGET"
-ssh svcops "/usr/local/bin/opsctl apache status SLOT"
-ssh svcops "sudo /usr/local/bin/opsctl runtime truth SLOT"
-ssh svcops "sudo /usr/local/bin/opsctl check --live SLOT"
+ssh svcops "/usr/local/bin/opsctl apache status TARGET"
+ssh svcops "sudo /usr/local/bin/opsctl runtime truth TARGET"
+ssh svcops "sudo /usr/local/bin/opsctl check --live TARGET"
 ```
 
-For group checks, prefer MCP selector arguments such as `slot_class` or `family` instead of many
-parallel per-slot calls.
+For group checks, prefer MCP selector arguments such as `runtime_class` or `family` instead of many
+parallel per-target calls.
 
 ## Binding and Public Host Diagnosis
 
@@ -189,7 +189,7 @@ Interpretation:
 binding public_host is the intended external name
 Apache public_host is the current configured external name
 binding gateway_port must equal Apache gateway_port
-DNS/wildcard acceptance is not enough to prove Apache dispatch to the slot
+DNS/wildcard acceptance is not enough to prove Apache dispatch to the target
 image labels do not prove intended public host, Linux account, or host port allocation
 ```
 
@@ -213,10 +213,10 @@ Use digest-pinned wrapper and product images. Do not use release-state rollout c
 operating path is the image rollout toolset below.
 
 Rollout order is dev first, then customer canary, then explicit customer targets. A customer canary
-is a bridge for promotion, not the first place to discover whether the slot image recipe works.
+is a bridge for promotion, not the first place to discover whether the target image recipe works.
 The same wrapper digest should carry the runtime recipe for both dev and customer projections.
 
-Treat NAS as part of the slot image runtime contract. Do not "fix" NAS by hand on one customer
+Treat NAS as part of the target image runtime contract. Do not "fix" NAS by hand on one customer
 account and then promote that image. The wrapper image must declare the NAS root, read-only policy,
 mount propagation, and host-propagated child CIFS mode; `runtime truth` and `check --live` must then
 confirm that the rendered compose and running container preserve that contract.
@@ -227,10 +227,10 @@ Plan:
 ssh svcops "sudo /usr/local/bin/opsctl rollout image-plan --wrapper-image WRAP@sha256:... --product-image PROD@sha256:..."
 ```
 
-Apply to a dev slot:
+Apply to a dev target:
 
 ```bash
-ssh svcops "sudo /usr/local/bin/opsctl rollout image-dev-apply --slot dev-oc --wrapper-image WRAP@sha256:... --product-image PROD@sha256:..."
+ssh svcops "sudo /usr/local/bin/opsctl rollout image-dev-apply --target dev-oc --wrapper-image WRAP@sha256:... --product-image PROD@sha256:..."
 ssh svcops "sudo /usr/local/bin/opsctl runtime truth dev-oc"
 ssh svcops "sudo /usr/local/bin/opsctl check --live dev-oc"
 ```
@@ -238,7 +238,7 @@ ssh svcops "sudo /usr/local/bin/opsctl check --live dev-oc"
 Apply to one customer canary:
 
 ```bash
-ssh svcops "sudo /usr/local/bin/opsctl rollout image-canary --slot oc3 --wrapper-image WRAP@sha256:... --product-image PROD@sha256:..."
+ssh svcops "sudo /usr/local/bin/opsctl rollout image-canary --target oc3 --wrapper-image WRAP@sha256:... --product-image PROD@sha256:..."
 ssh svcops "sudo /usr/local/bin/opsctl runtime truth oc3"
 ssh svcops "sudo /usr/local/bin/opsctl check --live oc3"
 ```
@@ -246,7 +246,7 @@ ssh svcops "sudo /usr/local/bin/opsctl check --live oc3"
 Promote the exact live canary image to explicit targets:
 
 ```bash
-ssh svcops "sudo /usr/local/bin/opsctl rollout image-promote --from-slot oc3 --slots oc1,oc2,oc4"
+ssh svcops "sudo /usr/local/bin/opsctl rollout image-promote --from-target oc3 --targets oc1,oc2,oc4"
 ```
 
 After promotion, verify each target with `runtime truth` and `check --live`.
@@ -254,7 +254,7 @@ After promotion, verify each target with `runtime truth` and `check --live`.
 ## Dev Recipe
 
 Dev source mode means the container sees an external source/output path. It does not mean customer
-slots should use source mounts.
+targets should use source mounts.
 
 Inspect:
 
@@ -268,7 +268,7 @@ Apply from an existing output directory:
 ssh svcops "sudo /usr/local/bin/opsctl recipe apply-dev dev-oc --source-output /ABS/PATH --allow-first-apply"
 ```
 
-Or sync from a source directory into the managed slot stage:
+Or sync from a source directory into the managed target stage:
 
 ```bash
 ssh svcops "sudo /usr/local/bin/opsctl recipe apply-dev dev-oc --sync-from /ABS/PATH --allow-first-apply"
@@ -283,7 +283,7 @@ ssh svcops "sudo /usr/local/bin/opsctl check --live dev-oc"
 
 ## Runtime Secret Injection
 
-Runtime provider secrets are slot secrets, not Gemini CLI credentials for the `svcops` account.
+Runtime provider secrets are target secrets, not Gemini CLI credentials for the `svcops` account.
 
 Never print the secret value. Preferred terminal stdin pattern:
 
@@ -306,7 +306,7 @@ Gateway tokens and workspace passwords are handoff credentials, not runtime prov
 Discover structure and presence without printing values:
 
 ```bash
-ssh svcops "sudo /usr/local/bin/opsctl handoff status SLOT"
+ssh svcops "sudo /usr/local/bin/opsctl handoff status TARGET"
 ```
 
 If value retrieval is necessary and authorized, use only the exact manual value command reported by
@@ -315,30 +315,30 @@ terminal, and tell them not to paste the secret value back into chat. Record onl
 
 ## Apply and Rollback
 
-Normal rollouts use image rollout tools. Use single-slot `apply` only to re-apply the slot's current
+Normal rollouts use image rollout tools. Use single-target `apply` only to re-apply the target's current
 runtime manifest after checks identify that exact target:
 
 ```bash
-ssh svcops "/usr/local/bin/opsctl binding status SLOT"
-ssh svcops "/usr/local/bin/opsctl apache status SLOT"
-ssh svcops "sudo /usr/local/bin/opsctl runtime truth SLOT"
-ssh svcops "sudo /usr/local/bin/opsctl apply SLOT"
-ssh svcops "sudo /usr/local/bin/opsctl check --live SLOT"
+ssh svcops "/usr/local/bin/opsctl binding status TARGET"
+ssh svcops "/usr/local/bin/opsctl apache status TARGET"
+ssh svcops "sudo /usr/local/bin/opsctl runtime truth TARGET"
+ssh svcops "sudo /usr/local/bin/opsctl apply TARGET"
+ssh svcops "sudo /usr/local/bin/opsctl check --live TARGET"
 ```
 
 For first migration from an older runtime, use `--allow-first-apply` only when the operator intends
 that exact target:
 
 ```bash
-ssh svcops "sudo /usr/local/bin/opsctl apply SLOT --allow-first-apply"
+ssh svcops "sudo /usr/local/bin/opsctl apply TARGET --allow-first-apply"
 ```
 
 Rollback:
 
 ```bash
-ssh svcops "/usr/local/bin/opsctl status SLOT"
-ssh svcops "sudo /usr/local/bin/opsctl rollback SLOT"
-ssh svcops "sudo /usr/local/bin/opsctl check --live SLOT"
+ssh svcops "/usr/local/bin/opsctl status TARGET"
+ssh svcops "sudo /usr/local/bin/opsctl rollback TARGET"
+ssh svcops "sudo /usr/local/bin/opsctl check --live TARGET"
 ```
 
 ## NAS Operations
@@ -347,36 +347,36 @@ Read status:
 
 ```bash
 ssh svcops "/usr/local/bin/opsctl nas requests"
-ssh svcops "/usr/local/bin/opsctl nas mounted SLOT"
-ssh svcops "/usr/local/bin/opsctl nas policy-check SLOT //HOST/SHARE"
-ssh svcops "sudo /usr/local/bin/opsctl nas credential status SLOT //HOST/SHARE"
+ssh svcops "/usr/local/bin/opsctl nas mounted TARGET"
+ssh svcops "/usr/local/bin/opsctl nas policy-check TARGET //HOST/SHARE"
+ssh svcops "sudo /usr/local/bin/opsctl nas credential status TARGET //HOST/SHARE"
 ```
 
 Mount an already-credentialed and policy-allowed share:
 
 ```bash
-ssh svcops "/usr/local/bin/opsctl nas policy-check SLOT //HOST/SHARE"
-ssh svcops "sudo /usr/local/bin/opsctl nas mount SLOT //HOST/SHARE"
-ssh svcops "/usr/local/bin/opsctl nas mounted SLOT"
-ssh svcops "sudo /usr/local/bin/opsctl check --live SLOT"
+ssh svcops "/usr/local/bin/opsctl nas policy-check TARGET //HOST/SHARE"
+ssh svcops "sudo /usr/local/bin/opsctl nas mount TARGET //HOST/SHARE"
+ssh svcops "/usr/local/bin/opsctl nas mounted TARGET"
+ssh svcops "sudo /usr/local/bin/opsctl check --live TARGET"
 ```
 
 Temporary unmount keeps official credentials and managed fstab entries:
 
 ```bash
-ssh svcops "sudo /usr/local/bin/opsctl nas unmount SLOT //HOST/SHARE"
-ssh svcops "sudo /usr/local/bin/opsctl nas credential status SLOT //HOST/SHARE"
-ssh svcops "/usr/local/bin/opsctl nas mounted SLOT"
+ssh svcops "sudo /usr/local/bin/opsctl nas unmount TARGET //HOST/SHARE"
+ssh svcops "sudo /usr/local/bin/opsctl nas credential status TARGET //HOST/SHARE"
+ssh svcops "/usr/local/bin/opsctl nas mounted TARGET"
 ```
 
 Permanent remove unmounts the share and removes official credentials plus the managed fstab entry:
 
 ```bash
-ssh svcops "sudo /usr/local/bin/opsctl nas credential status SLOT //HOST/SHARE"
-ssh svcops "sudo /usr/local/bin/opsctl nas remove SLOT //HOST/SHARE"
-ssh svcops "sudo /usr/local/bin/opsctl nas credential status SLOT //HOST/SHARE"
-ssh svcops "/usr/local/bin/opsctl nas mounted SLOT"
-ssh svcops "sudo /usr/local/bin/opsctl check --live SLOT"
+ssh svcops "sudo /usr/local/bin/opsctl nas credential status TARGET //HOST/SHARE"
+ssh svcops "sudo /usr/local/bin/opsctl nas remove TARGET //HOST/SHARE"
+ssh svcops "sudo /usr/local/bin/opsctl nas credential status TARGET //HOST/SHARE"
+ssh svcops "/usr/local/bin/opsctl nas mounted TARGET"
+ssh svcops "sudo /usr/local/bin/opsctl check --live TARGET"
 ```
 
 Customer NAS requests can be processed once:
@@ -404,27 +404,27 @@ fully exposed through `agent-runtime-ops`.
 Check heartbeat:
 
 ```bash
-ssh svcops "sudo /opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh heartbeat-status SLOT"
+ssh svcops "sudo /opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh heartbeat-status TARGET"
 ```
 
 Disable heartbeat:
 
 ```bash
-ssh svcops "sudo /opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh heartbeat-disable SLOT"
+ssh svcops "sudo /opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh heartbeat-disable TARGET"
 ```
 
 Verify:
 
 ```bash
-ssh svcops "sudo /opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh heartbeat-status SLOT"
-ssh svcops "sudo /usr/local/bin/opsctl check --live SLOT"
+ssh svcops "sudo /opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh heartbeat-status TARGET"
+ssh svcops "sudo /usr/local/bin/opsctl check --live TARGET"
 ```
 
 Report any legacy use:
 
 ```text
 legacy_exception_used=yes
-target=SLOT
+target=TARGET
 reason=<why MCP/opsctl was insufficient>
 command_shape=<exact command shape without secrets>
 verification=<non-secret verification result>

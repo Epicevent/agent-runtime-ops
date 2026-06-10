@@ -33,7 +33,7 @@ from agent_runtime_ops.cli import (
 from agent_runtime_ops.canonical_recipes import load_canonical_recipe
 from agent_runtime_ops.profiles import load_profile
 from agent_runtime_ops.routing import RuntimeBinding, dump_runtime_bindings, load_runtime_bindings
-from agent_runtime_ops.state import DesiredSlot
+from agent_runtime_ops.state import RuntimeTarget
 from agent_runtime_ops.yamlio import dump_yaml, load_yaml
 
 
@@ -233,7 +233,7 @@ def write_runtime_manifest(
     *,
     slot: str,
     family: str,
-    slot_class: str,
+    runtime_class: str,
     runtime_profile: str,
     wrapper_image: str,
     product_image: str,
@@ -245,15 +245,15 @@ def write_runtime_manifest(
         dump_yaml(
             {
                 "schema_version": 1,
-                "slot": slot,
-                "release": "direct-image",
-                "lane": f"image-{family}-{slot_class}",
+                "target": slot,
+                "linux_account": slot,
+                "image_name": "direct-image",
                 "family": family,
-                "slot_class": slot_class,
+                "runtime_class": runtime_class,
                 "runtime_profile": runtime_profile,
                 "wrapper_image": wrapper_image,
                 "product_image": product_image,
-                "release_digest": wrapper_image.rsplit("@", 1)[-1],
+                "wrapper_image_digest": wrapper_image.rsplit("@", 1)[-1],
                 "product_image_digest": product_image.rsplit("@", 1)[-1],
                 "recipe": {
                     "mode": "wrapped_product_image",
@@ -285,63 +285,28 @@ def write_slot_registry(root: Path, slots: list[str]) -> None:
         "dev-oc": (30789, 30790),
         "dev-hermess": (30889, 30890),
     }
-    slot_family = {}
-    slot_class = {}
-    slots_data = load_yaml(root / "slots.yaml")
-    lanes_data = load_yaml(root / "lanes.yaml")
-    lanes = lanes_data.get("lanes") or {}
-    for item in slots_data.get("slots") or []:
-        if isinstance(item, dict):
-            lane = item.get("lane")
-            lane_data = lanes.get(lane) if lane else {}
-            slot_family[str(item.get("slot"))] = str(lane_data.get("family") or "openclaw")
-            slot_class[str(item.get("slot"))] = str(lane_data.get("slot_class") or "customer")
+    slot_family = {
+        "oc3": "openclaw",
+        "oc4": "openclaw",
+        "dev-oc": "openclaw",
+        "oc20": "hermes",
+        "dev-hermess": "hermes",
+    }
+    runtime_class = {
+        "oc3": "customer",
+        "oc4": "customer",
+        "oc20": "customer",
+        "dev-oc": "dev",
+        "dev-hermess": "dev",
+    }
     bindings = []
     for index, slot in enumerate(slots):
         gateway_port, bridge_port = default_ports.get(slot, (32000 + index * 2, 32001 + index * 2))
-        bindings.append(binding(slot, slot_family.get(slot, "openclaw"), slot_class.get(slot, "customer"), gateway_port, bridge_port))
+        bindings.append(binding(slot, slot_family.get(slot, "openclaw"), runtime_class.get(slot, "customer"), gateway_port, bridge_port))
     (root / "runtime-bindings.json").write_text(dump_runtime_bindings(bindings), encoding="utf-8")
 
 
 def write_hermes_state(root: Path) -> None:
-    current_digest = "sha256:" + "1" * 64
-    (root / "slots.yaml").write_text(
-        """
-slots:
-  - slot: oc20
-    lane: hermes
-  - slot: dev-hermess
-    lane: dev-hermes
-""".lstrip(),
-        encoding="utf-8",
-    )
-    (root / "lanes.yaml").write_text(
-        """
-lanes:
-  hermes:
-    family: hermes
-    slot_class: customer
-    release: hermes-current
-    runtime_profile: hermes-customer
-  dev-hermes:
-    family: hermes
-    slot_class: dev
-    release: hermes-current
-    runtime_profile: hermes-dev
-""".lstrip(),
-        encoding="utf-8",
-    )
-    (root / "releases.yaml").write_text(
-        f"""
-releases:
-  hermes-current:
-    family: hermes
-    wrapper_image: ghcr.io/epicevent/openclaw-nas-agent@{current_digest}
-    product_image: ghcr.io/epicevent/openclaw-nas-agent@{current_digest}
-    digest: {current_digest}
-""".lstrip(),
-        encoding="utf-8",
-    )
     write_slot_registry(root, ["oc20", "dev-hermess"])
     product_image = image_ref("1")
     wrapper_image = wrapper_image_ref("agent-runtime-hermes", "1")
@@ -349,7 +314,7 @@ releases:
         root,
         slot="oc20",
         family="hermes",
-        slot_class="customer",
+        runtime_class="customer",
         runtime_profile="hermes-customer",
         wrapper_image=wrapper_image,
         product_image=product_image,
@@ -359,7 +324,7 @@ releases:
         root,
         slot="dev-hermess",
         family="hermes",
-        slot_class="dev",
+        runtime_class="dev",
         runtime_profile="hermes-dev",
         wrapper_image=wrapper_image,
         product_image=product_image,
@@ -368,46 +333,6 @@ releases:
 
 
 def write_state(root: Path) -> None:
-    current_digest = "sha256:" + "1" * 64
-    (root / "slots.yaml").write_text(
-        """
-slots:
-  - slot: oc3
-    lane: openclaw
-  - slot: oc4
-    lane: openclaw
-  - slot: dev-oc
-    lane: dev-openclaw
-""".lstrip(),
-        encoding="utf-8",
-    )
-    (root / "lanes.yaml").write_text(
-        """
-lanes:
-  openclaw:
-    family: openclaw
-    slot_class: customer
-    release: openclaw-current
-    runtime_profile: openclaw-customer
-  dev-openclaw:
-    family: openclaw
-    slot_class: dev
-    release: openclaw-current
-    runtime_profile: openclaw-dev
-""".lstrip(),
-        encoding="utf-8",
-    )
-    (root / "releases.yaml").write_text(
-        f"""
-releases:
-  openclaw-current:
-    family: openclaw
-    wrapper_image: ghcr.io/epicevent/openclaw-nas-agent@{current_digest}
-    product_image: ghcr.io/epicevent/openclaw-nas-agent@{current_digest}
-    digest: {current_digest}
-""".lstrip(),
-        encoding="utf-8",
-    )
     write_slot_registry(root, ["oc3", "oc4", "dev-oc"])
     product_image = wrapper_image_ref("openclaw-jitech", "1")
     wrapper_image = wrapper_image_ref("agent-runtime-openclaw", "1")
@@ -415,7 +340,7 @@ releases:
         root,
         slot="oc3",
         family="openclaw",
-        slot_class="customer",
+        runtime_class="customer",
         runtime_profile="openclaw-customer",
         wrapper_image=wrapper_image,
         product_image=product_image,
@@ -425,7 +350,7 @@ releases:
         root,
         slot="oc4",
         family="openclaw",
-        slot_class="customer",
+        runtime_class="customer",
         runtime_profile="openclaw-customer",
         wrapper_image=wrapper_image,
         product_image=product_image,
@@ -435,7 +360,7 @@ releases:
         root,
         slot="dev-oc",
         family="openclaw",
-        slot_class="dev",
+        runtime_class="dev",
         runtime_profile="openclaw-dev",
         wrapper_image=wrapper_image,
         product_image=product_image,
@@ -454,9 +379,12 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 dump_yaml(
                     {
                         "schema_version": 1,
-                        "slot": "oc20",
-                        "release": "direct-image",
+                        "target": "oc20",
+                        "linux_account": "oc20",
+                        "image_name": "direct-image",
                         "family": "hermes",
+                        "runtime_class": "customer",
+                        "runtime_profile": "hermes-workspace-customer",
                         "wrapper_image": wrapper_image,
                         "product_image": product_image,
                         "recipe": {
@@ -475,9 +403,9 @@ class CliReleaseRolloutTests(unittest.TestCase):
             text = output.getvalue()
             self.assertEqual(rc, 0, text)
             self.assertIn("status_source=runtime_manifests", text)
-            self.assertIn("binding_slots=oc20,dev-hermess", text)
-            self.assertIn("runtime_manifest_direct_image_slots=oc20", text)
-            self.assertIn("runtime_manifest_missing_slots=", text)
+            self.assertIn("binding_targets=oc20,dev-hermess", text)
+            self.assertIn("runtime_manifest_direct_image_targets=oc20,dev-hermess", text)
+            self.assertIn("runtime_manifest_missing_targets=", text)
             self.assertIn("runtime_manifest_canonical_recipe_names=hermes-combined,hermes-workspace", text)
             self.assertNotIn("legacy_rollout_state", text)
 
@@ -712,37 +640,17 @@ class CliReleaseRolloutTests(unittest.TestCase):
         self.assertIn("RUNTIME_NAS_PROPAGATION=rslave", text)
         self.assertIn("RUNTIME_NAS_CHILD_MOUNT_MODE=host-propagated-cifs", text)
 
-    def test_binding_normalize_migrates_legacy_registry(self) -> None:
+    def test_binding_normalize_requires_runtime_bindings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write_state(root)
             (root / "runtime-bindings.json").unlink()
-            (root / "slot-registry.json").write_text(
-                json.dumps(
-                    {
-                        "schema": "v2",
-                        "slots": [
-                            {"slot": "oc3", "gateway_port": 28989, "bridge_port": 28990},
-                            {"slot": "dev-oc", "gateway_port": 30789, "bridge_port": 30790},
-                        ],
-                    }
-                ),
-                encoding="utf-8",
-            )
             output = io.StringIO()
             with patch("agent_runtime_ops.cli._is_root", return_value=True), contextlib.redirect_stdout(output):
                 rc = cmd_binding_normalize(argparse.Namespace(state_root=str(root), write=True))
-            self.assertEqual(rc, 0, output.getvalue())
-            bindings = {item.linux_account: item for item in load_runtime_bindings(root)}
-            self.assertEqual(bindings["oc3"].gateway_port, 28989)
-            self.assertEqual(bindings["oc3"].family, "openclaw")
-            self.assertEqual(bindings["dev-oc"].runtime_class, "dev")
-            text = (root / "runtime-bindings.json").read_text(encoding="utf-8")
-            self.assertIn('"schema": "v1"', text)
-            self.assertIn("public_host", text)
-            self.assertNotIn("notes", text)
-            self.assertNotIn("runtime_profile", text)
-            self.assertNotIn("release", text)
+            self.assertEqual(rc, 1)
+            self.assertIn("binding_normalize_status=fail", output.getvalue())
+            self.assertIn("runtime bindings not found", output.getvalue())
 
     def test_binding_normalize_rewrites_runtime_bindings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -781,8 +689,8 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertEqual(rc, 0, output.getvalue())
             plan = json.loads(output.getvalue())
             self.assertEqual(plan["family"], "hermes")
-            self.assertEqual(plan["slots"][0]["gateway_port"], 30689)
-            self.assertEqual(plan["slots"][0]["runtime_profile"], "hermes-workspace-customer")
+            self.assertEqual(plan["targets"][0]["gateway_port"], 30689)
+            self.assertEqual(plan["targets"][0]["runtime_profile"], "hermes-workspace-customer")
 
     def test_rollout_image_canary_builds_target_from_wrapper_labels_and_binding(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -810,11 +718,11 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertEqual(rc, 0, output.getvalue())
             desired = apply.call_args.kwargs["desired"]
             self.assertEqual(desired.slot, "oc20")
-            self.assertEqual(desired.lane, "image-hermes-customer")
-            self.assertEqual(desired.release_name, "direct-image")
+            self.assertEqual(desired.runtime_class, "customer")
+            self.assertEqual(desired.image_name, "direct-image")
             self.assertEqual(desired.runtime_profile, "hermes-workspace-customer")
-            self.assertEqual(desired.release_data["wrapper_image"], wrapper)
-            self.assertEqual(desired.release_data["product_image"], product)
+            self.assertEqual(desired.image_spec["wrapper_image"], wrapper)
+            self.assertEqual(desired.image_spec["product_image"], product)
             self.assertIn("canonical_recipe_name=hermes-workspace", output.getvalue())
 
     def test_rollout_image_dev_apply_uses_dev_projection_from_same_wrapper_recipe(self) -> None:
@@ -843,8 +751,8 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertEqual(rc, 0, output.getvalue())
             desired = apply.call_args.kwargs["desired"]
             self.assertEqual(desired.slot, "dev-hermess")
-            self.assertEqual(desired.lane, "image-hermes-dev")
-            self.assertEqual(desired.release_name, "direct-image")
+            self.assertEqual(desired.runtime_class, "dev")
+            self.assertEqual(desired.image_name, "direct-image")
             self.assertEqual(desired.runtime_profile, "hermes-workspace-dev")
             self.assertTrue(apply.call_args.kwargs["allow_first_apply"])
 
@@ -880,7 +788,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
 
             self.assertEqual(rc, 0, output.getvalue())
             self.assertEqual([call.kwargs["desired"].slot for call in apply.call_args_list], ["oc3", "oc4"])
-            self.assertEqual([call.kwargs["desired"].release_name for call in apply.call_args_list], ["direct-image", "direct-image"])
+            self.assertEqual([call.kwargs["desired"].image_name for call in apply.call_args_list], ["direct-image", "direct-image"])
             self.assertIn(f"wrapper_image={wrapper}", output.getvalue())
             self.assertIn(f"product_image={product}", output.getvalue())
 
@@ -980,22 +888,22 @@ class CliReleaseRolloutTests(unittest.TestCase):
             route = next(route for route in load_runtime_bindings(root) if route.linux_account == "dev-oc")
             wrapper_image = wrapper_image_ref("agent-runtime-openclaw", "9")
             product_image = wrapper_image_ref("openclaw-jitech", "8")
-            release_data = {
+            image_spec = {
                 "family": "openclaw",
                 "image_name": "direct-image",
                 "wrapper_image": wrapper_image,
                 "product_image": product_image,
                 "digest": "sha256:" + "9" * 64,
                 "product_digest": "sha256:" + "8" * 64,
-                "compatibility_mode": "wrapped_product_image",
+                "mode": "wrapped_product_image",
                 "image_recipe": openclaw_image_recipe(product_image=product_image),
             }
-            desired = DesiredSlot(
-                slot="dev-oc",
-                lane="image-openclaw-dev",
-                lane_data={"family": "openclaw", "slot_class": "dev"},
-                release_name="direct-image",
-                release_data=release_data,
+            desired = RuntimeTarget(
+                target="dev-oc",
+                family="openclaw",
+                runtime_class="dev",
+                image_name="direct-image",
+                image_spec=image_spec,
                 runtime_profile="openclaw-dev",
                 route=route,
             )
@@ -1007,7 +915,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 ),
                 patch(
                     "agent_runtime_ops.cli._run_live_slot_checks",
-                    return_value=[(True, "live_container_image_matches_release", wrapper_image)],
+                    return_value=[(True, "live_container_image_matches_spec", wrapper_image)],
                 ),
                 contextlib.redirect_stdout(output),
             ):
@@ -1015,26 +923,42 @@ class CliReleaseRolloutTests(unittest.TestCase):
 
             text = output.getvalue()
             self.assertEqual(rc, 0, text)
-            self.assertIn("release=direct-image", text)
+            self.assertIn("image_name=direct-image", text)
             self.assertIn(wrapper_image, text)
             self.assertIn("canonical_recipe_name=openclaw-control", text)
             self.assertNotIn(image_ref("1"), text)
-            self.assertIn("PASS live_container_image_matches_release", text)
+            self.assertIn("PASS live_container_image_matches_spec", text)
 
     def test_check_ignores_legacy_lane_release_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write_hermes_state(root)
-            lanes = load_yaml(root / "lanes.yaml")
-            lanes["lanes"]["hermes"]["release"] = "hermes-candidate"
-            (root / "lanes.yaml").write_text(dump_yaml(lanes), encoding="utf-8")
+            (root / "lanes.yaml").write_text(
+                dump_yaml({"lanes": {"hermes": {"family": "hermes", "runtime_profile": "wrong-profile"}}}),
+                encoding="utf-8",
+            )
+            (root / "releases.yaml").write_text(
+                dump_yaml(
+                    {
+                        "releases": {
+                            "hermes-candidate": {
+                                "family": "hermes",
+                                "wrapper_image": image_ref("9"),
+                                "product_image": image_ref("9"),
+                                "digest": "sha256:" + "9" * 64,
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 rc = cmd_check(argparse.Namespace(state_root=str(root), slot="oc20", live=False))
 
             text = output.getvalue()
             self.assertEqual(rc, 0, text)
-            self.assertIn("release=direct-image", text)
+            self.assertIn("image_name=direct-image", text)
             self.assertIn("runtime_contract=hermes-workspace-http-3000", text)
             self.assertIn("PASS product_image_matches_runtime_contract", text)
             self.assertIn("canonical_recipe_name=hermes-combined", text)

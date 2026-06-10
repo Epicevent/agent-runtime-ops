@@ -8,7 +8,7 @@ from agent_runtime_ops.image_components import image_component_name, image_repo
 from agent_runtime_ops.profiles import load_profile
 from agent_runtime_ops.renderer import render_compose
 from agent_runtime_ops.routing import RuntimeBinding
-from agent_runtime_ops.state import DesiredSlot
+from agent_runtime_ops.state import RuntimeTarget
 
 
 def test_route(slot: str, family: str = "openclaw", runtime_class: str = "customer") -> RuntimeBinding:
@@ -33,29 +33,29 @@ def test_route(slot: str, family: str = "openclaw", runtime_class: str = "custom
 def desired_slot(
     slot: str,
     family: str,
-    slot_class: str,
+    runtime_class: str,
     runtime_profile: str,
     product_repo: str | None = None,
-) -> DesiredSlot:
+) -> RuntimeTarget:
     digest = "sha256:" + "a" * 64
     product_repo = product_repo or f"{family}-jitech"
-    return DesiredSlot(
-        slot=slot,
-        lane=f"{family}-{slot_class}-stable",
-        lane_data={"family": family, "slot_class": slot_class},
-        release_name=f"{family}-release",
-        release_data={
+    return RuntimeTarget(
+        target=slot,
+        family=family,
+        runtime_class=runtime_class,
+        image_name=f"{family}-image",
+        image_spec={
             "family": family,
             "wrapper_image": f"ghcr.io/epicevent/agent-runtime-{family}@{digest}",
             "product_image": f"ghcr.io/epicevent/{product_repo}@{digest}",
             "digest": digest,
         },
         runtime_profile=runtime_profile,
-        route=test_route(slot, family, slot_class),
+        route=test_route(slot, family, runtime_class),
     )
 
 
-def contract_results(profile_name: str, desired: DesiredSlot) -> dict[str, bool]:
+def contract_results(profile_name: str, desired: RuntimeTarget) -> dict[str, bool]:
     profile = load_profile(profile_name)
     rendered = render_compose(profile, desired)
     return {item.name: item.ok for item in validate_compose_contract(profile, desired, rendered.text)}

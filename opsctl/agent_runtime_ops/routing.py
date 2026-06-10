@@ -8,9 +8,6 @@ from pathlib import Path
 from typing import Any
 
 from .paths import DEFAULT_STATE_ROOT
-from .yamlio import load_yaml
-
-LEGACY_ROUTING_REGISTRY_NAME = "slot-registry.json"
 RUNTIME_BINDINGS_NAME = "runtime-bindings.json"
 
 LINUX_ACCOUNT_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
@@ -27,7 +24,6 @@ ALLOWED_BINDING_KEYS = {
     "bridge_port",
     "enabled",
 }
-ALLOWED_LEGACY_ROUTE_KEYS = {"slot", "gateway_port", "bridge_port", "enabled", "public_host", "notes", "instance_id"}
 FORBIDDEN_BINDING_KEYS = {
     "lane",
     "release",
@@ -61,10 +57,6 @@ class RuntimeBinding:
             "bridge_port": self.bridge_port,
             "enabled": self.enabled,
         }
-
-
-def legacy_routing_registry_path(state_root: Path = DEFAULT_STATE_ROOT) -> Path:
-    return state_root / LEGACY_ROUTING_REGISTRY_NAME
 
 
 def runtime_bindings_path(state_root: Path = DEFAULT_STATE_ROOT) -> Path:
@@ -212,83 +204,3 @@ def replace_runtime_binding(
         raise KeyError(f"runtime binding not found: {instance_id}")
     _validate_unique_bindings(rows)
     return rows
-
-
-def _legacy_slot_lanes(state_root: Path) -> dict[str, dict[str, str]]:
-    slots_data = load_yaml(state_root / "slots.yaml")
-    lanes_data = load_yaml(state_root / "lanes.yaml")
-    slots = slots_data.get("slots") if isinstance(slots_data, dict) else None
-    lanes = lanes_data.get("lanes") if isinstance(lanes_data, dict) else None
-    if not isinstance(lanes, dict):
-        raise ValueError("lanes.yaml must contain a lanes mapping")
-    if isinstance(slots, dict):
-        iterable = [(str(name), data) for name, data in slots.items()]
-    elif isinstance(slots, list):
-        iterable = [(str(item.get("slot")), item) for item in slots if isinstance(item, dict) and item.get("slot")]
-    else:
-        raise ValueError("slots.yaml must contain a slots mapping or list")
-
-    rows: dict[str, dict[str, str]] = {}
-    for account, data in iterable:
-        lane = data.get("lane") if isinstance(data, dict) else None
-        lane_data = lanes.get(lane) if lane else None
-        if not isinstance(lane_data, dict):
-            raise ValueError(f"lane not found for linux_account={account}: {lane}")
-        rows[account] = {
-            "family": validate_family(lane_data.get("family")),
-            "runtime_class": validate_runtime_class(lane_data.get("slot_class")),
-        }
-    return rows
-
-
-def _load_legacy_route_items(state_root: Path) -> list[dict[str, Any]]:
-    path = legacy_routing_registry_path(state_root)
-    with path.open("r", encoding="utf-8") as fh:
-        data = json.load(fh)
-    raw_routes = data.get("slots") if isinstance(data, dict) else None
-    if not isinstance(raw_routes, list):
-        raise ValueError("slot-registry.json must contain a slots list")
-    if not all(isinstance(item, dict) for item in raw_routes):
-        raise ValueError("slot-registry.json slots must be objects")
-    return raw_routes
-
-
-def _legacy_public_host(account: str, item: dict[str, Any]) -> str:
-    if item.get("public_host"):
-        return validate_public_host(item.get("public_host"))
-    try:
-        from .apache import parse_apache_route
-
-        return parse_apache_route(account).public_host
-    except Exception:
-        return validate_public_host(f"{account}.ji-tech.co.kr")
-
-
-def migrate_legacy_runtime_bindings(state_root: Path = DEFAULT_STATE_ROOT) -> list[RuntimeBinding]:
-    metadata = _legacy_slot_lanes(state_root)
-    bindings: list[RuntimeBinding] = []
-    for item in _load_legacy_route_items(state_root):
-        keys = set(item)
-        forbidden = sorted(keys & FORBIDDEN_BINDING_KEYS)
-        if forbidden:
-            raise ValueError("legacy slot-registry contains runtime result fields: " + ",".join(forbidden))
-        unknown = sorted(keys - ALLOWED_LEGACY_ROUTE_KEYS)
-        if unknown:
-            raise ValueError("legacy slot-registry has unknown fields: " + ",".join(unknown))
-        account = validate_linux_account(item.get("slot"))
-        if account not in metadata:
-            raise ValueError(f"cannot resolve legacy family/runtime_class for linux_account={account}")
-        bindings.append(
-            RuntimeBinding(
-                instance_id=validate_instance_id(item.get("instance_id")),
-                linux_account=account,
-                public_host=_legacy_public_host(account, item),
-                family=metadata[account]["family"],
-                runtime_class=metadata[account]["runtime_class"],
-                gateway_port=_port(item.get("gateway_port"), "gateway_port"),
-                bridge_port=_port(item.get("bridge_port"), "bridge_port"),
-                enabled=bool(item.get("enabled", True)),
-            )
-        )
-    _validate_unique_bindings(bindings)
-    return bindings

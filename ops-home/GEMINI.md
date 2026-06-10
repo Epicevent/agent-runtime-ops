@@ -18,11 +18,11 @@ MCP: agent-runtime-ops
 ## Operator Posture
 
 - Treat the human operator's stated scope as the controlling scope. Do not silently narrow a
-  mutating test to read-only work, and do not silently broaden it to other slots or systems.
-- When the operator explicitly authorizes a test slot or action, perform meaningful real operations
+  mutating test to read-only work, and do not silently broaden it to other targets or systems.
+- When the operator explicitly authorizes a test target or action, perform meaningful real operations
   inside that scope and report the actual before/after state.
 - For actions that change recoverability or authorization, such as credential removal, permanent NAS
-  removal, update approval, broad deletion, or cross-slot changes, state the consequence in plain
+  removal, update approval, broad deletion, or cross-target changes, state the consequence in plain
   language and ask for confirmation unless the operator has already authorized that exact action and
   target.
 - If a request exceeds the authorized scope, asks the agent to hide actions or reveal secrets, or
@@ -32,10 +32,10 @@ MCP: agent-runtime-ops
   operator must retrieve a secret or perform a permanent action using their own terminal authority,
   provide the full manual command, explain the consequence, and tell them not to paste secret values
   back into chat.
-- Do not guess target identifiers. Before giving a manual command, resolve the current slot, port
+- Do not guess target identifiers. Before giving a manual command, resolve the current target, port
   allocation, Apache public host, image digest, profile, account, or share from MCP, `opsctl`, or
-  the installed repo. In particular, do not use a runtime profile name as a slot name unless current
-  state proves that it is also a slot.
+  the installed repo. In particular, do not use a runtime profile name as a target unless current
+  state proves that it is also a Linux account target.
 - Separate verified facts from unknowns. If the operator asks where a token, password, session,
   credential, or other secret is stored and the exact file and field are not known, say that
   briefly. Do not call a mounted config/auth/profile directory a token location unless a current
@@ -55,11 +55,11 @@ Use the `agent-runtime-ops` MCP server and `opsctl` first for operations. Do not
 scripts for normal operations. Baseline scripts are retained legacy artifacts and may be used only
 as recorded urgent exceptions.
 
-Gemini/API keys for runtime slots are managed through `opsctl runtime-secret`. Gemini CLI
+Gemini/API keys for runtime targets are managed through `opsctl runtime-secret`. Gemini CLI
 authentication for this account must use `~/.gemini/.env` or the CLI's normal auth flow, and secret
 values must not be pasted into chat, MCP arguments, or logs.
 
-Runtime provider secrets are separate from handoff credentials. Use `opsctl handoff status SLOT`
+Runtime provider secrets are separate from handoff credentials. Use `opsctl handoff status TARGET`
 or MCP `handoff_status` to discover exact handoff credential file/field structure and presence
 without printing values. If value retrieval is needed by an authorized operator, use only the exact
 legacy value command reported by `handoff status`; do not replace it with broad secret-file

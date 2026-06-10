@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from agent_runtime_ops.cli import cmd_handoff_status
 from agent_runtime_ops.routing import RuntimeBinding, dump_runtime_bindings
+from agent_runtime_ops.yamlio import dump_yaml
 
 
 def binding(account: str, family: str, gateway: int, bridge: int) -> RuntimeBinding:
@@ -27,48 +28,6 @@ def binding(account: str, family: str, gateway: int, bridge: int) -> RuntimeBind
 
 def write_state(root: Path) -> None:
     digest = "sha256:" + "2" * 64
-    (root / "slots.yaml").write_text(
-        """
-slots:
-  - slot: dev-oc
-    lane: dev-openclaw
-  - slot: dev-hermess
-    lane: dev-hermes
-""".lstrip(),
-        encoding="utf-8",
-    )
-    (root / "lanes.yaml").write_text(
-        """
-lanes:
-  dev-openclaw:
-    family: openclaw
-    slot_class: dev
-    release: openclaw-current
-    runtime_profile: openclaw-dev
-  dev-hermes:
-    family: hermes
-    slot_class: dev
-    release: hermes-current
-    runtime_profile: hermes-dev
-""".lstrip(),
-        encoding="utf-8",
-    )
-    (root / "releases.yaml").write_text(
-        f"""
-releases:
-  openclaw-current:
-    family: openclaw
-    wrapper_image: ghcr.io/epicevent/openclaw-nas-agent@{digest}
-    product_image: ghcr.io/epicevent/openclaw-nas-agent@{digest}
-    digest: {digest}
-  hermes-current:
-    family: hermes
-    wrapper_image: ghcr.io/epicevent/openclaw-nas-agent@{digest}
-    product_image: ghcr.io/epicevent/openclaw-nas-agent@{digest}
-    digest: {digest}
-""".lstrip(),
-        encoding="utf-8",
-    )
     (root / "runtime-bindings.json").write_text(
         dump_runtime_bindings(
             [
@@ -78,6 +37,30 @@ releases:
         ),
         encoding="utf-8",
     )
+    for target, family, profile in (
+        ("dev-oc", "openclaw", "openclaw-dev"),
+        ("dev-hermess", "hermes", "hermes-dev"),
+    ):
+        manifest_dir = root / "runtime" / target
+        manifest_dir.mkdir(parents=True, exist_ok=True)
+        (manifest_dir / "manifest.yaml").write_text(
+            dump_yaml(
+                {
+                    "schema_version": 1,
+                    "target": target,
+                    "linux_account": target,
+                    "image_name": "direct-image",
+                    "family": family,
+                    "runtime_class": "dev",
+                    "runtime_profile": profile,
+                    "wrapper_image": f"ghcr.io/epicevent/agent-runtime-{family}@{digest}",
+                    "product_image": f"ghcr.io/epicevent/{family}-jitech@{digest}",
+                    "wrapper_image_digest": digest,
+                    "product_image_digest": digest,
+                }
+            ),
+            encoding="utf-8",
+        )
 
 
 class CliHandoffTests(unittest.TestCase):

@@ -1,6 +1,6 @@
 ---
 name: agent-runtime-ops
-description: Operate the agent-runtime-ops repository and the svcops server runtime. Use when Codex is asked to inspect, update, deploy, verify, or troubleshoot opsctl, runtime profiles, dev/customer slots, runtime secrets such as Gemini keys, NAS mount workflows, self-update approvals, or the agent-runtime-ops MCP server.
+description: Operate the agent-runtime-ops repository and the svcops server runtime. Use when Codex is asked to inspect, update, deploy, verify, or troubleshoot opsctl, runtime profiles, dev/customer targets, runtime secrets such as Gemini keys, NAS mount workflows, self-update approvals, or the agent-runtime-ops MCP server.
 ---
 
 # Agent Runtime Ops
@@ -37,9 +37,9 @@ state must still be read from MCP, `opsctl`, the installed repo, or the live ser
   mix verified structure with guesses. If the exact file and field are not known, say that briefly.
   A mounted config/auth/profile directory is not proof of the exact token location.
 - Runtime provider secrets and handoff credentials are different. Use MCP `handoff_status` or
-  `opsctl handoff status SLOT` to discover exact handoff file/field structure without printing
+  `opsctl handoff status TARGET` to discover exact handoff file/field structure without printing
   values. Do not replace that with broad secret-file discovery commands.
-- Do not put customer state, NAS passwords, API keys, gateway tokens, or real slot assignment details
+- Do not put customer state, NAS passwords, API keys, gateway tokens, or real target assignment details
   in the repo.
 - Do not pass raw secret values in MCP tool arguments. Use allowed files or terminal stdin.
 - Preserve the safety boundaries in `references/safety.md`; do not replace them with broad secret
@@ -60,5 +60,5 @@ Read the named section from `references/runbooks.md` when the task matches:
 - Runtime API keys such as Gemini/OpenAI: "Runtime Secret Injection"
 - Gateway tokens or workspace passwords: "Handoff Credentials"
 - NAS mount, unmount, remove, or credential tracking: "NAS Operations"
-- Apply or rollback a single slot: "Apply and Rollback"
+- Apply or rollback a single target: "Apply and Rollback"
 - Missing `opsctl` capability with urgent production need: "Legacy Exception"

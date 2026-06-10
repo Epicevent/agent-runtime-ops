@@ -79,14 +79,14 @@ def canonical_recipe_for_product(family: str, product_image: object) -> Canonica
     return None
 
 
-def canonical_recipe_for_release(release_data: dict[str, Any]) -> CanonicalRuntimeRecipe | None:
-    image_recipe = release_data.get("image_recipe")
+def canonical_recipe_for_image_spec(image_spec: dict[str, Any]) -> CanonicalRuntimeRecipe | None:
+    image_recipe = image_spec.get("image_recipe")
     if isinstance(image_recipe, dict):
         recipe_name = image_recipe.get("canonical_recipe_name") or image_recipe.get("recipe_name")
         if recipe_name:
             return load_canonical_recipe(str(recipe_name))
-    family = str(release_data.get("family") or "")
-    product_image = release_data.get("product_image")
+    family = str(image_spec.get("family") or "")
+    product_image = image_spec.get("product_image")
     return canonical_recipe_for_product(family, product_image)
 
 
@@ -140,19 +140,19 @@ def _command_mode_matches(recipe: CanonicalRuntimeRecipe, profile: RuntimeProfil
     return False
 
 
-def projection_checks(recipe: CanonicalRuntimeRecipe, slot_class: str) -> list[tuple[bool, str, str | None]]:
+def projection_checks(recipe: CanonicalRuntimeRecipe, runtime_class: str) -> list[tuple[bool, str, str | None]]:
     runtime_profiles = _string_map(recipe.data.get("runtime_profiles"))
     runtime_contracts = _string_map(recipe.data.get("runtime_contracts"))
-    profile_name = runtime_profiles.get(slot_class, "")
+    profile_name = runtime_profiles.get(runtime_class, "")
     checks: list[tuple[bool, str, str | None]] = [
-        (slot_class in {"customer", "dev"}, "canonical_projection_known", f"slot_class={slot_class}"),
+        (runtime_class in {"customer", "dev"}, "canonical_projection_known", f"runtime_class={runtime_class}"),
         (bool(profile_name), "canonical_projection_profile_declared", f"profile={profile_name or 'missing'}"),
     ]
     if not profile_name:
         return checks
 
     profile = load_profile(profile_name)
-    expected_source_mount = slot_class == "dev"
+    expected_source_mount = runtime_class == "dev"
     expected_working_dir = str(recipe.data.get("working_dir") or "")
     expected_http_port = str(recipe.data.get("http_port") or "")
     expected_source_output = str(recipe.data.get("source_output_target") or "")
@@ -169,9 +169,9 @@ def projection_checks(recipe: CanonicalRuntimeRecipe, slot_class: str) -> list[t
                 f"recipe={recipe.data.get('family') or 'missing'} profile={profile.metadata.get('family') or 'missing'}",
             ),
             (
-                profile.metadata.get("slot_class") == slot_class,
-                "canonical_profile_slot_class_matches",
-                f"recipe={slot_class} profile={profile.metadata.get('slot_class') or 'missing'}",
+                profile.metadata.get("slot_class") == runtime_class,
+                "canonical_profile_runtime_class_matches",
+                f"recipe={runtime_class} profile={profile.metadata.get('slot_class') or 'missing'}",
             ),
             (
                 profile.metadata.get("product_component") == recipe.data.get("product_component"),
@@ -179,9 +179,9 @@ def projection_checks(recipe: CanonicalRuntimeRecipe, slot_class: str) -> list[t
                 f"recipe={recipe.data.get('product_component') or 'missing'} profile={profile.metadata.get('product_component') or 'missing'}",
             ),
             (
-                profile.metadata.get("runtime_contract") == runtime_contracts.get(slot_class),
+                profile.metadata.get("runtime_contract") == runtime_contracts.get(runtime_class),
                 "canonical_runtime_contract_matches",
-                f"recipe={runtime_contracts.get(slot_class, 'missing')} profile={profile.metadata.get('runtime_contract') or 'missing'}",
+                f"recipe={runtime_contracts.get(runtime_class, 'missing')} profile={profile.metadata.get('runtime_contract') or 'missing'}",
             ),
             (
                 profile.metadata.get("customer_surface") == recipe.data.get("customer_surface"),
@@ -216,10 +216,10 @@ def projection_checks(recipe: CanonicalRuntimeRecipe, slot_class: str) -> list[t
             (
                 profile.metadata.get("allow_source_mount") is expected_source_mount,
                 "canonical_source_mount_policy_matches",
-                f"slot_class={slot_class} allow_source_mount={profile.metadata.get('allow_source_mount')}",
+                f"runtime_class={runtime_class} allow_source_mount={profile.metadata.get('allow_source_mount')}",
             ),
             (
-                slot_class == "customer"
+                runtime_class == "customer"
                 or profile.metadata.get("source_output_target") == expected_source_output,
                 "canonical_source_mount_target_matches",
                 f"recipe={expected_source_output or 'missing'} profile={profile.metadata.get('source_output_target') or 'missing'}",

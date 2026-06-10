@@ -244,7 +244,7 @@ repair_private_state_permissions() {
   chgrp "$OPS_GROUP" "$STATE_ROOT" 2>/dev/null || true
   chmod 0750 "$STATE_ROOT" 2>/dev/null || true
   local name path
-  for name in slots.yaml lanes.yaml releases.yaml dev-recipes.yaml nas-policy.yaml runtime-bindings.json slot-registry.json; do
+  for name in dev-recipes.yaml nas-policy.yaml runtime-bindings.json ops-update.yaml; do
     path="$STATE_ROOT/$name"
     if [[ -f "$path" && ! -L "$path" ]]; then
       chgrp "$OPS_GROUP" "$path" 2>/dev/null || true
@@ -255,13 +255,67 @@ repair_private_state_permissions() {
 
 seed_runtime_bindings() {
   [[ -d "$STATE_ROOT" ]] || return 0
-  if [[ -f "$STATE_ROOT/runtime-bindings.json" || -f "$STATE_ROOT/slot-registry.json" ]]; then
+  if [[ -f "$STATE_ROOT/runtime-bindings.json" ]]; then
     if "$BIN_LINK" --state-root "$STATE_ROOT" binding normalize --write >/dev/null; then
       info "runtime_bindings=normalized"
     else
       info "runtime_bindings=normalize_failed"
     fi
     return 0
+  fi
+}
+
+archive_legacy_state_files() {
+  [[ -d "$STATE_ROOT" ]] || return 0
+  [[ -f "$STATE_ROOT/runtime-bindings.json" ]] || return 0
+
+  local binding_text
+  if ! binding_text="$("$BIN_LINK" --state-root "$STATE_ROOT" binding list 2>/dev/null)"; then
+    info "legacy_state_archive=skipped reason=binding_list_failed"
+    return 0
+  fi
+
+  local family status missing
+  for family in openclaw hermes; do
+    if grep -q "family=$family" <<<"$binding_text"; then
+      if ! status="$("$BIN_LINK" --state-root "$STATE_ROOT" rollout status --family "$family" 2>/dev/null)"; then
+        info "legacy_state_archive=skipped reason=rollout_status_failed family=$family"
+        return 0
+      fi
+      missing="$(awk -F= '$1=="runtime_manifest_missing_targets"{print $2}' <<<"$status")"
+      if [[ -n "$missing" ]]; then
+        info "legacy_state_archive=skipped reason=runtime_manifest_missing family=$family targets=$missing"
+        return 0
+      fi
+    fi
+  done
+
+  local archive_root archive_dir moved name path
+  archive_root="$STATE_ROOT/legacy-state-archive"
+  archive_dir="$archive_root/$(date +%Y%m%dT%H%M%S%z)"
+  moved=0
+  install -d -o root -g "$OPS_GROUP" -m 0750 "$archive_root"
+  for path in \
+    "$STATE_ROOT"/slots.yaml "$STATE_ROOT"/slots.yaml.* \
+    "$STATE_ROOT"/lanes.yaml "$STATE_ROOT"/lanes.yaml.* \
+    "$STATE_ROOT"/releases.yaml "$STATE_ROOT"/releases.yaml.* \
+    "$STATE_ROOT"/slot-registry.json "$STATE_ROOT"/slot-registry.json.* \
+    "$STATE_ROOT"/rollout-state.yaml "$STATE_ROOT"/rollout-state.yaml.* \
+    "$STATE_ROOT"/images.yaml "$STATE_ROOT"/images.yaml.*; do
+    if [[ -e "$path" || -L "$path" ]]; then
+      name="$(basename "$path")"
+      if [[ "$moved" -eq 0 ]]; then
+        install -d -o root -g "$OPS_GROUP" -m 0750 "$archive_dir"
+      fi
+      mv "$path" "$archive_dir/$name"
+      moved=1
+    fi
+  done
+  if [[ "$moved" -eq 1 ]]; then
+    chown -R root:"$OPS_GROUP" "$archive_dir" 2>/dev/null || true
+    info "legacy_state_archive=$archive_dir"
+  else
+    info "legacy_state_archive=none"
   fi
 }
 
@@ -529,6 +583,7 @@ install_package() {
 
   repair_private_state_permissions
   seed_runtime_bindings
+  archive_legacy_state_files
   repair_private_state_permissions
 
   info "installed_dir=$release_dir"
