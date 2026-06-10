@@ -6,7 +6,7 @@ outside `/srv/openclaw-ops` desired state.
 Gemini/API keys here are runtime slot secrets. They are not used to install or
 authenticate a Gemini CLI on the `svcops` account.
 
-The supported path follows the baseline rule:
+The supported path is repo-owned and explicit:
 
 ```text
 root or svcops with restricted sudo

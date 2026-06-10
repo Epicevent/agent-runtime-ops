@@ -15,15 +15,14 @@ details live in `references/runbooks.md`, MCP, `opsctl --help`, and the repo.
   command only after explaining that it prints a credential. Ask them to report only non-secret
   status.
 
-## Legacy Exceptions
+## Missing Commands
 
-- Baseline scripts are retained legacy artifacts, not a normal operating path.
-- Do not delete baseline scripts just because MCP/`opsctl` now cover more work.
-- Use a baseline script only when both are true:
-  - MCP/`opsctl` does not yet expose the needed operation.
-  - The production operation cannot safely wait for the gap to be implemented here.
-- Report every legacy exception with target, reason, exact command shape, verification, and
-  `legacy_exception_used=yes`.
+- Do not route operations through external historical tool bundles.
+- If MCP/`opsctl` does not expose the needed operation, treat that as a tooling gap in this repo.
+- Implement the missing command here, add tests, deploy through the approved update flow, and then
+  run the operation through MCP/`opsctl`.
+- If the operator chooses to stop before implementation, report the missing command plainly. Do not
+  invent broad shell commands that bypass this repo.
 
 ## Layering
 

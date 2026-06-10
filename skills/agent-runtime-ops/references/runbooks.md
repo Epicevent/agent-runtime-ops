@@ -313,6 +313,18 @@ If value retrieval is necessary and authorized, use only the exact manual value 
 `handoff status`. Explain that it prints a credential, ask the operator to run it in their own
 terminal, and tell them not to paste the secret value back into chat. Record only non-secret status.
 
+The non-secret command generator is:
+
+```bash
+ssh svcops "sudo /usr/local/bin/opsctl handoff value-command TARGET"
+```
+
+The value command it reports is:
+
+```bash
+ssh svcops "sudo /usr/local/bin/opsctl handoff print TARGET"
+```
+
 ## Apply and Rollback
 
 Normal rollouts use image rollout tools. Use single-target `apply` only to re-apply the target's current
@@ -388,45 +400,32 @@ ssh svcops "sudo /usr/local/bin/opsctl nas approve-auto"
 Do not add NAS shares as compose volumes. Managed NAS is a child CIFS mount under
 `/home/ocN/nas_docs`.
 
-## Legacy Exception
-
-Baseline scripts are retained legacy artifacts, not a normal or secondary path. Use them only when:
-
-```text
-MCP/opsctl does not expose the needed operation
-and
-the production operation cannot safely wait for the gap to be implemented here
-```
-
-Current example: heartbeat may still require the retained baseline wrapper until the capability is
-fully exposed through `agent-runtime-ops`.
+## OpenClaw Heartbeat
 
 Check heartbeat:
 
 ```bash
-ssh svcops "sudo /opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh heartbeat-status TARGET"
+ssh svcops "sudo /usr/local/bin/opsctl heartbeat status TARGET"
 ```
 
 Disable heartbeat:
 
 ```bash
-ssh svcops "sudo /opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh heartbeat-disable TARGET"
+ssh svcops "sudo /usr/local/bin/opsctl heartbeat disable TARGET"
 ```
 
 Verify:
 
 ```bash
-ssh svcops "sudo /opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh heartbeat-status TARGET"
+ssh svcops "sudo /usr/local/bin/opsctl heartbeat status TARGET"
 ssh svcops "sudo /usr/local/bin/opsctl check --live TARGET"
 ```
 
-Report any legacy use:
+Disabled heartbeat should include:
 
 ```text
-legacy_exception_used=yes
 target=TARGET
-reason=<why MCP/opsctl was insufficient>
-command_shape=<exact command shape without secrets>
-verification=<non-secret verification result>
-migration_gap=<what should be moved into agent-runtime-ops>
+heartbeat_config_every=0m
+heartbeat_config_enabled=no
+heartbeat_disable_status=ok
 ```

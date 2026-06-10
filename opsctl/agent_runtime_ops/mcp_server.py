@@ -436,6 +436,50 @@ class McpServer:
                 },
             },
             {
+                "name": "handoff_value_command",
+                "title": "Handoff Value Command",
+                "description": (
+                    "Return the exact repo-native CLI command an authorized operator can run in their own terminal "
+                    "to print a handoff credential value. This MCP tool does not print the value."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"target": {"type": "string"}},
+                    "required": ["target"],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "heartbeat_status",
+                "title": "OpenClaw Heartbeat Status",
+                "description": (
+                    "Inspect OpenClaw heartbeat config and optional HEARTBEAT.md metadata without printing file contents. "
+                    "For dev or customer groups, prefer runtime_class over parallel per-target calls."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "target": {"type": "string"},
+                        "targets": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                        "runtime_class": {"type": "string", "enum": ["customer", "dev"]},
+                        "family": {"type": "string", "enum": ["openclaw"]},
+                    },
+                    "oneOf": [{"required": ["target"]}, {"required": ["targets"]}, {"required": ["runtime_class"]}],
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "heartbeat_disable",
+                "title": "Disable OpenClaw Heartbeat",
+                "description": "Set OpenClaw heartbeat cadence to 0m for one target and verify the resulting status.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"target": {"type": "string"}},
+                    "required": ["target"],
+                    "additionalProperties": False,
+                },
+            },
+            {
                 "name": "target_rollback",
                 "title": "Rollback Target",
                 "description": "Rollback one target and run a live check.",
@@ -547,6 +591,9 @@ class McpServer:
             "runtime_secret_status": self._tool_runtime_secret_status,
             "runtime_secret_set_from_file": self._tool_runtime_secret_set_from_file,
             "handoff_status": self._tool_handoff_status,
+            "handoff_value_command": self._tool_handoff_value_command,
+            "heartbeat_status": self._tool_heartbeat_status,
+            "heartbeat_disable": self._tool_heartbeat_disable,
             "target_rollback": self._tool_target_rollback,
             "nas_status": self._tool_nas_status,
             "nas_mount": self._tool_nas_mount,
@@ -892,6 +939,32 @@ class McpServer:
             for slot in slots
         )
         return self._common_response(ok=all(item["returncode"] == 0 for item in runs), mutated=False, runs=runs)
+
+    def _tool_handoff_value_command(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(args, {"target"})
+        slot = self._slot(args.get("target"))
+        runs = [self._run([self.sudo, self.opsctl, "handoff", "value-command", slot], timeout=60)]
+        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
+
+    def _tool_heartbeat_status(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(args, {"target", "targets", "runtime_class", "family"})
+        if args.get("family") is not None and str(args.get("family")) != "openclaw":
+            raise ToolError("heartbeat tools support only openclaw targets")
+        slots, runs = self._resolve_slots(args)
+        runs.extend(
+            self._run([self.sudo, self.opsctl, "heartbeat", "status", slot], timeout=60)
+            for slot in slots
+        )
+        return self._common_response(ok=all(item["returncode"] == 0 for item in runs), mutated=False, runs=runs)
+
+    def _tool_heartbeat_disable(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(args, {"target"})
+        slot = self._slot(args.get("target"))
+        runs = [
+            self._run([self.sudo, self.opsctl, "heartbeat", "status", slot], timeout=60),
+            self._run([self.sudo, self.opsctl, "heartbeat", "disable", slot], timeout=120),
+        ]
+        return self._common_response(ok=all(item["returncode"] == 0 for item in runs), mutated=True, runs=runs)
 
     def _tool_target_rollback(self, args: dict[str, Any]) -> dict[str, Any]:
         self._reject_unknown(args, {"target"})

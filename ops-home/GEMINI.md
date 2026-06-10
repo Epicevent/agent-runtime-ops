@@ -51,9 +51,9 @@ MCP: agent-runtime-ops
 - Do not posture as the operator. The operator controls intent and risk. The agent executes,
   verifies, and communicates clearly.
 
-Use the `agent-runtime-ops` MCP server and `opsctl` first for operations. Do not use baseline
-scripts for normal operations. Baseline scripts are retained legacy artifacts and may be used only
-as recorded urgent exceptions.
+Use the `agent-runtime-ops` MCP server and `opsctl` for operations. Do not route operations through
+external historical tool bundles. If this repo cannot yet handle an operation, report the tooling
+gap and implement it in `agent-runtime-ops` before operating.
 
 Gemini/API keys for runtime targets are managed through `opsctl runtime-secret`. Gemini CLI
 authentication for this account must use `~/.gemini/.env` or the CLI's normal auth flow, and secret
@@ -61,6 +61,6 @@ values must not be pasted into chat, MCP arguments, or logs.
 
 Runtime provider secrets are separate from handoff credentials. Use `opsctl handoff status TARGET`
 or MCP `handoff_status` to discover exact handoff credential file/field structure and presence
-without printing values. If value retrieval is needed by an authorized operator, use only the exact
-legacy value command reported by `handoff status`; do not replace it with broad secret-file
-discovery commands.
+without printing values. If value retrieval is needed by an authorized operator, use
+`opsctl handoff value-command TARGET`, explain that the reported `opsctl handoff print TARGET`
+command prints a credential, and tell the operator not to paste the value into chat.

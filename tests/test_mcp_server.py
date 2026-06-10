@@ -88,6 +88,9 @@ class McpServerTests(unittest.TestCase):
         self.assertNotIn("rollout_rollback_canary", names)
         self.assertNotIn("slot_apply", names)
         self.assertIn("handoff_status", names)
+        self.assertIn("handoff_value_command", names)
+        self.assertIn("heartbeat_status", names)
+        self.assertIn("heartbeat_disable", names)
         self.assertIn("nas_remove", names)
         self.assertIn("nas_credential_status", names)
         target_check_tool = next(item for item in tools["result"]["tools"] if item["name"] == "target_check")
@@ -104,6 +107,9 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("gateway tokens", handoff_tool["description"])
         handoff_schema = handoff_tool["inputSchema"]["properties"]
         self.assertEqual(handoff_schema["runtime_class"]["enum"], ["customer", "dev"])
+        heartbeat_tool = next(item for item in tools["result"]["tools"] if item["name"] == "heartbeat_status")
+        heartbeat_schema = heartbeat_tool["inputSchema"]["properties"]
+        self.assertEqual(heartbeat_schema["family"]["enum"], ["openclaw"])
         secret_tool = next(item for item in tools["result"]["tools"] if item["name"] == "runtime_secret_set_from_file")
         key_schema = secret_tool["inputSchema"]["properties"]["key"]
         self.assertIn("GEMINI_API_KEY", key_schema["enum"])
@@ -451,6 +457,72 @@ class McpServerTests(unittest.TestCase):
         self.assertEqual(runner.calls[0]["argv"], ["opsctl", "binding", "list"])
         self.assertEqual(runner.calls[1]["argv"], ["sudo", "opsctl", "handoff", "status", "dev-hermess"])
         self.assertEqual(runner.calls[2]["argv"], ["sudo", "opsctl", "handoff", "status", "dev-oc"])
+
+    def test_handoff_value_command_returns_repo_native_command_without_secret(self) -> None:
+        runner = FakeRunner(
+            [
+                (
+                    0,
+                    "target=dev-oc\nhandoff_value_printed=no\n"
+                    "handoff_value_command=sudo /usr/local/bin/opsctl handoff print dev-oc\n"
+                    "handoff_value_command_status=ok\n",
+                    "",
+                )
+            ]
+        )
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        payload = call_tool(server, "handoff_value_command", {"target": "dev-oc"})
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["mutated"])
+        self.assertIn("handoff_value_printed=no", payload["stdout"])
+        self.assertIn("handoff_value_command=sudo /usr/local/bin/opsctl handoff print dev-oc", payload["stdout"])
+        self.assertNotIn("svcops-control.sh", payload["stdout"])
+        self.assertEqual(runner.calls[0]["argv"], ["sudo", "opsctl", "handoff", "value-command", "dev-oc"])
+
+    def test_heartbeat_status_accepts_runtime_class_selector(self) -> None:
+        runner = FakeRunner(
+            [
+                (
+                    0,
+                    "\n".join(
+                        [
+                            "linux_account=dev-hermess family=hermes runtime_class=dev",
+                            "linux_account=dev-oc family=openclaw runtime_class=dev",
+                        ]
+                    )
+                    + "\n",
+                    "",
+                ),
+                (0, "target=dev-oc\nheartbeat_config_enabled=no\nheartbeat_status=ok\n", ""),
+            ]
+        )
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        payload = call_tool(server, "heartbeat_status", {"runtime_class": "dev", "family": "openclaw"})
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["mutated"])
+        self.assertIn("heartbeat_status=ok", payload["stdout"])
+        self.assertEqual(runner.calls[0]["argv"], ["opsctl", "binding", "list"])
+        self.assertEqual(runner.calls[1]["argv"], ["sudo", "opsctl", "heartbeat", "status", "dev-oc"])
+
+    def test_heartbeat_disable_runs_status_then_disable(self) -> None:
+        runner = FakeRunner(
+            [
+                (0, "target=dev-oc\nheartbeat_config_enabled=yes\nheartbeat_status=ok\n", ""),
+                (
+                    0,
+                    "target=dev-oc\nheartbeat_config_disabled=yes\nheartbeat_config_enabled=no\n"
+                    "heartbeat_disable_status=ok\n",
+                    "",
+                ),
+            ]
+        )
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        payload = call_tool(server, "heartbeat_disable", {"target": "dev-oc"})
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["mutated"])
+        self.assertIn("heartbeat_disable_status=ok", payload["stdout"])
+        self.assertEqual(runner.calls[0]["argv"], ["sudo", "opsctl", "heartbeat", "status", "dev-oc"])
+        self.assertEqual(runner.calls[1]["argv"], ["sudo", "opsctl", "heartbeat", "disable", "dev-oc"])
 
     def test_deploy_update_without_approval_returns_exact_root_command(self) -> None:
         target = "a" * 40

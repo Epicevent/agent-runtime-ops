@@ -12,9 +12,11 @@ from unittest.mock import patch
 from agent_runtime_ops.cli import (
     _approve_auto_once,
     _delete_official_credentials,
+    _fstab_escape,
     _managed_fstab_marker,
     _official_credential_status,
     _remove_managed_fstab_entry,
+    _write_managed_fstab_entry,
     cmd_nas_credential_status,
     cmd_nas_requests,
 )
@@ -155,6 +157,43 @@ class CliNasTests(unittest.TestCase):
         self.assertNotIn(marker, text)
         self.assertIn("# keep me", text)
         self.assertIn("//other/share", text)
+
+    def test_write_managed_fstab_entry_can_claim_same_source_legacy_entry(self) -> None:
+        share = "//192.168.0.222/hanpass"
+        mountpoint = Path("/tmp") / "oc3" / "nas_docs" / "host-f84f2e7ed9d1" / "hanpass"
+        marker = _managed_fstab_marker("oc3", share)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fstab = root / "fstab"
+            lock = root / "lock"
+            fstab.write_text(
+                "\n".join(
+                    [
+                        "# keep me",
+                        f"{share} {_fstab_escape(str(mountpoint))} cifs credentials=/legacy.cred,ro 0 0",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with (
+                patch("agent_runtime_ops.cli._slot_uid_gid", return_value=(1009, 1009)),
+                patch("agent_runtime_ops.cli._runtime_ids", return_value=(2009, 2009, 1030)),
+            ):
+                _write_managed_fstab_entry(
+                    "oc3",
+                    share,
+                    mountpoint,
+                    Path("/root/agent-runtime-ops/nas-credentials/oc3/host/hanpass.cred"),
+                    claim_existing_same_source=True,
+                    fstab_path=fstab,
+                    lock_path=lock,
+                )
+            text = fstab.read_text(encoding="utf-8")
+        self.assertIn("# disabled by agent-runtime-ops nas claim:", text)
+        self.assertIn(marker, text)
+        credential = Path("/root/agent-runtime-ops/nas-credentials/oc3/host/hanpass.cred")
+        self.assertIn(f"credentials={_fstab_escape(str(credential))}", text)
 
     def test_nas_credential_status_outputs_presence_without_secret(self) -> None:
         share = parse_smb_share("//192.168.0.222/hanpass")

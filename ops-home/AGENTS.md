@@ -57,12 +57,13 @@ separate operating-account credential.
 
 Runtime provider secrets are separate from handoff credentials. Use `opsctl handoff status TARGET`
 or MCP `handoff_status` to discover exact handoff credential file/field structure and presence
-without printing values. If value retrieval is needed by an authorized operator, use only the exact
-legacy value command reported by `handoff status`; do not replace it with broad secret-file
-discovery commands.
+without printing values. If value retrieval is needed by an authorized operator, use
+`opsctl handoff value-command TARGET`, explain that the reported `opsctl handoff print TARGET`
+command prints a credential, and tell the operator not to paste the value into chat.
 
 This guidance is intentionally global for Codex and Gemini CLI sessions under the `svcops` Unix
 account only.
 
-Baseline scripts are retained legacy artifacts, not a secondary operating path. Use them only as
-urgent exceptions when `agent-runtime-ops` cannot yet handle the operation, and record the exception.
+Do not route operations through external historical tool bundles. If `agent-runtime-ops` cannot yet
+handle an operation, treat that as a repo tooling gap: implement it here, deploy through the approved
+update flow, and then operate through MCP/`opsctl`.

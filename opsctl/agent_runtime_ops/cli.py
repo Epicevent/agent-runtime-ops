@@ -2910,6 +2910,25 @@ def _env_key_present(path: Path, key: str) -> tuple[str, str]:
     return "present", "present" if values.get(key) else "absent"
 
 
+def _json_path_value(path: Path, keys: list[str]) -> str:
+    data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    value = data
+    for key in keys:
+        if not isinstance(value, dict) or key not in value:
+            return ""
+        value = value[key]
+    return value if isinstance(value, str) else ""
+
+
+def _env_key_value(path: Path, key: str) -> str:
+    values = parse_secret_env_text(path.read_text(encoding="utf-8", errors="replace"), source=str(path))
+    return values.get(key, "")
+
+
+def _handoff_value_command(slot: str) -> str:
+    return shlex.join(["sudo", "/usr/local/bin/opsctl", "handoff", "print", slot])
+
+
 def cmd_handoff_status(args: argparse.Namespace) -> int:
     if not _is_root():
         print("error: run as root/admin: sudo /usr/local/bin/opsctl handoff status TARGET", file=sys.stderr)
@@ -2943,49 +2962,280 @@ def cmd_handoff_status(args: argparse.Namespace) -> int:
         print("handoff_container_file=/home/node/.openclaw/openclaw.json")
         print(f"handoff_file_state={file_state}")
         print(f"handoff_token={token_state}")
-        print("handoff_value_retrieval=legacy_exception")
-        print(
-            "handoff_value_command="
-            + shlex.join(
-                [
-                    "sudo",
-                    "/opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh",
-                    "handoff-credential",
-                    desired.slot,
-                ]
-            )
-        )
+        print("handoff_value_retrieval=manual_cli")
+        print(f"handoff_value_command={_handoff_value_command(desired.slot)}")
         print(f"handoff_status={'ok' if file_state == 'present' and token_state == 'present' else 'fail'}")
         return 0 if file_state == "present" and token_state == "present" else 1
 
     if family == "hermes":
         secret_file = _state_root(args) / "handoff" / f"hermes-workspace-{desired.slot}.env"
-        legacy_file = _state_root(args) / "reports" / f"hermes-workspace-{desired.slot}.password"
         file_state, password_state = _env_key_present(secret_file, "password")
         print("handoff_kind=hermes_workspace_password")
         print(f"handoff_secret_file={secret_file}")
         print("handoff_secret_key=password")
-        print(f"handoff_legacy_secret_file={legacy_file}")
         print(f"handoff_file_state={file_state}")
         print(f"handoff_password={password_state}")
-        print("handoff_value_retrieval=legacy_exception")
-        print(
-            "handoff_value_command="
-            + shlex.join(
-                [
-                    "sudo",
-                    "/opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh",
-                    "handoff-credential",
-                    desired.slot,
-                ]
-            )
-        )
+        print("handoff_value_retrieval=manual_cli")
+        print(f"handoff_value_command={_handoff_value_command(desired.slot)}")
         print(f"handoff_status={'ok' if file_state == 'present' and password_state == 'present' else 'fail'}")
         return 0 if file_state == "present" and password_state == "present" else 1
 
     print("handoff_status=fail")
     print("reason=unsupported_runtime_family")
     return 1
+
+
+def cmd_handoff_value_command(args: argparse.Namespace) -> int:
+    try:
+        desired = load_runtime_target(args.slot, _state_root(args))
+    except Exception as exc:
+        print(f"target={args.slot}")
+        print("handoff_value_command_status=fail")
+        print(f"reason={exc}")
+        return 1
+    print(f"target={desired.slot}")
+    print("handoff_value_printed=no")
+    print(f"handoff_value_command={_handoff_value_command(desired.slot)}")
+    print("handoff_value_command_status=ok")
+    return 0
+
+
+def cmd_handoff_print(args: argparse.Namespace) -> int:
+    if not _is_root():
+        print("error: run as root/admin: sudo /usr/local/bin/opsctl handoff print TARGET", file=sys.stderr)
+        return 2
+    try:
+        desired = load_runtime_target(args.slot, _state_root(args))
+        profile = load_profile(desired.runtime_profile)
+        family = str(profile.metadata.get("family") or desired.family or "")
+    except Exception as exc:
+        print(f"target={args.slot}")
+        print("handoff_print_status=fail")
+        print(f"reason={exc}")
+        return 1
+
+    print(f"target={desired.slot}")
+    print(f"runtime_profile={profile.name}")
+    print(f"family={family}")
+    print("handoff_value_printed=yes")
+
+    try:
+        if family == "openclaw":
+            config_path = _slot_home(desired.slot) / ".openclaw" / "openclaw.json"
+            _assert_secret_path_safe(desired.slot, config_path)
+            token = _json_path_value(config_path, ["gateway", "auth", "token"])
+            if not token:
+                raise ValueError("handoff_token=missing")
+            print("handoff_kind=openclaw_gateway_token")
+            print(f"handoff_secret_file={config_path}")
+            print(f"token={token}")
+        elif family == "hermes":
+            secret_file = _state_root(args) / "handoff" / f"hermes-workspace-{desired.slot}.env"
+            file_state, password_state = _env_key_present(secret_file, "password")
+            if file_state != "present" or password_state != "present":
+                raise ValueError(f"handoff_password={password_state} file_state={file_state}")
+            password = _env_key_value(secret_file, "password")
+            if not password:
+                raise ValueError("handoff_password=missing")
+            print("handoff_kind=hermes_workspace_password")
+            print(f"handoff_secret_file={secret_file}")
+            print("handoff_secret_key=password")
+            print(f"password={password}")
+        else:
+            raise ValueError("unsupported_runtime_family")
+    except Exception as exc:
+        print("handoff_print_status=fail")
+        print(f"reason={exc}")
+        return 1
+
+    print("handoff_print_status=ok")
+    return 0
+
+
+def _require_openclaw_target(slot: str, state_root: Path) -> tuple[RuntimeTarget, object]:
+    desired = load_runtime_target(slot, state_root)
+    profile = load_profile(desired.runtime_profile)
+    family = str(profile.metadata.get("family") or desired.family or "")
+    if family != "openclaw":
+        raise ValueError(f"heartbeat is supported only for openclaw targets: family={family or 'unknown'}")
+    return desired, profile
+
+
+def _openclaw_config_path(slot: str) -> Path:
+    return _slot_home(slot) / ".openclaw" / "openclaw.json"
+
+
+def _heartbeat_files(slot: str) -> list[Path]:
+    workspace = _slot_home(slot) / ".openclaw" / "workspace"
+    if not workspace.is_dir():
+        return []
+    rows: list[Path] = []
+    for path in workspace.rglob("HEARTBEAT.md"):
+        try:
+            relative = path.relative_to(workspace)
+        except ValueError:
+            continue
+        if len(relative.parts) <= 5 and (path.is_file() or path.is_symlink()):
+            rows.append(path)
+    return sorted(rows, key=lambda item: str(item))
+
+
+def _heartbeat_summary(data: dict[str, object] | None) -> tuple[str, str, str, list[tuple[str, str]], str]:
+    if data is None:
+        return "missing", "30m", "", [], "yes"
+    agents = data.get("agents")
+    agents_data = agents if isinstance(agents, dict) else {}
+    defaults = agents_data.get("defaults")
+    defaults_data = defaults if isinstance(defaults, dict) else {}
+    heartbeat = defaults_data.get("heartbeat")
+    default_every = "30m"
+    model = ""
+    config_state = "absent"
+    if isinstance(heartbeat, dict):
+        config_state = "present"
+        if heartbeat.get("every"):
+            default_every = str(heartbeat.get("every"))
+        if heartbeat.get("model"):
+            model = str(heartbeat.get("model"))
+    agent_entries = agents_data.get("list")
+    overrides: list[tuple[str, str]] = []
+    if isinstance(agent_entries, list):
+        for index, entry in enumerate(agent_entries):
+            if not isinstance(entry, dict):
+                continue
+            agent_heartbeat = entry.get("heartbeat")
+            if isinstance(agent_heartbeat, dict):
+                agent_id = str(entry.get("id") or index)
+                every = str(agent_heartbeat.get("every") or default_every)
+                overrides.append((agent_id, every))
+    if overrides:
+        enabled = any(every != "0m" for _, every in overrides)
+    else:
+        enabled = default_every != "0m"
+    return config_state, default_every, model, overrides, "yes" if enabled else "no"
+
+
+def _read_openclaw_config_for_heartbeat(slot: str, path: Path) -> tuple[str, dict[str, object] | None]:
+    if not path.exists():
+        return "missing", None
+    _assert_secret_path_safe(slot, path)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception as exc:
+        raise ValueError(f"heartbeat_config_parse_error={exc.__class__.__name__}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("heartbeat_config_parse_error=not_object")
+    return "present", data
+
+
+def _print_heartbeat_status(slot: str, profile_name: str) -> int:
+    files = _heartbeat_files(slot)
+    print(f"target={slot}")
+    print(f"runtime_profile={profile_name}")
+    print("family=openclaw")
+    for index, path in enumerate(files, 1):
+        print(f"heartbeat_file_{index}={path}")
+        try:
+            stat_result = path.lstat()
+            kind = "symlink" if path.is_symlink() else "regular"
+            print(f"heartbeat_file_{index}_type={kind}")
+            print(f"heartbeat_file_{index}_mode={stat.S_IMODE(stat_result.st_mode):03o}")
+            print(f"heartbeat_file_{index}_size={stat_result.st_size}")
+        except OSError as exc:
+            print(f"heartbeat_file_{index}_stat_error={exc.__class__.__name__}")
+    print(f"heartbeat_files_count={len(files)}")
+    print("heartbeat_files_note=optional_checklist_not_the_scheduler")
+    config_path = _openclaw_config_path(slot)
+    file_state, data = _read_openclaw_config_for_heartbeat(slot, config_path)
+    config_state, every, model, overrides, enabled = _heartbeat_summary(data)
+    print(f"heartbeat_config_file={config_path}")
+    print(f"heartbeat_config_file_state={file_state}")
+    print(f"heartbeat_config={config_state}")
+    print(f"heartbeat_config_every={every}")
+    print(f"heartbeat_config_model={model}")
+    print(f"heartbeat_agent_overrides_count={len(overrides)}")
+    for index, (agent_id, every_value) in enumerate(overrides, 1):
+        print(f"heartbeat_agent_{index}_id={agent_id}")
+        print(f"heartbeat_agent_{index}_every={every_value}")
+    print(f"heartbeat_config_enabled={enabled}")
+    print("heartbeat_status=ok")
+    return 0
+
+
+def cmd_heartbeat_status(args: argparse.Namespace) -> int:
+    try:
+        desired, profile = _require_openclaw_target(args.slot, _state_root(args))
+        return _print_heartbeat_status(desired.slot, profile.name)
+    except Exception as exc:
+        print(f"target={args.slot}")
+        print("heartbeat_status=fail")
+        print(f"reason={exc}")
+        return 1
+
+
+def _write_openclaw_config(slot: str, path: Path, data: dict[str, object]) -> None:
+    _assert_secret_path_safe(slot, path, create_parent=True)
+    runtime_uid, runtime_gid, _ = _runtime_ids(slot)
+    tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    tmp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.chmod(tmp_path, 0o600)
+    os.chown(tmp_path, runtime_uid, runtime_gid)
+    os.replace(tmp_path, path)
+
+
+def cmd_heartbeat_disable(args: argparse.Namespace) -> int:
+    if not _is_root():
+        print("error: run as root/admin: sudo /usr/local/bin/opsctl heartbeat disable TARGET", file=sys.stderr)
+        return 2
+    state_root = _state_root(args)
+    try:
+        desired, profile = _require_openclaw_target(args.slot, state_root)
+        files = _heartbeat_files(desired.slot)
+        config_path = _openclaw_config_path(desired.slot)
+        _, data = _read_openclaw_config_for_heartbeat(desired.slot, config_path)
+        if data is None:
+            data = {}
+        agents = data.setdefault("agents", {})
+        if not isinstance(agents, dict):
+            agents = {}
+            data["agents"] = agents
+        defaults = agents.setdefault("defaults", {})
+        if not isinstance(defaults, dict):
+            defaults = {}
+            agents["defaults"] = defaults
+        heartbeat = defaults.setdefault("heartbeat", {})
+        if not isinstance(heartbeat, dict):
+            heartbeat = {}
+            defaults["heartbeat"] = heartbeat
+        heartbeat["every"] = "0m"
+        overrides_disabled = 0
+        agent_entries = agents.get("list")
+        if isinstance(agent_entries, list):
+            for entry in agent_entries:
+                if not isinstance(entry, dict):
+                    continue
+                agent_heartbeat = entry.get("heartbeat")
+                if isinstance(agent_heartbeat, dict):
+                    agent_heartbeat["every"] = "0m"
+                    overrides_disabled += 1
+        _write_openclaw_config(desired.slot, config_path, data)
+        print(f"target={desired.slot}")
+        print(f"runtime_profile={profile.name}")
+        print("family=openclaw")
+        print(f"heartbeat_files_count={len(files)}")
+        print("heartbeat_files_action=left_untouched_optional_checklist")
+        print("heartbeat_config_disabled=yes")
+        print("heartbeat_config_every=0m")
+        print(f"heartbeat_agent_overrides_disabled={overrides_disabled}")
+        _append_action_log(state_root, "heartbeat_disable", desired.slot, str(config_path), "ok", "every=0m")
+        rc = _print_heartbeat_status(desired.slot, profile.name)
+        print("heartbeat_disable_status=ok")
+        return rc
+    except Exception as exc:
+        print(f"target={args.slot}")
+        print("heartbeat_disable_status=fail")
+        print(f"reason={exc}")
+        return 1
 
 
 def cmd_blocked_mutation(args: argparse.Namespace) -> int:
@@ -3882,7 +4132,16 @@ def _managed_fstab_marker(slot: str, share: str) -> str:
     return f"# agent-runtime-ops nas slot={slot} source={share}"
 
 
-def _write_managed_fstab_entry(slot: str, share: str, mountpoint: Path, credential_path: Path) -> None:
+def _write_managed_fstab_entry(
+    slot: str,
+    share: str,
+    mountpoint: Path,
+    credential_path: Path,
+    *,
+    claim_existing_same_source: bool = False,
+    fstab_path: Path = Path("/etc/fstab"),
+    lock_path: Path = Path("/run/agent-runtime-ops-fstab.lock"),
+) -> None:
     slot_uid, _ = _slot_uid_gid(slot)
     _, _, data_gid = _runtime_ids(slot)
     escaped_target = _fstab_escape(str(mountpoint))
@@ -3910,14 +4169,16 @@ def _write_managed_fstab_entry(slot: str, share: str, mountpoint: Path, credenti
     marker = _managed_fstab_marker(slot, share)
     entry = f"{escaped_source} {escaped_target} cifs {options} 0 0"
 
-    lock_path = Path("/run/agent-runtime-ops-fstab.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path.touch(exist_ok=True)
     with lock_path.open("r+") as lock_handle:
-        import fcntl
+        try:
+            import fcntl
 
-        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-        fstab = Path("/etc/fstab")
-        lines = fstab.read_text(encoding="utf-8").splitlines()
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        except ImportError:
+            pass
+        lines = fstab_path.read_text(encoding="utf-8").splitlines()
         new_lines: list[str] = []
         skip_next = False
         replaced = False
@@ -3933,16 +4194,19 @@ def _write_managed_fstab_entry(slot: str, share: str, mountpoint: Path, credenti
                 continue
             columns = line.split()
             if columns and not line.lstrip().startswith("#") and len(columns) >= 2 and columns[1] == escaped_target:
+                if claim_existing_same_source and len(columns) >= 3 and columns[0] == escaped_source and columns[2] == "cifs":
+                    new_lines.append("# disabled by agent-runtime-ops nas claim: " + line)
+                    continue
                 raise ValueError(f"non-managed fstab entry already owns mountpoint: {mountpoint}")
             new_lines.append(line)
         if not replaced:
             if new_lines and new_lines[-1] != "":
                 new_lines.append("")
             new_lines.extend([marker, entry])
-        tmp = fstab.with_name("fstab.agent-runtime-ops.tmp")
+        tmp = fstab_path.with_name(f"{fstab_path.name}.agent-runtime-ops.tmp")
         tmp.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
         os.chmod(tmp, 0o644)
-        os.replace(tmp, fstab)
+        os.replace(tmp, fstab_path)
 
 
 def _remove_managed_fstab_entry(
@@ -4000,7 +4264,14 @@ def _append_action_log(state_root: Path, action: str, slot: str, target: str, st
         handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
 
-def _prepare_mount_entry(slot: str, share_source: str, credential_path: Path, state_root: Path) -> tuple[object, Path]:
+def _prepare_mount_entry(
+    slot: str,
+    share_source: str,
+    credential_path: Path,
+    state_root: Path,
+    *,
+    claim_existing_same_source: bool = False,
+) -> tuple[object, Path]:
     decision = check_nas_policy(slot, share_source, state_root)
     if not decision.allowed:
         raise ValueError(f"policy denied: {decision.reason}")
@@ -4017,7 +4288,13 @@ def _prepare_mount_entry(slot: str, share_source: str, credential_path: Path, st
     )
     if not already_same_mount and not _max_mounts_allows(decision.max_mounts, current_count):
         raise ValueError(f"max_mounts_exceeded: current={current_count} max={decision.max_mounts}")
-    _write_managed_fstab_entry(decision.slot, decision.share.source, decision.mountpoint, credential_path)
+    _write_managed_fstab_entry(
+        decision.slot,
+        decision.share.source,
+        decision.mountpoint,
+        credential_path,
+        claim_existing_same_source=claim_existing_same_source,
+    )
     return decision, decision.mountpoint
 
 
@@ -4357,6 +4634,7 @@ def cmd_nas_mount(args: argparse.Namespace) -> int:
     if not _is_root():
         print("error: run as root/admin: sudo /usr/local/bin/opsctl nas mount TARGET //HOST/SHARE", file=sys.stderr)
         return 2
+    credential_source = ""
     try:
         decision = check_nas_policy(args.slot, args.share, _state_root(args))
         if args.username or args.password_stdin:
@@ -4365,13 +4643,24 @@ def cmd_nas_mount(args: argparse.Namespace) -> int:
             password = _read_password_from_stdin()
             credential_path = root_credential_path(args.slot, decision.share)
             _write_credential_file(credential_path, args.username, password, args.domain, 0, 0)
+            credential_source = "stdin"
         else:
             credential_path = root_credential_path(args.slot, decision.share)
-            if not credential_path.exists():
+            if credential_path.exists():
+                credential_source = "official_root"
+            else:
                 credential_path = customer_credential_path(args.slot, decision.share)
-            if not credential_path.exists():
-                raise ValueError("credential_missing: pass --username USER --password-stdin or create a customer credential")
-        decision, _ = _prepare_mount_entry(args.slot, args.share, credential_path, _state_root(args))
+                if credential_path.exists():
+                    credential_source = "official_customer"
+                else:
+                    raise ValueError("credential_missing: pass --username USER --password-stdin or create an official credential")
+        decision, _ = _prepare_mount_entry(
+            args.slot,
+            args.share,
+            credential_path,
+            _state_root(args),
+            claim_existing_same_source=True,
+        )
     except Exception as exc:
         print(f"target={args.slot}")
         print(f"share={args.share}")
@@ -4382,6 +4671,10 @@ def cmd_nas_mount(args: argparse.Namespace) -> int:
     rc, _, rows = _findmnt_one(decision.mountpoint)
     if rc == 0 and rows:
         row = rows[0]
+        print(f"target={decision.slot}")
+        print(f"share={decision.share.source}")
+        print(f"credential_source={credential_source or 'unknown'}")
+        print("secret_value_printed=no")
         _print_mount_row("existing_mount", row)
         ok = row.get("source") == decision.share.source and row.get("fstype") == "cifs" and _is_readonly_mount(row)
         print(f"mount_status={'already_mounted' if ok else 'fail'}")
@@ -4395,6 +4688,8 @@ def cmd_nas_mount(args: argparse.Namespace) -> int:
     print(f"target={decision.slot}")
     print(f"share={decision.share.source}")
     print(f"mountpoint={decision.mountpoint}")
+    print(f"credential_source={credential_source or 'unknown'}")
+    print("secret_value_printed=no")
     if rows:
         _print_mount_row("mounted", rows[0])
     print(f"mount_status={'ok' if ok else 'fail'}")
@@ -4714,6 +5009,21 @@ def build_parser() -> argparse.ArgumentParser:
     handoff_status = handoff_sub.add_parser("status")
     handoff_status.add_argument("slot", metavar="target")
     handoff_status.set_defaults(func=cmd_handoff_status)
+    handoff_value_command = handoff_sub.add_parser("value-command")
+    handoff_value_command.add_argument("slot", metavar="target")
+    handoff_value_command.set_defaults(func=cmd_handoff_value_command)
+    handoff_print = handoff_sub.add_parser("print")
+    handoff_print.add_argument("slot", metavar="target")
+    handoff_print.set_defaults(func=cmd_handoff_print)
+
+    heartbeat = sub.add_parser("heartbeat")
+    heartbeat_sub = heartbeat.add_subparsers(dest="heartbeat_command", required=True)
+    heartbeat_status = heartbeat_sub.add_parser("status")
+    heartbeat_status.add_argument("slot", metavar="target")
+    heartbeat_status.set_defaults(func=cmd_heartbeat_status)
+    heartbeat_disable = heartbeat_sub.add_parser("disable")
+    heartbeat_disable.add_argument("slot", metavar="target")
+    heartbeat_disable.set_defaults(func=cmd_heartbeat_disable)
 
     nas = sub.add_parser("nas")
     nas_sub = nas.add_subparsers(dest="nas_command", required=True)

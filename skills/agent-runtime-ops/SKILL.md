@@ -43,7 +43,7 @@ state must still be read from MCP, `opsctl`, the installed repo, or the live ser
   in the repo.
 - Do not pass raw secret values in MCP tool arguments. Use allowed files or terminal stdin.
 - Preserve the safety boundaries in `references/safety.md`; do not replace them with broad secret
-  discovery commands or normal baseline-script operation.
+  discovery commands or external historical tool bundles.
 
 ## Runbook Index
 
@@ -61,4 +61,4 @@ Read the named section from `references/runbooks.md` when the task matches:
 - Gateway tokens or workspace passwords: "Handoff Credentials"
 - NAS mount, unmount, remove, or credential tracking: "NAS Operations"
 - Apply or rollback a single target: "Apply and Rollback"
-- Missing `opsctl` capability with urgent production need: "Legacy Exception"
+- OpenClaw heartbeat status or disable: "OpenClaw Heartbeat"

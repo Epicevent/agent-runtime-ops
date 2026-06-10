@@ -230,6 +230,8 @@ sudo /usr/local/bin/opsctl check --live TARGET
 /usr/local/bin/opsctl nas policy-check TARGET //HOST/SHARE
 sudo /usr/local/bin/opsctl runtime-secret status TARGET
 sudo /usr/local/bin/opsctl handoff status TARGET
+sudo /usr/local/bin/opsctl handoff value-command TARGET
+sudo /usr/local/bin/opsctl heartbeat status TARGET
 ```
 
 These mutate runtime or server state:
@@ -242,6 +244,7 @@ sudo /usr/local/bin/opsctl rollout image-dev-apply --target TARGET --wrapper-ima
 sudo /usr/local/bin/opsctl rollout image-canary --target TARGET --wrapper-image WRAP@sha256:... --product-image PROD@sha256:...
 sudo /usr/local/bin/opsctl rollout image-promote --from-target TARGET --targets TARGET1,TARGET2
 sudo /usr/local/bin/opsctl runtime-secret set TARGET --key KEY --value-stdin --check
+sudo /usr/local/bin/opsctl heartbeat disable TARGET
 sudo /usr/local/bin/opsctl nas mount TARGET //HOST/SHARE
 sudo /usr/local/bin/opsctl nas unmount TARGET //HOST/SHARE
 sudo /usr/local/bin/opsctl nas approve-auto
@@ -251,43 +254,21 @@ Use `opsctl`; do not directly edit rendered Docker compose files. `opsctl apply`
 runtime profiles in this repo. NAS changes are child CIFS mounts under `/home/ocN/nas_docs`; do not
 turn NAS shares into compose volumes.
 
-## Retained Legacy Artifact
+## No External Operating Path
 
 This repo is the operating source for runtime profiles, desired state, render/apply/check,
 runtime manifests, NAS convergence, and rollout/release mechanics. The operating agent should use
-this repo, `opsctl`, and the `agent-runtime-ops` MCP first.
+this repo, `opsctl`, and the `agent-runtime-ops` MCP.
 
-The baseline scripts are retained legacy artifacts, not a secondary operating path. They remain on
-the server because deleting them abruptly is operationally risky. Do not use them for normal
-operations.
+Do not route normal operations through external historical tool bundles. If an operation is missing,
+pause the operation, implement the missing command in this repo, add tests, deploy through the normal
+approved update flow, and then run the operation through `opsctl` or MCP.
 
-Use a baseline script only as an urgent exception when both are true:
-
-```text
-agent-runtime-ops does not yet expose the needed operation
-production operation cannot safely wait for that gap to be implemented here
-```
-
-When a baseline script is used, record it in the operator report:
-
-```text
-legacy_exception_used=yes
-reason=<why opsctl/MCP could not handle it>
-command=<exact baseline command>
-verification=<post-check result>
-migration_gap=<what should be moved into agent-runtime-ops>
-```
+OpenClaw heartbeat is a first-class `opsctl` command:
 
 ```bash
-/opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh
-```
-
-Current known gap: OpenClaw heartbeat is not yet exposed through `opsctl`, so the retained baseline
-wrapper may be used as an exception:
-
-```bash
-ssh svcops "sudo /opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh heartbeat-status dev-oc"
-ssh svcops "sudo /opt/openclaw-nas-agent-baseline/scripts/svcops-control.sh heartbeat-disable dev-oc"
+ssh svcops "sudo /usr/local/bin/opsctl heartbeat status dev-oc"
+ssh svcops "sudo /usr/local/bin/opsctl heartbeat disable dev-oc"
 ```
 
 Disabled heartbeat should show:
@@ -295,18 +276,8 @@ Disabled heartbeat should show:
 ```text
 heartbeat_config_every=0m
 heartbeat_config_enabled=no
+heartbeat_disable_status=ok
 ```
-
-Current known gap: handoff credential value retrieval is not yet exposed through `opsctl`. Handoff
-credential structure and presence are exposed without values through:
-
-```bash
-ssh svcops "sudo /usr/local/bin/opsctl handoff status TARGET"
-```
-
-If an authorized operator needs the value in their own terminal, use only the exact value command
-reported by `handoff status`, warn that it prints a credential, and record it as a legacy exception
-until value retrieval is migrated into `agent-runtime-ops`.
 
 ## Secrets
 
@@ -335,6 +306,20 @@ password is stored.
 Use `sudo /usr/local/bin/opsctl handoff status TARGET` or the MCP `handoff_status` tool for exact
 handoff file/field structure and presence without values. Do not give broad `cat`, `less`, or
 recursive `grep` commands over secret directories to discover structure.
+
+If an authorized operator needs the actual handoff value, first give the non-secret command:
+
+```bash
+sudo /usr/local/bin/opsctl handoff value-command TARGET
+```
+
+Then have the operator run only the exact command it prints in their own terminal. It will be:
+
+```bash
+sudo /usr/local/bin/opsctl handoff print TARGET
+```
+
+Warn that `handoff print` prints a credential. The operator must not paste the value into chat.
 
 ## MCP
 
