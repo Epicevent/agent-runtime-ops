@@ -3487,6 +3487,11 @@ def _redact_git_url(value: str) -> str:
     return re.sub(r"://[^/@]+@", "://<redacted>@", value)
 
 
+def _git_source_command(source: Path, *args: str) -> list[str]:
+    safe_source = str(source.resolve(strict=False))
+    return ["git", "-c", f"safe.directory={safe_source}", "-C", safe_source, *args]
+
+
 def _source_provenance(source: Path) -> dict[str, object]:
     data: dict[str, object] = {
         "path": str(source),
@@ -3496,7 +3501,7 @@ def _source_provenance(source: Path) -> dict[str, object]:
         "git_toplevel": "",
         "git_remote_origin": "",
     }
-    rev = _run_text(["git", "-C", str(source), "rev-parse", "--show-toplevel", "HEAD"], timeout=30)
+    rev = _run_text(_git_source_command(source, "rev-parse", "--show-toplevel", "HEAD"), timeout=30)
     if rev.returncode != 0:
         data["status"] = "no_git"
         return data
@@ -3504,9 +3509,9 @@ def _source_provenance(source: Path) -> dict[str, object]:
     if len(lines) >= 2:
         data["git_toplevel"] = lines[0]
         data["git_head"] = lines[1]
-    status = _run_text(["git", "-C", str(source), "status", "--porcelain"], timeout=30)
+    status = _run_text(_git_source_command(source, "status", "--porcelain"), timeout=30)
     data["git_dirty"] = bool(status.stdout.strip()) if status.returncode == 0 else None
-    remote = _run_text(["git", "-C", str(source), "remote", "get-url", "origin"], timeout=30)
+    remote = _run_text(_git_source_command(source, "remote", "get-url", "origin"), timeout=30)
     if remote.returncode == 0:
         data["git_remote_origin"] = _redact_git_url(remote.stdout.strip())
     data["status"] = "git"

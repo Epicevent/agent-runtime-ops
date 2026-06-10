@@ -675,6 +675,39 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertEqual(recipe["build_command"], "npm run build")
             self.assertEqual(recipe["source_provenance"]["status"], "no_git")
 
+    def test_source_provenance_marks_git_worktree_safe_for_cross_account_read(self) -> None:
+        source = Path("/home/openclawdev/src/hermes-workspace-jitech")
+        safe_source = str(source.resolve(strict=False))
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], timeout: int = 20) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            if command[-3:] == ["rev-parse", "--show-toplevel", "HEAD"]:
+                return subprocess.CompletedProcess(command, 0, f"{safe_source}\n0123456789abcdef0123456789abcdef01234567\n", "")
+            if command[-2:] == ["status", "--porcelain"]:
+                return subprocess.CompletedProcess(command, 0, "", "")
+            if command[-3:] == ["remote", "get-url", "origin"]:
+                return subprocess.CompletedProcess(command, 0, "https://token@example.com/org/repo.git\n", "")
+            return subprocess.CompletedProcess(command, 1, "", "unexpected")
+
+        with patch("agent_runtime_ops.cli._run_text", side_effect=fake_run):
+            provenance = cli._source_provenance(source)
+
+        self.assertEqual(provenance["status"], "git")
+        self.assertEqual(provenance["git_dirty"], False)
+        self.assertEqual(provenance["git_remote_origin"], "https://<redacted>@example.com/org/repo.git")
+        self.assertTrue(calls)
+        for command in calls:
+            self.assertEqual(command[:4], ["git", "-c", f"safe.directory={safe_source}", "-C"])
+            self.assertEqual(command[4], safe_source)
+
+    def test_install_sudoers_allows_capture_dev_and_live_check_argument_orders(self) -> None:
+        text = Path("install.sh").read_text(encoding="utf-8")
+        self.assertIn(" check --live *", text)
+        self.assertIn(" check * --live *", text)
+        self.assertIn(" recipe apply-dev *", text)
+        self.assertIn(" recipe capture-dev *", text)
+
     def test_recipe_status_reports_missing_recipe_for_dev_slot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
