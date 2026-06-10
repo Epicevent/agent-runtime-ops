@@ -28,6 +28,7 @@ from agent_runtime_ops.cli import (
     cmd_rollout_plan,
     cmd_rollout_promote,
     cmd_rollout_rollback_canary,
+    cmd_rollout_status,
     _image_recipe_from_wrapper_image,
     _live_image_truth_from_info,
 )
@@ -309,6 +310,44 @@ def import_candidate(root: Path, name: str = "openclaw-candidate") -> None:
 
 
 class CliReleaseRolloutTests(unittest.TestCase):
+    def test_rollout_status_reports_runtime_manifest_truth(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_hermes_state(root)
+            wrapper_image = wrapper_image_ref("agent-runtime-hermes", "3")
+            product_image = wrapper_image_ref("hermes-workspace", "2")
+            manifest_dir = root / "runtime" / "oc20"
+            manifest_dir.mkdir(parents=True)
+            (manifest_dir / "manifest.yaml").write_text(
+                dump_yaml(
+                    {
+                        "schema_version": 1,
+                        "slot": "oc20",
+                        "release": "direct-image",
+                        "family": "hermes",
+                        "wrapper_image": wrapper_image,
+                        "product_image": product_image,
+                        "recipe": {
+                            "canonical_recipe_name": "hermes-workspace",
+                            "canonical_recipe_digest": hermes_workspace_recipe_digest(),
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                rc = cmd_rollout_status(argparse.Namespace(state_root=str(root), family="hermes"))
+
+            text = output.getvalue()
+            self.assertEqual(rc, 0, text)
+            self.assertIn("status_source=legacy_rollout_state", text)
+            self.assertIn("runtime_status_source=runtime_manifests", text)
+            self.assertIn("runtime_manifest_direct_image_slots=oc20", text)
+            self.assertIn("runtime_manifest_canonical_recipe_names=hermes-workspace", text)
+            self.assertIn("status_warning=legacy_rollout_state_is_not_runtime_truth", text)
+
     def test_apply_force_recreates_compose_container(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

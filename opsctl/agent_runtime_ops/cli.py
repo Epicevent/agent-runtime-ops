@@ -3637,6 +3637,51 @@ def cmd_release_promote(args: argparse.Namespace) -> int:
     return 2
 
 
+def _runtime_manifest_rollup(state_root: Path, slots: list[str], family: str) -> dict[str, object]:
+    rows: list[dict[str, object]] = []
+    for slot in slots:
+        path = _state_manifest_path(state_root, slot)
+        if path.exists() and path.is_symlink():
+            raise ValueError(f"managed runtime manifest must not be symlink: {path}")
+        if not path.is_file():
+            continue
+        manifest = load_yaml(path, default={})
+        if not isinstance(manifest, dict) or str(manifest.get("family") or "") != family:
+            continue
+        rows.append(manifest)
+
+    direct_slots = [str(item.get("slot") or "") for item in rows if item.get("release") == IMAGE_ROLLOUT_RELEASE_NAME]
+    recipes: list[str] = []
+    recipe_digests: list[str] = []
+    wrapper_images: list[str] = []
+    product_images: list[str] = []
+    for item in rows:
+        recipe = item.get("recipe")
+        recipe_name = ""
+        recipe_digest = ""
+        if isinstance(recipe, dict):
+            recipe_name = str(recipe.get("canonical_recipe_name") or "")
+            recipe_digest = str(recipe.get("canonical_recipe_digest") or "")
+        if recipe_name:
+            recipes.append(recipe_name)
+        if recipe_digest:
+            recipe_digests.append(recipe_digest)
+        if item.get("wrapper_image"):
+            wrapper_images.append(str(item.get("wrapper_image")))
+        if item.get("product_image"):
+            product_images.append(str(item.get("product_image")))
+
+    return {
+        "count": len(rows),
+        "slots": [str(item.get("slot") or "") for item in rows],
+        "direct_slots": direct_slots,
+        "wrapper_images": sorted(set(wrapper_images)),
+        "product_images": sorted(set(product_images)),
+        "canonical_recipe_names": sorted(set(recipes)),
+        "canonical_recipe_digests": sorted(set(recipe_digests)),
+    }
+
+
 def cmd_rollout_status(args: argparse.Namespace) -> int:
     state_root = _state_root(args)
     try:
@@ -3656,11 +3701,14 @@ def cmd_rollout_status(args: argparse.Namespace) -> int:
         canary_release = str(canary.get("release") or "") if isinstance(canary, dict) else ""
         if canary_release:
             _validate_release_for_family(releases_data, canary_release, family)
+        runtime_slots = sorted(set(_slots_for_lane(slots_data, fleet_lane) + _slots_for_lane(slots_data, canary_lane)))
+        runtime_rollup = _runtime_manifest_rollup(state_root, runtime_slots, family)
     except Exception as exc:
         print("rollout_status=fail")
         print(f"reason={exc}")
         return 1
     print("rollout_status=ok")
+    print("status_source=legacy_rollout_state")
     print(f"family={family}")
     print(f"fleet_lane={fleet_lane}")
     print(f"fleet_release={fleet_release}")
@@ -3686,6 +3734,16 @@ def cmd_rollout_status(args: argparse.Namespace) -> int:
         print(f"recorded_promotion_canonical_recipe_name={promotion.get('canonical_recipe_name', '')}")
         print(f"recorded_promotion_canonical_recipe_digest={promotion.get('canonical_recipe_digest', '')}")
         print(f"recorded_promotion_status={promotion.get('status', '')}")
+    print("runtime_status_source=runtime_manifests")
+    print(f"runtime_manifest_count={runtime_rollup['count']}")
+    print(f"runtime_manifest_slots={','.join(runtime_rollup['slots'])}")
+    print(f"runtime_manifest_direct_image_slots={','.join(runtime_rollup['direct_slots'])}")
+    print(f"runtime_manifest_wrapper_images={','.join(runtime_rollup['wrapper_images'])}")
+    print(f"runtime_manifest_product_images={','.join(runtime_rollup['product_images'])}")
+    print(f"runtime_manifest_canonical_recipe_names={','.join(runtime_rollup['canonical_recipe_names'])}")
+    print(f"runtime_manifest_canonical_recipe_digests={','.join(runtime_rollup['canonical_recipe_digests'])}")
+    if runtime_rollup["direct_slots"]:
+        print("status_warning=legacy_rollout_state_is_not_runtime_truth_use_runtime_manifest_or_runtime_truth")
     return 0
 
 
