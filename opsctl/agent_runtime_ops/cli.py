@@ -1216,6 +1216,353 @@ def _run_internal_http_check(nsenter: str, pid: int, name: str, url: str) -> tup
     return False, check_name, f"url={url} error={detail[:160]}"
 
 
+_DOCUMENT_TOOLS_PROBE_SCRIPT = r"""
+check_cmd() {
+  name="$1"
+  key="$2"
+  path="$(command -v "$name" 2>/dev/null || true)"
+  if [ -n "$path" ]; then
+    echo "cmd_${key}=yes"
+    echo "cmd_${key}_path=$path"
+  else
+    echo "cmd_${key}=no"
+    echo "cmd_${key}_path="
+  fi
+}
+for item in \
+  "file:file" "rg:rg" "jq:jq" "yq:yq" "7z:7z" "7zz:7zz" \
+  "libreoffice:libreoffice" "soffice:soffice" "pandoc:pandoc" \
+  "pdftotext:pdftotext" "pdfinfo:pdfinfo" "tesseract:tesseract" "ocrmypdf:ocrmypdf" \
+  "xlsx2csv:xlsx2csv" "in2csv:in2csv" "ssconvert:ssconvert" "antiword:antiword" "catdoc:catdoc" \
+  "python3:python3" "node:node" "npm:npm" "clawhub:clawhub" \
+  "hwp5txt:hwp5txt" "hwp5proc:hwp5proc" \
+  "openclaw-hwp-text:openclaw_hwp_text" "openclaw-document-tools:openclaw_document_tools" \
+  "read-hwp:read_hwp" "hwp-read:hwp_read" "hwp2txt:hwp2txt"; do
+  check_cmd "${item%%:*}" "${item#*:}"
+done
+
+if locale charmap 2>/dev/null | grep -qi UTF-8; then
+  echo "locale_utf8=yes"
+else
+  echo "locale_utf8=no"
+fi
+if locale -a 2>/dev/null | grep -Eiq "^ko_KR(\.utf8|\.UTF-8)?$"; then
+  echo "locale_ko_kr=yes"
+else
+  echo "locale_ko_kr=no"
+fi
+if command -v fc-list >/dev/null 2>&1 && [ "$(fc-list :lang=ko 2>/dev/null | wc -l | tr -d ' ')" -gt 0 ]; then
+  echo "korean_fonts=yes"
+else
+  echo "korean_fonts=no"
+fi
+if command -v tesseract >/dev/null 2>&1 && tesseract --list-langs 2>/dev/null | grep -qx kor; then
+  echo "tesseract_kor=yes"
+else
+  echo "tesseract_kor=no"
+fi
+if command -v python3 >/dev/null 2>&1; then
+  python3 - <<'PY'
+mods = ["docx", "pandas", "openpyxl", "pptx", "lxml", "bs4", "pypdf", "pdfplumber", "fitz", "olefile"]
+missing = []
+for mod in mods:
+    try:
+        __import__(mod)
+        print(f"python_{mod}=yes")
+    except Exception:
+        print(f"python_{mod}=no")
+        missing.append(mod)
+print("python_document_modules=" + ("yes" if not missing else "no"))
+print("python_document_modules_missing=" + (",".join(missing) if missing else "none"))
+PY
+else
+  for mod in docx pandas openpyxl pptx lxml bs4 pypdf pdfplumber fitz olefile; do
+    echo "python_${mod}=no"
+  done
+  echo "python_document_modules=no"
+  echo "python_document_modules_missing=python3"
+fi
+
+if [ -f /workspace/AGENTS.md ] && grep -q openclaw-hwp-text /workspace/AGENTS.md 2>/dev/null && grep -q /workspace/nas_docs /workspace/AGENTS.md 2>/dev/null; then
+  echo "hermes_agents_guidance=yes"
+else
+  echo "hermes_agents_guidance=no"
+fi
+if [ -f /workspace/CLAUDE.md ] && grep -q openclaw-hwp-text /workspace/CLAUDE.md 2>/dev/null && grep -q /workspace/nas_docs /workspace/CLAUDE.md 2>/dev/null; then
+  echo "hermes_claude_guidance=yes"
+else
+  echo "hermes_claude_guidance=no"
+fi
+if [ -f /workspace/GEMINI.md ] && grep -q openclaw-hwp-text /workspace/GEMINI.md 2>/dev/null && grep -q /workspace/nas_docs /workspace/GEMINI.md 2>/dev/null; then
+  echo "hermes_gemini_guidance=yes"
+else
+  echo "hermes_gemini_guidance=no"
+fi
+if [ -f /home/node/.openclaw/workspace/AGENTS.md ] && grep -q openclaw-hwp-text /home/node/.openclaw/workspace/AGENTS.md 2>/dev/null && grep -q /home/node/nas_docs /home/node/.openclaw/workspace/AGENTS.md 2>/dev/null; then
+  echo "openclaw_agents_guidance=yes"
+else
+  echo "openclaw_agents_guidance=no"
+fi
+if [ -f /home/node/.openclaw/workspace/CLAUDE.md ] && grep -q openclaw-hwp-text /home/node/.openclaw/workspace/CLAUDE.md 2>/dev/null && grep -q /home/node/nas_docs /home/node/.openclaw/workspace/CLAUDE.md 2>/dev/null; then
+  echo "openclaw_claude_guidance=yes"
+else
+  echo "openclaw_claude_guidance=no"
+fi
+if [ -f /home/node/.openclaw/workspace/GEMINI.md ] && grep -q openclaw-hwp-text /home/node/.openclaw/workspace/GEMINI.md 2>/dev/null && grep -q /home/node/nas_docs /home/node/.openclaw/workspace/GEMINI.md 2>/dev/null; then
+  echo "openclaw_gemini_guidance=yes"
+else
+  echo "openclaw_gemini_guidance=no"
+fi
+"""
+
+
+def _parse_probe_key_values(text: str) -> dict[str, str]:
+    data: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        if "=" not in raw_line:
+            continue
+        key, value = raw_line.split("=", 1)
+        key = key.strip()
+        if re.match(r"^[A-Za-z0-9_.-]+$", key):
+            data[key] = value.strip()
+    return data
+
+
+def _document_tool_payload_status(data: dict[str, str]) -> str:
+    required = ["openclaw_hwp_text", "openclaw_document_tools", "read_hwp", "hwp_read", "hwp2txt"]
+    present = [key for key in required if data.get(f"cmd_{key}") == "yes"]
+    if len(present) == len(required):
+        return "baseline"
+    if present:
+        return "partial"
+    return "missing"
+
+
+def _hwp_readiness(data: dict[str, str]) -> str:
+    helper = data.get("cmd_openclaw_hwp_text") == "yes"
+    aliases = all(data.get(f"cmd_{key}") == "yes" for key in ["read_hwp", "hwp_read", "hwp2txt"])
+    hwp5 = data.get("cmd_hwp5txt") == "yes" and data.get("cmd_hwp5proc") == "yes"
+    fallback = data.get("python_olefile") == "yes" and (
+        data.get("cmd_libreoffice") == "yes" or data.get("cmd_soffice") == "yes"
+    )
+    if helper and aliases and hwp5 and fallback:
+        return "full"
+    if helper and (hwp5 or fallback):
+        return "partial"
+    if helper:
+        return "weak"
+    return "none"
+
+
+def _workspace_guidance_status(family: str, data: dict[str, str]) -> str:
+    if family == "hermes":
+        keys = ["hermes_agents_guidance", "hermes_claude_guidance", "hermes_gemini_guidance"]
+    elif family == "openclaw":
+        keys = ["openclaw_agents_guidance", "openclaw_claude_guidance", "openclaw_gemini_guidance"]
+    else:
+        return "unknown"
+    return "present" if all(data.get(key) == "yes" for key in keys) else "missing"
+
+
+_DOCUMENT_TOOL_REQUIRED_COMMAND_KEYS = [
+    "file",
+    "rg",
+    "jq",
+    "yq",
+    "7z",
+    "7zz",
+    "libreoffice",
+    "soffice",
+    "pandoc",
+    "pdftotext",
+    "pdfinfo",
+    "tesseract",
+    "ocrmypdf",
+    "xlsx2csv",
+    "in2csv",
+    "ssconvert",
+    "antiword",
+    "catdoc",
+    "python3",
+    "node",
+    "npm",
+    "clawhub",
+    "hwp5txt",
+    "hwp5proc",
+    "openclaw_hwp_text",
+    "openclaw_document_tools",
+    "read_hwp",
+    "hwp_read",
+    "hwp2txt",
+]
+
+
+def _document_tools_failure_reasons(result: dict[str, str]) -> list[str]:
+    reasons: list[str] = []
+    if result.get("probe_status") != "ok":
+        reasons.append(f"probe_status={result.get('probe_status', '')}")
+        if result.get("reason"):
+            reasons.append(f"reason={result.get('reason')}")
+        return reasons
+    missing_commands = [key for key in _DOCUMENT_TOOL_REQUIRED_COMMAND_KEYS if result.get(f"cmd_{key}") != "yes"]
+    if missing_commands:
+        reasons.append("missing_commands=" + ",".join(missing_commands))
+    for key in ["locale_utf8", "locale_ko_kr", "korean_fonts", "tesseract_kor", "python_document_modules"]:
+        if result.get(key) != "yes":
+            reasons.append(f"{key}={result.get(key, '')}")
+    if result.get("document_tool_payload") != "baseline":
+        reasons.append(f"document_tool_payload={result.get('document_tool_payload', '')}")
+    if result.get("hwp_readiness") != "full":
+        reasons.append(f"hwp_readiness={result.get('hwp_readiness', '')}")
+    if result.get("workspace_guidance_status") != "present":
+        reasons.append(f"workspace_guidance_status={result.get('workspace_guidance_status', '')}")
+    return reasons
+
+
+def _document_tools_status_for_slot(slot: str, state_root: Path) -> dict[str, str]:
+    binding = get_runtime_binding(slot, state_root)
+    apache_route = parse_apache_route(binding.linux_account)
+    container, lookup = _find_gateway_container_by_binding(binding)
+    result: dict[str, str] = {
+        "target": binding.linux_account,
+        "family": binding.family,
+        "runtime_class": binding.runtime_class,
+        "public_host": binding.public_host,
+        "apache_gateway_port": str(apache_route.gateway_port),
+        "container_lookup": lookup or "",
+        "probe_status": "not_running",
+    }
+    if not container:
+        result["reason"] = lookup or "container_not_found"
+        return result
+
+    docker = shutil.which("docker")
+    if not docker:
+        result["probe_status"] = "fail"
+        result["reason"] = "docker_missing"
+        return result
+    nsenter = shutil.which("nsenter")
+    if not nsenter:
+        result["probe_status"] = "fail"
+        result["reason"] = "nsenter_missing"
+        return result
+
+    inspect = _run_text(["docker", "inspect", container])
+    if inspect.returncode != 0:
+        result["probe_status"] = "fail"
+        result["reason"] = (inspect.stderr or inspect.stdout).strip()[:160] or "docker_inspect_failed"
+        return result
+    try:
+        info = json.loads(inspect.stdout)[0]
+    except Exception as exc:
+        result["probe_status"] = "fail"
+        result["reason"] = f"docker_inspect_parse_failed:{exc}"
+        return result
+
+    state = info.get("State") or {}
+    config = info.get("Config") or {}
+    labels = _labels_from_container_info(info)
+    pid = int(state.get("Pid") or 0)
+    running = str(state.get("Running")).lower() == "true"
+    result.update(
+        {
+            "container": container,
+            "container_running": "yes" if running else "no",
+            "runtime_profile": _recipe_label(labels, f"runtime-profile.{binding.runtime_class}"),
+            "canonical_recipe_name": _recipe_label(labels, "recipe.name"),
+            "product_component": _recipe_label(labels, "product-component"),
+            "wrapper_component": _recipe_label(labels, "wrapper-component"),
+            "image": str(config.get("Image") or ""),
+        }
+    )
+    if not running or pid <= 0:
+        result["probe_status"] = "not_running"
+        result["reason"] = f"pid={pid}"
+        return result
+
+    proc = _run_text(
+        [nsenter, "-t", str(pid), "-m", "-u", "-i", "-n", "-p", "--", "/bin/sh", "-lc", _DOCUMENT_TOOLS_PROBE_SCRIPT],
+        timeout=30,
+    )
+    if proc.returncode != 0:
+        result["probe_status"] = "fail"
+        result["reason"] = (proc.stderr or proc.stdout).strip()[:160] or f"probe_returncode={proc.returncode}"
+        return result
+    probe = _parse_probe_key_values(proc.stdout)
+    result.update(probe)
+    result["document_tool_payload"] = _document_tool_payload_status(probe)
+    result["hwp_readiness"] = _hwp_readiness(probe)
+    result["workspace_guidance_status"] = _workspace_guidance_status(binding.family, probe)
+    result["probe_status"] = "ok"
+    failure_reasons = _document_tools_failure_reasons(result)
+    result["document_tools_ready"] = "no" if failure_reasons else "yes"
+    if failure_reasons:
+        result["failure_reasons"] = ";".join(failure_reasons)
+    return result
+
+
+def cmd_document_tools_status(args: argparse.Namespace) -> int:
+    if not _is_root():
+        print("error: run as root/admin: sudo /usr/local/bin/opsctl document-tools status ...", file=sys.stderr)
+        return 2
+    state_root = _state_root(args)
+    try:
+        all_targets = bool(getattr(args, "all", False))
+        slot_arg = getattr(args, "slot", None)
+        if all_targets and slot_arg:
+            raise ValueError("provide either TARGET or --all, not both")
+        if not all_targets and not slot_arg:
+            raise ValueError("provide TARGET or --all")
+        if all_targets:
+            slots = [binding.linux_account for binding in load_runtime_bindings(state_root) if binding.enabled]
+        else:
+            slots = [str(slot_arg)]
+        results = [_document_tools_status_for_slot(slot, state_root) for slot in slots]
+    except Exception as exc:
+        print("document_tools_status=fail")
+        print(f"reason={exc}")
+        return 1
+
+    for result in results:
+        if len(results) > 1:
+            keys = [
+                "target",
+                "family",
+                "runtime_class",
+                "runtime_profile",
+                "canonical_recipe_name",
+                "probe_status",
+                "document_tool_payload",
+                "hwp_readiness",
+                "document_tools_ready",
+                "workspace_guidance_status",
+                "locale_utf8",
+                "locale_ko_kr",
+                "korean_fonts",
+                "cmd_libreoffice",
+                "cmd_soffice",
+                "cmd_hwp5txt",
+                "cmd_hwp5proc",
+                "cmd_openclaw_hwp_text",
+                "cmd_read_hwp",
+                "cmd_hwp_read",
+                "cmd_hwp2txt",
+                "cmd_openclaw_document_tools",
+                "python_olefile",
+                "python_lxml",
+                "python_document_modules",
+                "tesseract_kor",
+                "reason",
+                "failure_reasons",
+            ]
+            print(" ".join(f"{key}={result.get(key, '')}" for key in keys if key in result))
+        else:
+            _print_key_values(result)
+    failed = [item for item in results if _document_tools_failure_reasons(item)]
+    print(f"document_tools_status={'fail' if failed else 'ok'} count={len(results)} failed={len(failed)}")
+    return 1 if failed else 0
+
+
 def _find_gateway_container(binding: RuntimeBinding, profile) -> tuple[str | None, str | None]:
     service_label = "gateway"
     by_label = _run_text(
@@ -2385,6 +2732,7 @@ def _apply_desired_slot(
         if not manifest_path.exists() and not state_manifest_path.exists() and not allow_first_apply:
             raise ValueError("first agent-runtime apply requires --allow-first-apply")
         previous_manifest = state_manifest_path if state_manifest_path.exists() else manifest_path if manifest_path.exists() else None
+        guidance_result = _ensure_runtime_workspace_guidance(desired.slot, profile)
         backup_dir = _backup_agent_runtime_state(desired.slot, runtime_dir, state_root)
         _atomic_write(compose_path, rendered.text, 0o644)
     except Exception as exc:
@@ -2406,6 +2754,8 @@ def _apply_desired_slot(
     print(f"runtime_profile={profile.name}")
     print(f"runtime_profile_digest={profile.digest}")
     print(f"compose_sha256={rendered.sha256}")
+    for key, value in guidance_result.items():
+        print(f"{key}={value}")
 
     config = _run_text_cwd(_docker_compose_command(desired.slot, compose_path, "config"), runtime_dir, timeout=60)
     if config.returncode != 0:
@@ -2563,6 +2913,128 @@ def cmd_rollback(args: argparse.Namespace) -> int:
 
 def _slot_home(slot: str) -> Path:
     return Path(_passwd_record(slot).pw_dir)
+
+
+def _workspace_guidance_paths(slot: str, family: str) -> tuple[Path, Path, list[Path], Path, str, str]:
+    home = _slot_home(slot)
+    expected_home = Path("/home") / slot
+    if home != expected_home:
+        raise ValueError(f"unexpected slot home: {home}")
+    if home.exists() and home.is_symlink():
+        raise ValueError(f"managed home must not be symlink: {home}")
+    if family == "hermes":
+        app_home = home / ".hermes"
+        workspace = app_home / "workspace"
+        source = REPO_ROOT / "images" / "shared-document-tools" / "hermes-workspace-guidance.md"
+        begin = "<!-- BEGIN OPENCLAW HERMES GUIDANCE -->"
+        end = "<!-- END OPENCLAW HERMES GUIDANCE -->"
+        names = ["AGENTS.md", "CLAUDE.md", "GEMINI.md"]
+    elif family == "openclaw":
+        app_home = home / ".openclaw"
+        workspace = app_home / "workspace"
+        source = REPO_ROOT / "images" / "shared-document-tools" / "openclaw-workspace-guidance.md"
+        begin = "<!-- BEGIN OPENCLAW WORKSPACE GUIDANCE -->"
+        end = "<!-- END OPENCLAW WORKSPACE GUIDANCE -->"
+        names = ["AGENTS.md", "CLAUDE.md", "GEMINI.md", "TOOLS.md"]
+    else:
+        raise ValueError(f"unsupported runtime family for workspace guidance: {family}")
+    targets = [workspace / name for name in names]
+    return app_home, workspace, targets, source, begin, end
+
+
+def _upsert_managed_guidance_block(existing: str, source_text: str, begin: str, end: str) -> str:
+    block = f"{begin}\n{source_text.rstrip()}\n{end}\n"
+    has_begin = begin in existing
+    has_end = end in existing
+    if has_begin != has_end:
+        raise ValueError("managed workspace guidance marker is incomplete")
+    if has_begin and has_end:
+        before, rest = existing.split(begin, 1)
+        _old, after = rest.split(end, 1)
+        return before.rstrip() + "\n\n" + block + after.lstrip()
+    if existing.strip():
+        return existing.rstrip() + "\n\n" + block
+    return block
+
+
+def _atomic_write_owned_text(path: Path, text: str, mode: int, uid: int, gid: int) -> None:
+    if path.exists() and path.is_symlink():
+        raise ValueError(f"managed guidance file must not be symlink: {path}")
+    if path.parent.is_symlink() or not path.parent.is_dir():
+        raise ValueError(f"managed guidance parent is not a safe directory: {path.parent}")
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp_path, mode)
+        os.chown(tmp_path, uid, gid)
+        os.replace(tmp_path, path)
+        try:
+            parent_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(parent_fd)
+            finally:
+                os.close(parent_fd)
+        except OSError:
+            pass
+    finally:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _ensure_runtime_workspace_guidance(slot: str, profile) -> dict[str, str]:
+    family = str(profile.metadata.get("family") or "")
+    if family not in {"hermes", "openclaw"}:
+        return {"workspace_guidance": "skipped", "workspace_guidance_reason": f"family={family or 'unknown'}"}
+    app_home, workspace, targets, source, begin, end = _workspace_guidance_paths(slot, family)
+    if not source.is_file() or source.is_symlink():
+        raise FileNotFoundError(f"workspace guidance source missing: {source}")
+
+    home = _slot_home(slot)
+    _ensure_not_symlink_chain(app_home, home)
+    _ensure_not_symlink_chain(workspace, home)
+    for target in targets:
+        _ensure_not_symlink_chain(target, home)
+        if target.exists() and target.is_symlink():
+            raise ValueError(f"managed guidance file must not be symlink: {target}")
+
+    if family == "hermes":
+        uid, _runtime_gid, data_gid = _runtime_ids(slot)
+        gid = data_gid
+        app_mode = 0o750
+        workspace_mode = 0o750
+    else:
+        uid, gid, _data_gid = _runtime_ids(slot)
+        app_mode = 0o750
+        workspace_mode = 0o750
+
+    app_home.mkdir(mode=app_mode, parents=True, exist_ok=True)
+    workspace.mkdir(mode=workspace_mode, parents=True, exist_ok=True)
+    _ensure_not_symlink_chain(workspace, home)
+    os.chown(app_home, uid, gid)
+    os.chmod(app_home, app_mode)
+    os.chown(workspace, uid, gid)
+    os.chmod(workspace, workspace_mode)
+
+    source_text = source.read_text(encoding="utf-8")
+    changed = 0
+    for target in targets:
+        existing = target.read_text(encoding="utf-8", errors="replace") if target.is_file() else ""
+        updated = _upsert_managed_guidance_block(existing, source_text, begin, end)
+        if updated != existing:
+            changed += 1
+        _atomic_write_owned_text(target, updated, 0o644, uid, gid)
+    return {
+        "workspace_guidance": "updated" if changed else "present",
+        "workspace_guidance_family": family,
+        "workspace_guidance_workspace": str(workspace),
+        "workspace_guidance_files": ",".join(str(target) for target in targets),
+    }
 
 
 def _assert_secret_path_safe(slot: str, path: Path, *, create_parent: bool = False) -> None:
@@ -4870,6 +5342,13 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_truth.add_argument("slot", nargs="?", metavar="target")
     runtime_truth.add_argument("--all", action="store_true")
     runtime_truth.set_defaults(func=cmd_runtime_truth)
+
+    document_tools = sub.add_parser("document-tools")
+    document_tools_sub = document_tools.add_subparsers(dest="document_tools_command", required=True)
+    document_tools_status = document_tools_sub.add_parser("status")
+    document_tools_status.add_argument("slot", nargs="?", metavar="target")
+    document_tools_status.add_argument("--all", action="store_true")
+    document_tools_status.set_defaults(func=cmd_document_tools_status)
 
     for name, func in (("status", cmd_status), ("plan", cmd_plan), ("check", cmd_check)):
         item = sub.add_parser(name)

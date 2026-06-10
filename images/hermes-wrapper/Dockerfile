@@ -54,9 +54,20 @@ LABEL com.epicevent.agent-runtime.nas.child-mount-mode="${RUNTIME_NAS_CHILD_MOUN
 LABEL com.epicevent.agent-runtime.health.endpoints="${RUNTIME_HEALTH_ENDPOINTS}"
 LABEL com.epicevent.agent-runtime.ops-repo-commit="${OPS_REPO_COMMIT}"
 
-COPY images/shared-document-tools/ /usr/local/share/agent-runtime-document-tools/
+USER root
+
+COPY images/shared-document-tools/install-document-baseline.sh /tmp/install-document-baseline.sh
+COPY images/shared-document-tools/openclaw-hwp-text.py /usr/local/bin/openclaw-hwp-text
+COPY images/shared-document-tools/openclaw-document-tools /usr/local/bin/openclaw-document-tools
 
 RUN set -eu; \
+    chmod +x /tmp/install-document-baseline.sh; \
+    /tmp/install-document-baseline.sh; \
+    rm -f /tmp/install-document-baseline.sh; \
+    chmod 0755 /usr/local/bin/openclaw-hwp-text /usr/local/bin/openclaw-document-tools; \
+    ln -sf /usr/local/bin/openclaw-hwp-text /usr/local/bin/read-hwp; \
+    ln -sf /usr/local/bin/openclaw-hwp-text /usr/local/bin/hwp-read; \
+    ln -sf /usr/local/bin/openclaw-hwp-text /usr/local/bin/hwp2txt; \
     install -d /usr/local/share/agent-runtime-ops; \
     { \
       echo "family=${RUNTIME_FAMILY}"; \
@@ -82,3 +93,7 @@ RUN set -eu; \
       echo "canonical_recipe_digest=${CANONICAL_RECIPE_DIGEST}"; \
       echo "ops_repo_commit=${OPS_REPO_COMMIT}"; \
     } > /usr/local/share/agent-runtime-ops/wrapper.manifest
+
+ENV LANG=ko_KR.UTF-8 \
+    LANGUAGE=ko_KR:ko \
+    LC_ALL=ko_KR.UTF-8

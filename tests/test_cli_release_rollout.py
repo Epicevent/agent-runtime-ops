@@ -18,6 +18,7 @@ from agent_runtime_ops.cli import (
     cmd_check,
     cmd_binding_normalize,
     cmd_diagnostics_show,
+    cmd_document_tools_status,
     cmd_recipe_capture_dev,
     cmd_recipe_dev_apply,
     cmd_recipe_dev_status,
@@ -526,6 +527,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
             with (
                 patch("agent_runtime_ops.cli._is_root", return_value=True),
                 patch("agent_runtime_ops.cli._slot_runtime_dir", return_value=runtime_dir),
+                patch("agent_runtime_ops.cli._ensure_runtime_workspace_guidance", return_value={"workspace_guidance": "present"}),
                 patch("agent_runtime_ops.cli._run_text_cwd", side_effect=fake_run),
                 patch(
                     "agent_runtime_ops.cli._run_live_slot_checks_with_wait",
@@ -536,6 +538,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 rc = cmd_apply(argparse.Namespace(state_root=str(root), slot="oc3", allow_first_apply=True))
 
             self.assertEqual(rc, 0, output.getvalue())
+            self.assertIn("workspace_guidance=present", output.getvalue())
             up_calls = [call for call in calls if "up" in call]
             self.assertEqual(len(up_calls), 1)
             self.assertIn("--force-recreate", up_calls[0])
@@ -566,6 +569,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
             with (
                 patch("agent_runtime_ops.cli._is_root", return_value=True),
                 patch("agent_runtime_ops.cli._slot_runtime_dir", return_value=runtime_dir),
+                patch("agent_runtime_ops.cli._ensure_runtime_workspace_guidance", return_value={"workspace_guidance": "present"}),
                 patch(
                     "agent_runtime_ops.cli._run_text_cwd",
                     return_value=subprocess.CompletedProcess(["docker"], 0, "", ""),
@@ -706,8 +710,108 @@ class CliReleaseRolloutTests(unittest.TestCase):
         self.assertIn(" check --live *", text)
         self.assertIn(" check * --live", text)
         self.assertIn(" check * --live *", text)
+        self.assertIn(" document-tools status *", text)
         self.assertIn(" recipe apply-dev *", text)
         self.assertIn(" recipe capture-dev *", text)
+
+    def test_document_tools_baseline_status_requires_hwp_helper_and_aliases(self) -> None:
+        data = {
+            "cmd_openclaw_hwp_text": "yes",
+            "cmd_openclaw_document_tools": "yes",
+            "cmd_read_hwp": "yes",
+            "cmd_hwp_read": "yes",
+            "cmd_hwp2txt": "yes",
+            "cmd_hwp5txt": "yes",
+            "cmd_hwp5proc": "yes",
+            "cmd_libreoffice": "yes",
+            "cmd_soffice": "yes",
+            "python_olefile": "yes",
+        }
+        self.assertEqual(cli._document_tool_payload_status(data), "baseline")
+        self.assertEqual(cli._hwp_readiness(data), "full")
+
+        missing_alias = dict(data)
+        missing_alias["cmd_hwp2txt"] = "no"
+        self.assertEqual(cli._document_tool_payload_status(missing_alias), "partial")
+        self.assertEqual(cli._hwp_readiness(missing_alias), "partial")
+
+    def test_document_tools_failure_reasons_require_full_baseline_and_guidance(self) -> None:
+        result = {f"cmd_{key}": "yes" for key in cli._DOCUMENT_TOOL_REQUIRED_COMMAND_KEYS}
+        result.update(
+            {
+                "probe_status": "ok",
+                "document_tool_payload": "baseline",
+                "hwp_readiness": "full",
+                "locale_utf8": "yes",
+                "locale_ko_kr": "yes",
+                "korean_fonts": "yes",
+                "tesseract_kor": "yes",
+                "python_document_modules": "yes",
+                "workspace_guidance_status": "present",
+            }
+        )
+        self.assertEqual(cli._document_tools_failure_reasons(result), [])
+
+        result["cmd_openclaw_hwp_text"] = "no"
+        self.assertIn("missing_commands=openclaw_hwp_text", ";".join(cli._document_tools_failure_reasons(result)))
+
+    def test_workspace_guidance_status_is_family_specific(self) -> None:
+        hermes = {
+            "hermes_agents_guidance": "yes",
+            "hermes_claude_guidance": "yes",
+            "hermes_gemini_guidance": "yes",
+        }
+        openclaw = {
+            "openclaw_agents_guidance": "yes",
+            "openclaw_claude_guidance": "yes",
+            "openclaw_gemini_guidance": "yes",
+        }
+        self.assertEqual(cli._workspace_guidance_status("hermes", hermes), "present")
+        self.assertEqual(cli._workspace_guidance_status("openclaw", openclaw), "present")
+        openclaw["openclaw_gemini_guidance"] = "no"
+        self.assertEqual(cli._workspace_guidance_status("openclaw", openclaw), "missing")
+
+    def test_document_tools_status_all_uses_runtime_bindings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+
+            def fake_status(slot: str, state_root: Path) -> dict[str, str]:
+                result = {f"cmd_{key}": "yes" for key in cli._DOCUMENT_TOOL_REQUIRED_COMMAND_KEYS}
+                result.update({
+                    "target": slot,
+                    "family": "openclaw",
+                    "runtime_class": "customer",
+                    "runtime_profile": "openclaw-customer",
+                    "canonical_recipe_name": "openclaw-control",
+                    "probe_status": "ok",
+                    "document_tool_payload": "baseline",
+                    "hwp_readiness": "full",
+                    "document_tools_ready": "yes",
+                    "workspace_guidance_status": "present",
+                    "locale_utf8": "yes",
+                    "locale_ko_kr": "yes",
+                    "korean_fonts": "yes",
+                    "tesseract_kor": "yes",
+                    "python_document_modules": "yes",
+                    "python_olefile": "yes",
+                })
+                return result
+
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.cli._document_tools_status_for_slot", side_effect=fake_status) as status_for_slot,
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_document_tools_status(argparse.Namespace(state_root=str(root), slot=None, all=True))
+
+            text = output.getvalue()
+            self.assertEqual(rc, 0, text)
+            self.assertIn("target=oc3", text)
+            self.assertIn("document_tool_payload=baseline", text)
+            self.assertIn("document_tools_status=ok", text)
+            self.assertGreaterEqual(status_for_slot.call_count, 2)
 
     def test_recipe_status_reports_missing_recipe_for_dev_slot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

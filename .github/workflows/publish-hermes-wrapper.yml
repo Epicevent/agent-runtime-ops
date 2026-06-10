@@ -123,6 +123,20 @@ jobs:
           docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.nas.propagation" }}' | grep -Fx rslave
           docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.nas.child-mount-mode" }}' | grep -Fx host-propagated-cifs
           docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.product-image" }}' | grep -Fx "${{ inputs.product_image }}"
+          docker run --rm --entrypoint /bin/sh "$image_ref" -lc '
+            set -eu
+            for command_name in file rg jq yq 7z 7zz libreoffice soffice pandoc pdftotext pdfinfo tesseract ocrmypdf xlsx2csv in2csv ssconvert antiword catdoc python3 node npm clawhub hwp5txt hwp5proc openclaw-hwp-text read-hwp hwp-read hwp2txt openclaw-document-tools; do
+              command -v "$command_name" >/dev/null 2>&1
+            done
+            locale charmap | grep -qi UTF-8
+            locale -a | grep -Eiq "^ko_KR(\.utf8|\.UTF-8)?$"
+            command -v fc-list >/dev/null 2>&1 && [ "$(fc-list :lang=ko 2>/dev/null | wc -l | tr -d " ")" -gt 0 ]
+            tesseract --list-langs 2>/dev/null | grep -qx kor
+            openclaw-document-tools | grep -q openclaw-hwp-text
+            openclaw-document-tools | grep -q /home/node/nas_docs
+            openclaw-document-tools | grep -q /workspace/nas_docs
+            python3 -c "import docx, pandas, openpyxl, pptx, lxml, bs4, pypdf, pdfplumber, fitz, olefile"
+          '
 
       - name: Push wrapper
         run: docker push "$IMAGE_REPOSITORY:${{ inputs.image_tag }}"

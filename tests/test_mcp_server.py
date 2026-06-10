@@ -69,6 +69,7 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("apache_status", names)
         self.assertIn("apache_set_host", names)
         self.assertIn("runtime_truth", names)
+        self.assertIn("document_tools_status", names)
         self.assertIn("runtime_secret_set_from_file", names)
         self.assertIn("deploy_update", names)
         self.assertIn("canonical_recipe_validate", names)
@@ -117,6 +118,8 @@ class McpServerTests(unittest.TestCase):
         self.assertNotIn("API_KEY", key_schema["enum"])
         image_plan_tool = next(item for item in tools["result"]["tools"] if item["name"] == "rollout_image_plan")
         self.assertIn("wrapper_image", image_plan_tool["inputSchema"]["properties"])
+        document_tools_tool = next(item for item in tools["result"]["tools"] if item["name"] == "document_tools_status")
+        self.assertIn("HWP/HWPX", document_tools_tool["description"])
 
     def test_unknown_tool_and_malformed_json(self) -> None:
         server = McpServer(runner=FakeRunner(), opsctl="opsctl", sudo="sudo")
@@ -152,6 +155,21 @@ class McpServerTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertFalse(payload["mutated"])
         self.assertEqual(runner.calls[0]["argv"], ["sudo", "opsctl", "runtime", "truth", "oc3"])
+
+    def test_document_tools_status_uses_sudo_opsctl_argv(self) -> None:
+        runner = FakeRunner([(0, "document_tools_status=ok count=1 failed=0\n", "")])
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        payload = call_tool(server, "document_tools_status", {"target": "OC15.JI-TECH.CO.KR."})
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["mutated"])
+        self.assertEqual(runner.calls[0]["argv"], ["sudo", "opsctl", "document-tools", "status", "oc15.ji-tech.co.kr"])
+
+    def test_document_tools_status_all_uses_sudo_opsctl_argv(self) -> None:
+        runner = FakeRunner([(0, "document_tools_status=ok count=22 failed=0\n", "")])
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        payload = call_tool(server, "document_tools_status", {"all": True})
+        self.assertTrue(payload["ok"])
+        self.assertEqual(runner.calls[0]["argv"], ["sudo", "opsctl", "document-tools", "status", "--all"])
 
     def test_rollout_image_plan_uses_digest_images_without_release_name(self) -> None:
         wrapper = "ghcr.io/epicevent/agent-runtime-openclaw@sha256:" + "a" * 64

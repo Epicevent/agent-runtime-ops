@@ -238,7 +238,20 @@ class McpServer:
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "target": {"type": "string"},
+                        "target": {"type": "string", "description": "Linux account, public host, or instance UUID."},
+                        "all": {"type": "boolean", "default": False},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "document_tools_status",
+                "title": "Document Tools Status",
+            "description": "Inspect the live target container for the baseline HWP/HWPX and document-tool commands.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                        "target": {"type": "string", "description": "Linux account, public host, or instance UUID."},
                         "all": {"type": "boolean", "default": False},
                     },
                     "additionalProperties": False,
@@ -583,6 +596,7 @@ class McpServer:
             "apache_status": self._tool_apache_status,
             "apache_set_host": self._tool_apache_set_host,
             "runtime_truth": self._tool_runtime_truth,
+            "document_tools_status": self._tool_document_tools_status,
             "target_check": self._tool_target_check,
             "deploy_update": self._tool_deploy_update,
             "rollout_image_plan": self._tool_rollout_image_plan,
@@ -719,8 +733,20 @@ class McpServer:
                 raise ToolError("provide either target or all, not both")
             argv.append("--all")
         else:
-            argv.append(self._slot(args.get("target")))
+            argv.append(self._target(args.get("target")))
         runs = [self._run(argv, timeout=120)]
+        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
+
+    def _tool_document_tools_status(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._reject_unknown(args, {"target", "all"})
+        argv = [self.sudo, self.opsctl, "document-tools", "status"]
+        if bool(args.get("all", False)):
+            if args.get("target") is not None:
+                raise ToolError("provide either target or all, not both")
+            argv.append("--all")
+        else:
+            argv.append(self._target(args.get("target")))
+        runs = [self._run(argv, timeout=180)]
         return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
 
     def _tool_target_check(self, args: dict[str, Any]) -> dict[str, Any]:
