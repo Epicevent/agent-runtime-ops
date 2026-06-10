@@ -29,6 +29,7 @@ from agent_runtime_ops.cli import (
     cmd_rollout_promote,
     cmd_rollout_rollback_canary,
     _image_recipe_from_wrapper_image,
+    _live_image_truth_from_info,
 )
 from agent_runtime_ops.canonical_recipes import load_canonical_recipe
 from agent_runtime_ops.profiles import load_profile
@@ -619,6 +620,28 @@ class CliReleaseRolloutTests(unittest.TestCase):
         with patch("agent_runtime_ops.cli._image_recipe_labels_from_wrapper", return_value=labels):
             with self.assertRaisesRegex(ValueError, "canonical recipe digest mismatch"):
                 _image_recipe_from_wrapper_image(wrapper_image, family="hermes", product_image=product_image)
+
+    def test_wrapper_image_recipe_rejects_missing_canonical_identity(self) -> None:
+        product_image = wrapper_image_ref("hermes-workspace", "2")
+        wrapper_image = wrapper_image_ref("agent-runtime-hermes", "3")
+        labels = hermes_recipe_labels(**{"recipe.name": "", "recipe.digest": ""})
+        with patch("agent_runtime_ops.cli._image_recipe_labels_from_wrapper", return_value=labels):
+            with self.assertRaisesRegex(ValueError, "missing canonical recipe name"):
+                _image_recipe_from_wrapper_image(wrapper_image, family="hermes", product_image=product_image)
+
+    def test_live_image_truth_rejects_partial_recipe_labels(self) -> None:
+        route = binding("oc20", "hermes", "customer", 30689, 30690)
+        labels = hermes_recipe_labels(**{"recipe.name": "", "recipe.digest": ""})
+        info = {
+            "Config": {
+                "Image": wrapper_image_ref("agent-runtime-hermes", "3"),
+                "Labels": labels,
+            }
+        }
+        truth = _live_image_truth_from_info(route, info, route)
+        self.assertEqual(truth["truth_status"], "incomplete_recipe_labels")
+        self.assertEqual(truth["canonical_recipe_name"], "")
+        self.assertEqual(truth["canonical_recipe_digest"], "")
 
     def test_wrapper_image_recipe_rejects_component_mismatch(self) -> None:
         product_image = wrapper_image_ref("hermes-workspace", "2")

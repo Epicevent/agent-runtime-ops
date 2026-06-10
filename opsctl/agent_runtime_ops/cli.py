@@ -845,7 +845,13 @@ def _image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product
     http_port = _recipe_label(labels, "http-port")
     canonical_name = _recipe_label(labels, "recipe.name")
     canonical_digest = _recipe_label(labels, "recipe.digest")
+    if not canonical_name:
+        raise ValueError("wrapper image recipe is missing canonical recipe name")
+    if not canonical_digest:
+        raise ValueError("wrapper image recipe is missing canonical recipe digest")
     required = {
+        "recipe.name": canonical_name,
+        "recipe.digest": canonical_digest,
         "product-component": product_component,
         "wrapper-component": wrapper_component,
         "runtime-profile.customer": customer_profile,
@@ -868,9 +874,7 @@ def _image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product
         raise ValueError(
             f"wrapper image recipe wrapper-component mismatch: label={wrapper_component} derived={derived_wrapper_component}"
         )
-    canonical_recipe = load_canonical_recipe(canonical_name) if canonical_name else canonical_recipe_for_product(family, product_image)
-    if canonical_recipe is None:
-        raise ValueError("wrapper image recipe does not map to a canonical runtime recipe")
+    canonical_recipe = load_canonical_recipe(canonical_name)
     canonical_failures = [name for ok, name, _ in validate_canonical_recipe(canonical_recipe) if not ok]
     if canonical_failures:
         raise ValueError("canonical runtime recipe validation failed: " + ",".join(canonical_failures))
@@ -1388,11 +1392,18 @@ def _live_image_truth_from_info(binding: RuntimeBinding, info: dict, apache_rout
     product_image = _recipe_label(labels, "product-image")
     runtime_profile = _recipe_label(labels, f"runtime-profile.{runtime_class}")
     runtime_contract = _recipe_label(labels, f"runtime-contract.{runtime_class}")
+    canonical_recipe_name = _recipe_label(labels, "recipe.name")
+    canonical_recipe_digest = _recipe_label(labels, "recipe.digest")
+    truth_status = "ok"
+    if schema != IMAGE_RECIPE_SCHEMA:
+        truth_status = "legacy_or_unlabeled"
+    elif not canonical_recipe_name or not canonical_recipe_digest:
+        truth_status = "incomplete_recipe_labels"
     return {
         "instance_id": binding.instance_id,
         "linux_account": binding.linux_account,
         "truth_source": "live_image",
-        "truth_status": "ok" if schema == IMAGE_RECIPE_SCHEMA else "legacy_or_unlabeled",
+        "truth_status": truth_status,
         "public_host": binding.public_host,
         "actual_public_host": apache_route.public_host,
         "gateway_port": str(binding.gateway_port),
@@ -1408,8 +1419,8 @@ def _live_image_truth_from_info(binding: RuntimeBinding, info: dict, apache_rout
         "wrapper_component": _recipe_label(labels, "wrapper-component"),
         "runtime_profile": runtime_profile,
         "runtime_contract": runtime_contract,
-        "canonical_recipe_name": _recipe_label(labels, "recipe.name"),
-        "canonical_recipe_digest": _recipe_label(labels, "recipe.digest"),
+        "canonical_recipe_name": canonical_recipe_name,
+        "canonical_recipe_digest": canonical_recipe_digest,
         "ops_repo_commit": _recipe_label(labels, "ops-repo-commit"),
     }
 
