@@ -1,0 +1,10 @@
+checks:
+  - container_running
+  - image_digest_match
+  - internal_workspace_http
+  - internal_gateway_http
+  - internal_dashboard_http
+  - nas_host_cifs
+  - nas_container_cifs
+  - nas_read_only
+  - source_mode_absent

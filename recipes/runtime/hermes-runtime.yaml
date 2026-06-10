@@ -1,0 +1,33 @@
+schema: v1
+name: hermes-runtime
+family: hermes
+product_component: hermes-runtime
+product_image_repo: ghcr.io/epicevent/hermes-runtime
+wrapper_component: hermes-wrapper
+wrapper_repo: ghcr.io/epicevent/agent-runtime-hermes
+runtime_contract_version: v2
+runtime_profiles:
+  customer: hermes-runtime-customer
+  dev: hermes-runtime-dev
+runtime_contracts:
+  customer: hermes-runtime-http-3000
+  dev: hermes-runtime-source-http-3000
+customer_surface: workspace-ui@3000
+expected_image_components:
+  - hermes-workspace-server
+  - hermes-gateway
+  - hermes-dashboard
+health_endpoints:
+  workspace: http://127.0.0.1:3000/
+  gateway: http://127.0.0.1:8642/health
+  dashboard: http://127.0.0.1:9119/api/status
+container_nas_root: /workspace/nas_docs
+host_nas_root_template: /home/{slot}/nas_docs
+nas_read_only: true
+nas_mount_propagation: rslave
+nas_child_mount_mode: host-propagated-cifs
+source_output_target: /opt/hermes-workspace
+runtime_user_mode: image-managed
+command_mode: image-default
+working_dir: /opt/hermes-workspace
+http_port: "3000"

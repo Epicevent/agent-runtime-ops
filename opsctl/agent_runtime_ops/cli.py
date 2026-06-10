@@ -689,6 +689,7 @@ def _allowed_image_ref(family: object, role: str, image_ref: object) -> bool:
         ),
         ("hermes", "product"): (
             "ghcr.io/epicevent/hermes-jitech@sha256:",
+            "ghcr.io/epicevent/hermes-runtime@sha256:",
             "ghcr.io/epicevent/hermes-workspace@sha256:",
             "ghcr.io/epicevent/openclaw-nas-agent@sha256:",
         ),
@@ -712,6 +713,31 @@ def _metadata_list(value: object) -> list[str]:
 
 def _csv(values: list[str]) -> str:
     return ",".join(values)
+
+
+def _label_map_from_string(value: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        key, sep, raw_value = item.partition("=")
+        if not sep:
+            raise ValueError(f"invalid label map item: {item}")
+        key = key.strip()
+        raw_value = raw_value.strip()
+        if not SAFE_NAME_RE.match(key):
+            raise ValueError(f"invalid label map key: {key}")
+        if not raw_value:
+            raise ValueError(f"empty label map value: {key}")
+        result[key] = raw_value
+    return result
+
+
+def _label_map_to_string(value: object) -> str:
+    if not isinstance(value, dict):
+        return ""
+    return ",".join(f"{key}={value[key]}" for key in sorted(value) if str(key) and str(value[key]))
 
 
 def _profile_runtime_contract(profile) -> str:
@@ -815,6 +841,8 @@ def _image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product
     nas_read_only = _recipe_label(labels, "nas.read-only")
     nas_propagation = _recipe_label(labels, "nas.propagation")
     nas_child_mount_mode = _recipe_label(labels, "nas.child-mount-mode")
+    contract_version = _recipe_label(labels, "contract.version")
+    health_endpoints_label = _recipe_label(labels, "health.endpoints")
     canonical_name = _recipe_label(labels, "recipe.name")
     canonical_digest = _recipe_label(labels, "recipe.digest")
     if not canonical_name:
@@ -874,6 +902,10 @@ def _image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product
         "nas.propagation": nas_propagation,
         "nas.child-mount-mode": nas_child_mount_mode,
     }
+    if expected_labels.get("contract.version"):
+        label_checks["contract.version"] = contract_version
+    if expected_labels.get("health.endpoints"):
+        label_checks["health.endpoints"] = health_endpoints_label
     for label_name, actual in label_checks.items():
         expected = expected_labels[label_name]
         if actual != expected:
@@ -912,6 +944,8 @@ def _image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product
         "nas_read_only": nas_read_only,
         "nas_mount_propagation": nas_propagation,
         "nas_child_mount_mode": nas_child_mount_mode,
+        "contract_version": contract_version,
+        "health_endpoints": _label_map_from_string(health_endpoints_label) if health_endpoints_label else {},
         "ops_repo_commit": _recipe_label(labels, "ops-repo-commit"),
     }
     for runtime_class, profile_name in recipe["runtime_profiles"].items():
@@ -1154,6 +1188,34 @@ def _http_backend_smoke(slot: str, path: str, state_root: Path) -> tuple[bool, s
         return False, f"url={url} host={binding.public_host} reason={exc}"
 
 
+def _contract_health_endpoints(desired, profile) -> dict[str, str]:
+    image_recipe = _image_spec_recipe(desired.image_spec)
+    endpoints = image_recipe.get("health_endpoints")
+    if isinstance(endpoints, dict):
+        return {str(key): str(value) for key, value in endpoints.items() if str(key) and str(value)}
+    profile_endpoints = profile.metadata.get("required_internal_http")
+    if isinstance(profile_endpoints, dict):
+        return {str(key): str(value) for key, value in profile_endpoints.items() if str(key) and str(value)}
+    return {}
+
+
+def _internal_http_check_name(name: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_]+", "_", name.strip().lower()).strip("_")
+    return safe or "endpoint"
+
+
+def _run_internal_http_check(nsenter: str, pid: int, name: str, url: str) -> tuple[bool, str, str]:
+    check_name = f"live_internal_http_{_internal_http_check_name(name)}_ok"
+    curl = shutil.which("curl")
+    if not curl:
+        return False, check_name, "curl_missing"
+    proc = _run_text([nsenter, "-t", str(pid), "-n", curl, "-fsS", "--max-time", "5", url], timeout=8)
+    if proc.returncode == 0:
+        return True, check_name, f"url={url}"
+    detail = (proc.stderr or proc.stdout).strip() or f"returncode={proc.returncode}"
+    return False, check_name, f"url={url} error={detail[:160]}"
+
+
 def _find_gateway_container(binding: RuntimeBinding, profile) -> tuple[str | None, str | None]:
     service_label = "gateway"
     by_label = _run_text(
@@ -1298,6 +1360,8 @@ def _live_image_truth_from_info(binding: RuntimeBinding, info: dict, apache_rout
         "nas_read_only": _recipe_label(labels, "nas.read-only"),
         "nas_mount_propagation": _recipe_label(labels, "nas.propagation"),
         "nas_child_mount_mode": _recipe_label(labels, "nas.child-mount-mode"),
+        "contract_version": _recipe_label(labels, "contract.version"),
+        "health_endpoints": _recipe_label(labels, "health.endpoints"),
         "ops_repo_commit": _recipe_label(labels, "ops-repo-commit"),
     }
 
@@ -1508,6 +1572,9 @@ def _run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool
     if smoke_path:
         smoke_ok, smoke_detail = _http_backend_smoke(desired.slot, smoke_path, state_root)
         checks.append((smoke_ok, "live_backend_http_smoke_ok", smoke_detail))
+
+    for endpoint_name, endpoint_url in _contract_health_endpoints(desired, profile).items():
+        checks.append(_run_internal_http_check(nsenter, pid, endpoint_name, endpoint_url))
 
     host_rc, host_error, host_mounts = _findmnt_under(host_nas_root)
     checks.append((host_rc == 0, "live_host_nas_root_findmnt_ok", host_error if host_rc != 0 else host_nas_root))
@@ -2274,7 +2341,7 @@ def _run_live_slot_checks_with_wait(desired, profile, state_root: Path, timeout_
         failed_names = {name for ok, name, _ in checks if not ok}
         if not failed_names:
             return checks
-        if not (failed_names & wait_names):
+        if not (failed_names & wait_names) and not any(name.startswith("live_internal_http_") for name in failed_names):
             return checks
         if time.monotonic() >= deadline:
             return checks
@@ -3250,12 +3317,14 @@ def _build_arg_lines_for_canonical_recipe(name: str) -> list[str]:
         f"RUNTIME_COMMAND_MODE={labels['command-mode']}",
         f"RUNTIME_WORKING_DIR={labels['working-dir']}",
         f"RUNTIME_HTTP_PORT={labels['http-port']}",
+        f"RUNTIME_CONTRACT_VERSION={labels['contract.version']}",
         f"RUNTIME_SOURCE_OUTPUT_TARGET={labels['source-output-target']}",
         f"RUNTIME_NAS_CONTAINER_ROOT={labels['nas.container-root']}",
         f"RUNTIME_NAS_HOST_ROOT_TEMPLATE={labels['nas.host-root-template']}",
         f"RUNTIME_NAS_READ_ONLY={labels['nas.read-only']}",
         f"RUNTIME_NAS_PROPAGATION={labels['nas.propagation']}",
         f"RUNTIME_NAS_CHILD_MOUNT_MODE={labels['nas.child-mount-mode']}",
+        f"RUNTIME_HEALTH_ENDPOINTS={labels['health.endpoints']}",
     ]
 
 
@@ -3557,6 +3626,83 @@ def cmd_recipe_dev_apply(args: argparse.Namespace) -> int:
     )
     _append_action_log(state_root, "recipe_apply_dev", slot, recipe_name, "ok" if rc == 0 else "fail", f"apply_rc={rc}")
     return rc
+
+
+def cmd_recipe_capture_dev(args: argparse.Namespace) -> int:
+    if not _is_root():
+        print("error: run as root/admin: sudo /usr/local/bin/opsctl recipe capture-dev TARGET ...", file=sys.stderr)
+        return 2
+    state_root = _state_root(args)
+    slot = str(args.slot)
+    recipe_name = str(getattr(args, "recipe_name", "") or "hermes-runtime")
+    try:
+        _validate_recipe_name(recipe_name)
+        desired, profile = _desired_from_live_image_truth(slot, state_root)
+        if desired.runtime_class != "dev" or profile.metadata.get("mode") != "source":
+            raise ValueError("recipe capture-dev requires a dev target using source mode")
+        image_recipe = _image_spec_recipe(desired.image_spec)
+        canonical_recipe = canonical_recipe_for_image_spec(desired.image_spec)
+        if canonical_recipe.name != recipe_name:
+            raise ValueError(f"live image recipe mismatch: image={canonical_recipe.name} requested={recipe_name}")
+        if recipe_name == "hermes-runtime" and str(image_recipe.get("contract_version") or "") != "v2":
+            raise ValueError("hermes-runtime capture requires runtime contract version v2")
+        recipes = _load_dev_recipe_state(state_root).get("recipes") or {}
+        dev_recipe = recipes.get(desired.slot) if isinstance(recipes, dict) else None
+        if not isinstance(dev_recipe, dict):
+            raise ValueError("dev recipe state is missing; run recipe apply-dev first")
+        if str(dev_recipe.get("recipe_name") or "") != recipe_name:
+            raise ValueError(
+                f"dev recipe state mismatch: state={dev_recipe.get('recipe_name') or 'missing'} requested={recipe_name}"
+            )
+        source_output = str(dev_recipe.get("source_output") or "")
+        if not source_output:
+            raise ValueError("dev recipe state is missing source_output")
+        provenance = dev_recipe.get("source_provenance")
+        if not isinstance(provenance, dict):
+            raise ValueError("dev recipe state is missing source provenance")
+        if provenance.get("status") != "git":
+            raise ValueError(f"source provenance is not git-backed: status={provenance.get('status') or 'missing'}")
+        if provenance.get("git_dirty") is not False:
+            raise ValueError(f"source provenance must be clean: git_dirty={provenance.get('git_dirty')}")
+        checks = _run_live_slot_checks(desired, profile, state_root)
+        failed = [name for ok, name, _detail in checks if not ok]
+        if failed:
+            raise ValueError("live checks failed: " + ",".join(failed))
+        health_endpoints = image_recipe.get("health_endpoints")
+        _append_action_log(
+            state_root,
+            "recipe_capture_dev",
+            desired.slot,
+            recipe_name,
+            "ok",
+            f"source_output={source_output}",
+        )
+    except Exception as exc:
+        print(f"target={slot}")
+        print("recipe_capture_dev_status=fail")
+        print(f"reason={exc}")
+        try:
+            _append_action_log(state_root, "recipe_capture_dev", slot, recipe_name, "fail", str(exc))
+        except Exception:
+            pass
+        return 1
+
+    identity = canonical_recipe_identity(canonical_recipe)
+    print(f"target={desired.slot}")
+    print("recipe_capture_dev_status=ok")
+    print(f"recipe_name={canonical_recipe.name}")
+    print(f"canonical_recipe_digest={identity['canonical_recipe_digest']}")
+    print(f"runtime_profile={profile.name}")
+    print(f"wrapper_image={desired.image_spec.get('wrapper_image')}")
+    print(f"product_image={desired.image_spec.get('product_image')}")
+    print(f"contract_version={image_recipe.get('contract_version') or ''}")
+    print(f"health_endpoints={_label_map_to_string(health_endpoints)}")
+    print(f"source_output={source_output}")
+    print(f"source_git_head={provenance.get('git_head') or ''}")
+    print(f"source_git_dirty={provenance.get('git_dirty')}")
+    print("secret_value_printed=no")
+    print("next_action=build product image from source_git_head, then wrap with this canonical_recipe_digest")
+    return 0
 
 
 def _runtime_manifest_rollup(state_root: Path, slots: list[str], family: str) -> dict[str, object]:
@@ -4793,6 +4939,10 @@ def build_parser() -> argparse.ArgumentParser:
     recipe_apply_dev.add_argument("--allow-first-apply", action="store_true")
     recipe_apply_dev.add_argument("--no-apply", action="store_true")
     recipe_apply_dev.set_defaults(func=cmd_recipe_dev_apply)
+    recipe_capture_dev = recipe_sub.add_parser("capture-dev")
+    recipe_capture_dev.add_argument("slot", metavar="target")
+    recipe_capture_dev.add_argument("--recipe-name", default="hermes-runtime")
+    recipe_capture_dev.set_defaults(func=cmd_recipe_capture_dev)
 
     runtime_secret = sub.add_parser("runtime-secret")
     runtime_secret_sub = runtime_secret.add_subparsers(dest="runtime_secret_command", required=True)

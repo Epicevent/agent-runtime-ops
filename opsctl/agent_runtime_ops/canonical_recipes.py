@@ -68,6 +68,18 @@ def _bool_label(value: Any) -> str:
     return ""
 
 
+def _label_map(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    pairs: list[str] = []
+    for key, item in sorted(value.items()):
+        key_text = str(key).strip()
+        item_text = str(item).strip()
+        if key_text and item_text:
+            pairs.append(f"{key_text}={item_text}")
+    return ",".join(pairs)
+
+
 def canonical_recipe_for_product(family: str, product_image: object) -> CanonicalRuntimeRecipe | None:
     product_repo = image_repo(product_image)
     for name in list_canonical_recipe_names():
@@ -102,6 +114,7 @@ def canonical_label_values(recipe: CanonicalRuntimeRecipe) -> dict[str, str]:
     return {
         "recipe.name": recipe.name,
         "recipe.digest": recipe.digest,
+        "contract.version": str(recipe.data.get("runtime_contract_version") or ""),
         "family": str(recipe.data.get("family") or ""),
         "product-component": str(recipe.data.get("product_component") or ""),
         "wrapper-component": str(recipe.data.get("wrapper_component") or ""),
@@ -118,6 +131,7 @@ def canonical_label_values(recipe: CanonicalRuntimeRecipe) -> dict[str, str]:
         "nas.read-only": _bool_label(recipe.data.get("nas_read_only")),
         "nas.propagation": str(recipe.data.get("nas_mount_propagation") or ""),
         "nas.child-mount-mode": str(recipe.data.get("nas_child_mount_mode") or ""),
+        "health.endpoints": _label_map(recipe.data.get("health_endpoints")),
     }
 
 
@@ -161,6 +175,8 @@ def projection_checks(recipe: CanonicalRuntimeRecipe, runtime_class: str) -> lis
     expected_host_nas_template = str(recipe.data.get("host_nas_root_template") or "")
     expected_components = _metadata_list(recipe.data.get("expected_image_components"))
     profile_components = _metadata_list(profile.metadata.get("expected_image_components"))
+    health_endpoints = _string_map(recipe.data.get("health_endpoints"))
+    requires_health_contract = str(recipe.data.get("runtime_contract_version") or "") == "v2"
     checks.extend(
         [
             (
@@ -192,6 +208,21 @@ def projection_checks(recipe: CanonicalRuntimeRecipe, runtime_class: str) -> lis
                 profile_components == expected_components,
                 "canonical_expected_components_match",
                 f"recipe={','.join(expected_components)} profile={','.join(profile_components)}",
+            ),
+            (
+                not requires_health_contract or "hermes-workspace-server" not in expected_components or bool(health_endpoints.get("workspace")),
+                "canonical_workspace_health_declared",
+                f"workspace={health_endpoints.get('workspace') or 'missing'}",
+            ),
+            (
+                not requires_health_contract or "hermes-gateway" not in expected_components or bool(health_endpoints.get("gateway")),
+                "canonical_gateway_health_declared",
+                f"gateway={health_endpoints.get('gateway') or 'missing'}",
+            ),
+            (
+                not requires_health_contract or "hermes-dashboard" not in expected_components or bool(health_endpoints.get("dashboard")),
+                "canonical_dashboard_health_declared",
+                f"dashboard={health_endpoints.get('dashboard') or 'missing'}",
             ),
             (
                 profile.metadata.get("container_nas_root") == expected_nas_root,

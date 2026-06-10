@@ -3,6 +3,7 @@ from __future__ import annotations
 
 IMAGE_COMPONENTS = {
     "ghcr.io/epicevent/hermes-jitech": "hermes-agent",
+    "ghcr.io/epicevent/hermes-runtime": "hermes-runtime",
     "ghcr.io/epicevent/hermes-workspace": "hermes-workspace",
     "ghcr.io/epicevent/openclaw-nas-agent": "combined-runtime",
     "ghcr.io/epicevent/openclaw-jitech": "openclaw-control",

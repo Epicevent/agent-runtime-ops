@@ -67,6 +67,7 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertEqual(image_repo(f"ghcr.io/epicevent/hermes-workspace@{digest}"), "ghcr.io/epicevent/hermes-workspace")
         self.assertEqual(image_repo("ghcr.io/epicevent/hermes-workspace:main"), "ghcr.io/epicevent/hermes-workspace")
         self.assertEqual(image_component_name(f"ghcr.io/epicevent/hermes-workspace@{digest}"), "hermes-workspace")
+        self.assertEqual(image_component_name(f"ghcr.io/epicevent/hermes-runtime@{digest}"), "hermes-runtime")
         self.assertEqual(image_component_name("ghcr.io/epicevent/openclaw-jitech@sha256:" + "c" * 64), "openclaw-control")
 
     def test_compose_uses_route_registry_ports(self) -> None:
@@ -130,6 +131,38 @@ class RuntimeContractTests(unittest.TestCase):
             product_repo="hermes-workspace",
         )
         results = contract_results("hermes-workspace-dev", desired)
+        self.assertTrue(results["compose_runtime_user_model"])
+        self.assertTrue(results["compose_uses_image_default_command"])
+        self.assertTrue(results["compose_required_working_dir"])
+        self.assertTrue(results["compose_customer_surface_port"])
+        self.assertTrue(results["compose_dev_source_mount_present"])
+
+    def test_hermes_runtime_customer_contract(self) -> None:
+        desired = desired_slot(
+            "oc2",
+            "hermes",
+            "customer",
+            "hermes-runtime-customer",
+            product_repo="hermes-runtime",
+        )
+        results = contract_results("hermes-runtime-customer", desired)
+        self.assertTrue(results["compose_runtime_user_model"])
+        self.assertTrue(results["compose_uses_image_default_command"])
+        self.assertTrue(results["compose_required_working_dir"])
+        self.assertTrue(results["compose_nas_root_bind_present"])
+        self.assertTrue(results["compose_nas_root_readonly"])
+        self.assertTrue(results["compose_nas_root_propagation"])
+        self.assertTrue(results["compose_customer_source_mount_absent"])
+
+    def test_hermes_runtime_dev_contract(self) -> None:
+        desired = desired_slot(
+            "dev-hermess",
+            "hermes",
+            "dev",
+            "hermes-runtime-dev",
+            product_repo="hermes-runtime",
+        )
+        results = contract_results("hermes-runtime-dev", desired)
         self.assertTrue(results["compose_runtime_user_model"])
         self.assertTrue(results["compose_uses_image_default_command"])
         self.assertTrue(results["compose_required_working_dir"])

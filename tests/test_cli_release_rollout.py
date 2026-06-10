@@ -18,6 +18,7 @@ from agent_runtime_ops.cli import (
     cmd_check,
     cmd_binding_normalize,
     cmd_diagnostics_show,
+    cmd_recipe_capture_dev,
     cmd_recipe_dev_apply,
     cmd_recipe_dev_status,
     cmd_recipe_validate_canonical,
@@ -59,6 +60,10 @@ def binding(account: str, family: str, runtime_class: str, gateway: int, bridge:
 
 def hermes_workspace_recipe_digest() -> str:
     return load_canonical_recipe("hermes-workspace").digest
+
+
+def hermes_runtime_recipe_digest() -> str:
+    return load_canonical_recipe("hermes-runtime").digest
 
 
 def hermes_combined_recipe_digest() -> str:
@@ -138,6 +143,44 @@ def hermes_image_recipe(
     }
 
 
+def hermes_runtime_image_recipe(*, product_image: str | None = None) -> dict[str, object]:
+    product_image = product_image or wrapper_image_ref("hermes-runtime", "4")
+    return {
+        "schema": "v1",
+        "source": "wrapper_image_labels",
+        "canonical_recipe_name": "hermes-runtime",
+        "canonical_recipe_digest": hermes_runtime_recipe_digest(),
+        "family": "hermes",
+        "product_image": product_image,
+        "product_component": "hermes-runtime",
+        "wrapper_component": "hermes-wrapper",
+        "runtime_profiles": {
+            "customer": "hermes-runtime-customer",
+            "dev": "hermes-runtime-dev",
+        },
+        "runtime_contracts": {
+            "customer": "hermes-runtime-http-3000",
+            "dev": "hermes-runtime-source-http-3000",
+        },
+        "command_mode": "image-default",
+        "working_dir": "/opt/hermes-workspace",
+        "http_port": "3000",
+        "source_output_target": "/opt/hermes-workspace",
+        "container_nas_root": "/workspace/nas_docs",
+        "host_nas_root_template": "/home/{slot}/nas_docs",
+        "nas_read_only": "true",
+        "nas_mount_propagation": "rslave",
+        "nas_child_mount_mode": "host-propagated-cifs",
+        "contract_version": "v2",
+        "health_endpoints": {
+            "workspace": "http://127.0.0.1:3000/",
+            "gateway": "http://127.0.0.1:8642/health",
+            "dashboard": "http://127.0.0.1:9119/api/status",
+        },
+        "ops_repo_commit": "8be9e466c28f821a907a40ab2b0068910c6762cf",
+    }
+
+
 def hermes_combined_image_recipe(*, product_image: str | None = None) -> dict[str, object]:
     product_image = product_image or image_ref("1")
     return {
@@ -193,6 +236,37 @@ def hermes_recipe_labels(**overrides: str) -> dict[str, str]:
         "nas.read-only": "true",
         "nas.propagation": "rslave",
         "nas.child-mount-mode": "host-propagated-cifs",
+        "ops-repo-commit": "8be9e466c28f821a907a40ab2b0068910c6762cf",
+    }
+    values.update(overrides)
+    return {IMAGE_RECIPE_LABEL_PREFIX + key: value for key, value in values.items()}
+
+
+def hermes_runtime_recipe_labels(**overrides: str) -> dict[str, str]:
+    product_image = overrides.pop("product_image", wrapper_image_ref("hermes-runtime", "4"))
+    values = {
+        "recipe.schema": "v1",
+        "recipe.name": "hermes-runtime",
+        "recipe.digest": hermes_runtime_recipe_digest(),
+        "family": "hermes",
+        "product-image": product_image,
+        "product-component": "hermes-runtime",
+        "wrapper-component": "hermes-wrapper",
+        "runtime-profile.customer": "hermes-runtime-customer",
+        "runtime-profile.dev": "hermes-runtime-dev",
+        "runtime-contract.customer": "hermes-runtime-http-3000",
+        "runtime-contract.dev": "hermes-runtime-source-http-3000",
+        "command-mode": "image-default",
+        "working-dir": "/opt/hermes-workspace",
+        "http-port": "3000",
+        "contract.version": "v2",
+        "source-output-target": "/opt/hermes-workspace",
+        "nas.container-root": "/workspace/nas_docs",
+        "nas.host-root-template": "/home/{slot}/nas_docs",
+        "nas.read-only": "true",
+        "nas.propagation": "rslave",
+        "nas.child-mount-mode": "host-propagated-cifs",
+        "health.endpoints": "dashboard=http://127.0.0.1:9119/api/status,gateway=http://127.0.0.1:8642/health,workspace=http://127.0.0.1:3000/",
         "ops-repo-commit": "8be9e466c28f821a907a40ab2b0068910c6762cf",
     }
     values.update(overrides)
@@ -640,6 +714,99 @@ class CliReleaseRolloutTests(unittest.TestCase):
         self.assertIn("RUNTIME_NAS_PROPAGATION=rslave", text)
         self.assertIn("RUNTIME_NAS_CHILD_MOUNT_MODE=host-propagated-cifs", text)
 
+    def test_recipe_validate_canonical_hermes_runtime_emits_v2_health_args(self) -> None:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = cmd_recipe_validate_canonical(
+                argparse.Namespace(name="hermes-runtime", emit_build_args=True)
+            )
+        text = output.getvalue()
+        self.assertEqual(rc, 0, text)
+        self.assertIn("CANONICAL_RECIPE_NAME=hermes-runtime", text)
+        self.assertIn(f"CANONICAL_RECIPE_DIGEST={hermes_runtime_recipe_digest()}", text)
+        self.assertIn("PRODUCT_COMPONENT=hermes-runtime", text)
+        self.assertIn("RUNTIME_PROFILE_DEV=hermes-runtime-dev", text)
+        self.assertIn("RUNTIME_CONTRACT_VERSION=v2", text)
+        self.assertIn(
+            "RUNTIME_HEALTH_ENDPOINTS=dashboard=http://127.0.0.1:9119/api/status,gateway=http://127.0.0.1:8642/health,workspace=http://127.0.0.1:3000/",
+            text,
+        )
+
+    def test_recipe_capture_dev_requires_clean_live_v2_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_slot_registry(root, ["dev-hermess"])
+            source_output = root / "hermesdev" / "dist"
+            source_output.mkdir(parents=True)
+            product_image = wrapper_image_ref("hermes-runtime", "4")
+            wrapper_image = wrapper_image_ref("agent-runtime-hermes", "5")
+            image_spec = {
+                "family": "hermes",
+                "image_name": "direct-image",
+                "wrapper_image": wrapper_image,
+                "product_image": product_image,
+                "digest": "sha256:" + "5" * 64,
+                "product_digest": "sha256:" + "4" * 64,
+                "mode": "wrapped_product_image",
+                "image_recipe": hermes_runtime_image_recipe(product_image=product_image),
+            }
+            route = next(route for route in load_runtime_bindings(root) if route.linux_account == "dev-hermess")
+            desired = RuntimeTarget(
+                target="dev-hermess",
+                family="hermes",
+                runtime_class="dev",
+                image_name="direct-image",
+                image_spec=image_spec,
+                runtime_profile="hermes-runtime-dev",
+                route=route,
+            )
+            (root / "dev-recipes.yaml").write_text(
+                dump_yaml(
+                    {
+                        "recipes": {
+                            "dev-hermess": {
+                                "recipe_name": "hermes-runtime",
+                                "source_output": str(source_output),
+                                "source_provenance": {
+                                    "status": "git",
+                                    "git_head": "0123456789abcdef0123456789abcdef01234567",
+                                    "git_dirty": False,
+                                },
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch(
+                    "agent_runtime_ops.cli._desired_from_live_image_truth",
+                    return_value=(desired, load_profile("hermes-runtime-dev")),
+                ),
+                patch(
+                    "agent_runtime_ops.cli._run_live_slot_checks",
+                    return_value=[
+                        (True, "live_container_image_matches_spec", wrapper_image),
+                        (True, "live_internal_http_workspace_ok", "url=http://127.0.0.1:3000/"),
+                        (True, "live_internal_http_gateway_ok", "url=http://127.0.0.1:8642/health"),
+                        (True, "live_internal_http_dashboard_ok", "url=http://127.0.0.1:9119/api/status"),
+                    ],
+                ),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_recipe_capture_dev(
+                    argparse.Namespace(state_root=str(root), slot="dev-hermess", recipe_name="hermes-runtime")
+                )
+
+            text = output.getvalue()
+            self.assertEqual(rc, 0, text)
+            self.assertIn("recipe_capture_dev_status=ok", text)
+            self.assertIn("contract_version=v2", text)
+            self.assertIn("source_git_dirty=False", text)
+            self.assertIn("secret_value_printed=no", text)
+
     def test_binding_normalize_requires_runtime_bindings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -807,6 +974,46 @@ class CliReleaseRolloutTests(unittest.TestCase):
         self.assertEqual(recipe["nas_read_only"], "true")
         self.assertEqual(recipe["nas_mount_propagation"], "rslave")
         self.assertEqual(recipe["nas_child_mount_mode"], "host-propagated-cifs")
+
+    def test_wrapper_image_recipe_reads_hermes_runtime_v2_health_contract(self) -> None:
+        product_image = wrapper_image_ref("hermes-runtime", "4")
+        wrapper_image = wrapper_image_ref("agent-runtime-hermes", "5")
+        labels = hermes_runtime_recipe_labels(product_image=product_image)
+        with patch("agent_runtime_ops.cli._image_recipe_labels_from_wrapper", return_value=labels):
+            recipe = _image_recipe_from_wrapper_image(wrapper_image, family="hermes", product_image=product_image)
+        self.assertEqual(recipe["canonical_recipe_name"], "hermes-runtime")
+        self.assertEqual(recipe["canonical_recipe_digest"], hermes_runtime_recipe_digest())
+        self.assertEqual(recipe["runtime_profiles"]["customer"], "hermes-runtime-customer")
+        self.assertEqual(recipe["runtime_profiles"]["dev"], "hermes-runtime-dev")
+        self.assertEqual(recipe["contract_version"], "v2")
+        self.assertEqual(
+            recipe["health_endpoints"],
+            {
+                "dashboard": "http://127.0.0.1:9119/api/status",
+                "gateway": "http://127.0.0.1:8642/health",
+                "workspace": "http://127.0.0.1:3000/",
+            },
+        )
+
+    def test_live_contract_health_endpoints_come_from_image_recipe(self) -> None:
+        product_image = wrapper_image_ref("hermes-runtime", "4")
+        desired = RuntimeTarget(
+            target="dev-hermess",
+            family="hermes",
+            runtime_class="dev",
+            image_name="direct-image",
+            image_spec={
+                "wrapper_image": wrapper_image_ref("agent-runtime-hermes", "5"),
+                "product_image": product_image,
+                "image_recipe": hermes_runtime_image_recipe(product_image=product_image),
+            },
+            runtime_profile="hermes-runtime-dev",
+            route=binding("dev-hermess", "hermes", "dev", 30889, 30890),
+        )
+        endpoints = cli._contract_health_endpoints(desired, load_profile("hermes-runtime-dev"))
+        self.assertEqual(endpoints["workspace"], "http://127.0.0.1:3000/")
+        self.assertEqual(endpoints["gateway"], "http://127.0.0.1:8642/health")
+        self.assertEqual(endpoints["dashboard"], "http://127.0.0.1:9119/api/status")
 
     def test_wrapper_image_recipe_rejects_canonical_digest_mismatch(self) -> None:
         product_image = wrapper_image_ref("hermes-workspace", "2")

@@ -13,12 +13,14 @@ ARG RUNTIME_CONTRACT_DEV=""
 ARG RUNTIME_COMMAND_MODE=""
 ARG RUNTIME_WORKING_DIR=""
 ARG RUNTIME_HTTP_PORT=""
+ARG RUNTIME_CONTRACT_VERSION=""
 ARG RUNTIME_SOURCE_OUTPUT_TARGET=""
 ARG RUNTIME_NAS_CONTAINER_ROOT=""
 ARG RUNTIME_NAS_HOST_ROOT_TEMPLATE=""
 ARG RUNTIME_NAS_READ_ONLY=""
 ARG RUNTIME_NAS_PROPAGATION=""
 ARG RUNTIME_NAS_CHILD_MOUNT_MODE=""
+ARG RUNTIME_HEALTH_ENDPOINTS=""
 ARG CANONICAL_RECIPE_NAME=""
 ARG CANONICAL_RECIPE_DIGEST=""
 
@@ -39,6 +41,7 @@ LABEL com.epicevent.agent-runtime.runtime-profile.customer="${RUNTIME_PROFILE_CU
 LABEL com.epicevent.agent-runtime.runtime-profile.dev="${RUNTIME_PROFILE_DEV}"
 LABEL com.epicevent.agent-runtime.runtime-contract.customer="${RUNTIME_CONTRACT_CUSTOMER}"
 LABEL com.epicevent.agent-runtime.runtime-contract.dev="${RUNTIME_CONTRACT_DEV}"
+LABEL com.epicevent.agent-runtime.contract.version="${RUNTIME_CONTRACT_VERSION}"
 LABEL com.epicevent.agent-runtime.command-mode="${RUNTIME_COMMAND_MODE}"
 LABEL com.epicevent.agent-runtime.working-dir="${RUNTIME_WORKING_DIR}"
 LABEL com.epicevent.agent-runtime.http-port="${RUNTIME_HTTP_PORT}"
@@ -48,6 +51,7 @@ LABEL com.epicevent.agent-runtime.nas.host-root-template="${RUNTIME_NAS_HOST_ROO
 LABEL com.epicevent.agent-runtime.nas.read-only="${RUNTIME_NAS_READ_ONLY}"
 LABEL com.epicevent.agent-runtime.nas.propagation="${RUNTIME_NAS_PROPAGATION}"
 LABEL com.epicevent.agent-runtime.nas.child-mount-mode="${RUNTIME_NAS_CHILD_MOUNT_MODE}"
+LABEL com.epicevent.agent-runtime.health.endpoints="${RUNTIME_HEALTH_ENDPOINTS}"
 LABEL com.epicevent.agent-runtime.ops-repo-commit="${OPS_REPO_COMMIT}"
 
 COPY images/shared-document-tools/ /usr/local/share/agent-runtime-document-tools/
@@ -63,6 +67,7 @@ RUN set -eu; \
       echo "runtime_profile_dev=${RUNTIME_PROFILE_DEV}"; \
       echo "runtime_contract_customer=${RUNTIME_CONTRACT_CUSTOMER}"; \
       echo "runtime_contract_dev=${RUNTIME_CONTRACT_DEV}"; \
+      echo "contract_version=${RUNTIME_CONTRACT_VERSION}"; \
       echo "command_mode=${RUNTIME_COMMAND_MODE}"; \
       echo "working_dir=${RUNTIME_WORKING_DIR}"; \
       echo "http_port=${RUNTIME_HTTP_PORT}"; \
@@ -72,6 +77,7 @@ RUN set -eu; \
       echo "nas_read_only=${RUNTIME_NAS_READ_ONLY}"; \
       echo "nas_mount_propagation=${RUNTIME_NAS_PROPAGATION}"; \
       echo "nas_child_mount_mode=${RUNTIME_NAS_CHILD_MOUNT_MODE}"; \
+      echo "health_endpoints=${RUNTIME_HEALTH_ENDPOINTS}"; \
       echo "canonical_recipe_name=${CANONICAL_RECIPE_NAME}"; \
       echo "canonical_recipe_digest=${CANONICAL_RECIPE_DIGEST}"; \
       echo "ops_repo_commit=${OPS_REPO_COMMIT}"; \
