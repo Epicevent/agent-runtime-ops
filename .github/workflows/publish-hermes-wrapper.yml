@@ -154,7 +154,7 @@ jobs:
             exit 0
           fi
 
-          cid="$(docker run -d --rm -e API_SERVER_KEY=dummy-local-smoke-key "$image_ref")"
+          cid="$(docker run -d --rm -e API_SERVER_KEY=dummy-local-smoke-key -e HERMES_PASSWORD=dummy-local-smoke-password "$image_ref")"
           trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
 
           for _ in {1..60}; do
