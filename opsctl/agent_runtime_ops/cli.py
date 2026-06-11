@@ -3857,7 +3857,7 @@ def _build_arg_lines_for_canonical_recipe(name: str) -> list[str]:
         f"RUNTIME_NAS_PROPAGATION={labels['nas.propagation']}",
         f"RUNTIME_NAS_CHILD_MOUNT_MODE={labels['nas.child-mount-mode']}",
         f"RUNTIME_HEALTH_ENDPOINTS={labels['health.endpoints']}",
-        f"RUNTIME_HEALTH_ENDPOINTS_JSON={labels['health.endpoints.json']}",
+        f"RUNTIME_HEALTH_ENDPOINTS_JSON={shlex.quote(labels['health.endpoints.json'])}",
     ]
 
 

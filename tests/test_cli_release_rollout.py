@@ -871,7 +871,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
             text,
         )
         self.assertIn(
-            'RUNTIME_HEALTH_ENDPOINTS_JSON={"dashboard":"http://127.0.0.1:9119/api/status","gateway":"http://127.0.0.1:8642/health","workspace":"http://127.0.0.1:3000/"}',
+            'RUNTIME_HEALTH_ENDPOINTS_JSON=\'{"dashboard":"http://127.0.0.1:9119/api/status","gateway":"http://127.0.0.1:8642/health","workspace":"http://127.0.0.1:3000/"}\'',
             text,
         )
 
