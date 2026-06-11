@@ -268,6 +268,7 @@ def hermes_runtime_recipe_labels(**overrides: str) -> dict[str, str]:
         "nas.propagation": "rslave",
         "nas.child-mount-mode": "host-propagated-cifs",
         "health.endpoints": "dashboard=http://127.0.0.1:9119/api/status,gateway=http://127.0.0.1:8642/health,workspace=http://127.0.0.1:3000/",
+        "health.endpoints.json": '{"dashboard":"http://127.0.0.1:9119/api/status","gateway":"http://127.0.0.1:8642/health","workspace":"http://127.0.0.1:3000/"}',
         "ops-repo-commit": "8be9e466c28f821a907a40ab2b0068910c6762cf",
     }
     values.update(overrides)
@@ -694,7 +695,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0, "https://token@example.com/org/repo.git\n", "")
             return subprocess.CompletedProcess(command, 1, "", "unexpected")
 
-        with patch("agent_runtime_ops.cli._run_text", side_effect=fake_run):
+        with patch("agent_runtime_ops.domain.source_provenance._run_text", side_effect=fake_run):
             provenance = cli._source_provenance(source)
 
         self.assertEqual(provenance["status"], "git")
@@ -869,6 +870,10 @@ class CliReleaseRolloutTests(unittest.TestCase):
             "RUNTIME_HEALTH_ENDPOINTS=dashboard=http://127.0.0.1:9119/api/status,gateway=http://127.0.0.1:8642/health,workspace=http://127.0.0.1:3000/",
             text,
         )
+        self.assertIn(
+            'RUNTIME_HEALTH_ENDPOINTS_JSON={"dashboard":"http://127.0.0.1:9119/api/status","gateway":"http://127.0.0.1:8642/health","workspace":"http://127.0.0.1:3000/"}',
+            text,
+        )
 
     def test_recipe_capture_dev_requires_clean_live_v2_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -917,6 +922,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 encoding="utf-8",
             )
             output = io.StringIO()
+            stored_head = "0123456789abcdef0123456789abcdef01234567"
             with (
                 patch("agent_runtime_ops.cli._is_root", return_value=True),
                 patch(
@@ -932,6 +938,17 @@ class CliReleaseRolloutTests(unittest.TestCase):
                         (True, "live_internal_http_dashboard_ok", "url=http://127.0.0.1:9119/api/status"),
                     ],
                 ),
+                patch(
+                    "agent_runtime_ops.domain.source_provenance.source_provenance",
+                    return_value={
+                        "path": str(source_output),
+                        "status": "git",
+                        "git_head": stored_head,
+                        "git_dirty": False,
+                        "git_toplevel": str(source_output.parent),
+                        "git_remote_origin": "",
+                    },
+                ),
                 contextlib.redirect_stdout(output),
             ):
                 rc = cmd_recipe_capture_dev(
@@ -943,7 +960,161 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertIn("recipe_capture_dev_status=ok", text)
             self.assertIn("contract_version=v2", text)
             self.assertIn("source_git_dirty=False", text)
+            self.assertIn(f"source_git_head_at_apply={stored_head}", text)
             self.assertIn("secret_value_printed=no", text)
+
+    def test_recipe_capture_dev_rejects_current_dirty_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_slot_registry(root, ["dev-hermess"])
+            source_output = root / "hermesdev" / "dist"
+            source_output.mkdir(parents=True)
+            product_image = wrapper_image_ref("hermes-runtime", "4")
+            wrapper_image = wrapper_image_ref("agent-runtime-hermes", "5")
+            image_spec = {
+                "family": "hermes",
+                "image_name": "direct-image",
+                "wrapper_image": wrapper_image,
+                "product_image": product_image,
+                "digest": "sha256:" + "5" * 64,
+                "product_digest": "sha256:" + "4" * 64,
+                "mode": "wrapped_product_image",
+                "image_recipe": hermes_runtime_image_recipe(product_image=product_image),
+            }
+            route = next(route for route in load_runtime_bindings(root) if route.linux_account == "dev-hermess")
+            desired = RuntimeTarget(
+                target="dev-hermess",
+                family="hermes",
+                runtime_class="dev",
+                image_name="direct-image",
+                image_spec=image_spec,
+                runtime_profile="hermes-runtime-dev",
+                route=route,
+            )
+            stored_head = "0123456789abcdef0123456789abcdef01234567"
+            (root / "dev-recipes.yaml").write_text(
+                dump_yaml(
+                    {
+                        "recipes": {
+                            "dev-hermess": {
+                                "recipe_name": "hermes-runtime",
+                                "source_output": str(source_output),
+                                "source_provenance": {
+                                    "status": "git",
+                                    "git_head": stored_head,
+                                    "git_dirty": False,
+                                },
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch(
+                    "agent_runtime_ops.cli._desired_from_live_image_truth",
+                    return_value=(desired, load_profile("hermes-runtime-dev")),
+                ),
+                patch(
+                    "agent_runtime_ops.domain.source_provenance.source_provenance",
+                    return_value={
+                        "path": str(source_output),
+                        "status": "git",
+                        "git_head": stored_head,
+                        "git_dirty": True,
+                        "git_toplevel": str(source_output.parent),
+                        "git_remote_origin": "",
+                    },
+                ),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_recipe_capture_dev(
+                    argparse.Namespace(state_root=str(root), slot="dev-hermess", recipe_name="hermes-runtime")
+                )
+
+            text = output.getvalue()
+            self.assertEqual(rc, 1, text)
+            self.assertIn("recipe_capture_dev_status=fail", text)
+            self.assertIn("current source provenance must be clean", text)
+
+    def test_recipe_capture_dev_rejects_head_changed_since_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_slot_registry(root, ["dev-hermess"])
+            source_output = root / "hermesdev" / "dist"
+            source_output.mkdir(parents=True)
+            product_image = wrapper_image_ref("hermes-runtime", "4")
+            wrapper_image = wrapper_image_ref("agent-runtime-hermes", "5")
+            image_spec = {
+                "family": "hermes",
+                "image_name": "direct-image",
+                "wrapper_image": wrapper_image,
+                "product_image": product_image,
+                "digest": "sha256:" + "5" * 64,
+                "product_digest": "sha256:" + "4" * 64,
+                "mode": "wrapped_product_image",
+                "image_recipe": hermes_runtime_image_recipe(product_image=product_image),
+            }
+            route = next(route for route in load_runtime_bindings(root) if route.linux_account == "dev-hermess")
+            desired = RuntimeTarget(
+                target="dev-hermess",
+                family="hermes",
+                runtime_class="dev",
+                image_name="direct-image",
+                image_spec=image_spec,
+                runtime_profile="hermes-runtime-dev",
+                route=route,
+            )
+            stored_head = "0123456789abcdef0123456789abcdef01234567"
+            current_head = "fedcba9876543210fedcba9876543210fedcba98"
+            (root / "dev-recipes.yaml").write_text(
+                dump_yaml(
+                    {
+                        "recipes": {
+                            "dev-hermess": {
+                                "recipe_name": "hermes-runtime",
+                                "source_output": str(source_output),
+                                "source_provenance": {
+                                    "status": "git",
+                                    "git_head": stored_head,
+                                    "git_dirty": False,
+                                },
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch(
+                    "agent_runtime_ops.cli._desired_from_live_image_truth",
+                    return_value=(desired, load_profile("hermes-runtime-dev")),
+                ),
+                patch(
+                    "agent_runtime_ops.domain.source_provenance.source_provenance",
+                    return_value={
+                        "path": str(source_output),
+                        "status": "git",
+                        "git_head": current_head,
+                        "git_dirty": False,
+                        "git_toplevel": str(source_output.parent),
+                        "git_remote_origin": "",
+                    },
+                ),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_recipe_capture_dev(
+                    argparse.Namespace(state_root=str(root), slot="dev-hermess", recipe_name="hermes-runtime")
+                )
+
+            text = output.getvalue()
+            self.assertEqual(rc, 1, text)
+            self.assertIn("recipe_capture_dev_status=fail", text)
+            self.assertIn("source git head changed since apply-dev", text)
 
     def test_binding_normalize_requires_runtime_bindings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1133,6 +1304,17 @@ class CliReleaseRolloutTests(unittest.TestCase):
             },
         )
 
+    def test_wrapper_image_recipe_prefers_health_endpoint_json_label(self) -> None:
+        product_image = wrapper_image_ref("hermes-runtime", "4")
+        wrapper_image = wrapper_image_ref("agent-runtime-hermes", "5")
+        labels = hermes_runtime_recipe_labels(
+            product_image=product_image,
+            **{"health.endpoints": "dashboard=http://wrong.invalid"},
+        )
+        with patch("agent_runtime_ops.cli._image_recipe_labels_from_wrapper", return_value=labels):
+            recipe = _image_recipe_from_wrapper_image(wrapper_image, family="hermes", product_image=product_image)
+        self.assertEqual(recipe["health_endpoints"]["gateway"], "http://127.0.0.1:8642/health")
+
     def test_live_contract_health_endpoints_come_from_image_recipe(self) -> None:
         product_image = wrapper_image_ref("hermes-runtime", "4")
         desired = RuntimeTarget(
@@ -1198,6 +1380,26 @@ class CliReleaseRolloutTests(unittest.TestCase):
         self.assertEqual(truth["truth_status"], "incomplete_recipe_labels")
         self.assertEqual(truth["canonical_recipe_name"], "")
         self.assertEqual(truth["canonical_recipe_digest"], "")
+
+    def test_runtime_truth_compares_image_recipe_digest_to_local_canonical_recipe(self) -> None:
+        ok, name, detail = cli._local_canonical_recipe_check_from_truth(
+            {
+                "canonical_recipe_name": "hermes-runtime",
+                "canonical_recipe_digest": hermes_runtime_recipe_digest(),
+            }
+        )
+        self.assertTrue(ok, detail)
+        self.assertEqual(name, "truth_canonical_recipe_digest_matches_local")
+
+        ok, name, detail = cli._local_canonical_recipe_check_from_truth(
+            {
+                "canonical_recipe_name": "hermes-runtime",
+                "canonical_recipe_digest": "sha256:" + "0" * 64,
+            }
+        )
+        self.assertFalse(ok)
+        self.assertEqual(name, "truth_canonical_recipe_digest_matches_local")
+        self.assertIn("local=", detail or "")
 
     def test_live_image_truth_reports_nas_contract_from_image_labels(self) -> None:
         route = binding("dev-oc", "openclaw", "dev", 30789, 30790)

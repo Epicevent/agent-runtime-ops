@@ -21,6 +21,7 @@ ARG RUNTIME_NAS_READ_ONLY=""
 ARG RUNTIME_NAS_PROPAGATION=""
 ARG RUNTIME_NAS_CHILD_MOUNT_MODE=""
 ARG RUNTIME_HEALTH_ENDPOINTS=""
+ARG RUNTIME_HEALTH_ENDPOINTS_JSON=""
 ARG CANONICAL_RECIPE_NAME=""
 ARG CANONICAL_RECIPE_DIGEST=""
 
@@ -52,6 +53,7 @@ LABEL com.epicevent.agent-runtime.nas.read-only="${RUNTIME_NAS_READ_ONLY}"
 LABEL com.epicevent.agent-runtime.nas.propagation="${RUNTIME_NAS_PROPAGATION}"
 LABEL com.epicevent.agent-runtime.nas.child-mount-mode="${RUNTIME_NAS_CHILD_MOUNT_MODE}"
 LABEL com.epicevent.agent-runtime.health.endpoints="${RUNTIME_HEALTH_ENDPOINTS}"
+LABEL com.epicevent.agent-runtime.health.endpoints.json="${RUNTIME_HEALTH_ENDPOINTS_JSON}"
 LABEL com.epicevent.agent-runtime.ops-repo-commit="${OPS_REPO_COMMIT}"
 
 USER root
@@ -89,6 +91,7 @@ RUN set -eu; \
       echo "nas_mount_propagation=${RUNTIME_NAS_PROPAGATION}"; \
       echo "nas_child_mount_mode=${RUNTIME_NAS_CHILD_MOUNT_MODE}"; \
       echo "health_endpoints=${RUNTIME_HEALTH_ENDPOINTS}"; \
+      echo "health_endpoints_json=${RUNTIME_HEALTH_ENDPOINTS_JSON}"; \
       echo "canonical_recipe_name=${CANONICAL_RECIPE_NAME}"; \
       echo "canonical_recipe_digest=${CANONICAL_RECIPE_DIGEST}"; \
       echo "ops_repo_commit=${OPS_REPO_COMMIT}"; \

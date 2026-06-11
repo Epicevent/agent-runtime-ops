@@ -31,12 +31,17 @@ from .canonical_recipes import (
     validate_canonical_recipe,
 )
 from .compose_contract import validate_compose_contract
+from .domain.runtime_truth import local_canonical_recipe_check_from_truth as _local_canonical_recipe_check_from_truth
+from .domain.source_provenance import require_fresh_clean_source_provenance as _require_fresh_clean_source_provenance
+from .domain.source_provenance import source_provenance as _source_provenance
 from .host.fstab import (
     fstab_escape as _fstab_escape,
     managed_fstab_marker as _managed_fstab_marker,
     remove_managed_fstab_entry as _remove_managed_fstab_entry,
     write_managed_fstab_entry as _host_write_managed_fstab_entry,
 )
+from .host.files import atomic_write_text as _atomic_write_text
+from .host.files import fsync_parent as _fsync_parent
 from .host.mounts import (
     findmnt_one as _findmnt_one,
     findmnt_tree as _findmnt_tree,
@@ -253,11 +258,19 @@ def _write_runtime_bindings_file(state_root: Path, bindings: list[RuntimeBinding
     if path.exists() and path.is_symlink():
         raise ValueError(f"runtime bindings must not be symlink: {path}")
     tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
-    tmp_path.write_text(dump_runtime_bindings(bindings), encoding="utf-8")
-    if hasattr(os, "chown"):
-        os.chown(tmp_path, 0, state_root.stat().st_gid)
-    os.chmod(tmp_path, 0o640)
-    os.replace(tmp_path, path)
+    try:
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            handle.write(dump_runtime_bindings(bindings))
+            handle.flush()
+            os.fsync(handle.fileno())
+        if hasattr(os, "chown"):
+            os.chown(tmp_path, 0, state_root.stat().st_gid)
+        os.chmod(tmp_path, 0o640)
+        os.replace(tmp_path, path)
+        _fsync_parent(path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
     return path
 
 
@@ -734,10 +747,46 @@ def _label_map_from_string(value: str) -> dict[str, str]:
     return result
 
 
+def _label_map_from_json(value: str) -> dict[str, str]:
+    try:
+        data = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid label map json: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("label map json must be an object")
+    result: dict[str, str] = {}
+    for key, raw_value in data.items():
+        key_text = str(key).strip()
+        value_text = str(raw_value).strip()
+        if not SAFE_NAME_RE.match(key_text):
+            raise ValueError(f"invalid label map key: {key_text}")
+        if not value_text:
+            raise ValueError(f"empty label map value: {key_text}")
+        result[key_text] = value_text
+    return result
+
+
+def _label_map_from_labels(labels: dict[str, str], name: str) -> dict[str, str]:
+    json_value = _recipe_label(labels, f"{name}.json")
+    if json_value:
+        return _label_map_from_json(json_value)
+    csv_value = _recipe_label(labels, name)
+    return _label_map_from_string(csv_value) if csv_value else {}
+
+
 def _label_map_to_string(value: object) -> str:
     if not isinstance(value, dict):
         return ""
     return ",".join(f"{key}={value[key]}" for key in sorted(value) if str(key) and str(value[key]))
+
+
+def _label_map_to_json(value: object) -> str:
+    if not isinstance(value, dict):
+        return ""
+    result = {str(key): str(item) for key, item in value.items() if str(key) and str(item)}
+    if not result:
+        return ""
+    return json.dumps(result, sort_keys=True, separators=(",", ":"))
 
 
 def _profile_runtime_contract(profile) -> str:
@@ -843,6 +892,7 @@ def _image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product
     nas_child_mount_mode = _recipe_label(labels, "nas.child-mount-mode")
     contract_version = _recipe_label(labels, "contract.version")
     health_endpoints_label = _recipe_label(labels, "health.endpoints")
+    health_endpoints_json_label = _recipe_label(labels, "health.endpoints.json")
     canonical_name = _recipe_label(labels, "recipe.name")
     canonical_digest = _recipe_label(labels, "recipe.digest")
     if not canonical_name:
@@ -904,13 +954,20 @@ def _image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product
     }
     if expected_labels.get("contract.version"):
         label_checks["contract.version"] = contract_version
-    if expected_labels.get("health.endpoints"):
-        label_checks["health.endpoints"] = health_endpoints_label
     for label_name, actual in label_checks.items():
         expected = expected_labels[label_name]
         if actual != expected:
             raise ValueError(
                 f"wrapper image canonical recipe mismatch: {label_name} label={actual or 'missing'} canonical={expected or 'missing'}"
+            )
+    if expected_labels.get("health.endpoints.json"):
+        expected_health_endpoints = _label_map_from_json(expected_labels["health.endpoints.json"])
+        actual_health_endpoints = _label_map_from_labels(labels, "health.endpoints")
+        if actual_health_endpoints != expected_health_endpoints:
+            actual = health_endpoints_json_label or health_endpoints_label
+            raise ValueError(
+                "wrapper image canonical recipe mismatch: health.endpoints "
+                f"label={actual or 'missing'} canonical={expected_labels['health.endpoints.json']}"
             )
     if canonical_name and canonical_name != canonical_recipe.name:
         raise ValueError(f"wrapper image canonical recipe name mismatch: label={canonical_name} canonical={canonical_recipe.name}")
@@ -945,7 +1002,7 @@ def _image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product
         "nas_mount_propagation": nas_propagation,
         "nas_child_mount_mode": nas_child_mount_mode,
         "contract_version": contract_version,
-        "health_endpoints": _label_map_from_string(health_endpoints_label) if health_endpoints_label else {},
+        "health_endpoints": _label_map_from_labels(labels, "health.endpoints"),
         "ops_repo_commit": _recipe_label(labels, "ops-repo-commit"),
     }
     for runtime_class, profile_name in recipe["runtime_profiles"].items():
@@ -1709,6 +1766,7 @@ def _live_image_truth_from_info(binding: RuntimeBinding, info: dict, apache_rout
         "nas_child_mount_mode": _recipe_label(labels, "nas.child-mount-mode"),
         "contract_version": _recipe_label(labels, "contract.version"),
         "health_endpoints": _recipe_label(labels, "health.endpoints"),
+        "health_endpoints_json": _recipe_label(labels, "health.endpoints.json"),
         "ops_repo_commit": _recipe_label(labels, "ops-repo-commit"),
     }
 
@@ -1774,6 +1832,7 @@ def _live_runtime_truth(slot: str, state_root: Path) -> tuple[dict[str, str], li
                 "truth_container_linux_account_label_matches",
                 f"label={labels.get('agent-runtime.linux-account') or labels.get('agent-runtime.slot') or 'missing'} binding={binding.linux_account}",
             ),
+            _local_canonical_recipe_check_from_truth(truth),
         ]
     )
     return truth, checks
@@ -2188,10 +2247,7 @@ def _docker_compose_command(slot: str, compose_path: Path, *args: str) -> list[s
 
 def _atomic_write(path: Path, text: str, mode: int = 0o644) -> None:
     _safe_managed_file(path)
-    tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
-    tmp_path.write_text(text, encoding="utf-8")
-    os.chmod(tmp_path, mode)
-    os.replace(tmp_path, path)
+    _atomic_write_text(path, text, mode=mode)
 
 
 def _required_compose_variables(rendered_text: str) -> set[str]:
@@ -3732,11 +3788,15 @@ def _write_state_yaml_file(state_root: Path, name: str, data: dict) -> Path | No
     backup_path = _backup_state_file(state_root, path)
     tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
     try:
-        tmp_path.write_text(dump_yaml(data), encoding="utf-8")
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            handle.write(dump_yaml(data))
+            handle.flush()
+            os.fsync(handle.fileno())
         if hasattr(os, "chown") and hasattr(os, "geteuid") and os.geteuid() == 0:
             os.chown(tmp_path, 0, state_root.stat().st_gid)
         os.chmod(tmp_path, 0o640)
         os.replace(tmp_path, path)
+        _fsync_parent(path)
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise
@@ -3797,6 +3857,7 @@ def _build_arg_lines_for_canonical_recipe(name: str) -> list[str]:
         f"RUNTIME_NAS_PROPAGATION={labels['nas.propagation']}",
         f"RUNTIME_NAS_CHILD_MOUNT_MODE={labels['nas.child-mount-mode']}",
         f"RUNTIME_HEALTH_ENDPOINTS={labels['health.endpoints']}",
+        f"RUNTIME_HEALTH_ENDPOINTS_JSON={labels['health.endpoints.json']}",
     ]
 
 
@@ -3955,41 +4016,6 @@ def _dev_recipe_runtime_env(desired, state_root: Path) -> dict[str, str]:
     return env
 
 
-def _redact_git_url(value: str) -> str:
-    return re.sub(r"://[^/@]+@", "://<redacted>@", value)
-
-
-def _git_source_command(source: Path, *args: str) -> list[str]:
-    safe_source = str(source.resolve(strict=False))
-    return ["git", "-c", f"safe.directory={safe_source}", "-C", safe_source, *args]
-
-
-def _source_provenance(source: Path) -> dict[str, object]:
-    data: dict[str, object] = {
-        "path": str(source),
-        "status": "unknown",
-        "git_head": "",
-        "git_dirty": None,
-        "git_toplevel": "",
-        "git_remote_origin": "",
-    }
-    rev = _run_text(_git_source_command(source, "rev-parse", "--show-toplevel", "HEAD"), timeout=30)
-    if rev.returncode != 0:
-        data["status"] = "no_git"
-        return data
-    lines = [line.strip() for line in rev.stdout.splitlines() if line.strip()]
-    if len(lines) >= 2:
-        data["git_toplevel"] = lines[0]
-        data["git_head"] = lines[1]
-    status = _run_text(_git_source_command(source, "status", "--porcelain"), timeout=30)
-    data["git_dirty"] = bool(status.stdout.strip()) if status.returncode == 0 else None
-    remote = _run_text(_git_source_command(source, "remote", "get-url", "origin"), timeout=30)
-    if remote.returncode == 0:
-        data["git_remote_origin"] = _redact_git_url(remote.stdout.strip())
-    data["status"] = "git"
-    return data
-
-
 def cmd_recipe_dev_status(args: argparse.Namespace) -> int:
     state_root = _state_root(args)
     slot = str(args.slot)
@@ -4134,13 +4160,8 @@ def cmd_recipe_capture_dev(args: argparse.Namespace) -> int:
         source_output = str(dev_recipe.get("source_output") or "")
         if not source_output:
             raise ValueError("dev recipe state is missing source_output")
-        provenance = dev_recipe.get("source_provenance")
-        if not isinstance(provenance, dict):
-            raise ValueError("dev recipe state is missing source provenance")
-        if provenance.get("status") != "git":
-            raise ValueError(f"source provenance is not git-backed: status={provenance.get('status') or 'missing'}")
-        if provenance.get("git_dirty") is not False:
-            raise ValueError(f"source provenance must be clean: git_dirty={provenance.get('git_dirty')}")
+        stored_provenance = dev_recipe.get("source_provenance")
+        provenance = _require_fresh_clean_source_provenance(dev_recipe)
         checks = _run_live_slot_checks(desired, profile, state_root)
         failed = [name for ok, name, _detail in checks if not ok]
         if failed:
@@ -4177,6 +4198,8 @@ def cmd_recipe_capture_dev(args: argparse.Namespace) -> int:
     print(f"source_output={source_output}")
     print(f"source_git_head={provenance.get('git_head') or ''}")
     print(f"source_git_dirty={provenance.get('git_dirty')}")
+    if isinstance(stored_provenance, dict):
+        print(f"source_git_head_at_apply={stored_provenance.get('git_head') or ''}")
     print("secret_value_printed=no")
     print("next_action=build product image from source_git_head, then wrap with this canonical_recipe_digest")
     return 0

@@ -86,6 +86,7 @@ jobs:
             --build-arg RUNTIME_NAS_PROPAGATION="$RUNTIME_NAS_PROPAGATION" \
             --build-arg RUNTIME_NAS_CHILD_MOUNT_MODE="$RUNTIME_NAS_CHILD_MOUNT_MODE" \
             --build-arg RUNTIME_HEALTH_ENDPOINTS="$RUNTIME_HEALTH_ENDPOINTS" \
+            --build-arg RUNTIME_HEALTH_ENDPOINTS_JSON="$RUNTIME_HEALTH_ENDPOINTS_JSON" \
             --build-arg CANONICAL_RECIPE_NAME="$CANONICAL_RECIPE_NAME" \
             --build-arg CANONICAL_RECIPE_DIGEST="$CANONICAL_RECIPE_DIGEST" \
             -t "$image_ref" \
@@ -113,6 +114,7 @@ jobs:
           if grep -Fx "canonical_recipe_name=hermes-runtime" ./wrapper.manifest; then
             grep -Fx "contract_version=v2" ./wrapper.manifest
             grep -Fx "health_endpoints=dashboard=http://127.0.0.1:9119/api/status,gateway=http://127.0.0.1:8642/health,workspace=http://127.0.0.1:3000/" ./wrapper.manifest
+            grep -Fx 'health_endpoints_json={"dashboard":"http://127.0.0.1:9119/api/status","gateway":"http://127.0.0.1:8642/health","workspace":"http://127.0.0.1:3000/"}' ./wrapper.manifest
           fi
           docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.recipe.schema" }}' | grep -Fx v1
           docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.recipe.name" }}' | grep -E '^hermes-(combined|workspace|runtime)$'
@@ -122,6 +124,9 @@ jobs:
           docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.nas.read-only" }}' | grep -Fx true
           docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.nas.propagation" }}' | grep -Fx rslave
           docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.nas.child-mount-mode" }}' | grep -Fx host-propagated-cifs
+          if grep -Fx "canonical_recipe_name=hermes-runtime" ./wrapper.manifest; then
+            docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.health.endpoints.json" }}' | grep -Fx '{"dashboard":"http://127.0.0.1:9119/api/status","gateway":"http://127.0.0.1:8642/health","workspace":"http://127.0.0.1:3000/"}'
+          fi
           docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.product-image" }}' | grep -Fx "${{ inputs.product_image }}"
           docker run --rm --entrypoint /bin/sh "$image_ref" -lc '
             set -eu
@@ -137,6 +142,65 @@ jobs:
             openclaw-document-tools | grep -q /workspace/nas_docs
             python3 -c "import docx, pandas, openpyxl, pptx, lxml, bs4, pypdf, pdfplumber, fitz, olefile"
           '
+
+      - name: Smoke Hermes runtime services
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_ref="$IMAGE_REPOSITORY:${{ inputs.image_tag }}"
+          recipe_name="$(docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.recipe.name" }}')"
+          if [[ "$recipe_name" != "hermes-runtime" ]]; then
+            echo "smoke_status=skipped recipe_name=$recipe_name"
+            exit 0
+          fi
+
+          cid="$(docker run -d --rm -e API_SERVER_KEY=dummy-local-smoke-key "$image_ref")"
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+
+          for _ in {1..60}; do
+            if ! docker inspect "$cid" --format '{{ .State.Running }}' | grep -Fx true >/dev/null; then
+              docker logs "$cid" || true
+              echo "smoke_status=fail reason=container_exited" >&2
+              exit 1
+            fi
+            if docker exec "$cid" node -e '
+              const http = require("http");
+              const endpoints = [
+                "http://127.0.0.1:3000/",
+                "http://127.0.0.1:8642/health",
+                "http://127.0.0.1:9119/api/status",
+              ];
+              function check(url) {
+                return new Promise((resolve, reject) => {
+                  const request = http.get(url, (response) => {
+                    response.resume();
+                    if (response.statusCode >= 200 && response.statusCode < 400) {
+                      resolve();
+                    } else {
+                      reject(new Error(`${url} returned ${response.statusCode}`));
+                    }
+                  });
+                  request.on("error", reject);
+                  request.setTimeout(2000, () => request.destroy(new Error(`${url} timed out`)));
+                });
+              }
+              Promise.all(endpoints.map(check)).then(
+                () => process.exit(0),
+                (error) => {
+                  console.error(error.message);
+                  process.exit(1);
+                }
+              );
+            '; then
+              echo "smoke_status=ok recipe_name=$recipe_name"
+              exit 0
+            fi
+            sleep 2
+          done
+
+          docker logs "$cid" || true
+          echo "smoke_status=fail reason=endpoints_not_ready" >&2
+          exit 1
 
       - name: Push wrapper
         run: docker push "$IMAGE_REPOSITORY:${{ inputs.image_tag }}"

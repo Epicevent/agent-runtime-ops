@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -80,6 +81,15 @@ def _label_map(value: Any) -> str:
     return ",".join(pairs)
 
 
+def _label_map_json(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    result = {str(key).strip(): str(item).strip() for key, item in value.items() if str(key).strip() and str(item).strip()}
+    if not result:
+        return ""
+    return json.dumps(result, sort_keys=True, separators=(",", ":"))
+
+
 def canonical_recipe_for_product(family: str, product_image: object) -> CanonicalRuntimeRecipe | None:
     product_repo = image_repo(product_image)
     for name in list_canonical_recipe_names():
@@ -132,6 +142,7 @@ def canonical_label_values(recipe: CanonicalRuntimeRecipe) -> dict[str, str]:
         "nas.propagation": str(recipe.data.get("nas_mount_propagation") or ""),
         "nas.child-mount-mode": str(recipe.data.get("nas_child_mount_mode") or ""),
         "health.endpoints": _label_map(recipe.data.get("health_endpoints")),
+        "health.endpoints.json": _label_map_json(recipe.data.get("health_endpoints")),
     }
 
 
