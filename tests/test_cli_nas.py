@@ -10,10 +10,12 @@ import uuid
 from unittest.mock import patch
 
 from agent_runtime_ops.cli import (
-    _approve_auto_once,
-    _delete_official_credentials,
     _fstab_escape,
     _managed_fstab_marker,
+)
+from agent_runtime_ops.commands.nas import (
+    _approve_auto_once,
+    _delete_official_credentials,
     _official_credential_status,
     _remove_managed_fstab_entry,
     _write_managed_fstab_entry,
@@ -118,8 +120,8 @@ class CliNasTests(unittest.TestCase):
             legacy_path.parent.mkdir()
             legacy_path.write_text("username=legacy\npassword=secret\n", encoding="utf-8")
             with (
-                patch("agent_runtime_ops.cli.root_credential_path", return_value=root_path),
-                patch("agent_runtime_ops.cli.customer_credential_path", return_value=customer_path),
+                patch("agent_runtime_ops.commands.nas.root_credential_path", return_value=root_path),
+                patch("agent_runtime_ops.commands.nas.customer_credential_path", return_value=customer_path),
             ):
                 status = _official_credential_status("oc3", share)
         self.assertEqual(status["root_credential_present"], "no")
@@ -137,9 +139,9 @@ class CliNasTests(unittest.TestCase):
             customer_path.write_text("username=customer\npassword=secret\n", encoding="utf-8")
             legacy_path.write_text("username=legacy\npassword=secret\n", encoding="utf-8")
             with (
-                patch("agent_runtime_ops.cli.root_credential_path", return_value=root_path),
-                patch("agent_runtime_ops.cli.customer_credential_path", return_value=customer_path),
-                patch("agent_runtime_ops.cli._credential_file_is_safe_for_slot"),
+                patch("agent_runtime_ops.commands.nas.root_credential_path", return_value=root_path),
+                patch("agent_runtime_ops.commands.nas.customer_credential_path", return_value=customer_path),
+                patch("agent_runtime_ops.commands.nas._credential_file_is_safe_for_slot"),
             ):
                 removed = _delete_official_credentials("oc3", share)
             self.assertFalse(root_path.exists())
@@ -193,8 +195,8 @@ class CliNasTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with (
-                patch("agent_runtime_ops.cli._slot_uid_gid", return_value=(1009, 1009)),
-                patch("agent_runtime_ops.cli._runtime_ids", return_value=(2009, 2009, 1030)),
+                patch("agent_runtime_ops.commands.nas._slot_uid_gid", return_value=(1009, 1009)),
+                patch("agent_runtime_ops.commands.nas._runtime_ids", return_value=(2009, 2009, 1030)),
             ):
                 _write_managed_fstab_entry(
                     "oc3",
@@ -221,8 +223,8 @@ class CliNasTests(unittest.TestCase):
             customer_path = Path(tmp) / "customer.cred"
             root_path.write_text("username=root\npassword=top-secret\n", encoding="utf-8")
             with (
-                patch("agent_runtime_ops.cli.root_credential_path", return_value=root_path),
-                patch("agent_runtime_ops.cli.customer_credential_path", return_value=customer_path),
+                patch("agent_runtime_ops.commands.nas.root_credential_path", return_value=root_path),
+                patch("agent_runtime_ops.commands.nas.customer_credential_path", return_value=customer_path),
             ):
                 output = io.StringIO()
                 with contextlib.redirect_stdout(output):
@@ -249,11 +251,11 @@ class CliNasTests(unittest.TestCase):
             credential = root / "cred"
             output = io.StringIO()
             with (
-                patch("agent_runtime_ops.cli.getpass.getuser", return_value="oc3"),
-                patch("agent_runtime_ops.cli._ensure_customer_agent_dirs"),
-                patch("agent_runtime_ops.cli._slot_uid_gid", return_value=(1003, 1003)),
-                patch("agent_runtime_ops.cli.customer_credential_path", return_value=credential),
-                patch("agent_runtime_ops.cli._write_credential_file") as write_credential,
+                patch("agent_runtime_ops.commands.nas.getpass.getuser", return_value="oc3"),
+                patch("agent_runtime_ops.commands.nas._ensure_customer_agent_dirs"),
+                patch("agent_runtime_ops.commands.nas._slot_uid_gid", return_value=(1003, 1003)),
+                patch("agent_runtime_ops.commands.nas.customer_credential_path", return_value=credential),
+                patch("agent_runtime_ops.commands.nas._write_credential_file") as write_credential,
                 patch("sys.stdin", io.StringIO(secret)),
                 contextlib.redirect_stdout(output),
             ):
@@ -295,14 +297,14 @@ class CliNasTests(unittest.TestCase):
             credential = root / "root.cred"
             output = io.StringIO()
             with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
-                patch("agent_runtime_ops.cli.check_nas_policy", return_value=decision) as policy,
-                patch("agent_runtime_ops.cli.root_credential_path", return_value=credential) as root_path,
-                patch("agent_runtime_ops.cli._write_credential_file"),
-                patch("agent_runtime_ops.cli._prepare_mount_entry", return_value=(decision, decision.mountpoint)) as prepare,
-                patch("agent_runtime_ops.cli._findmnt_one", side_effect=[(1, "", []), (0, "", [])]),
-                patch("agent_runtime_ops.cli._host_mount_prepared_share", return_value=(True, "ok")),
-                patch("agent_runtime_ops.cli._append_action_log"),
+                patch("agent_runtime_ops.commands.nas._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.nas.check_nas_policy", return_value=decision) as policy,
+                patch("agent_runtime_ops.commands.nas.root_credential_path", return_value=credential) as root_path,
+                patch("agent_runtime_ops.commands.nas._write_credential_file"),
+                patch("agent_runtime_ops.commands.nas._prepare_mount_entry", return_value=(decision, decision.mountpoint)) as prepare,
+                patch("agent_runtime_ops.commands.nas._findmnt_one", side_effect=[(1, "", []), (0, "", [])]),
+                patch("agent_runtime_ops.commands.nas._host_mount_prepared_share", return_value=(True, "ok")),
+                patch("agent_runtime_ops.commands.nas._append_action_log"),
                 patch("sys.stdin", io.StringIO("secret-password")),
                 contextlib.redirect_stdout(output),
             ):
@@ -344,15 +346,15 @@ class CliNasTests(unittest.TestCase):
             credential.write_text("username=nas\npassword=secret\n", encoding="utf-8")
             output = io.StringIO()
             with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
-                patch("agent_runtime_ops.cli.check_nas_policy", return_value=decision),
-                patch("agent_runtime_ops.cli.root_credential_path", return_value=credential),
-                patch("agent_runtime_ops.cli._credential_file_is_safe_for_slot"),
-                patch("agent_runtime_ops.cli._prepare_mount_entry", return_value=(decision, decision.mountpoint)),
-                patch("agent_runtime_ops.cli._findmnt_one", return_value=(1, "", [])),
-                patch("agent_runtime_ops.cli._host_mount_prepared_share", return_value=(False, "mount_failed")),
-                patch("agent_runtime_ops.cli._remove_managed_fstab_entry", return_value=True) as remove_fstab,
-                patch("agent_runtime_ops.cli._append_action_log"),
+                patch("agent_runtime_ops.commands.nas._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.nas.check_nas_policy", return_value=decision),
+                patch("agent_runtime_ops.commands.nas.root_credential_path", return_value=credential),
+                patch("agent_runtime_ops.commands.nas._credential_file_is_safe_for_slot"),
+                patch("agent_runtime_ops.commands.nas._prepare_mount_entry", return_value=(decision, decision.mountpoint)),
+                patch("agent_runtime_ops.commands.nas._findmnt_one", return_value=(1, "", [])),
+                patch("agent_runtime_ops.commands.nas._host_mount_prepared_share", return_value=(False, "mount_failed")),
+                patch("agent_runtime_ops.commands.nas._remove_managed_fstab_entry", return_value=True) as remove_fstab,
+                patch("agent_runtime_ops.commands.nas._append_action_log"),
                 contextlib.redirect_stdout(output),
             ):
                 rc = cmd_nas_mount(
