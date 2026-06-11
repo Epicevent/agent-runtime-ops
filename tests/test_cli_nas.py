@@ -191,8 +191,8 @@ class CliNasTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with (
-                patch("agent_runtime_ops.commands.nas.slot_uid_gid", return_value=(1009, 1009)),
-                patch("agent_runtime_ops.commands.nas.runtime_ids", return_value=(2009, 2009, 1030)),
+                patch("agent_runtime_ops.domain.nas_mounts.slot_uid_gid", return_value=(1009, 1009)),
+                patch("agent_runtime_ops.domain.nas_mounts.runtime_ids", return_value=(2009, 2009, 1030)),
             ):
                 _write_managed_fstab_entry(
                     "oc3",

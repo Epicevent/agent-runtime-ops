@@ -15,6 +15,8 @@ from ..domain.nas_credentials import (
     official_credential_status,
     validate_official_credentials_for_delete,
 )
+from ..domain.nas_mounts import prepare_mount_entry as _prepare_mount_entry
+from ..domain.nas_mounts import write_managed_fstab_entry as _write_managed_fstab_entry
 from ..domain.nas_requests import move_request, safe_request_file
 from ..host.account_files import (
     atomic_write_key_value,
@@ -22,18 +24,15 @@ from ..host.account_files import (
     ensure_customer_agent_dirs,
     read_key_value_file,
     read_password_from_stdin,
-    runtime_ids,
     slot_uid_gid,
     write_credential_file,
 )
 from ..host.fstab import remove_managed_fstab_entry as _remove_managed_fstab_entry
-from ..host.fstab import write_managed_fstab_entry as _host_write_managed_fstab_entry
 from ..host.mounts import (
     findmnt_one as _findmnt_one,
     findmnt_under as _findmnt_under,
     is_readonly_mount as _is_readonly_mount,
     mount_prepared_share as _host_mount_prepared_share,
-    mounted_child_cifs_count as _mounted_child_cifs_count,
     safe_mountpoint_path as _safe_mountpoint_path,
 )
 from ..nas import (
@@ -57,63 +56,6 @@ def _print_official_credential_status(prefix: str, status: dict[str, str]) -> No
         "remount_possible",
     ]:
         print(f"{prefix}{key}={status[key]}")
-
-
-def _write_managed_fstab_entry(
-    slot: str,
-    share: str,
-    mountpoint: Path,
-    credential_path: Path,
-    *,
-    claim_existing_same_source: bool = False,
-    fstab_path: Path = Path("/etc/fstab"),
-    lock_path: Path = Path("/run/agent-runtime-ops-fstab.lock"),
-) -> None:
-    _host_write_managed_fstab_entry(
-        slot,
-        share,
-        mountpoint,
-        credential_path,
-        slot_uid_gid=slot_uid_gid,
-        runtime_ids=runtime_ids,
-        claim_existing_same_source=claim_existing_same_source,
-        fstab_path=fstab_path,
-        lock_path=lock_path,
-    )
-
-
-def _prepare_mount_entry(
-    slot: str,
-    share_source: str,
-    credential_path: Path,
-    state_root: Path,
-    *,
-    claim_existing_same_source: bool = False,
-) -> tuple[object, Path]:
-    decision = check_nas_policy(slot, share_source, state_root)
-    if not decision.allowed:
-        raise ValueError(f"policy denied: {decision.reason}")
-    _safe_mountpoint_path(decision.mountpoint)
-    decision.mountpoint.mkdir(parents=True, exist_ok=True)
-    _safe_mountpoint_path(decision.mountpoint)
-    credential_file_is_safe_for_slot(slot, credential_path)
-    current_count = _mounted_child_cifs_count(decision.slot)
-    existing_rc, _, existing_rows = _findmnt_one(decision.mountpoint)
-    already_same_mount = (
-        existing_rc == 0
-        and bool(existing_rows)
-        and existing_rows[0].get("source") == decision.share.source
-    )
-    if not already_same_mount and not _max_mounts_allows(decision.max_mounts, current_count):
-        raise ValueError(f"max_mounts_exceeded: current={current_count} max={decision.max_mounts}")
-    _write_managed_fstab_entry(
-        decision.slot,
-        decision.share.source,
-        decision.mountpoint,
-        credential_path,
-        claim_existing_same_source=claim_existing_same_source,
-    )
-    return decision, decision.mountpoint
 
 
 def _rollback_fstab_after_mount_failure(args: argparse.Namespace, slot: str, share: str) -> str:
@@ -326,15 +268,6 @@ def cmd_nas_credential_set(args: argparse.Namespace) -> int:
     print("credential_status=stored")
     print("secret_value_printed=no")
     return 0
-
-
-def _max_mounts_allows(value: object, current_count: int) -> bool:
-    if value in {None, "", "unlimited"}:
-        return True
-    try:
-        return current_count < int(value)
-    except (TypeError, ValueError):
-        return False
 
 
 def _print_mount_row(prefix: str, row: dict[str, str]) -> None:
