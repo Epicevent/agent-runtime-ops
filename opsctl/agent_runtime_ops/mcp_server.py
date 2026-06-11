@@ -8,16 +8,20 @@ import shlex
 import sys
 from typing import Any, TextIO
 
+from .mcp.handlers import deploy as deploy_handlers
+from .mcp.handlers import handoff as handoff_handlers
+from .mcp.handlers import heartbeat as heartbeat_handlers
 from .mcp.handlers import nas as nas_handlers
+from .mcp.handlers import recipe as recipe_handlers
+from .mcp.handlers import rollout as rollout_handlers
+from .mcp.handlers import routing as routing_handlers
+from .mcp.handlers import secrets as secret_handlers
 from .mcp.runner import CommandResult, CommandRunner
 from .mcp.specs import list_tool_specs
-from .paths import REPO_ROOT
 from .redaction import redact
-from .runtime_secrets import RUNTIME_SECRET_KEYS
 
 
 PROTOCOL_VERSION = "2025-06-18"
-FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 LINUX_ACCOUNT_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 TARGET_RE = re.compile(
     r"^(?:[a-z][a-z0-9-]{0,31}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|"
@@ -64,16 +68,6 @@ def _json_result(message_id: Any, result: dict[str, Any]) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": message_id, "result": result}
 
 
-def _parse_key_values(text: str) -> dict[str, str]:
-    data: dict[str, str] = {}
-    for raw_line in text.splitlines():
-        if "=" not in raw_line:
-            continue
-        key, value = raw_line.split("=", 1)
-        data[key.strip()] = value.strip()
-    return data
-
-
 def _parse_key_value_tokens(text: str) -> dict[str, str]:
     data: dict[str, str] = {}
     for token in shlex.split(text):
@@ -93,6 +87,8 @@ def _default_secret_roots() -> list[Path]:
 
 
 class McpServer:
+    tool_error = ToolError
+
     def __init__(
         self,
         *,
@@ -168,30 +164,30 @@ class McpServer:
         if not isinstance(args, dict):
             raise ProtocolError(-32602, "tool arguments must be an object")
         handlers = {
-            "ops_orientation": self._tool_ops_orientation,
-            "binding_list": self._tool_binding_list,
-            "binding_status": self._tool_binding_status,
-            "binding_set_public_host": self._tool_binding_set_public_host,
-            "apache_status": self._tool_apache_status,
-            "apache_set_host": self._tool_apache_set_host,
-            "runtime_truth": self._tool_runtime_truth,
-            "document_tools_status": self._tool_document_tools_status,
-            "target_check": self._tool_target_check,
-            "deploy_update": self._tool_deploy_update,
-            "rollout_image_plan": self._tool_rollout_image_plan,
-            "rollout_image_dev_apply": self._tool_rollout_image_dev_apply,
-            "rollout_image_canary": self._tool_rollout_image_canary,
-            "rollout_image_promote": self._tool_rollout_image_promote,
-            "canonical_recipe_validate": self._tool_canonical_recipe_validate,
-            "dev_recipe_status": self._tool_dev_recipe_status,
-            "dev_recipe_apply": self._tool_dev_recipe_apply,
-            "runtime_secret_status": self._tool_runtime_secret_status,
-            "runtime_secret_set_from_file": self._tool_runtime_secret_set_from_file,
-            "handoff_status": self._tool_handoff_status,
-            "handoff_value_command": self._tool_handoff_value_command,
-            "heartbeat_status": self._tool_heartbeat_status,
-            "heartbeat_disable": self._tool_heartbeat_disable,
-            "target_rollback": self._tool_target_rollback,
+            "ops_orientation": lambda tool_args: routing_handlers.ops_orientation(self, tool_args),
+            "binding_list": lambda tool_args: routing_handlers.binding_list(self, tool_args),
+            "binding_status": lambda tool_args: routing_handlers.binding_status(self, tool_args),
+            "binding_set_public_host": lambda tool_args: routing_handlers.binding_set_public_host(self, tool_args),
+            "apache_status": lambda tool_args: routing_handlers.apache_status(self, tool_args),
+            "apache_set_host": lambda tool_args: routing_handlers.apache_set_host(self, tool_args),
+            "runtime_truth": lambda tool_args: routing_handlers.runtime_truth(self, tool_args),
+            "document_tools_status": lambda tool_args: routing_handlers.document_tools_status(self, tool_args),
+            "target_check": lambda tool_args: routing_handlers.target_check(self, tool_args),
+            "deploy_update": lambda tool_args: deploy_handlers.deploy_update(self, tool_args),
+            "rollout_image_plan": lambda tool_args: rollout_handlers.image_plan(self, tool_args),
+            "rollout_image_dev_apply": lambda tool_args: rollout_handlers.image_dev_apply(self, tool_args),
+            "rollout_image_canary": lambda tool_args: rollout_handlers.image_canary(self, tool_args),
+            "rollout_image_promote": lambda tool_args: rollout_handlers.image_promote(self, tool_args),
+            "canonical_recipe_validate": lambda tool_args: recipe_handlers.canonical_validate(self, tool_args),
+            "dev_recipe_status": lambda tool_args: recipe_handlers.dev_status(self, tool_args),
+            "dev_recipe_apply": lambda tool_args: recipe_handlers.dev_apply(self, tool_args),
+            "runtime_secret_status": lambda tool_args: secret_handlers.status(self, tool_args),
+            "runtime_secret_set_from_file": lambda tool_args: secret_handlers.set_from_file(self, tool_args),
+            "handoff_status": lambda tool_args: handoff_handlers.status(self, tool_args),
+            "handoff_value_command": lambda tool_args: handoff_handlers.value_command(self, tool_args),
+            "heartbeat_status": lambda tool_args: heartbeat_handlers.status(self, tool_args),
+            "heartbeat_disable": lambda tool_args: heartbeat_handlers.disable(self, tool_args),
+            "target_rollback": lambda tool_args: routing_handlers.target_rollback(self, tool_args),
             "nas_status": lambda tool_args: nas_handlers.status(self, tool_args),
             "nas_mount": lambda tool_args: nas_handlers.mount(self, tool_args),
             "nas_unmount": lambda tool_args: nas_handlers.unmount(self, tool_args),
@@ -258,333 +254,6 @@ class McpServer:
         if extra:
             payload.update(extra)
         return payload
-
-    def _tool_ops_orientation(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, set())
-        runs = [
-            self._run([self.opsctl, "update", "status"]),
-            self._run([self.opsctl, "binding", "list"]),
-            self._run([self.opsctl, "profile", "list"]),
-        ]
-        ok = all(item["returncode"] == 0 for item in runs)
-        return self._common_response(ok=ok, mutated=False, runs=runs, extra={"repo_root": str(REPO_ROOT)})
-
-    def _tool_binding_list(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, set())
-        runs = [self._run([self.opsctl, "binding", "list"], timeout=60)]
-        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
-
-    def _tool_binding_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"target"})
-        argv = [self.opsctl, "binding", "status"]
-        if args.get("target"):
-            argv.append(self._target(args.get("target")))
-        runs = [self._run(argv, timeout=60)]
-        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
-
-    def _tool_binding_set_public_host(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"target", "host"})
-        target = self._target(args.get("target"))
-        host = self._host(args.get("host"))
-        runs = [self._run([self.sudo, self.opsctl, "binding", "set-public-host", target, host], timeout=120)]
-        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=True, runs=runs)
-
-    def _tool_apache_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"target"})
-        argv = [self.opsctl, "apache", "status"]
-        if args.get("target"):
-            argv.append(self._target(args.get("target")))
-        runs = [self._run(argv, timeout=60)]
-        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
-
-    def _tool_apache_set_host(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"linux_account", "host"})
-        linux_account = self._linux_account(args.get("linux_account"))
-        host = self._host(args.get("host"))
-        runs = [self._run([self.sudo, self.opsctl, "apache", "set-host", linux_account, host], timeout=120)]
-        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=True, runs=runs)
-
-    def _tool_runtime_truth(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"target", "all"})
-        argv = [self.sudo, self.opsctl, "runtime", "truth"]
-        if bool(args.get("all", False)):
-            if args.get("target") is not None:
-                raise ToolError("provide either target or all, not both")
-            argv.append("--all")
-        else:
-            argv.append(self._target(args.get("target")))
-        runs = [self._run(argv, timeout=120)]
-        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
-
-    def _tool_document_tools_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"target", "all"})
-        argv = [self.sudo, self.opsctl, "document-tools", "status"]
-        if bool(args.get("all", False)):
-            if args.get("target") is not None:
-                raise ToolError("provide either target or all, not both")
-            argv.append("--all")
-        else:
-            argv.append(self._target(args.get("target")))
-        runs = [self._run(argv, timeout=180)]
-        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
-
-    def _tool_target_check(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"target", "targets", "runtime_class", "family"})
-        slots, runs = self._resolve_slots(args)
-        for slot in slots:
-            runs.append(self._run([self.opsctl, "binding", "status", slot]))
-            runs.append(self._run([self.opsctl, "apache", "status", slot]))
-            runs.append(self._run([self.sudo, self.opsctl, "runtime", "truth", slot], timeout=120))
-            runs.append(self._run([self.sudo, self.opsctl, "check", "--live", slot], timeout=120))
-        ok = all(item["returncode"] == 0 for item in runs)
-        return self._common_response(ok=ok, mutated=False, runs=runs)
-
-    def _tool_deploy_update(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"target_ref"})
-        target_ref = args.get("target_ref")
-        if target_ref is not None:
-            target_ref = str(target_ref)
-            if not FULL_SHA_RE.match(target_ref):
-                raise ToolError("target_ref must be a full 40-character commit sha")
-        status = self._run([self.opsctl, "update", "status"])
-        runs = [status]
-        data = _parse_key_values(status["stdout"])
-        approved_ref = data.get("approved_ref", "")
-        installed_ref = data.get("installed_ref", "")
-        if status["returncode"] != 0 or not approved_ref:
-            ref_for_command = target_ref or "FULL_40_CHARACTER_COMMIT_SHA"
-            command = shlex.join([self.sudo, self.opsctl, "update", "approve", ref_for_command])
-            return self._common_response(
-                ok=False,
-                mutated=False,
-                runs=runs,
-                next_action=command,
-                extra={"approved_ref": approved_ref, "installed_ref": installed_ref},
-            )
-        if target_ref and approved_ref != target_ref:
-            command = shlex.join([self.sudo, self.opsctl, "update", "approve", target_ref])
-            return self._common_response(
-                ok=False,
-                mutated=False,
-                runs=runs,
-                next_action=command,
-                extra={"approved_ref": approved_ref, "installed_ref": installed_ref},
-            )
-        if data.get("approved_matches_installed") == "yes":
-            return self._common_response(
-                ok=True,
-                mutated=False,
-                runs=runs,
-                extra={"approved_ref": approved_ref, "installed_ref": installed_ref},
-            )
-        runs.append(self._run([self.sudo, self.opsctl, "self-update"], timeout=300))
-        runs.append(self._run([self.opsctl, "update", "status"]))
-        runs.append(self._run([self.opsctl, "profile", "list"]))
-        post_data = _parse_key_values(runs[-2]["stdout"])
-        ok = all(item["returncode"] == 0 for item in runs) and post_data.get("approved_matches_installed") == "yes"
-        return self._common_response(
-            ok=ok,
-            mutated=True,
-            runs=runs,
-            extra={
-                "approved_ref": post_data.get("approved_ref", approved_ref),
-                "installed_ref": post_data.get("installed_ref", installed_ref),
-            },
-        )
-
-    def _tool_rollout_image_plan(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"wrapper_image", "product_image", "target", "targets"})
-        argv = [
-            self.sudo,
-            self.opsctl,
-            "rollout",
-            "image-plan",
-            "--wrapper-image",
-            self._image_ref(args.get("wrapper_image")),
-            "--product-image",
-            self._image_ref(args.get("product_image")),
-        ]
-        if args.get("target"):
-            argv.extend(["--target", self._slot(args.get("target"))])
-        slots = args.get("targets")
-        if slots is not None:
-            if not isinstance(slots, list) or not slots:
-                raise ToolError("targets must be a non-empty array")
-            argv.append("--targets")
-            argv.extend(self._slot(item) for item in slots)
-        runs = [self._run(argv, timeout=180)]
-        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
-
-    def _tool_rollout_image_dev_apply(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self._tool_rollout_image_apply(args, command="image-dev-apply")
-
-    def _tool_rollout_image_canary(self, args: dict[str, Any]) -> dict[str, Any]:
-        return self._tool_rollout_image_apply(args, command="image-canary")
-
-    def _tool_rollout_image_apply(self, args: dict[str, Any], *, command: str) -> dict[str, Any]:
-        self._reject_unknown(args, {"target", "wrapper_image", "product_image", "allow_first_apply"})
-        argv = [
-            self.sudo,
-            self.opsctl,
-            "rollout",
-            command,
-            "--target",
-            self._slot(args.get("target")),
-            "--wrapper-image",
-            self._image_ref(args.get("wrapper_image")),
-            "--product-image",
-            self._image_ref(args.get("product_image")),
-        ]
-        if bool(args.get("allow_first_apply", False)):
-            argv.append("--allow-first-apply")
-        runs = [self._run(argv, timeout=900)]
-        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=True, runs=runs)
-
-    def _tool_rollout_image_promote(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"from_target", "targets"})
-        slots = args.get("targets")
-        if not isinstance(slots, list) or not slots:
-            raise ToolError("targets must be a non-empty array")
-        slot_values = [self._slot(item) for item in slots]
-        argv = [
-            self.sudo,
-            self.opsctl,
-            "rollout",
-            "image-promote",
-            "--from-target",
-            self._slot(args.get("from_target")),
-            "--targets",
-            ",".join(slot_values),
-        ]
-        runs = [self._run(argv, timeout=1800)]
-        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=True, runs=runs)
-
-    def _tool_canonical_recipe_validate(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"name"})
-        name = self._safe_name(args.get("name"))
-        runs = [self._run([self.opsctl, "recipe", "validate-canonical", name], timeout=60)]
-        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
-
-    def _tool_dev_recipe_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"target"})
-        slot = self._slot(args.get("target"))
-        if not slot.startswith("dev-"):
-            raise ToolError("dev recipe tools require a dev target")
-        runs = [self._run([self.opsctl, "recipe", "status", slot], timeout=60)]
-        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
-
-    def _tool_dev_recipe_apply(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(
-            args,
-            {
-                "target",
-                "recipe_name",
-                "source_output",
-                "sync_from",
-                "build_command",
-                "allow_first_apply",
-                "no_apply",
-            },
-        )
-        slot = self._slot(args.get("target"))
-        if not slot.startswith("dev-"):
-            raise ToolError("dev recipe tools require a dev target")
-        has_source_output = args.get("source_output") is not None
-        has_sync_from = args.get("sync_from") is not None
-        if has_source_output == has_sync_from:
-            raise ToolError("provide exactly one of source_output or sync_from")
-        runs = [self._run([self.opsctl, "recipe", "status", slot], timeout=60)]
-        if runs[0]["returncode"] != 0:
-            return self._common_response(ok=False, mutated=False, runs=runs, next_action="fix dev recipe status before apply")
-        argv = [self.sudo, self.opsctl, "recipe", "apply-dev", slot]
-        recipe_name = args.get("recipe_name")
-        if recipe_name:
-            argv.extend(["--recipe-name", self._safe_name(recipe_name)])
-        if has_source_output:
-            argv.extend(["--source-output", self._path_text(args.get("source_output"), "source_output")])
-        else:
-            argv.extend(["--sync-from", self._path_text(args.get("sync_from"), "sync_from")])
-        build_command = self._safe_text(args.get("build_command"), "build_command")
-        if build_command:
-            argv.extend(["--build-command", build_command])
-        if bool(args.get("allow_first_apply", False)):
-            argv.append("--allow-first-apply")
-        if bool(args.get("no_apply", False)):
-            argv.append("--no-apply")
-        runs.append(self._run(argv, timeout=900))
-        ok = all(item["returncode"] == 0 for item in runs)
-        return self._common_response(ok=ok, mutated=True, runs=runs)
-
-    def _tool_runtime_secret_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"target", "targets", "runtime_class", "family"})
-        slots, runs = self._resolve_slots(args)
-        runs.extend(
-            self._run([self.sudo, self.opsctl, "runtime-secret", "status", slot], timeout=60)
-            for slot in slots
-        )
-        return self._common_response(ok=all(item["returncode"] == 0 for item in runs), mutated=False, runs=runs)
-
-    def _tool_runtime_secret_set_from_file(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"target", "key", "secret_file", "check", "no_restart"})
-        self._reject_sensitive_raw_args(args, allowed={"secret_file"})
-        slot = self._slot(args.get("target"))
-        key = str(args.get("key") or "")
-        if key not in RUNTIME_SECRET_KEYS:
-            raise ToolError(f"unsupported runtime secret key: {key}")
-        value = self._read_allowed_secret_file(args.get("secret_file"))
-        argv = [self.sudo, self.opsctl, "runtime-secret", "set", slot, "--key", key, "--value-stdin"]
-        if bool(args.get("no_restart", False)):
-            argv.append("--no-restart")
-        if bool(args.get("check", True)):
-            argv.append("--check")
-        runs = [self._run(argv, input_text=value, timeout=240)]
-        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=True, runs=runs)
-
-    def _tool_handoff_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"target", "targets", "runtime_class", "family"})
-        slots, runs = self._resolve_slots(args)
-        runs.extend(
-            self._run([self.sudo, self.opsctl, "handoff", "status", slot], timeout=60)
-            for slot in slots
-        )
-        return self._common_response(ok=all(item["returncode"] == 0 for item in runs), mutated=False, runs=runs)
-
-    def _tool_handoff_value_command(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"target"})
-        slot = self._slot(args.get("target"))
-        runs = [self._run([self.sudo, self.opsctl, "handoff", "value-command", slot], timeout=60)]
-        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
-
-    def _tool_heartbeat_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"target", "targets", "runtime_class", "family"})
-        if args.get("family") is not None and str(args.get("family")) != "openclaw":
-            raise ToolError("heartbeat tools support only openclaw targets")
-        slots, runs = self._resolve_slots(args)
-        runs.extend(
-            self._run([self.sudo, self.opsctl, "heartbeat", "status", slot], timeout=60)
-            for slot in slots
-        )
-        return self._common_response(ok=all(item["returncode"] == 0 for item in runs), mutated=False, runs=runs)
-
-    def _tool_heartbeat_disable(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"target"})
-        slot = self._slot(args.get("target"))
-        runs = [
-            self._run([self.sudo, self.opsctl, "heartbeat", "status", slot], timeout=60),
-            self._run([self.sudo, self.opsctl, "heartbeat", "disable", slot], timeout=120),
-        ]
-        return self._common_response(ok=all(item["returncode"] == 0 for item in runs), mutated=True, runs=runs)
-
-    def _tool_target_rollback(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"target"})
-        slot = self._slot(args.get("target"))
-        runs = [self._run([self.opsctl, "status", slot], timeout=60)]
-        if runs[0]["returncode"] != 0:
-            return self._common_response(ok=False, mutated=False, runs=runs, next_action="fix target status before rollback")
-        runs.append(self._run([self.sudo, self.opsctl, "rollback", slot], timeout=240))
-        runs.append(self._run([self.sudo, self.opsctl, "check", "--live", slot], timeout=180))
-        ok = all(item["returncode"] == 0 for item in runs)
-        return self._common_response(ok=ok, mutated=True, runs=runs)
 
     def _reject_unknown(self, args: dict[str, Any], allowed: set[str]) -> None:
         unknown = sorted(set(args) - allowed)
