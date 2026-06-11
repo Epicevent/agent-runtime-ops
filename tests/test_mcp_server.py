@@ -4,7 +4,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from agent_runtime_ops.mcp_server import CommandResult, McpServer
+from agent_runtime_ops.mcp.runner import CommandResult
+from agent_runtime_ops.mcp_server import McpServer
 
 
 class FakeRunner:

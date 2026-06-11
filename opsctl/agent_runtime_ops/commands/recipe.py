@@ -28,12 +28,10 @@ from ..domain.common import now_iso as _now_iso
 from ..domain.common import run_text as _run_text
 from ..domain.common import state_root as _state_root
 from ..domain.image_specs import (
-    _image_spec_recipe,
-    _label_map_to_json,
-    _label_map_to_string,
-    _optional_safe_text,
-    _profile_runtime_contract,
-    _validate_safe_name,
+    image_spec_recipe,
+    label_map_to_string,
+    optional_safe_text,
+    validate_safe_name,
 )
 from ..domain.runtime_apply import apply_desired_slot as _apply_desired_slot
 from ..domain.runtime_checks import run_live_slot_checks as _run_live_slot_checks
@@ -139,7 +137,7 @@ def _write_dev_recipe_state(state_root: Path, data: dict) -> Path | None:
 
 
 def _validate_recipe_name(name: str) -> None:
-    _validate_safe_name(name)
+    validate_safe_name(name)
 
 
 def _build_arg_lines_for_canonical_recipe(name: str) -> list[str]:
@@ -399,7 +397,7 @@ def cmd_recipe_dev_apply(args: argparse.Namespace) -> int:
             "source_output": str(source_output),
             "sync_from": sync_from_value,
             "source_provenance": _source_provenance(provenance_source),
-            "build_command": _optional_safe_text(args.build_command, "--build-command"),
+            "build_command": optional_safe_text(args.build_command, "--build-command"),
             "updated_at": _now_iso(),
             "updated_by": os.environ.get("SUDO_USER") or os.environ.get("USER") or "",
         }
@@ -452,7 +450,7 @@ def cmd_recipe_capture_dev(args: argparse.Namespace) -> int:
         desired, profile = _desired_from_live_image_truth(slot, state_root)
         if desired.runtime_class != "dev" or profile.metadata.get("mode") != "source":
             raise ValueError("recipe capture-dev requires a dev target using source mode")
-        image_recipe = _image_spec_recipe(desired.image_spec)
+        image_recipe = image_spec_recipe(desired.image_spec)
         canonical_recipe = canonical_recipe_for_image_spec(desired.image_spec)
         if canonical_recipe.name != recipe_name:
             raise ValueError(f"live image recipe mismatch: image={canonical_recipe.name} requested={recipe_name}")
@@ -503,7 +501,7 @@ def cmd_recipe_capture_dev(args: argparse.Namespace) -> int:
     print(f"wrapper_image={desired.image_spec.get('wrapper_image')}")
     print(f"product_image={desired.image_spec.get('product_image')}")
     print(f"contract_version={image_recipe.get('contract_version') or ''}")
-    print(f"health_endpoints={_label_map_to_string(health_endpoints)}")
+    print(f"health_endpoints={label_map_to_string(health_endpoints)}")
     print(f"source_output={source_output}")
     print(f"source_git_head={provenance.get('git_head') or ''}")
     print(f"source_git_dirty={provenance.get('git_dirty')}")

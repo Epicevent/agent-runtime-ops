@@ -14,18 +14,17 @@ from .runtime_checks import (
     run_live_slot_checks_with_wait,
     run_static_slot_checks,
 )
+from .runtime_backup import backup_agent_runtime_state, restore_backup
+from .runtime_manifest import write_slot_manifests
 from .runtime_state import (
     _agent_compose_path,
     _agent_manifest_path,
     _atomic_write,
-    _backup_agent_runtime_state,
     _docker_compose_command,
     _env_file_keys,
     _required_compose_variables,
-    _restore_backup,
     _slot_runtime_dir,
     _state_manifest_path,
-    _write_slot_manifests,
 )
 from .runtime_truth import find_gateway_container
 from .workspace_guidance import ensure_runtime_workspace_guidance
@@ -100,7 +99,7 @@ def apply_desired_slot(
             raise ValueError("first agent-runtime apply requires --allow-first-apply")
         previous_manifest = state_manifest_path if state_manifest_path.exists() else manifest_path if manifest_path.exists() else None
         guidance_result = ensure_runtime_workspace_guidance(desired.slot, profile)
-        backup_dir = _backup_agent_runtime_state(desired.slot, runtime_dir, state_root)
+        backup_dir = backup_agent_runtime_state(desired.slot, runtime_dir, state_root)
         _atomic_write(compose_path, rendered.text, 0o644)
     except Exception as exc:
         print(f"target={getattr(desired, 'slot', '')}")
@@ -126,7 +125,7 @@ def apply_desired_slot(
 
     config = run_text_cwd(_docker_compose_command(desired.slot, compose_path, "config"), runtime_dir, timeout=60)
     if config.returncode != 0:
-        ok, reason = _restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
+        ok, reason = restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
         print("apply_status=fail")
         print_process_result("compose_config_error", config)
         print(f"rollback_status={'ok' if ok else 'fail'}")
@@ -140,7 +139,7 @@ def apply_desired_slot(
         timeout=240,
     )
     if up.returncode != 0:
-        ok, reason = _restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
+        ok, reason = restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
         print("apply_status=fail")
         print_process_result("compose_up_error", up)
         print(f"rollback_status={'ok' if ok else 'fail'}")
@@ -160,7 +159,7 @@ def apply_desired_slot(
             failed += 1
     if failed:
         diagnostics_dir = write_failed_container_diagnostics(desired.route, profile, backup_dir)
-        ok, reason = _restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
+        ok, reason = restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
         print(f"apply_status=fail live_failed={failed}")
         if diagnostics_dir:
             print(f"failure_diagnostics_dir={diagnostics_dir}")
@@ -171,7 +170,7 @@ def apply_desired_slot(
 
     applied_at = now_iso()
     try:
-        _write_slot_manifests(
+        write_slot_manifests(
             state_root=state_root,
             runtime_dir=runtime_dir,
             desired=desired,
@@ -183,7 +182,7 @@ def apply_desired_slot(
         )
         append_action_log(state_root, action_name, desired.slot, desired.image_name, "ok", rendered.sha256)
     except Exception as exc:
-        ok, reason = _restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
+        ok, reason = restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
         print("apply_status=fail")
         print(f"reason=manifest_write_failed:{exc}")
         print(f"rollback_status={'ok' if ok else 'fail'}")
@@ -200,3 +199,6 @@ def apply_desired_slot(
 _print_process_result = print_process_result
 _write_failed_container_diagnostics = write_failed_container_diagnostics
 _apply_desired_slot = apply_desired_slot
+_backup_agent_runtime_state = backup_agent_runtime_state
+_restore_backup = restore_backup
+_write_slot_manifests = write_slot_manifests

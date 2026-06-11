@@ -10,11 +10,11 @@ from ..domain.common import check_line as _check_line
 from ..domain.common import is_root as _is_root
 from ..domain.common import state_root as _state_root
 from ..domain.image_specs import (
-    _image_spec_recipe_payload,
-    _profile_customer_surface,
-    _profile_runtime_contract,
+    image_spec_recipe_payload,
+    profile_customer_surface,
+    profile_runtime_contract,
 )
-from ..domain.runtime_state import _desired_from_runtime_manifest
+from ..domain.runtime_manifest import desired_from_runtime_manifest
 from ..domain.runtime_truth import live_runtime_truth as _live_runtime_truth
 from ..renderer import render_compose
 from ..routing import get_runtime_binding
@@ -81,7 +81,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def cmd_plan(args: argparse.Namespace) -> int:
     try:
-        desired, profile = _desired_from_runtime_manifest(args.slot, _state_root(args))
+        desired, profile = desired_from_runtime_manifest(args.slot, _state_root(args))
     except Exception as exc:
         plan = {
             "target": args.slot,
@@ -100,11 +100,11 @@ def cmd_plan(args: argparse.Namespace) -> int:
         "image_name": desired.image_name,
         "runtime_profile": profile.name,
         "runtime_profile_digest": profile.digest,
-        "runtime_contract": _profile_runtime_contract(profile),
-        "customer_surface": _profile_customer_surface(profile),
+        "runtime_contract": profile_runtime_contract(profile),
+        "customer_surface": profile_customer_surface(profile),
         "wrapper_image": desired.image_spec.get("wrapper_image"),
         "product_image": desired.image_spec.get("product_image"),
-        "recipe": _image_spec_recipe_payload(desired.image_spec),
+        "recipe": image_spec_recipe_payload(desired.image_spec),
         "compose_sha256": rendered.sha256,
         "mutates": False,
     }

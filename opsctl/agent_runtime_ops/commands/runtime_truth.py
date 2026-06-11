@@ -7,18 +7,7 @@ import sys
 from ..domain.common import check_line as _check_line
 from ..domain.common import is_root as _is_root
 from ..domain.common import state_root as _state_root
-from ..domain.runtime_truth import (
-    _find_gateway_container,
-    _find_gateway_container_by_binding,
-    _image_spec_recipe_tokens,
-    _labels_from_container_info,
-    _label_map_from_labels,
-    _live_image_truth_from_info,
-    _live_runtime_truth,
-    _profile_customer_surface,
-    _profile_runtime_contract,
-)
-from ..profiles import load_profile
+from ..domain.runtime_truth import live_runtime_truth
 from ..routing import load_runtime_bindings
 
 
@@ -45,7 +34,7 @@ def cmd_runtime_truth(args: argparse.Namespace) -> int:
             slots = [str(slot_arg)]
         all_ok = True
         for slot in slots:
-            truth, checks = _live_runtime_truth(slot, state_root)
+            truth, checks = live_runtime_truth(slot, state_root)
             if len(slots) > 1:
                 summary = " ".join(f"{key}={value}" for key, value in truth.items())
                 print(summary)

@@ -20,11 +20,11 @@ from ..nas import check_nas_policy
 from ..routing import get_runtime_binding
 from .common import is_root, run_text
 from .image_specs import (
-    _allowed_image_ref,
-    _digest_from_image_ref,
-    _has_digest_ref,
-    _image_spec_profile_contract_checks,
-    _image_spec_recipe,
+    allowed_image_ref,
+    digest_from_image_ref,
+    has_digest_ref,
+    image_spec_profile_contract_checks,
+    image_spec_recipe,
 )
 from .runtime_truth import find_gateway_container, live_runtime_truth
 
@@ -51,7 +51,7 @@ def http_backend_smoke(slot: str, path: str, state_root: Path) -> tuple[bool, st
 
 
 def contract_health_endpoints(desired, profile) -> dict[str, str]:
-    image_recipe = _image_spec_recipe(desired.image_spec)
+    image_recipe = image_spec_recipe(desired.image_spec)
     endpoints = image_recipe.get("health_endpoints")
     if isinstance(endpoints, dict):
         return {str(key): str(value) for key, value in endpoints.items() if str(key) and str(value)}
@@ -261,7 +261,7 @@ def run_static_slot_checks(desired, profile, rendered=None) -> list[tuple[bool, 
     wrapper_image = desired.image_spec.get("wrapper_image")
     product_image = desired.image_spec.get("product_image")
     image_digest = desired.image_spec.get("digest")
-    wrapper_digest = _digest_from_image_ref(wrapper_image)
+    wrapper_digest = digest_from_image_ref(wrapper_image)
     allow_source_mount = profile.metadata.get("allow_source_mount")
 
     checks: list[tuple[bool, str, str | None]] = [
@@ -278,8 +278,8 @@ def run_static_slot_checks(desired, profile, rendered=None) -> list[tuple[bool, 
         ),
         (bool(wrapper_image), "wrapper_image_present", str(wrapper_image) if wrapper_image else None),
         (bool(product_image), "product_image_present", str(product_image) if product_image else None),
-        (_has_digest_ref(wrapper_image), "wrapper_image_pinned_by_digest", str(wrapper_image) if wrapper_image else None),
-        (_has_digest_ref(product_image), "product_image_pinned_by_digest", str(product_image) if product_image else None),
+        (has_digest_ref(wrapper_image), "wrapper_image_pinned_by_digest", str(wrapper_image) if wrapper_image else None),
+        (has_digest_ref(product_image), "product_image_pinned_by_digest", str(product_image) if product_image else None),
         (
             isinstance(image_digest, str) and image_digest.startswith("sha256:"),
             "wrapper_image_digest_present",
@@ -291,17 +291,17 @@ def run_static_slot_checks(desired, profile, rendered=None) -> list[tuple[bool, 
             f"wrapper={wrapper_digest} image_spec={image_digest}",
         ),
         (
-            _allowed_image_ref(target_family, "wrapper", wrapper_image),
+            allowed_image_ref(target_family, "wrapper", wrapper_image),
             "wrapper_image_repository_allowed",
             str(wrapper_image) if wrapper_image else None,
         ),
         (
-            _allowed_image_ref(target_family, "product", product_image),
+            allowed_image_ref(target_family, "product", product_image),
             "product_image_repository_allowed",
             str(product_image) if product_image else None,
         ),
     ]
-    checks.extend(_image_spec_profile_contract_checks(desired.image_spec, profile))
+    checks.extend(image_spec_profile_contract_checks(desired.image_spec, profile))
 
     if runtime_class == "customer":
         checks.extend(

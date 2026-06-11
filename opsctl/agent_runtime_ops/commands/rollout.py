@@ -12,10 +12,9 @@ from ..domain.common import is_root as _is_root
 from ..domain.common import state_root as _state_root
 from ..domain.image_specs import (
     IMAGE_ROLLOUT_IMAGE_NAME,
-    _image_spec_from_direct_images,
-    _image_spec_recipe_payload,
-    _image_spec_runtime_profile_name,
-    _profile_runtime_contract,
+    image_spec_from_direct_images,
+    image_spec_recipe_payload,
+    profile_runtime_contract,
 )
 from ..domain.runtime_apply import apply_desired_slot as _apply_desired_slot
 from ..domain.runtime_checks import run_static_slot_checks as _run_static_slot_checks
@@ -24,7 +23,7 @@ from ..domain.runtime_targets import (
     desired_from_direct_images as _desired_from_direct_images,
     desired_from_live_image_truth as _desired_from_live_image_truth,
 )
-from ..domain.runtime_truth import live_runtime_truth as _live_runtime_truth
+from ..domain.runtime_truth import live_runtime_truth
 from ..renderer import render_compose
 from ..routing import load_runtime_bindings
 from ..yamlio import load_yaml
@@ -126,7 +125,7 @@ def _image_spec_canonical_record(image_spec: dict) -> dict[str, str]:
 
 
 def _direct_image_spec_from_args(args: argparse.Namespace) -> dict[str, object]:
-    return _image_spec_from_direct_images(str(args.wrapper_image), str(args.product_image))
+    return image_spec_from_direct_images(str(args.wrapper_image), str(args.product_image))
 
 
 def cmd_rollout_image_plan(args: argparse.Namespace) -> int:
@@ -154,7 +153,7 @@ def cmd_rollout_image_plan(args: argparse.Namespace) -> int:
                     "gateway_port": desired.route.gateway_port if desired.route else "",
                     "bridge_port": desired.route.bridge_port if desired.route else "",
                     "runtime_profile": profile.name,
-                    "runtime_contract": _profile_runtime_contract(profile),
+                    "runtime_contract": profile_runtime_contract(profile),
                     "checks": checks,
                     "compatible": all(item["ok"] for item in checks),
                     "compose_sha256": rendered.sha256,
@@ -166,7 +165,7 @@ def cmd_rollout_image_plan(args: argparse.Namespace) -> int:
             "family": image_spec.get("family"),
             "wrapper_image": image_spec.get("wrapper_image"),
             "product_image": image_spec.get("product_image"),
-            "recipe": _image_spec_recipe_payload(image_spec),
+            "recipe": image_spec_recipe_payload(image_spec),
             "targets": plans,
             "mutates": False,
         }
@@ -231,7 +230,7 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
     state_root = _state_root(args)
     from_slot = str(args.from_slot)
     try:
-        source_truth, source_checks = _live_runtime_truth(from_slot, state_root)
+        source_truth, source_checks = live_runtime_truth(from_slot, state_root)
         failed = [name for ok, name, _ in source_checks if not ok]
         if failed or source_truth.get("truth_status") != "ok":
             raise ValueError(
@@ -239,7 +238,7 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
             )
         wrapper_image = str(source_truth.get("wrapper_image") or "")
         product_image = str(source_truth.get("product_image") or "")
-        image_spec = _image_spec_from_direct_images(wrapper_image, product_image)
+        image_spec = image_spec_from_direct_images(wrapper_image, product_image)
         slots = [item.strip() for item in str(args.slots).split(",") if item.strip()]
         if not slots:
             raise ValueError("--targets must name the promotion targets explicitly")

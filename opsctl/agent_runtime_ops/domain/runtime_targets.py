@@ -5,14 +5,14 @@ from pathlib import Path
 from ..profiles import load_profile
 from ..routing import get_runtime_binding
 from ..state import RuntimeTarget
-from .image_specs import IMAGE_ROLLOUT_IMAGE_NAME, _image_spec_from_direct_images, _image_spec_recipe
+from .image_specs import IMAGE_ROLLOUT_IMAGE_NAME, image_spec_from_direct_images, image_spec_recipe
 from .runtime_truth import live_runtime_truth
 
 
 def desired_from_direct_images(slot: str, image_spec: dict, state_root: Path):
     binding = get_runtime_binding(slot, state_root)
     runtime_class = binding.runtime_class
-    image_recipe = _image_spec_recipe(image_spec)
+    image_recipe = image_spec_recipe(image_spec)
     profiles = image_recipe.get("runtime_profiles") if isinstance(image_recipe, dict) else {}
     runtime_profile = profiles.get(runtime_class) if isinstance(profiles, dict) else ""
     if not runtime_profile:
@@ -46,7 +46,7 @@ def desired_from_live_image_truth(slot: str, state_root: Path):
         raise ValueError(f"live image truth is not ok: status={truth.get('truth_status')} failed={','.join(failed)}")
     wrapper_image = str(truth.get("wrapper_image") or "")
     product_image = str(truth.get("product_image") or "")
-    image_spec = _image_spec_from_direct_images(wrapper_image, product_image)
+    image_spec = image_spec_from_direct_images(wrapper_image, product_image)
     return desired_from_direct_images(slot, image_spec, state_root)
 
 

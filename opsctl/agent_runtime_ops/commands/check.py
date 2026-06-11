@@ -5,10 +5,10 @@ import argparse
 from ..canonical_recipes import canonical_recipe_for_image_spec, canonical_recipe_identity
 from ..domain.common import check_line as _check_line
 from ..domain.common import state_root as _state_root
-from ..domain.image_specs import _profile_customer_surface, _profile_runtime_contract
+from ..domain.image_specs import profile_customer_surface, profile_runtime_contract
 from ..domain.runtime_checks import run_live_slot_checks as _run_live_slot_checks
 from ..domain.runtime_checks import run_static_slot_checks as _run_static_slot_checks
-from ..domain.runtime_state import _desired_from_runtime_manifest
+from ..domain.runtime_manifest import desired_from_runtime_manifest
 from ..domain.runtime_targets import desired_from_live_image_truth as _desired_from_live_image_truth
 from ..renderer import render_compose
 
@@ -19,7 +19,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         if args.live:
             desired, profile = _desired_from_live_image_truth(args.slot, state_root)
         else:
-            desired, profile = _desired_from_runtime_manifest(args.slot, state_root)
+            desired, profile = desired_from_runtime_manifest(args.slot, state_root)
         rendered = render_compose(profile, desired)
     except Exception as exc:
         print(f"target={args.slot}")
@@ -32,8 +32,8 @@ def cmd_check(args: argparse.Namespace) -> int:
     print(f"runtime_class={desired.runtime_class}")
     print(f"runtime_profile={profile.name}")
     print(f"runtime_profile_digest={profile.digest}")
-    print(f"runtime_contract={_profile_runtime_contract(profile)}")
-    print(f"customer_surface={_profile_customer_surface(profile)}")
+    print(f"runtime_contract={profile_runtime_contract(profile)}")
+    print(f"customer_surface={profile_customer_surface(profile)}")
     for key, value in canonical_recipe_identity(canonical_recipe_for_image_spec(desired.image_spec)).items():
         print(f"{key}={value}")
     print(f"compose_sha256={rendered.sha256}")

@@ -8,15 +8,8 @@ import shlex
 import sys
 from typing import Any, TextIO
 
-from .mcp.handlers import deploy as deploy_handlers
-from .mcp.handlers import handoff as handoff_handlers
-from .mcp.handlers import heartbeat as heartbeat_handlers
-from .mcp.handlers import nas as nas_handlers
-from .mcp.handlers import recipe as recipe_handlers
-from .mcp.handlers import rollout as rollout_handlers
-from .mcp.handlers import routing as routing_handlers
-from .mcp.handlers import secrets as secret_handlers
-from .mcp.runner import CommandResult, CommandRunner
+from .mcp.registry import get_handler
+from .mcp.runner import CommandRunner
 from .mcp.specs import list_tool_specs
 from .redaction import redact
 
@@ -163,43 +156,12 @@ class McpServer:
             raise ProtocolError(-32602, "tools/call requires a tool name")
         if not isinstance(args, dict):
             raise ProtocolError(-32602, "tool arguments must be an object")
-        handlers = {
-            "ops_orientation": lambda tool_args: routing_handlers.ops_orientation(self, tool_args),
-            "binding_list": lambda tool_args: routing_handlers.binding_list(self, tool_args),
-            "binding_status": lambda tool_args: routing_handlers.binding_status(self, tool_args),
-            "binding_set_public_host": lambda tool_args: routing_handlers.binding_set_public_host(self, tool_args),
-            "apache_status": lambda tool_args: routing_handlers.apache_status(self, tool_args),
-            "apache_set_host": lambda tool_args: routing_handlers.apache_set_host(self, tool_args),
-            "runtime_truth": lambda tool_args: routing_handlers.runtime_truth(self, tool_args),
-            "document_tools_status": lambda tool_args: routing_handlers.document_tools_status(self, tool_args),
-            "target_check": lambda tool_args: routing_handlers.target_check(self, tool_args),
-            "deploy_update": lambda tool_args: deploy_handlers.deploy_update(self, tool_args),
-            "rollout_image_plan": lambda tool_args: rollout_handlers.image_plan(self, tool_args),
-            "rollout_image_dev_apply": lambda tool_args: rollout_handlers.image_dev_apply(self, tool_args),
-            "rollout_image_canary": lambda tool_args: rollout_handlers.image_canary(self, tool_args),
-            "rollout_image_promote": lambda tool_args: rollout_handlers.image_promote(self, tool_args),
-            "canonical_recipe_validate": lambda tool_args: recipe_handlers.canonical_validate(self, tool_args),
-            "dev_recipe_status": lambda tool_args: recipe_handlers.dev_status(self, tool_args),
-            "dev_recipe_apply": lambda tool_args: recipe_handlers.dev_apply(self, tool_args),
-            "runtime_secret_status": lambda tool_args: secret_handlers.status(self, tool_args),
-            "runtime_secret_set_from_file": lambda tool_args: secret_handlers.set_from_file(self, tool_args),
-            "handoff_status": lambda tool_args: handoff_handlers.status(self, tool_args),
-            "handoff_value_command": lambda tool_args: handoff_handlers.value_command(self, tool_args),
-            "heartbeat_status": lambda tool_args: heartbeat_handlers.status(self, tool_args),
-            "heartbeat_disable": lambda tool_args: heartbeat_handlers.disable(self, tool_args),
-            "target_rollback": lambda tool_args: routing_handlers.target_rollback(self, tool_args),
-            "nas_status": lambda tool_args: nas_handlers.status(self, tool_args),
-            "nas_mount": lambda tool_args: nas_handlers.mount(self, tool_args),
-            "nas_unmount": lambda tool_args: nas_handlers.unmount(self, tool_args),
-            "nas_remove": lambda tool_args: nas_handlers.remove(self, tool_args),
-            "nas_credential_status": lambda tool_args: nas_handlers.credential_status(self, tool_args),
-            "nas_approve_auto_once": lambda tool_args: nas_handlers.approve_auto_once(self, tool_args),
-        }
-        if name not in handlers:
+        handler = get_handler(name)
+        if handler is None:
             raise ProtocolError(-32602, f"unknown tool: {name}")
         is_error = False
         try:
-            payload = handlers[name](args)
+            payload = handler(self, args)
         except ToolError as exc:
             is_error = True
             payload = self._common_response(

@@ -10,11 +10,11 @@ from .apache_route_checks import apache_route_checks
 from .common import container_name, run_text
 from .image_specs import (
     IMAGE_RECIPE_SCHEMA,
-    _label_map_from_labels,
-    _image_spec_recipe_tokens,
-    _profile_customer_surface,
-    _profile_runtime_contract,
-    _recipe_label,
+    image_spec_recipe_tokens,
+    label_map_from_labels,
+    profile_customer_surface,
+    profile_runtime_contract,
+    recipe_label,
 )
 
 
@@ -135,13 +135,13 @@ def live_image_truth_from_info(binding: RuntimeBinding, info: dict, apache_route
     config = info.get("Config") if isinstance(info, dict) else {}
     image = str((config or {}).get("Image") or "")
     runtime_class = binding.runtime_class
-    schema = _recipe_label(labels, "recipe.schema")
-    family = _recipe_label(labels, "family")
-    product_image = _recipe_label(labels, "product-image")
-    runtime_profile = _recipe_label(labels, f"runtime-profile.{runtime_class}")
-    runtime_contract = _recipe_label(labels, f"runtime-contract.{runtime_class}")
-    canonical_recipe_name = _recipe_label(labels, "recipe.name")
-    canonical_recipe_digest = _recipe_label(labels, "recipe.digest")
+    schema = recipe_label(labels, "recipe.schema")
+    family = recipe_label(labels, "family")
+    product_image = recipe_label(labels, "product-image")
+    runtime_profile = recipe_label(labels, f"runtime-profile.{runtime_class}")
+    runtime_contract = recipe_label(labels, f"runtime-contract.{runtime_class}")
+    canonical_recipe_name = recipe_label(labels, "recipe.name")
+    canonical_recipe_digest = recipe_label(labels, "recipe.digest")
     truth_status = "ok"
     if schema != IMAGE_RECIPE_SCHEMA:
         truth_status = "legacy_or_unlabeled"
@@ -163,22 +163,22 @@ def live_image_truth_from_info(binding: RuntimeBinding, info: dict, apache_route
         "wrapper_image": image,
         "image_family": family,
         "product_image": product_image,
-        "product_component": _recipe_label(labels, "product-component"),
-        "wrapper_component": _recipe_label(labels, "wrapper-component"),
+        "product_component": recipe_label(labels, "product-component"),
+        "wrapper_component": recipe_label(labels, "wrapper-component"),
         "runtime_profile": runtime_profile,
         "runtime_contract": runtime_contract,
         "canonical_recipe_name": canonical_recipe_name,
         "canonical_recipe_digest": canonical_recipe_digest,
-        "source_output_target": _recipe_label(labels, "source-output-target"),
-        "container_nas_root": _recipe_label(labels, "nas.container-root"),
-        "host_nas_root_template": _recipe_label(labels, "nas.host-root-template"),
-        "nas_read_only": _recipe_label(labels, "nas.read-only"),
-        "nas_mount_propagation": _recipe_label(labels, "nas.propagation"),
-        "nas_child_mount_mode": _recipe_label(labels, "nas.child-mount-mode"),
-        "contract_version": _recipe_label(labels, "contract.version"),
-        "health_endpoints": _recipe_label(labels, "health.endpoints"),
-        "health_endpoints_json": _recipe_label(labels, "health.endpoints.json"),
-        "ops_repo_commit": _recipe_label(labels, "ops-repo-commit"),
+        "source_output_target": recipe_label(labels, "source-output-target"),
+        "container_nas_root": recipe_label(labels, "nas.container-root"),
+        "host_nas_root_template": recipe_label(labels, "nas.host-root-template"),
+        "nas_read_only": recipe_label(labels, "nas.read-only"),
+        "nas_mount_propagation": recipe_label(labels, "nas.propagation"),
+        "nas_child_mount_mode": recipe_label(labels, "nas.child-mount-mode"),
+        "contract_version": recipe_label(labels, "contract.version"),
+        "health_endpoints": recipe_label(labels, "health.endpoints"),
+        "health_endpoints_json": recipe_label(labels, "health.endpoints.json"),
+        "ops_repo_commit": recipe_label(labels, "ops-repo-commit"),
     }
 
 
@@ -254,7 +254,7 @@ _find_gateway_container_by_binding = find_gateway_container_by_binding
 _labels_from_container_info = labels_from_container_info
 _live_image_truth_from_info = live_image_truth_from_info
 _live_runtime_truth = live_runtime_truth
-_label_map_from_labels = _label_map_from_labels
-_image_spec_recipe_tokens = _image_spec_recipe_tokens
-_profile_customer_surface = _profile_customer_surface
-_profile_runtime_contract = _profile_runtime_contract
+_label_map_from_labels = label_map_from_labels
+_image_spec_recipe_tokens = image_spec_recipe_tokens
+_profile_customer_surface = profile_customer_surface
+_profile_runtime_contract = profile_runtime_contract

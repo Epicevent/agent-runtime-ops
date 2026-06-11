@@ -12,7 +12,7 @@ from ..apache import parse_apache_route
 from ..domain.common import is_root as _is_root
 from ..domain.common import run_text as _run_text
 from ..domain.common import state_root as _state_root
-from ..domain.image_specs import _recipe_label
+from ..domain.image_specs import recipe_label
 from ..domain.runtime_truth import _find_gateway_container_by_binding, _labels_from_container_info
 from ..routing import get_runtime_binding, load_runtime_bindings
 
@@ -269,10 +269,10 @@ def _document_tools_status_for_slot(slot: str, state_root: Path) -> dict[str, st
         {
             "container": container,
             "container_running": "yes" if running else "no",
-            "runtime_profile": _recipe_label(labels, f"runtime-profile.{binding.runtime_class}"),
-            "canonical_recipe_name": _recipe_label(labels, "recipe.name"),
-            "product_component": _recipe_label(labels, "product-component"),
-            "wrapper_component": _recipe_label(labels, "wrapper-component"),
+            "runtime_profile": recipe_label(labels, f"runtime-profile.{binding.runtime_class}"),
+            "canonical_recipe_name": recipe_label(labels, "recipe.name"),
+            "product_component": recipe_label(labels, "product-component"),
+            "wrapper_component": recipe_label(labels, "wrapper-component"),
             "image": str(config.get("Image") or ""),
         }
     )

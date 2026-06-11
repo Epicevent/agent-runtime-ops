@@ -13,11 +13,13 @@ from ..domain.runtime_checks import (
     profile_startup_timeout_seconds as _profile_startup_timeout_seconds,
     run_live_slot_checks_with_wait as _run_live_slot_checks_with_wait,
 )
+from ..domain.runtime_backup import (
+    latest_backup,
+    load_backup_runtime_contract,
+    restore_backup,
+)
+from ..domain.runtime_manifest import desired_from_runtime_manifest
 from ..domain.runtime_state import (
-    _desired_from_runtime_manifest,
-    _latest_backup,
-    _load_backup_runtime_contract,
-    _restore_backup,
     _slot_runtime_dir,
 )
 
@@ -28,7 +30,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
         return 2
     state_root = _state_root(args)
     try:
-        desired, profile = _desired_from_runtime_manifest(args.slot, state_root)
+        desired, profile = desired_from_runtime_manifest(args.slot, state_root)
     except Exception as exc:
         print(f"target={args.slot}")
         print("apply_status=fail")
@@ -54,10 +56,10 @@ def cmd_rollback(args: argparse.Namespace) -> int:
     state_root = _state_root(args)
     try:
         runtime_dir = _slot_runtime_dir(args.slot)
-        backup_dir = _latest_backup(runtime_dir)
+        backup_dir = latest_backup(runtime_dir)
         if backup_dir is None:
             raise FileNotFoundError("no agent-runtime backup")
-        ok, reason = _restore_backup(args.slot, runtime_dir, backup_dir, state_root)
+        ok, reason = restore_backup(args.slot, runtime_dir, backup_dir, state_root)
     except Exception as exc:
         print(f"target={args.slot}")
         print("rollback_status=fail")
@@ -76,7 +78,7 @@ def cmd_rollback(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        desired, profile = _load_backup_runtime_contract(args.slot, backup_dir, state_root)
+        desired, profile = load_backup_runtime_contract(args.slot, backup_dir, state_root)
     except Exception as exc:
         print("rollback_status=fail")
         print(f"reason={exc}")

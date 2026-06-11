@@ -586,3 +586,31 @@ def _image_spec_profile_contract_checks(image_spec: dict, profile) -> list[tuple
 
 def _image_spec_profile_contract_failures(image_spec: dict, profile) -> list[str]:
     return [name for ok, name, _ in _image_spec_profile_contract_checks(image_spec, profile) if not ok]
+
+
+has_digest_ref = _has_digest_ref
+digest_from_image_ref = _digest_from_image_ref
+validate_safe_name = _validate_safe_name
+validate_image_digest_ref = _validate_image_digest_ref
+optional_safe_text = _optional_safe_text
+allowed_image_ref = _allowed_image_ref
+metadata_list = _metadata_list
+csv = _csv
+label_map_from_string = _label_map_from_string
+label_map_from_json = _label_map_from_json
+label_map_from_labels = _label_map_from_labels
+label_map_to_string = _label_map_to_string
+label_map_to_json = _label_map_to_json
+profile_runtime_contract = _profile_runtime_contract
+profile_customer_surface = _profile_customer_surface
+image_spec_recipe_payload = _image_spec_recipe_payload
+image_spec_recipe_tokens = _image_spec_recipe_tokens
+image_recipe_labels_from_wrapper = _image_recipe_labels_from_wrapper
+recipe_label = _recipe_label
+image_recipe_from_wrapper_image = _image_recipe_from_wrapper_image
+image_recipe_from_wrapper_image_auto = _image_recipe_from_wrapper_image_auto
+image_spec_from_direct_images = _image_spec_from_direct_images
+image_spec_recipe = _image_spec_recipe
+image_spec_runtime_profile_name = _image_spec_runtime_profile_name
+image_spec_profile_contract_checks = _image_spec_profile_contract_checks
+image_spec_profile_contract_failures = _image_spec_profile_contract_failures
