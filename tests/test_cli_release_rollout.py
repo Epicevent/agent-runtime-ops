@@ -19,18 +19,22 @@ from agent_runtime_ops.cli import (
     cmd_binding_normalize,
     cmd_diagnostics_show,
     cmd_document_tools_status,
+    _image_recipe_from_wrapper_image,
+    _live_image_truth_from_info,
+    build_parser,
+)
+from agent_runtime_ops.commands.recipe import (
     cmd_recipe_capture_dev,
     cmd_recipe_dev_apply,
     cmd_recipe_dev_status,
     cmd_recipe_validate_canonical,
+)
+from agent_runtime_ops.commands.rollout import (
     cmd_rollout_image_canary,
     cmd_rollout_image_dev_apply,
     cmd_rollout_image_plan,
     cmd_rollout_image_promote,
     cmd_rollout_status,
-    _image_recipe_from_wrapper_image,
-    _live_image_truth_from_info,
-    build_parser,
 )
 from agent_runtime_ops.canonical_recipes import load_canonical_recipe
 from agent_runtime_ops.profiles import load_profile
@@ -653,9 +657,9 @@ class CliReleaseRolloutTests(unittest.TestCase):
             runtime_dir = root / "home" / "dev-oc" / "openclaw"
             output = io.StringIO()
             with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
-                patch("agent_runtime_ops.cli._ensure_dev_runtime_dir", return_value=runtime_dir),
-                patch("agent_runtime_ops.cli._slot_uid_gid", return_value=(1000, 1000)),
+                patch("agent_runtime_ops.commands.recipe._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.recipe._ensure_dev_runtime_dir", return_value=runtime_dir),
+                patch("agent_runtime_ops.commands.recipe._slot_uid_gid", return_value=(1000, 1000)),
                 contextlib.redirect_stdout(output),
             ):
                 rc = cmd_recipe_dev_apply(
@@ -924,13 +928,13 @@ class CliReleaseRolloutTests(unittest.TestCase):
             output = io.StringIO()
             stored_head = "0123456789abcdef0123456789abcdef01234567"
             with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.recipe._is_root", return_value=True),
                 patch(
-                    "agent_runtime_ops.cli._desired_from_live_image_truth",
+                    "agent_runtime_ops.commands.recipe._desired_from_live_image_truth",
                     return_value=(desired, load_profile("hermes-runtime-dev")),
                 ),
                 patch(
-                    "agent_runtime_ops.cli._run_live_slot_checks",
+                    "agent_runtime_ops.commands.recipe._run_live_slot_checks",
                     return_value=[
                         (True, "live_container_image_matches_spec", wrapper_image),
                         (True, "live_internal_http_workspace_ok", "url=http://127.0.0.1:3000/"),
@@ -1012,9 +1016,9 @@ class CliReleaseRolloutTests(unittest.TestCase):
             )
             output = io.StringIO()
             with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.recipe._is_root", return_value=True),
                 patch(
-                    "agent_runtime_ops.cli._desired_from_live_image_truth",
+                    "agent_runtime_ops.commands.recipe._desired_from_live_image_truth",
                     return_value=(desired, load_profile("hermes-runtime-dev")),
                 ),
                 patch(
@@ -1089,9 +1093,9 @@ class CliReleaseRolloutTests(unittest.TestCase):
             )
             output = io.StringIO()
             with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.recipe._is_root", return_value=True),
                 patch(
-                    "agent_runtime_ops.cli._desired_from_live_image_truth",
+                    "agent_runtime_ops.commands.recipe._desired_from_live_image_truth",
                     return_value=(desired, load_profile("hermes-runtime-dev")),
                 ),
                 patch(
@@ -1149,7 +1153,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
             product = wrapper_image_ref("hermes-workspace", "2")
             output = io.StringIO()
             with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.rollout._is_root", return_value=True),
                 patch("agent_runtime_ops.cli._image_recipe_labels_from_wrapper", return_value=hermes_recipe_labels(product_image=product)),
                 contextlib.redirect_stdout(output),
             ):
@@ -1176,9 +1180,9 @@ class CliReleaseRolloutTests(unittest.TestCase):
             product = wrapper_image_ref("hermes-workspace", "2")
             output = io.StringIO()
             with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.rollout._is_root", return_value=True),
                 patch("agent_runtime_ops.cli._image_recipe_labels_from_wrapper", return_value=hermes_recipe_labels(product_image=product)),
-                patch("agent_runtime_ops.cli._apply_desired_slot", return_value=0) as apply,
+                patch("agent_runtime_ops.commands.rollout._apply_desired_slot", return_value=0) as apply,
                 contextlib.redirect_stdout(output),
             ):
                 rc = cmd_rollout_image_canary(
@@ -1209,9 +1213,9 @@ class CliReleaseRolloutTests(unittest.TestCase):
             product = wrapper_image_ref("hermes-workspace", "2")
             output = io.StringIO()
             with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.rollout._is_root", return_value=True),
                 patch("agent_runtime_ops.cli._image_recipe_labels_from_wrapper", return_value=hermes_recipe_labels(product_image=product)),
-                patch("agent_runtime_ops.cli._apply_desired_slot", return_value=0) as apply,
+                patch("agent_runtime_ops.commands.rollout._apply_desired_slot", return_value=0) as apply,
                 contextlib.redirect_stdout(output),
             ):
                 rc = cmd_rollout_image_dev_apply(
@@ -1245,13 +1249,13 @@ class CliReleaseRolloutTests(unittest.TestCase):
             }
             output = io.StringIO()
             with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
-                patch("agent_runtime_ops.cli._live_runtime_truth", return_value=(source_truth, [])),
+                patch("agent_runtime_ops.commands.rollout._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.rollout._live_runtime_truth", return_value=(source_truth, [])),
                 patch(
                     "agent_runtime_ops.cli._image_recipe_labels_from_wrapper",
                     return_value=openclaw_recipe_labels(product_image=product),
                 ),
-                patch("agent_runtime_ops.cli._apply_desired_slot", return_value=0) as apply,
+                patch("agent_runtime_ops.commands.rollout._apply_desired_slot", return_value=0) as apply,
                 contextlib.redirect_stdout(output),
             ):
                 rc = cmd_rollout_image_promote(
