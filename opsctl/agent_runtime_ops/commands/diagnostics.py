@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 
 from ..domain.common import is_root as _is_root
-from ..domain.runtime_state import agent_backup_root, slot_runtime_dir
+from ..domain.runtime_paths import agent_backup_root, slot_runtime_dir
 from ..redaction import redact
 from ..routing import validate_linux_account
 from ..yamlio import load_yaml

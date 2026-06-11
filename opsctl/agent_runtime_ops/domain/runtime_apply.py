@@ -16,13 +16,15 @@ from .runtime_checks import (
 )
 from .runtime_backup import backup_agent_runtime_state, restore_backup
 from .runtime_manifest import write_slot_manifests
-from .runtime_state import (
-    agent_compose_path,
-    agent_manifest_path,
-    atomic_write,
+from .docker_compose import (
     docker_compose_command,
     env_file_keys,
     required_compose_variables,
+)
+from .runtime_paths import (
+    agent_compose_path,
+    agent_manifest_path,
+    atomic_write,
     slot_runtime_dir,
     state_manifest_path,
 )
@@ -194,11 +196,3 @@ def apply_desired_slot(
         return 1
     print("apply_status=ok")
     return 0
-
-
-_print_process_result = print_process_result
-_write_failed_container_diagnostics = write_failed_container_diagnostics
-_apply_desired_slot = apply_desired_slot
-_backup_agent_runtime_state = backup_agent_runtime_state
-_restore_backup = restore_backup
-_write_slot_manifests = write_slot_manifests

@@ -16,7 +16,8 @@ from ..domain.common import run_text as _run_text
 from ..domain.common import run_text_cwd as _run_text_cwd
 from ..domain.common import state_root as _state_root
 from ..domain.runtime_checks import profile_startup_timeout_seconds as _profile_startup_timeout_seconds
-from ..domain.runtime_state import agent_compose_path, compose_project_name, docker_compose_command, slot_runtime_dir
+from ..domain.docker_compose import compose_project_name, docker_compose_command
+from ..domain.runtime_paths import agent_compose_path, slot_runtime_dir
 from ..domain.runtime_truth import find_gateway_container as _find_gateway_container
 from ..host.account_files import ensure_not_symlink_chain, runtime_ids, slot_home
 from ..profiles import load_profile

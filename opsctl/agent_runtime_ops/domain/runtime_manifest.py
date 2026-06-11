@@ -15,7 +15,7 @@ from .image_specs import (
     profile_customer_surface,
     profile_runtime_contract,
 )
-from .runtime_state import agent_manifest_path, atomic_write, state_manifest_path
+from .runtime_paths import agent_manifest_path, atomic_write, state_manifest_path
 from .update_policy import installed_source_commit as _installed_source_commit
 
 
@@ -197,12 +197,3 @@ def desired_from_manifest(slot: str, manifest: dict, state_root: Path):
         runtime_profile=str(manifest.get("runtime_profile") or ""),
         route=get_runtime_binding(target, state_root),
     )
-
-
-_manifest_payload = manifest_payload
-_desired_from_runtime_manifest = desired_from_runtime_manifest
-_write_slot_manifest = write_slot_manifest
-_write_state_slot_manifest = write_state_slot_manifest
-_write_slot_manifests = write_slot_manifests
-_read_legacy_slot_manifest = read_legacy_slot_manifest
-_desired_from_manifest = desired_from_manifest

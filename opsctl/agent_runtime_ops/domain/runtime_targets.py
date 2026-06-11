@@ -48,7 +48,3 @@ def desired_from_live_image_truth(slot: str, state_root: Path):
     product_image = str(truth.get("product_image") or "")
     image_spec = image_spec_from_direct_images(wrapper_image, product_image)
     return desired_from_direct_images(slot, image_spec, state_root)
-
-
-_desired_from_direct_images = desired_from_direct_images
-_desired_from_live_image_truth = desired_from_live_image_truth

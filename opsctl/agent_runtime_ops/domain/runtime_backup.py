@@ -9,11 +9,11 @@ from ..profiles import load_profile
 from ..yamlio import load_yaml
 from .common import now_iso, run_text_cwd
 from .runtime_manifest import desired_from_manifest, read_legacy_slot_manifest
-from .runtime_state import (
+from .docker_compose import docker_compose_command
+from .runtime_paths import (
     agent_backup_root,
     agent_compose_path,
     agent_manifest_path,
-    docker_compose_command,
     state_manifest_path,
 )
 
@@ -112,10 +112,3 @@ def load_backup_runtime_contract(slot: str, backup_dir: Path, state_root: Path):
     if not desired.runtime_profile:
         raise ValueError("backup manifest is missing runtime_profile")
     return desired, load_profile(desired.runtime_profile)
-
-
-_backup_agent_runtime_state = backup_agent_runtime_state
-_latest_backup = latest_backup
-_restore_backup = restore_backup
-_backup_manifest_data = backup_manifest_data
-_load_backup_runtime_contract = load_backup_runtime_contract

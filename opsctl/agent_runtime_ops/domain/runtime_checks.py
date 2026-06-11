@@ -368,13 +368,3 @@ def profile_startup_timeout_seconds(profile) -> int:
     except (TypeError, ValueError):
         return 90
     return max(30, min(value, 600))
-
-
-_http_backend_smoke = http_backend_smoke
-_contract_health_endpoints = contract_health_endpoints
-_internal_http_check_name = internal_http_check_name
-_run_internal_http_check = run_internal_http_check
-_run_live_slot_checks = run_live_slot_checks
-_run_static_slot_checks = run_static_slot_checks
-_run_live_slot_checks_with_wait = run_live_slot_checks_with_wait
-_profile_startup_timeout_seconds = profile_startup_timeout_seconds

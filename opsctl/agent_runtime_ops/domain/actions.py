@@ -34,6 +34,3 @@ def append_action_log(state_root: Path, action: str, slot: str, target: str, sta
         handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
         handle.flush()
         os.fsync(handle.fileno())
-
-
-_append_action_log = append_action_log

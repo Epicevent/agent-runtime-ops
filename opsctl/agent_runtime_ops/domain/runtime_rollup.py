@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .image_specs import IMAGE_ROLLOUT_IMAGE_NAME
-from .runtime_state import state_manifest_path
+from .runtime_paths import state_manifest_path
 from ..yamlio import load_yaml
 
 

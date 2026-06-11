@@ -56,13 +56,3 @@ def run_text_cwd(command: list[str], cwd: Path, timeout: int = 20) -> subprocess
         return subprocess.run(command, cwd=str(cwd), text=True, capture_output=True, timeout=timeout)
     except FileNotFoundError as exc:
         return subprocess.CompletedProcess(command, 127, "", str(exc))
-
-
-_state_root = state_root
-_is_root = is_root
-_now_iso = now_iso
-_check_line = check_line
-_apache_public_host = apache_public_host
-_container_name = container_name
-_run_text = run_text
-_run_text_cwd = run_text_cwd

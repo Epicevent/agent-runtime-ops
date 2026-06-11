@@ -19,7 +19,7 @@ from ..domain.runtime_backup import (
     restore_backup,
 )
 from ..domain.runtime_manifest import desired_from_runtime_manifest
-from ..domain.runtime_state import (
+from ..domain.runtime_paths import (
     slot_runtime_dir,
 )
 
