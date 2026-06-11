@@ -1,17 +1,11 @@
 from __future__ import annotations
 
 import argparse
-import copy
-import json
 import os
 from pathlib import Path
-import re
 import shlex
-import shutil
-import stat
-import subprocess
 import sys
-import tempfile
+from types import SimpleNamespace
 
 from ..canonical_recipes import (
     canonical_label_values,
@@ -25,113 +19,30 @@ from ..domain.actions import append_action_log as _append_action_log
 from ..domain.common import check_line as _check_line
 from ..domain.common import is_root as _is_root
 from ..domain.common import now_iso as _now_iso
-from ..domain.common import run_text as _run_text
 from ..domain.common import state_root as _state_root
+from ..domain.dev_recipe_state import load_dev_recipe_state as _load_dev_recipe_state
+from ..domain.dev_recipe_state import write_dev_recipe_state as _write_dev_recipe_state
+from ..domain.dev_recipe_runtime import dev_recipe_runtime_env as _dev_recipe_runtime_env
+from ..domain.dev_recipe_runtime import ensure_dev_runtime_dir as _ensure_dev_runtime_dir
+from ..domain.dev_recipe_runtime import safe_existing_directory as _safe_existing_directory
+from ..domain.dev_recipe_runtime import sync_dev_source_output as _sync_dev_source_output
+from ..domain.dev_recipe_runtime import upsert_runtime_env_file as _upsert_runtime_env_file
 from ..domain.image_specs import (
     image_spec_recipe,
     label_map_to_string,
     optional_safe_text,
     validate_safe_name,
 )
-from ..domain.runtime_apply import apply_desired_slot as _apply_desired_slot
 from ..domain.runtime_checks import run_live_slot_checks as _run_live_slot_checks
 from ..domain.runtime_targets import desired_from_live_image_truth as _desired_from_live_image_truth
 from ..domain.source_provenance import require_fresh_clean_source_provenance as _require_fresh_clean_source_provenance
 from ..domain.source_provenance import source_provenance as _source_provenance
 from ..host.account_files import (
-    atomic_write_key_value,
-    read_key_value_file,
-    runtime_ids,
     slot_uid_gid,
 )
-from ..host.files import atomic_write_text as _atomic_write_text
-from ..host.files import fsync_parent as _fsync_parent
-from ..paths import DEFAULT_STATE_ROOT
 from ..profiles import load_profile
-from ..routing import get_runtime_binding
-from ..runtime_secrets import primary_profile_secret_file
 from ..state import load_runtime_target
-from ..yamlio import dump_yaml, load_yaml
-
-
-SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-DEV_RECIPE_STATE_NAME = "dev-recipes.yaml"
-DEV_RECIPE_STAGE_ROOT = "agent-runtime-source"
-
-
-def _assert_state_parent_safe(path: Path) -> None:
-    parent = path.parent
-    if parent.exists() and parent.is_symlink():
-        raise ValueError(f"managed state parent must not be symlink: {parent}")
-    parent.mkdir(mode=0o750, parents=True, exist_ok=True)
-    if path.exists() and path.is_symlink():
-        raise ValueError(f"managed state file must not be symlink: {path}")
-
-
-def _backup_state_file(state_root: Path, path: Path) -> Path | None:
-    if not path.exists():
-        return None
-    if path.is_symlink():
-        raise ValueError(f"managed state file must not be symlink: {path}")
-    backup_root = state_root / "backups" / "state"
-    if backup_root.exists() and backup_root.is_symlink():
-        raise ValueError(f"managed backup root must not be symlink: {backup_root}")
-    backup_root.mkdir(mode=0o750, parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).astimezone().strftime("%Y%m%dT%H%M%S%z")
-    backup_path = backup_root / f"{path.name}.{stamp}"
-    suffix = 1
-    while backup_path.exists():
-        suffix += 1
-        backup_path = backup_root / f"{path.name}.{stamp}.{suffix}"
-    shutil.copy2(path, backup_path)
-    return backup_path
-
-
-def _write_state_yaml_file(state_root: Path, name: str, data: dict) -> Path | None:
-    path = state_root / name
-    _assert_state_parent_safe(path)
-    backup_path = _backup_state_file(state_root, path)
-    tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
-    try:
-        with tmp_path.open("w", encoding="utf-8") as handle:
-            handle.write(dump_yaml(data))
-            handle.flush()
-            os.fsync(handle.fileno())
-        if hasattr(os, "chown") and hasattr(os, "geteuid") and os.geteuid() == 0:
-            os.chown(tmp_path, 0, state_root.stat().st_gid)
-        os.chmod(tmp_path, 0o640)
-        os.replace(tmp_path, path)
-        _fsync_parent(path)
-    except Exception:
-        tmp_path.unlink(missing_ok=True)
-        raise
-    return backup_path
-
-
-def _state_meta(source: str | None = None) -> dict[str, object]:
-    meta: dict[str, object] = {
-        "schema_version": 1,
-        "updated_at": _now_iso(),
-        "scope": "private_server_state",
-    }
-    if source:
-        meta["source"] = source
-    return meta
-
-
-def _load_dev_recipe_state(state_root: Path) -> dict:
-    data = load_yaml(state_root / DEV_RECIPE_STATE_NAME, default={})
-    if not isinstance(data, dict):
-        data = {}
-    data.setdefault("meta", _state_meta("opsctl recipe"))
-    data.setdefault("recipes", {})
-    return data
-
-
-def _write_dev_recipe_state(state_root: Path, data: dict) -> Path | None:
-    data["meta"] = _state_meta("opsctl recipe")
-    data.setdefault("recipes", {})
-    return _write_state_yaml_file(state_root, DEV_RECIPE_STATE_NAME, data)
+from .apply import cmd_apply
 
 
 def _validate_recipe_name(name: str) -> None:
@@ -204,121 +115,6 @@ def cmd_recipe_list_canonical(args: argparse.Namespace) -> int:
         recipe = load_canonical_recipe(name)
         print(f"{recipe.name} {recipe.digest}")
     return 0
-
-
-def _safe_existing_directory(value: object, name: str) -> Path:
-    text = str(value or "").strip()
-    if not text:
-        raise ValueError(f"{name} is required")
-    path = Path(text)
-    if not path.is_absolute():
-        raise ValueError(f"{name} must be an absolute path")
-    if path.is_symlink():
-        raise ValueError(f"{name} must not be a symlink")
-    resolved = path.resolve(strict=True)
-    if not resolved.is_dir():
-        raise ValueError(f"{name} must be an existing directory")
-    return resolved
-
-
-def _reject_tree_symlinks(root: Path) -> None:
-    for current, dirs, files in os.walk(root):
-        current_path = Path(current)
-        for name in [*dirs, *files]:
-            item = current_path / name
-            if item.is_symlink():
-                raise ValueError(f"source tree must not contain symlinks: {item}")
-
-
-def _assert_child_of(child: Path, parent: Path) -> None:
-    child_resolved = child.resolve(strict=False)
-    parent_resolved = parent.resolve(strict=False)
-    if child_resolved != parent_resolved and parent_resolved not in child_resolved.parents:
-        raise ValueError(f"path escaped managed root: {child}")
-
-
-def _ensure_dev_runtime_dir(slot: str) -> Path:
-    uid, gid = slot_uid_gid(slot)
-    home = Path("/home") / slot
-    if home.is_symlink():
-        raise ValueError(f"managed home must not be symlink: {home}")
-    if not home.is_dir():
-        raise FileNotFoundError(home)
-    runtime_dir = home / "openclaw"
-    if runtime_dir.exists() and runtime_dir.is_symlink():
-        raise ValueError(f"managed runtime dir must not be symlink: {runtime_dir}")
-    runtime_dir.mkdir(mode=0o750, parents=True, exist_ok=True)
-    os.chown(runtime_dir, uid, gid)
-    os.chmod(runtime_dir, 0o750)
-    return runtime_dir
-
-
-def _chmod_source_tree(root: Path, uid: int, gid: int) -> None:
-    for current, dirs, files in os.walk(root):
-        current_path = Path(current)
-        os.chown(current_path, uid, gid)
-        os.chmod(current_path, 0o750)
-        for dirname in dirs:
-            path = current_path / dirname
-            os.chown(path, uid, gid)
-            os.chmod(path, 0o750)
-        for filename in files:
-            path = current_path / filename
-            mode = path.stat().st_mode
-            file_mode = 0o750 if mode & stat.S_IXUSR else 0o640
-            os.chown(path, uid, gid)
-            os.chmod(path, file_mode)
-
-
-def _sync_dev_source_output(slot: str, recipe_name: str, source: Path) -> Path:
-    _reject_tree_symlinks(source)
-    runtime_uid, _, data_gid = runtime_ids(slot)
-    home = Path("/home") / slot
-    stage_root = home / DEV_RECIPE_STAGE_ROOT
-    if stage_root.exists() and stage_root.is_symlink():
-        raise ValueError(f"managed source stage root must not be symlink: {stage_root}")
-    stage_root.mkdir(mode=0o750, parents=True, exist_ok=True)
-    os.chown(stage_root, runtime_uid, data_gid)
-    os.chmod(stage_root, 0o750)
-    dest = stage_root / recipe_name
-    tmp = stage_root / f".{recipe_name}.tmp.{os.getpid()}"
-    backup = stage_root / f".{recipe_name}.previous.{os.getpid()}"
-    for path in (dest, tmp, backup):
-        _assert_child_of(path, stage_root)
-    if tmp.exists():
-        shutil.rmtree(tmp)
-    if backup.exists():
-        shutil.rmtree(backup)
-    shutil.copytree(source, tmp, symlinks=False)
-    _chmod_source_tree(tmp, runtime_uid, data_gid)
-    if dest.exists():
-        if dest.is_symlink():
-            raise ValueError(f"managed source stage must not be symlink: {dest}")
-        os.replace(dest, backup)
-    os.replace(tmp, dest)
-    if backup.exists():
-        shutil.rmtree(backup)
-    return dest
-
-
-def _upsert_runtime_env_file(path: Path, updates: dict[str, str], uid: int, gid: int) -> None:
-    if path.exists() and path.is_symlink():
-        raise ValueError(f"runtime env file must not be symlink: {path}")
-    data = read_key_value_file(path) if path.exists() else {}
-    data.update({key: value for key, value in updates.items() if value})
-    atomic_write_key_value(path, data, 0o640, uid, gid)
-
-
-def _dev_recipe_runtime_env(desired, state_root: Path) -> dict[str, str]:
-    family = str(desired.family or "")
-    binding = get_runtime_binding(desired.slot, state_root)
-    env = {
-        "OPENCLAW_RUNTIME_FAMILY": family,
-        "OPENCLAW_IMAGE": str(desired.image_spec.get("wrapper_image") or ""),
-        "OPENCLAW_GATEWAY_PORT": str(binding.gateway_port),
-        "OPENCLAW_BRIDGE_PORT": str(binding.bridge_port),
-    }
-    return env
 
 
 def cmd_recipe_dev_status(args: argparse.Namespace) -> int:
