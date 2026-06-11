@@ -634,8 +634,8 @@ class CliReleaseRolloutTests(unittest.TestCase):
             )
             output = io.StringIO()
             with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
-                patch("agent_runtime_ops.cli._slot_runtime_dir", return_value=runtime_dir),
+                patch("agent_runtime_ops.commands.diagnostics._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.diagnostics._slot_runtime_dir", return_value=runtime_dir),
                 contextlib.redirect_stdout(output),
             ):
                 rc = cmd_diagnostics_show(argparse.Namespace(slot="oc3", dir=str(diag_dir), tail=20))
