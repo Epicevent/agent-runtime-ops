@@ -7,6 +7,7 @@ from pathlib import Path
 import shlex
 import sys
 
+from ..host.account_files import _ensure_not_symlink_chain
 from ..runtime_secrets import parse_secret_env_text
 
 
@@ -26,10 +27,6 @@ def _is_root() -> bool:
 
 def _slot_home(slot: str) -> Path:
     return _cli_mod()._slot_home(slot)
-
-
-def _ensure_not_symlink_chain(path: Path, stop_at: Path) -> None:
-    return _cli_mod()._ensure_not_symlink_chain(path, stop_at)
 
 
 def _assert_secret_path_safe(slot: str, path: Path, *, create_parent: bool = False) -> None:

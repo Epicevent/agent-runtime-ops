@@ -9,6 +9,18 @@ from pathlib import Path
 import sys
 import time
 
+from ..host.account_files import (
+    _atomic_write_key_value,
+    _credential_file_is_safe_for_slot,
+    _credential_presence,
+    _ensure_customer_agent_dirs,
+    _read_key_value_file,
+    _read_password_from_stdin,
+    _runtime_ids,
+    _slot_uid_gid,
+    _write_credential_file,
+)
+
 def _cli_mod():
     from .. import cli
 
@@ -29,42 +41,6 @@ def _now_iso() -> str:
 
 def _run_text(command: list[str], timeout: int = 20):
     return _cli_mod()._run_text(command, timeout=timeout)
-
-
-def _read_key_value_file(path: Path) -> dict[str, str]:
-    return _cli_mod()._read_key_value_file(path)
-
-
-def _atomic_write_key_value(path: Path, data: dict[str, str], mode: int, uid: int | None = None, gid: int | None = None) -> None:
-    return _cli_mod()._atomic_write_key_value(path, data, mode, uid, gid)
-
-
-def _slot_uid_gid(slot: str) -> tuple[int, int]:
-    return _cli_mod()._slot_uid_gid(slot)
-
-
-def _runtime_ids(slot: str) -> tuple[int, int, int]:
-    return _cli_mod()._runtime_ids(slot)
-
-
-def _ensure_customer_agent_dirs(slot: str) -> None:
-    return _cli_mod()._ensure_customer_agent_dirs(slot)
-
-
-def _read_password_from_stdin() -> str:
-    return _cli_mod()._read_password_from_stdin()
-
-
-def _write_credential_file(path: Path, username: str, password: str, domain: str | None, uid: int, gid: int) -> None:
-    return _cli_mod()._write_credential_file(path, username, password, domain, uid, gid)
-
-
-def _credential_file_is_safe_for_slot(slot: str, path: Path, uid: int | None = None) -> None:
-    return _cli_mod()._credential_file_is_safe_for_slot(slot, path, uid=uid)
-
-
-def _credential_presence(path: Path) -> str:
-    return _cli_mod()._credential_presence(path)
 
 
 def _host_write_managed_fstab_entry(*args, **kwargs) -> None:

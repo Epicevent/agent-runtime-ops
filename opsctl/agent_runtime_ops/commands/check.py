@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 from ..canonical_recipes import canonical_recipe_for_image_spec, canonical_recipe_identity
+from ..domain.image_specs import _profile_customer_surface, _profile_runtime_contract
 from ..renderer import render_compose
 
 
@@ -23,14 +24,6 @@ def _desired_from_live_image_truth(slot: str, state_root: Path):
 
 def _desired_from_runtime_manifest(slot: str, state_root: Path):
     return _cli_mod()._desired_from_runtime_manifest(slot, state_root)
-
-
-def _profile_runtime_contract(profile) -> str:
-    return _cli_mod()._profile_runtime_contract(profile)
-
-
-def _profile_customer_surface(profile) -> str:
-    return _cli_mod()._profile_customer_surface(profile)
 
 
 def _run_static_slot_checks(desired, profile, rendered):

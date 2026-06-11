@@ -6,6 +6,14 @@ from pathlib import Path
 import shutil
 import sys
 
+from ..domain.image_specs import (
+    IMAGE_RECIPE_SCHEMA,
+    _image_spec_recipe_tokens,
+    _label_map_from_labels,
+    _profile_customer_surface,
+    _profile_runtime_contract,
+    _recipe_label,
+)
 from ..domain.runtime_truth import local_canonical_recipe_check_from_truth as _local_canonical_recipe_check_from_truth
 from ..routing import RuntimeBinding
 
@@ -28,18 +36,6 @@ def _run_text(command: list[str], timeout: int = 20):
     return _cli_mod()._run_text(command, timeout=timeout)
 
 
-def _label_map_from_labels(labels: dict[str, str], name: str) -> dict[str, str]:
-    return _cli_mod()._label_map_from_labels(labels, name)
-
-
-def _profile_runtime_contract(profile) -> str:
-    return _cli_mod()._profile_runtime_contract(profile)
-
-
-def _profile_customer_surface(profile) -> str:
-    return _cli_mod()._profile_customer_surface(profile)
-
-
 def _apache_route_checks(binding: RuntimeBinding, apache_route) -> list[tuple[bool, str, str | None]]:
     return _cli_mod()._apache_route_checks(binding, apache_route)
 
@@ -50,14 +46,6 @@ def _check_line(ok: bool, name: str, detail: str | None = None) -> None:
 
 def _is_root() -> bool:
     return _cli_mod()._is_root()
-
-
-def _image_spec_recipe_tokens(image_spec: dict) -> dict[str, str]:
-    return _cli_mod()._image_spec_recipe_tokens(image_spec)
-
-
-def _recipe_label(labels: dict[str, str], name: str) -> str:
-    return _cli_mod()._recipe_label(labels, name)
 
 
 def parse_apache_route(slot: str):
@@ -74,9 +62,6 @@ def get_runtime_binding(target: str, state_root: Path):
 
 def load_profile(name: str):
     return _cli_mod().load_profile(name)
-
-
-IMAGE_RECIPE_SCHEMA = "v1"
 
 
 def _find_gateway_container(binding: RuntimeBinding, profile) -> tuple[str | None, str | None]:

@@ -9,6 +9,8 @@ import stat
 import sys
 import time
 
+from ..host.account_files import _ensure_not_symlink_chain, _runtime_ids
+
 def _cli_mod():
     from .. import cli
 
@@ -32,14 +34,6 @@ def _is_root() -> bool:
 
 def _slot_home(slot: str) -> Path:
     return _cli_mod()._slot_home(slot)
-
-
-def _ensure_not_symlink_chain(path: Path, stop_at: Path) -> None:
-    return _cli_mod()._ensure_not_symlink_chain(path, stop_at)
-
-
-def _runtime_ids(slot: str) -> tuple[int, int, int]:
-    return _cli_mod()._runtime_ids(slot)
 
 
 def _slot_runtime_dir(slot: str) -> Path:

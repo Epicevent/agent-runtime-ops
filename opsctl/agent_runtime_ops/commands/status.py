@@ -6,6 +6,11 @@ from pathlib import Path
 
 from ..apache import parse_apache_route
 from ..domain.apache_route_checks import apache_route_checks as _apache_route_checks
+from ..domain.image_specs import (
+    _image_spec_recipe_payload,
+    _profile_customer_surface,
+    _profile_runtime_contract,
+)
 from ..renderer import render_compose
 from ..routing import get_runtime_binding
 
@@ -30,18 +35,6 @@ def _live_runtime_truth(slot: str, state_root: Path):
 
 def _desired_from_runtime_manifest(slot: str, state_root: Path):
     return _cli_mod()._desired_from_runtime_manifest(slot, state_root)
-
-
-def _profile_runtime_contract(profile) -> str:
-    return _cli_mod()._profile_runtime_contract(profile)
-
-
-def _profile_customer_surface(profile) -> str:
-    return _cli_mod()._profile_customer_surface(profile)
-
-
-def _image_spec_recipe_payload(image_spec: dict) -> dict[str, object]:
-    return _cli_mod()._image_spec_recipe_payload(image_spec)
 
 
 def _check_line(ok: bool, name: str, detail: str | None = None) -> None:

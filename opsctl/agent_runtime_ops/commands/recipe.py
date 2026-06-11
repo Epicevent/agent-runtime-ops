@@ -13,8 +13,31 @@ import subprocess
 import sys
 import tempfile
 
+from ..canonical_recipes import (
+    canonical_label_values,
+    canonical_recipe_for_image_spec,
+    canonical_recipe_identity,
+    list_canonical_recipe_names,
+    load_canonical_recipe,
+    validate_canonical_recipe,
+)
+from ..domain.image_specs import (
+    _image_spec_recipe,
+    _label_map_to_json,
+    _label_map_to_string,
+    _optional_safe_text,
+    _profile_runtime_contract,
+    _validate_safe_name,
+)
 from ..domain.source_provenance import require_fresh_clean_source_provenance as _require_fresh_clean_source_provenance
 from ..domain.source_provenance import source_provenance as _source_provenance
+from ..host.account_files import (
+    _atomic_write_key_value,
+    _ensure_not_symlink_chain,
+    _read_key_value_file,
+    _runtime_ids,
+    _slot_uid_gid,
+)
 from ..host.files import atomic_write_text as _atomic_write_text
 from ..host.files import fsync_parent as _fsync_parent
 from ..paths import DEFAULT_STATE_ROOT
@@ -44,22 +67,6 @@ def _run_text(command: list[str], timeout: int = 20):
     return _cli_mod()._run_text(command, timeout=timeout)
 
 
-def _slot_uid_gid(slot: str) -> tuple[int, int]:
-    return _cli_mod()._slot_uid_gid(slot)
-
-
-def _atomic_write_key_value(path: Path, data: dict[str, str], mode: int, uid: int | None = None, gid: int | None = None) -> None:
-    return _cli_mod()._atomic_write_key_value(path, data, mode, uid, gid)
-
-
-def _runtime_ids(slot: str) -> tuple[int, int, int]:
-    return _cli_mod()._runtime_ids(slot)
-
-
-def _ensure_not_symlink_chain(path: Path, stop_at: Path) -> None:
-    return _cli_mod()._ensure_not_symlink_chain(path, stop_at)
-
-
 def _slot_runtime_dir(slot: str) -> Path:
     return _cli_mod()._slot_runtime_dir(slot)
 
@@ -84,30 +91,6 @@ def _append_action_log(state_root: Path, action: str, slot: str, target: str, st
     return _cli_mod()._append_action_log(state_root, action, slot, target, status, detail)
 
 
-def _validate_safe_name(name: str) -> None:
-    return _cli_mod()._validate_safe_name(name)
-
-
-def _optional_safe_text(value: object, name: str) -> str:
-    return _cli_mod()._optional_safe_text(value, name)
-
-
-def _profile_runtime_contract(profile) -> str:
-    return _cli_mod()._profile_runtime_contract(profile)
-
-
-def _label_map_to_string(value: object) -> str:
-    return _cli_mod()._label_map_to_string(value)
-
-
-def _label_map_to_json(value: object) -> str:
-    return _cli_mod()._label_map_to_json(value)
-
-
-def _image_spec_recipe(image_spec: dict) -> dict[str, object]:
-    return _cli_mod()._image_spec_recipe(image_spec)
-
-
 def _dev_recipe_runtime_env(desired, state_root: Path) -> dict[str, str]:
     return _cli_mod()._dev_recipe_runtime_env(desired, state_root)
 
@@ -122,30 +105,6 @@ def get_runtime_binding(target: str, state_root: Path):
 
 def load_profile(name: str):
     return _cli_mod().load_profile(name)
-
-
-def load_canonical_recipe(name: str):
-    return _cli_mod().load_canonical_recipe(name)
-
-
-def list_canonical_recipe_names():
-    return _cli_mod().list_canonical_recipe_names()
-
-
-def validate_canonical_recipe(name: str):
-    return _cli_mod().validate_canonical_recipe(name)
-
-
-def canonical_label_values(recipe):
-    return _cli_mod().canonical_label_values(recipe)
-
-
-def canonical_recipe_for_image_spec(image_spec: dict):
-    return _cli_mod().canonical_recipe_for_image_spec(image_spec)
-
-
-def canonical_recipe_identity(recipe) -> dict[str, str]:
-    return _cli_mod().canonical_recipe_identity(recipe)
 
 
 SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")

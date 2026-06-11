@@ -7,6 +7,8 @@ from pathlib import Path
 import stat
 import sys
 
+from ..host.account_files import _ensure_not_symlink_chain, _runtime_ids
+
 
 def _cli_mod():
     from .. import cli
@@ -26,10 +28,6 @@ def _slot_home(slot: str) -> Path:
     return _cli_mod()._slot_home(slot)
 
 
-def _ensure_not_symlink_chain(path: Path, stop_at: Path) -> None:
-    return _cli_mod()._ensure_not_symlink_chain(path, stop_at)
-
-
 def _assert_secret_path_safe(slot: str, path: Path, *, create_parent: bool = False) -> None:
     if not path.is_absolute():
         raise ValueError(f"secret file path must be absolute: {path}")
@@ -45,10 +43,6 @@ def _assert_secret_path_safe(slot: str, path: Path, *, create_parent: bool = Fal
         raise ValueError(f"secret file path is not a regular file: {path}")
     if path.is_symlink():
         raise ValueError(f"secret file must not be a symlink: {path}")
-
-
-def _runtime_ids(slot: str) -> tuple[int, int, int]:
-    return _cli_mod()._runtime_ids(slot)
 
 
 def _append_action_log(state_root: Path, action: str, slot: str, target: str, status: str, detail: str = "") -> None:

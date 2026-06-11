@@ -5,6 +5,16 @@ import json
 import sys
 from pathlib import Path
 
+from ..canonical_recipes import canonical_recipe_for_image_spec, canonical_recipe_identity
+from ..domain.image_specs import (
+    IMAGE_ROLLOUT_IMAGE_NAME,
+    _image_spec_from_direct_images,
+    _image_spec_recipe,
+    _image_spec_recipe_payload,
+    _image_spec_runtime_profile_name,
+    _profile_runtime_contract,
+)
+
 
 def _cli_mod():
     from .. import cli
@@ -22,26 +32,6 @@ def _is_root() -> bool:
 
 def _apache_public_host(slot: str) -> str:
     return _cli_mod()._apache_public_host(slot)
-
-
-def _image_spec_from_direct_images(wrapper_image: str, product_image: str) -> dict[str, object]:
-    return _cli_mod()._image_spec_from_direct_images(wrapper_image, product_image)
-
-
-def _image_spec_recipe_payload(image_spec: dict) -> dict[str, object]:
-    return _cli_mod()._image_spec_recipe_payload(image_spec)
-
-
-def _image_spec_recipe(image_spec: dict) -> dict[str, object]:
-    return _cli_mod()._image_spec_recipe(image_spec)
-
-
-def _image_spec_runtime_profile_name(image_spec: dict, runtime_class: str, fallback: str | None = None) -> str:
-    return _cli_mod()._image_spec_runtime_profile_name(image_spec, runtime_class, fallback)
-
-
-def _profile_runtime_contract(profile) -> str:
-    return _cli_mod()._profile_runtime_contract(profile)
 
 
 def _run_static_slot_checks(desired, profile, rendered=None):
@@ -88,14 +78,6 @@ def load_profile(name: str):
     return _cli_mod().load_profile(name)
 
 
-def canonical_recipe_for_image_spec(image_spec: dict):
-    return _cli_mod().canonical_recipe_for_image_spec(image_spec)
-
-
-def canonical_recipe_identity(recipe) -> dict[str, str]:
-    return _cli_mod().canonical_recipe_identity(recipe)
-
-
 def render_compose(profile, desired):
     return _cli_mod().render_compose(profile, desired)
 
@@ -106,9 +88,6 @@ def RuntimeTarget(*args, **kwargs):
 
 def load_yaml(path: Path, *args, **kwargs) -> dict:
     return _cli_mod().load_yaml(path, *args, **kwargs)
-
-
-IMAGE_ROLLOUT_IMAGE_NAME = "direct-image"
 
 
 def _runtime_manifest_rollup(state_root: Path, slots: list[str], family: str) -> dict[str, object]:
