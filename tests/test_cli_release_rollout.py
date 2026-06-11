@@ -1187,7 +1187,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
             output = io.StringIO()
             with (
                 patch("agent_runtime_ops.commands.rollout._is_root", return_value=True),
-                patch("agent_runtime_ops.domain.image_specs._image_recipe_labels_from_wrapper", return_value=hermes_recipe_labels(product_image=product)),
+                patch("agent_runtime_ops.domain.image_specs.image_recipe_labels_from_wrapper", return_value=hermes_recipe_labels(product_image=product)),
                 contextlib.redirect_stdout(output),
             ):
                 rc = cmd_rollout_image_plan(
@@ -1214,7 +1214,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
             output = io.StringIO()
             with (
                 patch("agent_runtime_ops.commands.rollout._is_root", return_value=True),
-                patch("agent_runtime_ops.domain.image_specs._image_recipe_labels_from_wrapper", return_value=hermes_recipe_labels(product_image=product)),
+                patch("agent_runtime_ops.domain.image_specs.image_recipe_labels_from_wrapper", return_value=hermes_recipe_labels(product_image=product)),
                 patch("agent_runtime_ops.commands.rollout._apply_desired_slot", return_value=0) as apply,
                 contextlib.redirect_stdout(output),
             ):
@@ -1247,7 +1247,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
             output = io.StringIO()
             with (
                 patch("agent_runtime_ops.commands.rollout._is_root", return_value=True),
-                patch("agent_runtime_ops.domain.image_specs._image_recipe_labels_from_wrapper", return_value=hermes_recipe_labels(product_image=product)),
+                patch("agent_runtime_ops.domain.image_specs.image_recipe_labels_from_wrapper", return_value=hermes_recipe_labels(product_image=product)),
                 patch("agent_runtime_ops.commands.rollout._apply_desired_slot", return_value=0) as apply,
                 contextlib.redirect_stdout(output),
             ):
@@ -1285,7 +1285,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 patch("agent_runtime_ops.commands.rollout._is_root", return_value=True),
                 patch("agent_runtime_ops.commands.rollout.live_runtime_truth", return_value=(source_truth, [])),
                 patch(
-                    "agent_runtime_ops.domain.image_specs._image_recipe_labels_from_wrapper",
+                    "agent_runtime_ops.domain.image_specs.image_recipe_labels_from_wrapper",
                     return_value=openclaw_recipe_labels(product_image=product),
                 ),
                 patch("agent_runtime_ops.commands.rollout._apply_desired_slot", return_value=0) as apply,
@@ -1308,7 +1308,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
     def test_wrapper_image_recipe_reads_oci_labels(self) -> None:
         product_image = wrapper_image_ref("hermes-workspace", "2")
         wrapper_image = wrapper_image_ref("agent-runtime-hermes", "3")
-        with patch("agent_runtime_ops.domain.image_specs._image_recipe_labels_from_wrapper", return_value=hermes_recipe_labels()):
+        with patch("agent_runtime_ops.domain.image_specs.image_recipe_labels_from_wrapper", return_value=hermes_recipe_labels()):
             recipe = image_recipe_from_wrapper_image(wrapper_image, family="hermes", product_image=product_image)
         self.assertEqual(recipe["source"], "wrapper_image_labels")
         self.assertEqual(recipe["canonical_recipe_name"], "hermes-workspace")
@@ -1325,7 +1325,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
         product_image = wrapper_image_ref("hermes-runtime", "4")
         wrapper_image = wrapper_image_ref("agent-runtime-hermes", "5")
         labels = hermes_runtime_recipe_labels(product_image=product_image)
-        with patch("agent_runtime_ops.domain.image_specs._image_recipe_labels_from_wrapper", return_value=labels):
+        with patch("agent_runtime_ops.domain.image_specs.image_recipe_labels_from_wrapper", return_value=labels):
             recipe = image_recipe_from_wrapper_image(wrapper_image, family="hermes", product_image=product_image)
         self.assertEqual(recipe["canonical_recipe_name"], "hermes-runtime")
         self.assertEqual(recipe["canonical_recipe_digest"], hermes_runtime_recipe_digest())
@@ -1348,7 +1348,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
             product_image=product_image,
             **{"health.endpoints": "dashboard=http://wrong.invalid"},
         )
-        with patch("agent_runtime_ops.domain.image_specs._image_recipe_labels_from_wrapper", return_value=labels):
+        with patch("agent_runtime_ops.domain.image_specs.image_recipe_labels_from_wrapper", return_value=labels):
             recipe = image_recipe_from_wrapper_image(wrapper_image, family="hermes", product_image=product_image)
         self.assertEqual(recipe["health_endpoints"]["gateway"], "http://127.0.0.1:8642/health")
 
@@ -1376,7 +1376,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
         product_image = wrapper_image_ref("hermes-workspace", "2")
         wrapper_image = wrapper_image_ref("agent-runtime-hermes", "3")
         labels = hermes_recipe_labels(**{"recipe.digest": "sha256:" + "9" * 64})
-        with patch("agent_runtime_ops.domain.image_specs._image_recipe_labels_from_wrapper", return_value=labels):
+        with patch("agent_runtime_ops.domain.image_specs.image_recipe_labels_from_wrapper", return_value=labels):
             with self.assertRaisesRegex(ValueError, "canonical recipe digest mismatch"):
                 image_recipe_from_wrapper_image(wrapper_image, family="hermes", product_image=product_image)
 
@@ -1384,7 +1384,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
         product_image = wrapper_image_ref("hermes-workspace", "2")
         wrapper_image = wrapper_image_ref("agent-runtime-hermes", "3")
         labels = hermes_recipe_labels(**{"recipe.name": "", "recipe.digest": ""})
-        with patch("agent_runtime_ops.domain.image_specs._image_recipe_labels_from_wrapper", return_value=labels):
+        with patch("agent_runtime_ops.domain.image_specs.image_recipe_labels_from_wrapper", return_value=labels):
             with self.assertRaisesRegex(ValueError, "missing canonical recipe name"):
                 image_recipe_from_wrapper_image(wrapper_image, family="hermes", product_image=product_image)
 
@@ -1392,7 +1392,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
         product_image = wrapper_image_ref("openclaw-jitech", "8")
         wrapper_image = wrapper_image_ref("agent-runtime-openclaw", "9")
         labels = openclaw_recipe_labels(**{"nas.propagation": ""})
-        with patch("agent_runtime_ops.domain.image_specs._image_recipe_labels_from_wrapper", return_value=labels):
+        with patch("agent_runtime_ops.domain.image_specs.image_recipe_labels_from_wrapper", return_value=labels):
             with self.assertRaisesRegex(ValueError, "recipe labels are incomplete: .*nas.propagation"):
                 image_recipe_from_wrapper_image(wrapper_image, family="openclaw", product_image=product_image)
 
@@ -1400,7 +1400,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
         product_image = wrapper_image_ref("openclaw-jitech", "8")
         wrapper_image = wrapper_image_ref("agent-runtime-openclaw", "9")
         labels = openclaw_recipe_labels(**{"nas.propagation": "private"})
-        with patch("agent_runtime_ops.domain.image_specs._image_recipe_labels_from_wrapper", return_value=labels):
+        with patch("agent_runtime_ops.domain.image_specs.image_recipe_labels_from_wrapper", return_value=labels):
             with self.assertRaisesRegex(ValueError, "canonical recipe mismatch: nas.propagation"):
                 image_recipe_from_wrapper_image(wrapper_image, family="openclaw", product_image=product_image)
 
@@ -1497,7 +1497,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
         product_image = wrapper_image_ref("hermes-workspace", "2")
         wrapper_image = wrapper_image_ref("agent-runtime-hermes", "3")
         labels = hermes_recipe_labels(**{"product-component": "combined-runtime"})
-        with patch("agent_runtime_ops.domain.image_specs._image_recipe_labels_from_wrapper", return_value=labels):
+        with patch("agent_runtime_ops.domain.image_specs.image_recipe_labels_from_wrapper", return_value=labels):
             with self.assertRaisesRegex(ValueError, "product-component mismatch"):
                 image_recipe_from_wrapper_image(wrapper_image, family="hermes", product_image=product_image)
 

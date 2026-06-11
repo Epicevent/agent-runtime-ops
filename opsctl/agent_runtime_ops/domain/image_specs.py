@@ -34,38 +34,38 @@ IMAGE_RECIPE_SCHEMA = "v1"
 IMAGE_ROLLOUT_IMAGE_NAME = "direct-image"
 
 
-def _has_digest_ref(value: object) -> bool:
+def has_digest_ref(value: object) -> bool:
     return isinstance(value, str) and "@sha256:" in value
 
 
-def _digest_from_image_ref(value: object) -> str | None:
+def digest_from_image_ref(value: object) -> str | None:
     if not isinstance(value, str) or "@sha256:" not in value:
         return None
     return "sha256:" + value.rsplit("@sha256:", 1)[1]
 
 
-def _validate_safe_name(name: str) -> None:
+def validate_safe_name(name: str) -> None:
     if not SAFE_NAME_RE.match(name):
         raise ValueError("name must contain only letters, numbers, '.', '_', or '-'")
 
 
-def _validate_image_digest_ref(image_ref: str) -> str:
+def validate_image_digest_ref(image_ref: str) -> str:
     if not IMAGE_REF_RE.match(image_ref):
         raise ValueError("image reference must be pinned by digest: REGISTRY/IMAGE@sha256:<64 hex>")
-    digest = _digest_from_image_ref(image_ref)
+    digest = digest_from_image_ref(image_ref)
     if not digest or not DIGEST_RE.match(digest):
         raise ValueError("image reference digest must be sha256:<64 hex>")
     return digest
 
 
-def _optional_safe_text(value: object, name: str) -> str:
+def optional_safe_text(value: object, name: str) -> str:
     text = str(value or "").strip()
     if text and not SAFE_TEXT_RE.match(text):
         raise ValueError(f"{name} must not contain control characters")
     return text
 
 
-def _allowed_image_ref(family: object, role: str, image_ref: object) -> bool:
+def allowed_image_ref(family: object, role: str, image_ref: object) -> bool:
     if not isinstance(family, str) or not isinstance(image_ref, str):
         return False
     allowed = {
@@ -93,7 +93,7 @@ def _allowed_image_ref(family: object, role: str, image_ref: object) -> bool:
     return image_ref.startswith(allowed.get((family, role), ()))
 
 
-def _metadata_list(value: object) -> list[str]:
+def metadata_list(value: object) -> list[str]:
     if isinstance(value, list):
         items: list[str] = []
         for item in value:
@@ -111,7 +111,7 @@ def _csv(values: list[str]) -> str:
     return ",".join(values)
 
 
-def _label_map_from_string(value: str) -> dict[str, str]:
+def label_map_from_string(value: str) -> dict[str, str]:
     result: dict[str, str] = {}
     for item in value.split(","):
         item = item.strip()
@@ -130,7 +130,7 @@ def _label_map_from_string(value: str) -> dict[str, str]:
     return result
 
 
-def _label_map_from_json(value: str) -> dict[str, str]:
+def label_map_from_json(value: str) -> dict[str, str]:
     try:
         data = json.loads(value)
     except json.JSONDecodeError as exc:
@@ -149,21 +149,21 @@ def _label_map_from_json(value: str) -> dict[str, str]:
     return result
 
 
-def _label_map_from_labels(labels: dict[str, str], name: str) -> dict[str, str]:
-    json_value = _recipe_label(labels, f"{name}.json")
+def label_map_from_labels(labels: dict[str, str], name: str) -> dict[str, str]:
+    json_value = recipe_label(labels, f"{name}.json")
     if json_value:
-        return _label_map_from_json(json_value)
-    csv_value = _recipe_label(labels, name)
-    return _label_map_from_string(csv_value) if csv_value else {}
+        return label_map_from_json(json_value)
+    csv_value = recipe_label(labels, name)
+    return label_map_from_string(csv_value) if csv_value else {}
 
 
-def _label_map_to_string(value: object) -> str:
+def label_map_to_string(value: object) -> str:
     if not isinstance(value, dict):
         return ""
     return ",".join(f"{key}={value[key]}" for key in sorted(value) if str(key) and str(value[key]))
 
 
-def _label_map_to_json(value: object) -> str:
+def label_map_to_json(value: object) -> str:
     if not isinstance(value, dict):
         return ""
     result = {str(key): str(item) for key, item in value.items() if str(key) and str(item)}
@@ -172,18 +172,18 @@ def _label_map_to_json(value: object) -> str:
     return json.dumps(result, sort_keys=True, separators=(",", ":"))
 
 
-def _profile_runtime_contract(profile) -> str:
+def profile_runtime_contract(profile) -> str:
     return str(profile.metadata.get("runtime_contract") or "")
 
 
-def _profile_customer_surface(profile) -> str:
+def profile_customer_surface(profile) -> str:
     return str(profile.metadata.get("customer_surface") or "")
 
 
-def _image_spec_recipe_payload(image_spec: dict) -> dict[str, object]:
+def image_spec_recipe_payload(image_spec: dict) -> dict[str, object]:
     product_image = image_spec.get("product_image")
     wrapper_image = image_spec.get("wrapper_image")
-    image_recipe = _image_spec_recipe(image_spec)
+    image_recipe = image_spec_recipe(image_spec)
     canonical_recipe = canonical_recipe_for_image_spec(image_spec)
     payload: dict[str, object] = {
         "mode": image_spec.get("mode") or "unknown",
@@ -201,8 +201,8 @@ def _image_spec_recipe_payload(image_spec: dict) -> dict[str, object]:
     return payload
 
 
-def _image_spec_recipe_tokens(image_spec: dict) -> dict[str, str]:
-    recipe = _image_spec_recipe_payload(image_spec)
+def image_spec_recipe_tokens(image_spec: dict) -> dict[str, str]:
+    recipe = image_spec_recipe_payload(image_spec)
     return {
         "recipe_mode": str(recipe.get("mode") or "unknown"),
         "product_component": str(recipe.get("product_component") or "unknown"),
@@ -221,7 +221,7 @@ def _derived_image_components(product_image: str, wrapper_image: str) -> dict[st
     }
 
 
-def _image_recipe_labels_from_wrapper(wrapper_image: str) -> dict[str, str]:
+def image_recipe_labels_from_wrapper(wrapper_image: str) -> dict[str, str]:
     docker = shutil.which("docker")
     if not docker:
         raise ValueError("docker is required to inspect wrapper image recipe labels")
@@ -242,42 +242,42 @@ def _image_recipe_labels_from_wrapper(wrapper_image: str) -> dict[str, str]:
     return {str(key): str(value) for key, value in labels.items()}
 
 
-def _recipe_label(labels: dict[str, str], name: str) -> str:
+def recipe_label(labels: dict[str, str], name: str) -> str:
     return str(labels.get(IMAGE_RECIPE_LABEL_PREFIX + name) or "")
 
 
-def _image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product_image: str) -> dict[str, object]:
-    labels = _image_recipe_labels_from_wrapper(wrapper_image)
-    schema = _recipe_label(labels, "recipe.schema")
+def image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product_image: str) -> dict[str, object]:
+    labels = image_recipe_labels_from_wrapper(wrapper_image)
+    schema = recipe_label(labels, "recipe.schema")
     if schema != IMAGE_RECIPE_SCHEMA:
         raise ValueError(
             "wrapper image is missing agent-runtime recipe labels; rebuild wrapper with current publish workflow"
         )
-    label_family = _recipe_label(labels, "family")
-    label_product_image = _recipe_label(labels, "product-image")
+    label_family = recipe_label(labels, "family")
+    label_product_image = recipe_label(labels, "product-image")
     if label_family != family:
         raise ValueError(f"wrapper image recipe family mismatch: label={label_family or 'missing'} requested={family}")
     if label_product_image != product_image:
         raise ValueError("wrapper image recipe product-image does not match --product-image")
-    customer_profile = _recipe_label(labels, "runtime-profile.customer")
-    dev_profile = _recipe_label(labels, "runtime-profile.dev")
-    customer_contract = _recipe_label(labels, "runtime-contract.customer")
-    dev_contract = _recipe_label(labels, "runtime-contract.dev")
-    product_component = _recipe_label(labels, "product-component")
-    wrapper_component = _recipe_label(labels, "wrapper-component")
-    command_mode = _recipe_label(labels, "command-mode")
-    http_port = _recipe_label(labels, "http-port")
-    source_output_target = _recipe_label(labels, "source-output-target")
-    nas_container_root = _recipe_label(labels, "nas.container-root")
-    nas_host_root_template = _recipe_label(labels, "nas.host-root-template")
-    nas_read_only = _recipe_label(labels, "nas.read-only")
-    nas_propagation = _recipe_label(labels, "nas.propagation")
-    nas_child_mount_mode = _recipe_label(labels, "nas.child-mount-mode")
-    contract_version = _recipe_label(labels, "contract.version")
-    health_endpoints_label = _recipe_label(labels, "health.endpoints")
-    health_endpoints_json_label = _recipe_label(labels, "health.endpoints.json")
-    canonical_name = _recipe_label(labels, "recipe.name")
-    canonical_digest = _recipe_label(labels, "recipe.digest")
+    customer_profile = recipe_label(labels, "runtime-profile.customer")
+    dev_profile = recipe_label(labels, "runtime-profile.dev")
+    customer_contract = recipe_label(labels, "runtime-contract.customer")
+    dev_contract = recipe_label(labels, "runtime-contract.dev")
+    product_component = recipe_label(labels, "product-component")
+    wrapper_component = recipe_label(labels, "wrapper-component")
+    command_mode = recipe_label(labels, "command-mode")
+    http_port = recipe_label(labels, "http-port")
+    source_output_target = recipe_label(labels, "source-output-target")
+    nas_container_root = recipe_label(labels, "nas.container-root")
+    nas_host_root_template = recipe_label(labels, "nas.host-root-template")
+    nas_read_only = recipe_label(labels, "nas.read-only")
+    nas_propagation = recipe_label(labels, "nas.propagation")
+    nas_child_mount_mode = recipe_label(labels, "nas.child-mount-mode")
+    contract_version = recipe_label(labels, "contract.version")
+    health_endpoints_label = recipe_label(labels, "health.endpoints")
+    health_endpoints_json_label = recipe_label(labels, "health.endpoints.json")
+    canonical_name = recipe_label(labels, "recipe.name")
+    canonical_digest = recipe_label(labels, "recipe.digest")
     if not canonical_name:
         raise ValueError("wrapper image recipe is missing canonical recipe name")
     if not canonical_digest:
@@ -326,7 +326,7 @@ def _image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product
         "runtime-contract.customer": customer_contract,
         "runtime-contract.dev": dev_contract,
         "command-mode": command_mode,
-        "working-dir": _recipe_label(labels, "working-dir"),
+        "working-dir": recipe_label(labels, "working-dir"),
         "http-port": http_port,
         "source-output-target": source_output_target,
         "nas.container-root": nas_container_root,
@@ -344,8 +344,8 @@ def _image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product
                 f"wrapper image canonical recipe mismatch: {label_name} label={actual or 'missing'} canonical={expected or 'missing'}"
             )
     if expected_labels.get("health.endpoints.json"):
-        expected_health_endpoints = _label_map_from_json(expected_labels["health.endpoints.json"])
-        actual_health_endpoints = _label_map_from_labels(labels, "health.endpoints")
+        expected_health_endpoints = label_map_from_json(expected_labels["health.endpoints.json"])
+        actual_health_endpoints = label_map_from_labels(labels, "health.endpoints")
         if actual_health_endpoints != expected_health_endpoints:
             actual = health_endpoints_json_label or health_endpoints_label
             raise ValueError(
@@ -376,7 +376,7 @@ def _image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product
             "dev": dev_contract,
         },
         "command_mode": command_mode,
-        "working_dir": _recipe_label(labels, "working-dir"),
+        "working_dir": recipe_label(labels, "working-dir"),
         "http_port": http_port,
         "source_output_target": source_output_target,
         "container_nas_root": nas_container_root,
@@ -385,8 +385,8 @@ def _image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product
         "nas_mount_propagation": nas_propagation,
         "nas_child_mount_mode": nas_child_mount_mode,
         "contract_version": contract_version,
-        "health_endpoints": _label_map_from_labels(labels, "health.endpoints"),
-        "ops_repo_commit": _recipe_label(labels, "ops-repo-commit"),
+        "health_endpoints": label_map_from_labels(labels, "health.endpoints"),
+        "ops_repo_commit": recipe_label(labels, "ops-repo-commit"),
     }
     for runtime_class, profile_name in recipe["runtime_profiles"].items():
         profile = load_profile(str(profile_name))
@@ -403,24 +403,24 @@ def _image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product
     return recipe
 
 
-def _image_recipe_from_wrapper_image_auto(wrapper_image: str, *, product_image: str) -> dict[str, object]:
-    labels = _image_recipe_labels_from_wrapper(wrapper_image)
-    family = _recipe_label(labels, "family")
+def image_recipe_from_wrapper_image_auto(wrapper_image: str, *, product_image: str) -> dict[str, object]:
+    labels = image_recipe_labels_from_wrapper(wrapper_image)
+    family = recipe_label(labels, "family")
     if family not in {"openclaw", "hermes"}:
         raise ValueError(f"wrapper image recipe family mismatch: label={family or 'missing'}")
-    return _image_recipe_from_wrapper_image(wrapper_image, family=family, product_image=product_image)
+    return image_recipe_from_wrapper_image(wrapper_image, family=family, product_image=product_image)
 
 
-def _image_spec_from_direct_images(wrapper_image: str, product_image: str) -> dict[str, object]:
-    wrapper_digest = _validate_image_digest_ref(wrapper_image)
-    product_digest = _validate_image_digest_ref(product_image)
-    image_recipe = _image_recipe_from_wrapper_image_auto(wrapper_image, product_image=product_image)
+def image_spec_from_direct_images(wrapper_image: str, product_image: str) -> dict[str, object]:
+    wrapper_digest = validate_image_digest_ref(wrapper_image)
+    product_digest = validate_image_digest_ref(product_image)
+    image_recipe = image_recipe_from_wrapper_image_auto(wrapper_image, product_image=product_image)
     family = str(image_recipe.get("family") or "")
     if family not in {"openclaw", "hermes"}:
         raise ValueError("wrapper image recipe did not declare a supported family")
-    if not _allowed_image_ref(family, "wrapper", wrapper_image):
+    if not allowed_image_ref(family, "wrapper", wrapper_image):
         raise ValueError(f"wrapper image repository is not allowed for {family}")
-    if not _allowed_image_ref(family, "product", product_image):
+    if not allowed_image_ref(family, "product", product_image):
         raise ValueError(f"product image repository is not allowed for {family}")
     components = _derived_image_components(product_image, wrapper_image)
     components.update(
@@ -454,13 +454,13 @@ def _image_spec_from_direct_images(wrapper_image: str, product_image: str) -> di
     }
 
 
-def _image_spec_recipe(image_spec: dict) -> dict[str, object]:
+def image_spec_recipe(image_spec: dict) -> dict[str, object]:
     recipe = image_spec.get("image_recipe")
     return recipe if isinstance(recipe, dict) else {}
 
 
-def _image_spec_runtime_profile_name(image_spec: dict, runtime_class: str, fallback: str | None = None) -> str:
-    recipe = _image_spec_recipe(image_spec)
+def image_spec_runtime_profile_name(image_spec: dict, runtime_class: str, fallback: str | None = None) -> str:
+    recipe = image_spec_recipe(image_spec)
     profiles = recipe.get("runtime_profiles")
     if isinstance(profiles, dict) and profiles.get(runtime_class):
         return str(profiles[runtime_class])
@@ -469,14 +469,14 @@ def _image_spec_runtime_profile_name(image_spec: dict, runtime_class: str, fallb
     return str(fallback or "")
 
 
-def _image_spec_profile_contract_checks(image_spec: dict, profile) -> list[tuple[bool, str, str | None]]:
-    runtime_contract = _profile_runtime_contract(profile)
-    customer_surface = _profile_customer_surface(profile)
-    expected_components = _metadata_list(profile.metadata.get("expected_image_components"))
-    compatible_product_prefixes = _metadata_list(profile.metadata.get("compatible_product_image_prefixes"))
+def image_spec_profile_contract_checks(image_spec: dict, profile) -> list[tuple[bool, str, str | None]]:
+    runtime_contract = profile_runtime_contract(profile)
+    customer_surface = profile_customer_surface(profile)
+    expected_components = metadata_list(profile.metadata.get("expected_image_components"))
+    compatible_product_prefixes = metadata_list(profile.metadata.get("compatible_product_image_prefixes"))
     product_image = str(image_spec.get("product_image") or "")
     runtime_class = str(profile.metadata.get("slot_class") or "")
-    image_recipe = _image_spec_recipe(image_spec)
+    image_recipe = image_spec_recipe(image_spec)
     canonical_recipe = canonical_recipe_for_image_spec(image_spec)
     checks: list[tuple[bool, str, str | None]] = [
         (bool(runtime_contract), "runtime_contract_declared", f"contract={runtime_contract or 'missing'}"),
@@ -584,33 +584,5 @@ def _image_spec_profile_contract_checks(image_spec: dict, profile) -> list[tuple
     return checks
 
 
-def _image_spec_profile_contract_failures(image_spec: dict, profile) -> list[str]:
-    return [name for ok, name, _ in _image_spec_profile_contract_checks(image_spec, profile) if not ok]
-
-
-has_digest_ref = _has_digest_ref
-digest_from_image_ref = _digest_from_image_ref
-validate_safe_name = _validate_safe_name
-validate_image_digest_ref = _validate_image_digest_ref
-optional_safe_text = _optional_safe_text
-allowed_image_ref = _allowed_image_ref
-metadata_list = _metadata_list
-csv = _csv
-label_map_from_string = _label_map_from_string
-label_map_from_json = _label_map_from_json
-label_map_from_labels = _label_map_from_labels
-label_map_to_string = _label_map_to_string
-label_map_to_json = _label_map_to_json
-profile_runtime_contract = _profile_runtime_contract
-profile_customer_surface = _profile_customer_surface
-image_spec_recipe_payload = _image_spec_recipe_payload
-image_spec_recipe_tokens = _image_spec_recipe_tokens
-image_recipe_labels_from_wrapper = _image_recipe_labels_from_wrapper
-recipe_label = _recipe_label
-image_recipe_from_wrapper_image = _image_recipe_from_wrapper_image
-image_recipe_from_wrapper_image_auto = _image_recipe_from_wrapper_image_auto
-image_spec_from_direct_images = _image_spec_from_direct_images
-image_spec_recipe = _image_spec_recipe
-image_spec_runtime_profile_name = _image_spec_runtime_profile_name
-image_spec_profile_contract_checks = _image_spec_profile_contract_checks
-image_spec_profile_contract_failures = _image_spec_profile_contract_failures
+def image_spec_profile_contract_failures(image_spec: dict, profile) -> list[str]:
+    return [name for ok, name, _ in image_spec_profile_contract_checks(image_spec, profile) if not ok]
