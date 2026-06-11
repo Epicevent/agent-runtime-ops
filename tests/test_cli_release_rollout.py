@@ -1502,7 +1502,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
                     return_value=(desired, load_profile("openclaw-dev")),
                 ),
                 patch(
-                    "agent_runtime_ops.cli._run_live_slot_checks",
+                    "agent_runtime_ops.commands.check._run_live_slot_checks",
                     return_value=[(True, "live_container_image_matches_spec", wrapper_image)],
                 ),
                 contextlib.redirect_stdout(output),
