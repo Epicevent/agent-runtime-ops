@@ -11,8 +11,6 @@ from unittest.mock import patch
 
 from agent_runtime_ops.commands.nas import (
     _approve_auto_once,
-    _delete_official_credentials,
-    _official_credential_status,
     _remove_managed_fstab_entry,
     _write_managed_fstab_entry,
     cmd_nas_credential_status,
@@ -20,6 +18,7 @@ from agent_runtime_ops.commands.nas import (
     cmd_nas_mount,
     cmd_nas_requests,
 )
+from agent_runtime_ops.domain.nas_credentials import delete_official_credentials, official_credential_status
 from agent_runtime_ops.host.fstab import fstab_escape as _fstab_escape
 from agent_runtime_ops.host.fstab import managed_fstab_marker as _managed_fstab_marker
 from agent_runtime_ops.nas import parse_smb_share
@@ -118,10 +117,10 @@ class CliNasTests(unittest.TestCase):
             legacy_path.parent.mkdir()
             legacy_path.write_text("username=legacy\npassword=secret\n", encoding="utf-8")
             with (
-                patch("agent_runtime_ops.commands.nas.root_credential_path", return_value=root_path),
-                patch("agent_runtime_ops.commands.nas.customer_credential_path", return_value=customer_path),
+                patch("agent_runtime_ops.domain.nas_credentials.root_credential_path", return_value=root_path),
+                patch("agent_runtime_ops.domain.nas_credentials.customer_credential_path", return_value=customer_path),
             ):
-                status = _official_credential_status("oc3", share)
+                status = official_credential_status("oc3", share)
         self.assertEqual(status["root_credential_present"], "no")
         self.assertEqual(status["customer_credential_present"], "no")
         self.assertEqual(status["official_credential_present"], "no")
@@ -137,11 +136,10 @@ class CliNasTests(unittest.TestCase):
             customer_path.write_text("username=customer\npassword=secret\n", encoding="utf-8")
             legacy_path.write_text("username=legacy\npassword=secret\n", encoding="utf-8")
             with (
-                patch("agent_runtime_ops.commands.nas.root_credential_path", return_value=root_path),
-                patch("agent_runtime_ops.commands.nas.customer_credential_path", return_value=customer_path),
-                patch("agent_runtime_ops.commands.nas.credential_file_is_safe_for_slot"),
+                patch("agent_runtime_ops.domain.nas_credentials.root_credential_path", return_value=root_path),
+                patch("agent_runtime_ops.domain.nas_credentials.customer_credential_path", return_value=customer_path),
             ):
-                removed = _delete_official_credentials("oc3", share)
+                removed = delete_official_credentials("oc3", share)
             self.assertFalse(root_path.exists())
             self.assertFalse(customer_path.exists())
             self.assertTrue(legacy_path.exists())
@@ -221,8 +219,8 @@ class CliNasTests(unittest.TestCase):
             customer_path = Path(tmp) / "customer.cred"
             root_path.write_text("username=root\npassword=top-secret\n", encoding="utf-8")
             with (
-                patch("agent_runtime_ops.commands.nas.root_credential_path", return_value=root_path),
-                patch("agent_runtime_ops.commands.nas.customer_credential_path", return_value=customer_path),
+                patch("agent_runtime_ops.domain.nas_credentials.root_credential_path", return_value=root_path),
+                patch("agent_runtime_ops.domain.nas_credentials.customer_credential_path", return_value=customer_path),
             ):
                 output = io.StringIO()
                 with contextlib.redirect_stdout(output):

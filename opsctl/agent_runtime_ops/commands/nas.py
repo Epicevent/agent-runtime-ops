@@ -1,23 +1,24 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
 import getpass
-import json
-import os
 from pathlib import Path
 import sys
-import time
 
 from ..domain.actions import append_action_log as _append_action_log
 from ..domain.common import is_root as _is_root
 from ..domain.common import now_iso as _now_iso
 from ..domain.common import run_text as _run_text
 from ..domain.common import state_root as _state_root
+from ..domain.nas_credentials import (
+    delete_official_credentials,
+    official_credential_status,
+    validate_official_credentials_for_delete,
+)
+from ..domain.nas_requests import move_request, safe_request_file
 from ..host.account_files import (
     atomic_write_key_value,
     credential_file_is_safe_for_slot,
-    credential_presence,
     ensure_customer_agent_dirs,
     read_key_value_file,
     read_password_from_stdin,
@@ -36,10 +37,8 @@ from ..host.mounts import (
     safe_mountpoint_path as _safe_mountpoint_path,
 )
 from ..nas import (
-    agent_nas_dir,
     check_nas_policy,
     customer_credential_path,
-    history_dir,
     mountpoint_for_share,
     parse_smb_share,
     request_dir,
@@ -48,34 +47,6 @@ from ..nas import (
 )
 from ..routing import get_runtime_binding, load_runtime_bindings
 from ..state import load_runtime_target
-
-
-def _official_credential_paths(slot: str, share) -> dict[str, Path]:
-    return {
-        "root": root_credential_path(slot, share),
-        "customer": customer_credential_path(slot, share),
-    }
-
-
-def _combine_presence(*values: str) -> str:
-    if "yes" in values:
-        return "yes"
-    if "unknown" in values:
-        return "unknown"
-    return "no"
-
-
-def _official_credential_status(slot: str, share) -> dict[str, str]:
-    paths = _official_credential_paths(slot, share)
-    root_present = credential_presence(paths["root"])
-    customer_present = credential_presence(paths["customer"])
-    official_present = _combine_presence(root_present, customer_present)
-    return {
-        "root_credential_present": root_present,
-        "customer_credential_present": customer_present,
-        "official_credential_present": official_present,
-        "remount_possible": "yes" if official_present == "yes" else official_present,
-    }
 
 
 def _print_official_credential_status(prefix: str, status: dict[str, str]) -> None:
@@ -154,25 +125,6 @@ def _rollback_fstab_after_mount_failure(args: argparse.Namespace, slot: str, sha
         return f"failed:{exc}"
 
 
-def _move_request(path: Path, slot: str, status: str) -> Path:
-    target_dir = history_dir(slot, status)
-    target_dir.mkdir(parents=True, exist_ok=True)
-    target = target_dir / f"{datetime.now().strftime('%Y%m%dT%H%M%S')}.{path.name}"
-    os.replace(path, target)
-    return target
-
-
-def _safe_request_file(path: Path, slot: str) -> None:
-    uid, _ = slot_uid_gid(slot)
-    if path.is_symlink():
-        raise ValueError(f"request file must not be symlink: {path}")
-    stat_result = path.stat()
-    if stat_result.st_uid != uid:
-        raise ValueError(f"request file owner mismatch: {path}")
-    if stat_result.st_mode & 0o022:
-        raise ValueError(f"request file must not be group/world writable: {path}")
-
-
 def _approve_auto_once(state_root: Path) -> dict[str, int]:
     result = {"checked": 0, "approved": 0, "pending": 0, "rejected": 0, "failed": 0}
     for binding in load_runtime_bindings(state_root):
@@ -185,12 +137,12 @@ def _approve_auto_once(state_root: Path) -> dict[str, int]:
         for path in sorted(pending_dir.glob("*.env")):
             result["checked"] += 1
             try:
-                _safe_request_file(path, slot)
+                safe_request_file(path, slot)
                 data = read_key_value_file(path)
                 share_source = data.get("requested_share") or ""
                 decision = check_nas_policy(slot, share_source, state_root)
                 if not decision.allowed:
-                    _move_request(path, slot, "rejected")
+                    move_request(path, slot, "rejected")
                     _append_action_log(state_root, "nas_approve_auto", slot, share_source, "rejected", decision.reason)
                     result["rejected"] += 1
                     continue
@@ -204,19 +156,19 @@ def _approve_auto_once(state_root: Path) -> dict[str, int]:
                 decision, _ = _prepare_mount_entry(slot, decision.share.source, credential_path, state_root)
                 ok, reason = _host_mount_prepared_share(decision)
                 if ok:
-                    _move_request(path, slot, "approved")
+                    move_request(path, slot, "approved")
                     _append_action_log(state_root, "nas_approve_auto", slot, decision.share.source, "approved", reason)
                     result["approved"] += 1
                 else:
                     rollback = "removed" if _remove_managed_fstab_entry(decision.slot, decision.share.source) else "not_found"
-                    _move_request(path, slot, "rejected")
+                    move_request(path, slot, "rejected")
                     _append_action_log(state_root, "nas_approve_auto", slot, decision.share.source, "rejected", f"{reason} fstab_entry_rollback={rollback}")
                     result["rejected"] += 1
                     result["failed"] += 1
             except Exception as exc:
                 try:
                     share_source = read_key_value_file(path).get("requested_share", "")
-                    _move_request(path, slot, "rejected")
+                    move_request(path, slot, "rejected")
                     _append_action_log(state_root, "nas_approve_auto", slot, share_source, "rejected", str(exc))
                 except Exception:
                     pass
@@ -405,7 +357,7 @@ def cmd_nas_credential_status(args: argparse.Namespace) -> int:
         print("credential_status=fail")
         print(f"reason={exc}")
         return 1
-    status = _official_credential_status(slot, share)
+    status = official_credential_status(slot, share)
     print(f"target={slot}")
     print(f"share={share.source}")
     print("credential_scope=official")
@@ -440,7 +392,7 @@ def cmd_nas_mounted(args: argparse.Namespace) -> int:
         _print_mount_row(prefix, row)
         try:
             share = parse_smb_share(row.get("source", ""))
-            _print_official_credential_status(f"{prefix}_", _official_credential_status(desired.slot, share))
+            _print_official_credential_status(f"{prefix}_", official_credential_status(desired.slot, share))
         except Exception:
             print(f"{prefix}_official_credential_present=unknown")
             print(f"{prefix}_remount_possible=unknown")
@@ -531,7 +483,7 @@ def cmd_nas_unmount(args: argparse.Namespace) -> int:
         share = parse_smb_share(args.share)
         mountpoint = mountpoint_for_share(slot, share)
         _safe_mountpoint_path(mountpoint)
-        credential_status = _official_credential_status(slot, share)
+        credential_status = official_credential_status(slot, share)
     except Exception as exc:
         print(f"target={args.slot}")
         print(f"share={args.share}")
@@ -581,26 +533,6 @@ def cmd_nas_unmount(args: argparse.Namespace) -> int:
     return 0
 
 
-def _validate_official_credentials_for_delete(slot: str, share) -> None:
-    paths = _official_credential_paths(slot, share)
-    slot_uid, _ = slot_uid_gid(slot)
-    for name, path in paths.items():
-        if credential_presence(path) == "yes":
-            credential_file_is_safe_for_slot(slot, path, uid=0 if name == "root" else slot_uid)
-
-
-def _delete_official_credentials(slot: str, share) -> dict[str, str]:
-    paths = _official_credential_paths(slot, share)
-    removed: dict[str, str] = {}
-    for name, path in paths.items():
-        if credential_presence(path) == "yes":
-            path.unlink()
-            removed[f"{name}_credential_removed"] = "yes"
-        else:
-            removed[f"{name}_credential_removed"] = "no"
-    return removed
-
-
 def cmd_nas_remove(args: argparse.Namespace) -> int:
     if not _is_root():
         print("error: run as root/admin: sudo /usr/local/bin/opsctl nas remove TARGET //HOST/SHARE", file=sys.stderr)
@@ -611,9 +543,9 @@ def cmd_nas_remove(args: argparse.Namespace) -> int:
         share = parse_smb_share(args.share)
         mountpoint = mountpoint_for_share(slot, share)
         _safe_mountpoint_path(mountpoint)
-        before_status = _official_credential_status(slot, share)
+        before_status = official_credential_status(slot, share)
         # Validate credentials before mutating mount or fstab state.
-        _validate_official_credentials_for_delete(slot, share)
+        validate_official_credentials_for_delete(slot, share)
     except Exception as exc:
         print(f"target={args.slot}")
         print(f"share={args.share}")
@@ -647,7 +579,7 @@ def cmd_nas_remove(args: argparse.Namespace) -> int:
 
     try:
         fstab_removed = _remove_managed_fstab_entry(slot, share.source)
-        removed = _delete_official_credentials(slot, share)
+        removed = delete_official_credentials(slot, share)
     except Exception as exc:
         print("remove_status=fail")
         print(f"reason={exc}")
@@ -659,7 +591,7 @@ def cmd_nas_remove(args: argparse.Namespace) -> int:
             print("empty_dir_removed=yes")
         except OSError:
             print("empty_dir_removed=no")
-    after_status = _official_credential_status(slot, share)
+    after_status = official_credential_status(slot, share)
     print(f"target={slot}")
     print(f"share={share.source}")
     print(f"mountpoint={mountpoint}")
