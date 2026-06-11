@@ -819,6 +819,38 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertIn("document_tools_status=ok", text)
             self.assertGreaterEqual(status_for_slot.call_count, 2)
 
+    def test_document_tools_status_for_slot_reads_runtime_labels_after_module_split(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            labels = openclaw_recipe_labels(product_image=wrapper_image_ref("openclaw-jitech", "8"))
+            inspect_info = {
+                "State": {"Running": False, "Pid": 0},
+                "Config": {
+                    "Image": wrapper_image_ref("agent-runtime-openclaw", "9"),
+                    "Labels": labels,
+                },
+            }
+            inspect_result = subprocess.CompletedProcess(
+                ["docker", "inspect", "container-1"],
+                0,
+                stdout=json.dumps([inspect_info]),
+                stderr="",
+            )
+            apache_route = argparse.Namespace(public_host="oc3.ji-tech.co.kr", gateway_port=30689)
+
+            with (
+                patch("agent_runtime_ops.commands.document_tools.parse_apache_route", return_value=apache_route),
+                patch("agent_runtime_ops.commands.document_tools._find_gateway_container_by_binding", return_value=("container-1", "instance_label")),
+                patch("agent_runtime_ops.commands.document_tools.shutil.which", return_value="/usr/bin/tool"),
+                patch("agent_runtime_ops.commands.document_tools._run_text", return_value=inspect_result),
+            ):
+                result = document_tools._document_tools_status_for_slot("oc3", root)
+
+            self.assertEqual(result["probe_status"], "not_running")
+            self.assertEqual(result["runtime_profile"], "openclaw-customer")
+            self.assertEqual(result["canonical_recipe_name"], "openclaw-control")
+
     def test_recipe_status_reports_missing_recipe_for_dev_slot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

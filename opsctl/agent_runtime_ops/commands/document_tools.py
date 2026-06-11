@@ -9,6 +9,7 @@ import sys
 import os
 
 from ..apache import parse_apache_route
+from ..commands.runtime_truth import _find_gateway_container_by_binding, _labels_from_container_info
 from ..routing import get_runtime_binding, load_runtime_bindings
 
 
@@ -31,14 +32,6 @@ def _is_root() -> bool:
 
 def _run_text(command: list[str], timeout: int = 20):
     return _cli_mod()._run_text(command, timeout=timeout)
-
-
-def _find_gateway_container_by_binding(binding):
-    return _cli_mod()._find_gateway_container_by_binding(binding)
-
-
-def _labels_from_container_info(info: dict) -> dict[str, str]:
-    return _cli_mod()._labels_from_container_info(info)
 
 
 def _recipe_label(labels: dict[str, str], name: str) -> str:
