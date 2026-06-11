@@ -8,6 +8,7 @@ import shlex
 import sys
 from typing import Any, TextIO
 
+from .mcp.handlers import nas as nas_handlers
 from .mcp.runner import CommandResult, CommandRunner
 from .mcp.specs import list_tool_specs
 from .paths import REPO_ROOT
@@ -191,12 +192,12 @@ class McpServer:
             "heartbeat_status": self._tool_heartbeat_status,
             "heartbeat_disable": self._tool_heartbeat_disable,
             "target_rollback": self._tool_target_rollback,
-            "nas_status": self._tool_nas_status,
-            "nas_mount": self._tool_nas_mount,
-            "nas_unmount": self._tool_nas_unmount,
-            "nas_remove": self._tool_nas_remove,
-            "nas_credential_status": self._tool_nas_credential_status,
-            "nas_approve_auto_once": self._tool_nas_approve_auto_once,
+            "nas_status": lambda tool_args: nas_handlers.status(self, tool_args),
+            "nas_mount": lambda tool_args: nas_handlers.mount(self, tool_args),
+            "nas_unmount": lambda tool_args: nas_handlers.unmount(self, tool_args),
+            "nas_remove": lambda tool_args: nas_handlers.remove(self, tool_args),
+            "nas_credential_status": lambda tool_args: nas_handlers.credential_status(self, tool_args),
+            "nas_approve_auto_once": lambda tool_args: nas_handlers.approve_auto_once(self, tool_args),
         }
         if name not in handlers:
             raise ProtocolError(-32602, f"unknown tool: {name}")
@@ -584,78 +585,6 @@ class McpServer:
         runs.append(self._run([self.sudo, self.opsctl, "check", "--live", slot], timeout=180))
         ok = all(item["returncode"] == 0 for item in runs)
         return self._common_response(ok=ok, mutated=True, runs=runs)
-
-    def _tool_nas_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"target"})
-        runs = [self._run([self.opsctl, "nas", "requests"], timeout=60)]
-        slot_value = args.get("target")
-        if slot_value:
-            runs.append(self._run([self.opsctl, "nas", "mounted", self._target(slot_value)], timeout=60))
-        ok = all(item["returncode"] == 0 for item in runs)
-        return self._common_response(ok=ok, mutated=False, runs=runs)
-
-    def _tool_nas_mount(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"target", "share", "keep_fstab_on_failure"})
-        self._reject_sensitive_raw_args(args)
-        target = self._target(args.get("target"))
-        share = self._share(args.get("share"))
-        runs = [self._run([self.opsctl, "nas", "policy-check", target, share], timeout=60)]
-        if runs[0]["returncode"] != 0:
-            return self._common_response(ok=False, mutated=False, runs=runs, next_action="fix NAS policy or grant before mount")
-        argv = [self.sudo, self.opsctl, "nas", "mount", target, share]
-        if bool(args.get("keep_fstab_on_failure", False)):
-            argv.append("--keep-fstab-on-failure")
-        runs.append(self._run(argv, timeout=180))
-        runs.append(self._run([self.opsctl, "nas", "mounted", target], timeout=60))
-        ok = all(item["returncode"] == 0 for item in runs)
-        return self._common_response(ok=ok, mutated=True, runs=runs)
-
-    def _tool_nas_unmount(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"target", "share", "lazy", "delete_empty_dir"})
-        target = self._target(args.get("target"))
-        share = self._share(args.get("share"))
-        argv = [self.sudo, self.opsctl, "nas", "unmount", target, share]
-        if bool(args.get("lazy", False)):
-            argv.append("--lazy")
-        if bool(args.get("delete_empty_dir", False)):
-            argv.append("--delete-empty-dir")
-        runs = [
-            self._run([self.opsctl, "nas", "mounted", target], timeout=60),
-            self._run(argv, timeout=180),
-            self._run([self.opsctl, "nas", "mounted", target], timeout=60),
-        ]
-        ok = all(item["returncode"] == 0 for item in runs)
-        return self._common_response(ok=ok, mutated=True, runs=runs)
-
-    def _tool_nas_remove(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"target", "share", "lazy", "delete_empty_dir"})
-        target = self._target(args.get("target"))
-        share = self._share(args.get("share"))
-        argv = [self.sudo, self.opsctl, "nas", "remove", target, share]
-        if bool(args.get("lazy", False)):
-            argv.append("--lazy")
-        if bool(args.get("delete_empty_dir", False)):
-            argv.append("--delete-empty-dir")
-        runs = [
-            self._run([self.sudo, self.opsctl, "nas", "credential", "status", target, share], timeout=60),
-            self._run(argv, timeout=180),
-            self._run([self.sudo, self.opsctl, "nas", "credential", "status", target, share], timeout=60),
-            self._run([self.opsctl, "nas", "mounted", target], timeout=60),
-        ]
-        ok = all(item["returncode"] == 0 for item in runs)
-        return self._common_response(ok=ok, mutated=True, runs=runs)
-
-    def _tool_nas_credential_status(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, {"target", "share"})
-        target = self._target(args.get("target"))
-        share = self._share(args.get("share"))
-        runs = [self._run([self.sudo, self.opsctl, "nas", "credential", "status", target, share], timeout=60)]
-        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
-
-    def _tool_nas_approve_auto_once(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._reject_unknown(args, set())
-        runs = [self._run([self.sudo, self.opsctl, "nas", "approve-auto"], timeout=180)]
-        return self._common_response(ok=runs[0]["returncode"] == 0, mutated=True, runs=runs)
 
     def _reject_unknown(self, args: dict[str, Any], allowed: set[str]) -> None:
         unknown = sorted(set(args) - allowed)
