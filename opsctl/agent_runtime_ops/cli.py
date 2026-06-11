@@ -27,6 +27,8 @@ from .commands.binding import (
     cmd_binding_set_public_host,
     cmd_binding_status,
 )
+from .commands.profile import cmd_profile_list
+from .commands.update import cmd_self_update, cmd_update_approve, cmd_update_status
 from .canonical_recipes import (
     canonical_label_values,
     canonical_recipe_for_product,
@@ -42,6 +44,7 @@ from .domain.runtime_truth import local_canonical_recipe_check_from_truth as _lo
 from .domain.apache_route_checks import apache_route_checks as _apache_route_checks
 from .domain.source_provenance import require_fresh_clean_source_provenance as _require_fresh_clean_source_provenance
 from .domain.source_provenance import source_provenance as _source_provenance
+from .domain.update_policy import installed_source_commit as _installed_source_commit
 from .host.fstab import (
     fstab_escape as _fstab_escape,
     managed_fstab_marker as _managed_fstab_marker,
@@ -74,7 +77,7 @@ from .nas import (
     request_path,
     root_credential_path,
 )
-from .profiles import list_profile_names, load_profile
+from .profiles import load_profile
 from .redaction import redact
 from .renderer import render_compose
 from .routing import (
@@ -93,9 +96,6 @@ from .runtime_secrets import (
 from .state import RuntimeTarget, digest_from_image_ref, image_spec_from_manifest, load_runtime_target, runtime_manifest_path
 from .yamlio import dump_yaml, load_yaml
 
-DEFAULT_REPO_URL = "https://github.com/Epicevent/agent-runtime-ops.git"
-UPDATE_POLICY_NAME = "ops-update.yaml"
-FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 IMAGE_REF_RE = re.compile(r"^[A-Za-z0-9./:_-]+@sha256:[0-9a-f]{64}$")
@@ -118,162 +118,8 @@ def _is_root() -> bool:
     return geteuid() == 0
 
 
-def _approved_update_from_policy(state_root: Path) -> tuple[str, str]:
-    policy_path = state_root / UPDATE_POLICY_NAME
-    data = load_yaml(policy_path)
-    item = (data.get("updates") or {}).get("agent-runtime-ops")
-    if not isinstance(item, dict):
-        raise ValueError(f"missing updates.agent-runtime-ops in {policy_path}")
-    repo_url = item.get("repo_url", DEFAULT_REPO_URL)
-    ref = item.get("approved_ref")
-    return str(repo_url), str(ref or "")
-
-
-def _validate_update_target(repo_url: str, ref: str) -> None:
-    if repo_url != DEFAULT_REPO_URL:
-        raise ValueError(f"unapproved update repository: {repo_url}")
-    if not FULL_SHA_RE.match(ref):
-        raise ValueError("self-update requires an approved full 40-character commit sha")
-
-
 def _now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
-
-
-def _installed_source_commit() -> str:
-    manifest_path = REPO_ROOT / ".agent-runtime-ops-manifest"
-    try:
-        for raw_line in manifest_path.read_text(encoding="utf-8").splitlines():
-            key, _, value = raw_line.partition("=")
-            if key == "source_commit":
-                return value.strip()
-    except OSError:
-        return ""
-    return ""
-
-
-def _write_update_policy(state_root: Path, ref: str) -> Path:
-    _validate_update_target(DEFAULT_REPO_URL, ref)
-    if not state_root.is_dir():
-        raise FileNotFoundError(state_root)
-
-    policy_path = state_root / UPDATE_POLICY_NAME
-    data = {
-        "meta": {
-            "schema_version": 1,
-            "updated_at": _now_iso(),
-            "scope": "private_server_state",
-        },
-        "updates": {
-            "agent-runtime-ops": {
-                "repo_url": DEFAULT_REPO_URL,
-                "approved_ref": ref,
-                "approved_at": _now_iso(),
-                "approved_by": os.environ.get("SUDO_USER") or os.environ.get("USER") or "",
-            }
-        },
-    }
-
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=state_root, delete=False) as fh:
-        tmp_path = Path(fh.name)
-        fh.write(dump_yaml(data))
-        fh.flush()
-        os.fsync(fh.fileno())
-    try:
-        if hasattr(os, "chown"):
-            os.chown(tmp_path, 0, state_root.stat().st_gid)
-        os.chmod(tmp_path, 0o640)
-        os.replace(tmp_path, policy_path)
-    except Exception:
-        tmp_path.unlink(missing_ok=True)
-        raise
-    return policy_path
-
-
-def cmd_profile_list(args: argparse.Namespace) -> int:
-    for name in list_profile_names():
-        profile = load_profile(name)
-        print(f"{profile.name} {profile.digest}")
-    return 0
-
-
-def cmd_self_update(args: argparse.Namespace) -> int:
-    if not _is_root():
-        print("error: run as root/admin: sudo /usr/local/bin/opsctl self-update", file=sys.stderr)
-        return 2
-    if shutil.which("git") is None:
-        print("error: missing command: git", file=sys.stderr)
-        return 2
-    if shutil.which("bash") is None:
-        print("error: missing command: bash", file=sys.stderr)
-        return 2
-
-    try:
-        repo_url, ref = _approved_update_from_policy(_state_root(args))
-        policy_source = str(_state_root(args) / UPDATE_POLICY_NAME)
-        _validate_update_target(repo_url, ref)
-    except Exception as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        print(f"hint: approve a full commit in {_state_root(args) / UPDATE_POLICY_NAME}", file=sys.stderr)
-        return 2
-
-    with tempfile.TemporaryDirectory(prefix="agent-runtime-ops-update.") as tmp:
-        repo = Path(tmp) / "agent-runtime-ops"
-        print(f"update_repo={repo_url}")
-        print(f"approved_ref={ref}")
-        print(f"policy_source={policy_source}")
-        try:
-            subprocess.run(["git", "clone", "--no-checkout", repo_url, str(repo)], check=True)
-            subprocess.run(["git", "-C", str(repo), "fetch", "--depth", "1", "origin", ref], check=True)
-            subprocess.run(["git", "-C", str(repo), "checkout", "--detach", ref], check=True)
-            resolved = subprocess.check_output(
-                ["git", "-C", str(repo), "rev-parse", "HEAD"],
-                text=True,
-            ).strip()
-            if resolved != ref:
-                print(f"error: checkout mismatch: expected {ref}, got {resolved}", file=sys.stderr)
-                return 1
-            env = os.environ.copy()
-            env["AGENT_RUNTIME_OPS_REF"] = ref
-            subprocess.run(["bash", str(repo / "install.sh"), "install"], check=True, env=env)
-        except subprocess.CalledProcessError as exc:
-            return exc.returncode or 1
-    return 0
-
-
-def cmd_update_approve(args: argparse.Namespace) -> int:
-    if not _is_root():
-        print("error: run as root/admin: sudo /usr/local/bin/opsctl update approve FULL_SHA", file=sys.stderr)
-        return 2
-    try:
-        policy_path = _write_update_policy(_state_root(args), args.ref)
-    except Exception as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    print(f"approved_ref={args.ref}")
-    print(f"policy_file={policy_path}")
-    return 0
-
-
-def cmd_update_status(args: argparse.Namespace) -> int:
-    installed_ref = _installed_source_commit()
-    try:
-        repo_url, ref = _approved_update_from_policy(_state_root(args))
-        _validate_update_target(repo_url, ref)
-    except Exception as exc:
-        print("update_status=not_ready")
-        if installed_ref:
-            print(f"installed_ref={installed_ref}")
-        print(f"reason={exc}")
-        return 1
-    matches = bool(installed_ref) and installed_ref == ref
-    print(f"update_status={'current' if matches else 'ready'}")
-    if installed_ref:
-        print(f"installed_ref={installed_ref}")
-    print(f"repo_url={repo_url}")
-    print(f"approved_ref={ref}")
-    print(f"approved_matches_installed={'yes' if matches else 'no'}")
-    return 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:
