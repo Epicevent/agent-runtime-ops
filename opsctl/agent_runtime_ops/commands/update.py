@@ -8,6 +8,8 @@ import subprocess
 import sys
 import tempfile
 
+from ..domain.common import is_root as _is_root
+from ..domain.common import state_root as _state_root
 from ..domain.update_policy import (
     UPDATE_POLICY_NAME,
     approved_update_from_policy,
@@ -15,17 +17,6 @@ from ..domain.update_policy import (
     validate_update_target,
     write_update_policy,
 )
-
-
-def _state_root(args: argparse.Namespace) -> Path:
-    return Path(args.state_root)
-
-
-def _is_root() -> bool:
-    geteuid = getattr(os, "geteuid", None)
-    if geteuid is None:
-        return False
-    return geteuid() == 0
 
 
 def cmd_self_update(args: argparse.Namespace) -> int:

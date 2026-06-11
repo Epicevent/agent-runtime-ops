@@ -9,10 +9,6 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from agent_runtime_ops.cli import (
-    _fstab_escape,
-    _managed_fstab_marker,
-)
 from agent_runtime_ops.commands.nas import (
     _approve_auto_once,
     _delete_official_credentials,
@@ -24,6 +20,8 @@ from agent_runtime_ops.commands.nas import (
     cmd_nas_mount,
     cmd_nas_requests,
 )
+from agent_runtime_ops.host.fstab import fstab_escape as _fstab_escape
+from agent_runtime_ops.host.fstab import managed_fstab_marker as _managed_fstab_marker
 from agent_runtime_ops.nas import parse_smb_share
 from agent_runtime_ops.routing import RuntimeBinding, dump_runtime_bindings
 from agent_runtime_ops.yamlio import dump_yaml

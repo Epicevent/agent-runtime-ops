@@ -1,45 +1,16 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 
 from ..canonical_recipes import canonical_recipe_for_image_spec, canonical_recipe_identity
+from ..domain.common import check_line as _check_line
+from ..domain.common import state_root as _state_root
 from ..domain.image_specs import _profile_customer_surface, _profile_runtime_contract
+from ..domain.runtime_checks import run_live_slot_checks as _run_live_slot_checks
+from ..domain.runtime_checks import run_static_slot_checks as _run_static_slot_checks
+from ..domain.runtime_state import _desired_from_runtime_manifest
+from ..domain.runtime_targets import desired_from_live_image_truth as _desired_from_live_image_truth
 from ..renderer import render_compose
-
-
-def _cli_mod():
-    from .. import cli
-
-    return cli
-
-
-def _state_root(args: argparse.Namespace) -> Path:
-    return Path(args.state_root)
-
-
-def _desired_from_live_image_truth(slot: str, state_root: Path):
-    return _cli_mod()._desired_from_live_image_truth(slot, state_root)
-
-
-def _desired_from_runtime_manifest(slot: str, state_root: Path):
-    return _cli_mod()._desired_from_runtime_manifest(slot, state_root)
-
-
-def _run_static_slot_checks(desired, profile, rendered):
-    return _cli_mod()._run_static_slot_checks(desired, profile, rendered)
-
-
-def _run_live_slot_checks(desired, profile, state_root: Path):
-    return _cli_mod()._run_live_slot_checks(desired, profile, state_root)
-
-
-def _check_line(ok: bool, name: str, detail: str | None = None) -> None:
-    status = "PASS" if ok else "FAIL"
-    if detail:
-        print(f"{status} {name} {detail}")
-    else:
-        print(f"{status} {name}")
 
 
 def cmd_check(args: argparse.Namespace) -> int:

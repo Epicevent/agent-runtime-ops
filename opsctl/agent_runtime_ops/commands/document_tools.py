@@ -9,33 +9,12 @@ import sys
 import os
 
 from ..apache import parse_apache_route
-from ..commands.runtime_truth import _find_gateway_container_by_binding, _labels_from_container_info
+from ..domain.common import is_root as _is_root
+from ..domain.common import run_text as _run_text
+from ..domain.common import state_root as _state_root
+from ..domain.image_specs import _recipe_label
+from ..domain.runtime_truth import _find_gateway_container_by_binding, _labels_from_container_info
 from ..routing import get_runtime_binding, load_runtime_bindings
-
-
-def _cli_mod():
-    from .. import cli
-
-    return cli
-
-
-def _state_root(args: argparse.Namespace) -> Path:
-    return Path(args.state_root)
-
-
-def _is_root() -> bool:
-    geteuid = getattr(os, "geteuid", None)
-    if geteuid is None:
-        return False
-    return geteuid() == 0
-
-
-def _run_text(command: list[str], timeout: int = 20):
-    return _cli_mod()._run_text(command, timeout=timeout)
-
-
-def _recipe_label(labels: dict[str, str], name: str) -> str:
-    return _cli_mod()._recipe_label(labels, name)
 
 
 _DOCUMENT_TOOLS_PROBE_SCRIPT = r"""

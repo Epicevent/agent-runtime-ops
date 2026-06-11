@@ -9,6 +9,9 @@ import sys
 
 from ..apache import parse_apache_route, set_apache_host
 from ..domain.apache_route_checks import apache_route_checks as _apache_route_checks
+from ..domain.common import check_line as _check_line
+from ..domain.common import is_root as _is_root
+from ..domain.common import state_root as _state_root
 from ..host.files import fsync_parent as _fsync_parent
 from ..routing import (
     RuntimeBinding,
@@ -19,25 +22,6 @@ from ..routing import (
     runtime_bindings_path,
     validate_public_host as validate_binding_public_host,
 )
-
-
-def _state_root(args: argparse.Namespace) -> Path:
-    return Path(args.state_root)
-
-
-def _is_root() -> bool:
-    geteuid = getattr(os, "geteuid", None)
-    if geteuid is None:
-        return False
-    return geteuid() == 0
-
-
-def _check_line(ok: bool, name: str, detail: str | None = None) -> None:
-    prefix = "PASS" if ok else "FAIL"
-    if detail:
-        print(f"{prefix} {name} {detail}")
-    else:
-        print(f"{prefix} {name}")
 
 
 def cmd_binding_list(args: argparse.Namespace) -> int:

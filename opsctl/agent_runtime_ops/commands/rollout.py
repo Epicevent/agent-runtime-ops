@@ -6,88 +6,28 @@ import sys
 from pathlib import Path
 
 from ..canonical_recipes import canonical_recipe_for_image_spec, canonical_recipe_identity
+from ..domain.actions import append_action_log as _append_action_log
+from ..domain.common import apache_public_host as _apache_public_host
+from ..domain.common import is_root as _is_root
+from ..domain.common import state_root as _state_root
 from ..domain.image_specs import (
     IMAGE_ROLLOUT_IMAGE_NAME,
     _image_spec_from_direct_images,
-    _image_spec_recipe,
     _image_spec_recipe_payload,
     _image_spec_runtime_profile_name,
     _profile_runtime_contract,
 )
-
-
-def _cli_mod():
-    from .. import cli
-
-    return cli
-
-
-def _state_root(args: argparse.Namespace) -> Path:
-    return _cli_mod()._state_root(args)
-
-
-def _is_root() -> bool:
-    return _cli_mod()._is_root()
-
-
-def _apache_public_host(slot: str) -> str:
-    return _cli_mod()._apache_public_host(slot)
-
-
-def _run_static_slot_checks(desired, profile, rendered=None):
-    return _cli_mod()._run_static_slot_checks(desired, profile, rendered)
-
-
-def _apply_desired_slot(*args, **kwargs):
-    return _cli_mod()._apply_desired_slot(*args, **kwargs)
-
-
-def _live_runtime_truth(slot: str, state_root: Path):
-    return _cli_mod()._live_runtime_truth(slot, state_root)
-
-
-def _append_action_log(state_root: Path, action: str, slot: str, target: str, status: str, detail: str = "") -> None:
-    return _cli_mod()._append_action_log(state_root, action, slot, target, status, detail)
-
-
-def load_runtime_bindings(state_root: Path):
-    return _cli_mod().load_runtime_bindings(state_root)
-
-
-def get_runtime_binding(target: str, state_root: Path):
-    return _cli_mod().get_runtime_binding(target, state_root)
-
-
-def load_runtime_target(target: str, state_root: Path):
-    return _cli_mod().load_runtime_target(target, state_root)
-
-
-def image_spec_from_manifest(manifest: dict):
-    return _cli_mod().image_spec_from_manifest(manifest)
-
-
-def runtime_manifest_path(state_root: Path, slot: str) -> Path:
-    return _cli_mod().runtime_manifest_path(state_root, slot)
-
-
-def _state_manifest_path(state_root: Path, slot: str, *, create_parent: bool = False) -> Path:
-    return _cli_mod()._state_manifest_path(state_root, slot, create_parent=create_parent)
-
-
-def load_profile(name: str):
-    return _cli_mod().load_profile(name)
-
-
-def render_compose(profile, desired):
-    return _cli_mod().render_compose(profile, desired)
-
-
-def RuntimeTarget(*args, **kwargs):
-    return _cli_mod().RuntimeTarget(*args, **kwargs)
-
-
-def load_yaml(path: Path, *args, **kwargs) -> dict:
-    return _cli_mod().load_yaml(path, *args, **kwargs)
+from ..domain.runtime_apply import apply_desired_slot as _apply_desired_slot
+from ..domain.runtime_checks import run_static_slot_checks as _run_static_slot_checks
+from ..domain.runtime_state import _state_manifest_path
+from ..domain.runtime_targets import (
+    desired_from_direct_images as _desired_from_direct_images,
+    desired_from_live_image_truth as _desired_from_live_image_truth,
+)
+from ..domain.runtime_truth import live_runtime_truth as _live_runtime_truth
+from ..renderer import render_compose
+from ..routing import load_runtime_bindings
+from ..yamlio import load_yaml
 
 
 def _runtime_manifest_rollup(state_root: Path, slots: list[str], family: str) -> dict[str, object]:
@@ -183,47 +123,6 @@ def cmd_rollout_status(args: argparse.Namespace) -> int:
 
 def _image_spec_canonical_record(image_spec: dict) -> dict[str, str]:
     return canonical_recipe_identity(canonical_recipe_for_image_spec(image_spec))
-
-
-def _desired_from_direct_images(slot: str, image_spec: dict, state_root: Path):
-    binding = get_runtime_binding(slot, state_root)
-    runtime_class = binding.runtime_class
-    image_recipe = _image_spec_recipe(image_spec)
-    profiles = image_recipe.get("runtime_profiles") if isinstance(image_recipe, dict) else {}
-    runtime_profile = profiles.get(runtime_class) if isinstance(profiles, dict) else ""
-    if not runtime_profile:
-        raise ValueError(f"wrapper image recipe has no runtime profile for runtime_class={runtime_class}")
-    family = str(image_recipe.get("family") or image_spec.get("family") or "")
-    profile = load_profile(str(runtime_profile))
-    if profile.metadata.get("family") != family:
-        raise ValueError(f"slot image family/profile mismatch: image={family} profile={profile.metadata.get('family')}")
-    if profile.metadata.get("slot_class") != runtime_class:
-        raise ValueError(
-            f"binding image runtime_class/profile mismatch: binding={runtime_class} profile={profile.metadata.get('slot_class')}"
-        )
-    if family != binding.family:
-        raise ValueError(f"binding image family mismatch: image={family} binding={binding.family}")
-    desired = RuntimeTarget(
-        target=binding.linux_account,
-        family=family,
-        runtime_class=runtime_class,
-        image_name=IMAGE_ROLLOUT_IMAGE_NAME,
-        image_spec=image_spec,
-        runtime_profile=str(runtime_profile),
-        route=binding,
-    )
-    return desired, profile
-
-
-def _desired_from_live_image_truth(slot: str, state_root: Path):
-    truth, checks = _live_runtime_truth(slot, state_root)
-    failed = [name for ok, name, _ in checks if not ok]
-    if failed or truth.get("truth_status") != "ok":
-        raise ValueError(f"live image truth is not ok: status={truth.get('truth_status')} failed={','.join(failed)}")
-    wrapper_image = str(truth.get("wrapper_image") or "")
-    product_image = str(truth.get("product_image") or "")
-    image_spec = _image_spec_from_direct_images(wrapper_image, product_image)
-    return _desired_from_direct_images(slot, image_spec, state_root)
 
 
 def _direct_image_spec_from_args(args: argparse.Namespace) -> dict[str, object]:

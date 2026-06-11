@@ -7,26 +7,12 @@ from pathlib import Path
 import shlex
 import sys
 
-from ..host.account_files import _ensure_not_symlink_chain
+from ..domain.common import is_root as _is_root
+from ..domain.common import state_root as _state_root
+from ..host.account_files import _ensure_not_symlink_chain, _slot_home
+from ..profiles import load_profile
 from ..runtime_secrets import parse_secret_env_text
-
-
-def _cli_mod():
-    from .. import cli
-
-    return cli
-
-
-def _state_root(args: argparse.Namespace) -> Path:
-    return _cli_mod()._state_root(args)
-
-
-def _is_root() -> bool:
-    return _cli_mod()._is_root()
-
-
-def _slot_home(slot: str) -> Path:
-    return _cli_mod()._slot_home(slot)
+from ..state import load_runtime_target
 
 
 def _assert_secret_path_safe(slot: str, path: Path, *, create_parent: bool = False) -> None:
@@ -44,14 +30,6 @@ def _assert_secret_path_safe(slot: str, path: Path, *, create_parent: bool = Fal
         raise ValueError(f"secret file path is not a regular file: {path}")
     if path.is_symlink():
         raise ValueError(f"secret file must not be a symlink: {path}")
-
-
-def load_runtime_target(target: str, state_root: Path):
-    return _cli_mod().load_runtime_target(target, state_root)
-
-
-def load_profile(name: str):
-    return _cli_mod().load_profile(name)
 
 
 def _json_path_present(path: Path, keys: list[str]) -> tuple[str, str]:

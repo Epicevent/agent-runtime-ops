@@ -4,63 +4,22 @@ import argparse
 from pathlib import Path
 import sys
 
-
-def _cli_mod():
-    from .. import cli
-
-    return cli
-
-
-def _state_root(args: argparse.Namespace) -> Path:
-    return Path(args.state_root)
-
-
-def _is_root() -> bool:
-    return _cli_mod()._is_root()
-
-
-def _desired_from_runtime_manifest(slot: str, state_root: Path):
-    return _cli_mod()._desired_from_runtime_manifest(slot, state_root)
-
-
-def _append_action_log(*args, **kwargs):
-    return _cli_mod()._append_action_log(*args, **kwargs)
-
-
-def _apply_desired_slot(*args, **kwargs):
-    return _cli_mod()._apply_desired_slot(*args, **kwargs)
-
-
-def _slot_runtime_dir(slot: str) -> Path:
-    return _cli_mod()._slot_runtime_dir(slot)
-
-
-def _latest_backup(runtime_dir: Path):
-    return _cli_mod()._latest_backup(runtime_dir)
-
-
-def _restore_backup(slot: str, runtime_dir: Path, backup_dir: Path, state_root: Path):
-    return _cli_mod()._restore_backup(slot, runtime_dir, backup_dir, state_root)
-
-
-def _load_backup_runtime_contract(slot: str, backup_dir: Path, state_root: Path):
-    return _cli_mod()._load_backup_runtime_contract(slot, backup_dir, state_root)
-
-
-def _run_live_slot_checks_with_wait(desired, profile, state_root: Path, timeout_seconds: int = 90):
-    return _cli_mod()._run_live_slot_checks_with_wait(desired, profile, state_root, timeout_seconds=timeout_seconds)
-
-
-def _profile_startup_timeout_seconds(profile) -> int:
-    return _cli_mod()._profile_startup_timeout_seconds(profile)
-
-
-def _check_line(ok: bool, name: str, detail: str | None = None) -> None:
-    status = "PASS" if ok else "FAIL"
-    if detail:
-        print(f"{status} {name} {detail}")
-    else:
-        print(f"{status} {name}")
+from ..domain.actions import append_action_log as _append_action_log
+from ..domain.common import check_line as _check_line
+from ..domain.common import is_root as _is_root
+from ..domain.common import state_root as _state_root
+from ..domain.runtime_apply import apply_desired_slot as _apply_desired_slot
+from ..domain.runtime_checks import (
+    profile_startup_timeout_seconds as _profile_startup_timeout_seconds,
+    run_live_slot_checks_with_wait as _run_live_slot_checks_with_wait,
+)
+from ..domain.runtime_state import (
+    _desired_from_runtime_manifest,
+    _latest_backup,
+    _load_backup_runtime_contract,
+    _restore_backup,
+    _slot_runtime_dir,
+)
 
 
 def cmd_apply(args: argparse.Namespace) -> int:

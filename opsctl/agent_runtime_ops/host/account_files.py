@@ -61,6 +61,10 @@ def _slot_uid_gid(slot: str) -> tuple[int, int]:
     return int(record.pw_uid), int(record.pw_gid)
 
 
+def _slot_home(slot: str) -> Path:
+    return Path(_passwd_record(slot).pw_dir)
+
+
 def _runtime_ids(slot: str) -> tuple[int, int, int]:
     runtime = _passwd_record(f"{slot}_rt")
     data_gid = _group_gid(f"{slot}_data")

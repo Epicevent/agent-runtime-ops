@@ -6,34 +6,19 @@ import os
 from pathlib import Path
 import sys
 
+from ..domain.common import is_root as _is_root
+from ..domain.runtime_state import _agent_backup_root, _slot_runtime_dir
 from ..redaction import redact
 from ..routing import validate_linux_account
 from ..yamlio import load_yaml
 
 
-def _cli_mod():
-    from .. import cli
-
-    return cli
-
-
-def _is_root() -> bool:
-    geteuid = getattr(os, "geteuid", None)
-    if geteuid is None:
-        return False
-    return geteuid() == 0
-
-
-def _agent_backup_root(runtime_dir: Path) -> Path:
-    return _cli_mod()._agent_backup_root(runtime_dir)
-
-
-def _slot_runtime_dir(slot: str) -> Path:
-    return _cli_mod()._slot_runtime_dir(slot)
-
-
 def _is_under_path(path: Path, root: Path) -> bool:
-    return _cli_mod()._is_under_path(path, root)
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _resolve_diagnostics_dir(slot: str, value: str | None = None) -> Path:

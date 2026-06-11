@@ -21,6 +21,12 @@ from ..canonical_recipes import (
     load_canonical_recipe,
     validate_canonical_recipe,
 )
+from ..domain.actions import append_action_log as _append_action_log
+from ..domain.common import check_line as _check_line
+from ..domain.common import is_root as _is_root
+from ..domain.common import now_iso as _now_iso
+from ..domain.common import run_text as _run_text
+from ..domain.common import state_root as _state_root
 from ..domain.image_specs import (
     _image_spec_recipe,
     _label_map_to_json,
@@ -29,6 +35,10 @@ from ..domain.image_specs import (
     _profile_runtime_contract,
     _validate_safe_name,
 )
+from ..domain.runtime_apply import apply_desired_slot as _apply_desired_slot
+from ..domain.runtime_checks import run_live_slot_checks as _run_live_slot_checks
+from ..domain.runtime_state import _slot_runtime_dir
+from ..domain.runtime_targets import desired_from_live_image_truth as _desired_from_live_image_truth
 from ..domain.source_provenance import require_fresh_clean_source_provenance as _require_fresh_clean_source_provenance
 from ..domain.source_provenance import source_provenance as _source_provenance
 from ..host.account_files import (
@@ -41,70 +51,11 @@ from ..host.account_files import (
 from ..host.files import atomic_write_text as _atomic_write_text
 from ..host.files import fsync_parent as _fsync_parent
 from ..paths import DEFAULT_STATE_ROOT
+from ..profiles import load_profile
+from ..routing import get_runtime_binding
 from ..runtime_secrets import primary_profile_secret_file
+from ..state import load_runtime_target
 from ..yamlio import dump_yaml, load_yaml
-
-
-def _cli_mod():
-    from .. import cli
-
-    return cli
-
-
-def _state_root(args: argparse.Namespace) -> Path:
-    return _cli_mod()._state_root(args)
-
-
-def _now_iso() -> str:
-    return _cli_mod()._now_iso()
-
-
-def _is_root() -> bool:
-    return _cli_mod()._is_root()
-
-
-def _run_text(command: list[str], timeout: int = 20):
-    return _cli_mod()._run_text(command, timeout=timeout)
-
-
-def _slot_runtime_dir(slot: str) -> Path:
-    return _cli_mod()._slot_runtime_dir(slot)
-
-
-def _apply_desired_slot(*args, **kwargs):
-    return _cli_mod()._apply_desired_slot(*args, **kwargs)
-
-
-def _desired_from_live_image_truth(slot: str, state_root: Path):
-    return _cli_mod()._desired_from_live_image_truth(slot, state_root)
-
-
-def _run_live_slot_checks(desired, profile, state_root: Path):
-    return _cli_mod()._run_live_slot_checks(desired, profile, state_root)
-
-
-def _check_line(ok: bool, name: str, detail: str | None = None) -> None:
-    return _cli_mod()._check_line(ok, name, detail)
-
-
-def _append_action_log(state_root: Path, action: str, slot: str, target: str, status: str, detail: str = "") -> None:
-    return _cli_mod()._append_action_log(state_root, action, slot, target, status, detail)
-
-
-def _dev_recipe_runtime_env(desired, state_root: Path) -> dict[str, str]:
-    return _cli_mod()._dev_recipe_runtime_env(desired, state_root)
-
-
-def load_runtime_target(target: str, state_root: Path):
-    return _cli_mod().load_runtime_target(target, state_root)
-
-
-def get_runtime_binding(target: str, state_root: Path):
-    return _cli_mod().get_runtime_binding(target, state_root)
-
-
-def load_profile(name: str):
-    return _cli_mod().load_profile(name)
 
 
 SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")

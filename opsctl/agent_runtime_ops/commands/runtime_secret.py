@@ -9,12 +9,17 @@ import stat
 import sys
 import time
 
-from ..host.account_files import _ensure_not_symlink_chain, _runtime_ids
-
-def _cli_mod():
-    from .. import cli
-
-    return cli
+from ..domain.actions import append_action_log as _append_action_log
+from ..domain.common import check_line as _check_line
+from ..domain.common import is_root as _is_root
+from ..domain.common import run_text as _run_text
+from ..domain.common import run_text_cwd as _run_text_cwd
+from ..domain.common import state_root as _state_root
+from ..domain.runtime_checks import profile_startup_timeout_seconds as _profile_startup_timeout_seconds
+from ..domain.runtime_state import _agent_compose_path, _compose_project_name, _docker_compose_command, _slot_runtime_dir
+from ..domain.runtime_truth import find_gateway_container as _find_gateway_container
+from ..host.account_files import _ensure_not_symlink_chain, _runtime_ids, _slot_home
+from ..profiles import load_profile
 from ..runtime_secrets import (
     RUNTIME_SECRET_KEYS,
     parse_secret_env_text,
@@ -22,113 +27,7 @@ from ..runtime_secrets import (
     render_upserted_secret_env,
     validate_runtime_secret_values,
 )
-
-
-def _state_root(args: argparse.Namespace) -> Path:
-    return _cli_mod()._state_root(args)
-
-
-def _is_root() -> bool:
-    return _cli_mod()._is_root()
-
-
-def _slot_home(slot: str) -> Path:
-    return _cli_mod()._slot_home(slot)
-
-
-def _slot_runtime_dir(slot: str) -> Path:
-    return _cli_mod()._slot_runtime_dir(slot)
-
-
-def _agent_compose_path(runtime_dir: Path) -> Path:
-    return _cli_mod()._agent_compose_path(runtime_dir)
-
-
-def _docker_compose_command(slot: str, compose_path: Path, *args: str) -> list[str]:
-    return _cli_mod()._docker_compose_command(slot, compose_path, *args)
-
-
-def _compose_project_name(slot: str) -> str:
-    return _cli_mod()._compose_project_name(slot)
-
-
-def _run_text(command: list[str], timeout: int = 20):
-    return _cli_mod()._run_text(command, timeout=timeout)
-
-
-def _run_text_cwd(command: list[str], cwd: Path, timeout: int = 20):
-    return _cli_mod()._run_text_cwd(command, cwd, timeout=timeout)
-
-
-def _container_name(slot: str, profile) -> str:
-    return _cli_mod()._container_name(slot, profile)
-
-
-def _find_gateway_container(binding, profile):
-    service_label = "gateway"
-    by_label = _run_text(
-        [
-            "docker",
-            "ps",
-            "-a",
-            "--filter",
-            f"label=agent-runtime.instance-id={binding.instance_id}",
-            "--filter",
-            f"label=agent-runtime.profile={profile.name}",
-            "--filter",
-            f"label=agent-runtime.service={service_label}",
-            "--format",
-            "{{.ID}}",
-        ]
-    )
-    if by_label.returncode == 0:
-        ids = [line.strip() for line in by_label.stdout.splitlines() if line.strip()]
-        if len(ids) == 1:
-            return ids[0], "instance_label"
-        if len(ids) > 1:
-            return None, f"multiple_instance_label_matches:{len(ids)}"
-    legacy = _run_text(
-        [
-            "docker",
-            "ps",
-            "-a",
-            "--filter",
-            f"label=agent-runtime.slot={binding.linux_account}",
-            "--filter",
-            f"label=agent-runtime.profile={profile.name}",
-            "--filter",
-            f"label=agent-runtime.service={service_label}",
-            "--format",
-            "{{.ID}}",
-        ]
-    )
-    if legacy.returncode == 0:
-        ids = [line.strip() for line in legacy.stdout.splitlines() if line.strip()]
-        if len(ids) == 1:
-            return ids[0], "legacy_linux_account_label"
-        if len(ids) > 1:
-            return None, f"multiple_legacy_label_matches:{len(ids)}"
-    return _container_name(binding.linux_account, profile), "fallback_name"
-
-
-def _profile_startup_timeout_seconds(profile) -> int:
-    return _cli_mod()._profile_startup_timeout_seconds(profile)
-
-
-def _check_line(ok: bool, name: str, detail: str | None = None) -> None:
-    return _cli_mod()._check_line(ok, name, detail)
-
-
-def _append_action_log(state_root: Path, action: str, slot: str, target: str, status: str, detail: str = "") -> None:
-    return _cli_mod()._append_action_log(state_root, action, slot, target, status, detail)
-
-
-def load_runtime_target(target: str, state_root: Path):
-    return _cli_mod().load_runtime_target(target, state_root)
-
-
-def load_profile(name: str):
-    return _cli_mod().load_profile(name)
+from ..state import load_runtime_target
 
 
 def _assert_secret_path_safe(slot: str, path: Path, *, create_parent: bool = False) -> None:

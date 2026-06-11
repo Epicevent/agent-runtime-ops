@@ -114,6 +114,7 @@ class CliRuntimeSecretTests(unittest.TestCase):
         with (
             patch("agent_runtime_ops.commands.runtime_secret._is_root", return_value=True),
             patch("agent_runtime_ops.commands.runtime_secret.shutil.which", return_value="/usr/bin/docker"),
+            patch("agent_runtime_ops.domain.runtime_truth.run_text", side_effect=fake_run),
             patch("agent_runtime_ops.commands.runtime_secret._run_text", side_effect=fake_run),
         ):
             checks = _run_runtime_secret_container_checks(desired, profile, {"API_SERVER_KEY"})

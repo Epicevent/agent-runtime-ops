@@ -6,43 +6,18 @@ from pathlib import Path
 
 from ..apache import parse_apache_route
 from ..domain.apache_route_checks import apache_route_checks as _apache_route_checks
+from ..domain.common import check_line as _check_line
+from ..domain.common import is_root as _is_root
+from ..domain.common import state_root as _state_root
 from ..domain.image_specs import (
     _image_spec_recipe_payload,
     _profile_customer_surface,
     _profile_runtime_contract,
 )
+from ..domain.runtime_state import _desired_from_runtime_manifest
+from ..domain.runtime_truth import live_runtime_truth as _live_runtime_truth
 from ..renderer import render_compose
 from ..routing import get_runtime_binding
-
-
-def _cli_mod():
-    from .. import cli
-
-    return cli
-
-
-def _state_root(args: argparse.Namespace) -> Path:
-    return Path(args.state_root)
-
-
-def _is_root() -> bool:
-    return _cli_mod()._is_root()
-
-
-def _live_runtime_truth(slot: str, state_root: Path):
-    return _cli_mod()._live_runtime_truth(slot, state_root)
-
-
-def _desired_from_runtime_manifest(slot: str, state_root: Path):
-    return _cli_mod()._desired_from_runtime_manifest(slot, state_root)
-
-
-def _check_line(ok: bool, name: str, detail: str | None = None) -> None:
-    status = "PASS" if ok else "FAIL"
-    if detail:
-        print(f"{status} {name} {detail}")
-    else:
-        print(f"{status} {name}")
 
 
 def cmd_status(args: argparse.Namespace) -> int:

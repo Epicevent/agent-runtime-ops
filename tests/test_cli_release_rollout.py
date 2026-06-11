@@ -13,16 +13,12 @@ from unittest.mock import patch
 
 import agent_runtime_ops.cli as cli
 import agent_runtime_ops.commands.document_tools as document_tools
-from agent_runtime_ops.cli import (
-    IMAGE_RECIPE_LABEL_PREFIX,
-    cmd_apply,
-    cmd_check,
-    cmd_binding_normalize,
-    cmd_diagnostics_show,
-    cmd_document_tools_status,
-    _image_recipe_from_wrapper_image,
-    build_parser,
-)
+from agent_runtime_ops.cli import build_parser
+from agent_runtime_ops.commands.apply import cmd_apply
+from agent_runtime_ops.commands.binding import cmd_binding_normalize
+from agent_runtime_ops.commands.check import cmd_check
+from agent_runtime_ops.commands.diagnostics import cmd_diagnostics_show
+from agent_runtime_ops.commands.document_tools import cmd_document_tools_status
 from agent_runtime_ops.commands.runtime_truth import _live_image_truth_from_info, _live_runtime_truth
 from agent_runtime_ops.commands.recipe import (
     cmd_recipe_capture_dev,
@@ -38,6 +34,10 @@ from agent_runtime_ops.commands.rollout import (
     cmd_rollout_status,
 )
 from agent_runtime_ops.canonical_recipes import load_canonical_recipe
+from agent_runtime_ops.domain.image_specs import IMAGE_RECIPE_LABEL_PREFIX, _image_recipe_from_wrapper_image
+from agent_runtime_ops.domain.runtime_checks import contract_health_endpoints, run_live_slot_checks
+from agent_runtime_ops.domain.runtime_truth import local_canonical_recipe_check_from_truth
+from agent_runtime_ops.domain.source_provenance import source_provenance
 from agent_runtime_ops.profiles import load_profile
 from agent_runtime_ops.routing import RuntimeBinding, dump_runtime_bindings, load_runtime_bindings
 from agent_runtime_ops.state import RuntimeTarget
@@ -531,12 +531,12 @@ class CliReleaseRolloutTests(unittest.TestCase):
 
             output = io.StringIO()
             with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
-                patch("agent_runtime_ops.cli._slot_runtime_dir", return_value=runtime_dir),
-                patch("agent_runtime_ops.cli._ensure_runtime_workspace_guidance", return_value={"workspace_guidance": "present"}),
-                patch("agent_runtime_ops.cli._run_text_cwd", side_effect=fake_run),
+                patch("agent_runtime_ops.commands.apply._is_root", return_value=True),
+                patch("agent_runtime_ops.domain.runtime_apply._slot_runtime_dir", return_value=runtime_dir),
+                patch("agent_runtime_ops.domain.runtime_apply.ensure_runtime_workspace_guidance", return_value={"workspace_guidance": "present"}),
+                patch("agent_runtime_ops.domain.runtime_apply.run_text_cwd", side_effect=fake_run),
                 patch(
-                    "agent_runtime_ops.cli._run_live_slot_checks_with_wait",
+                    "agent_runtime_ops.domain.runtime_apply.run_live_slot_checks_with_wait",
                     return_value=[(True, "live_runtime_recreated", "ok")],
                 ),
                 contextlib.redirect_stdout(output),
@@ -573,19 +573,19 @@ class CliReleaseRolloutTests(unittest.TestCase):
 
             output = io.StringIO()
             with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
-                patch("agent_runtime_ops.cli._slot_runtime_dir", return_value=runtime_dir),
-                patch("agent_runtime_ops.cli._ensure_runtime_workspace_guidance", return_value={"workspace_guidance": "present"}),
+                patch("agent_runtime_ops.commands.apply._is_root", return_value=True),
+                patch("agent_runtime_ops.domain.runtime_apply._slot_runtime_dir", return_value=runtime_dir),
+                patch("agent_runtime_ops.domain.runtime_apply.ensure_runtime_workspace_guidance", return_value={"workspace_guidance": "present"}),
                 patch(
-                    "agent_runtime_ops.cli._run_text_cwd",
+                    "agent_runtime_ops.domain.runtime_apply.run_text_cwd",
                     return_value=subprocess.CompletedProcess(["docker"], 0, "", ""),
                 ),
                 patch(
-                    "agent_runtime_ops.cli._run_live_slot_checks_with_wait",
+                    "agent_runtime_ops.domain.runtime_apply.run_live_slot_checks_with_wait",
                     return_value=[(False, "live_backend_http_smoke_ok", "connection reset")],
                 ),
-                patch("agent_runtime_ops.cli._write_failed_container_diagnostics", side_effect=fake_diagnostics),
-                patch("agent_runtime_ops.cli._restore_backup", side_effect=fake_restore),
+                patch("agent_runtime_ops.domain.runtime_apply.write_failed_container_diagnostics", side_effect=fake_diagnostics),
+                patch("agent_runtime_ops.domain.runtime_apply._restore_backup", side_effect=fake_restore),
                 contextlib.redirect_stdout(output),
             ):
                 rc = cmd_apply(argparse.Namespace(state_root=str(root), slot="oc3", allow_first_apply=True))
@@ -701,7 +701,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 1, "", "unexpected")
 
         with patch("agent_runtime_ops.domain.source_provenance._run_text", side_effect=fake_run):
-            provenance = cli._source_provenance(source)
+            provenance = source_provenance(source)
 
         self.assertEqual(provenance["status"], "git")
         self.assertEqual(provenance["git_dirty"], False)
@@ -1367,7 +1367,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
             runtime_profile="hermes-runtime-dev",
             route=binding("dev-hermess", "hermes", "dev", 30889, 30890),
         )
-        endpoints = cli._contract_health_endpoints(desired, load_profile("hermes-runtime-dev"))
+        endpoints = contract_health_endpoints(desired, load_profile("hermes-runtime-dev"))
         self.assertEqual(endpoints["workspace"], "http://127.0.0.1:3000/")
         self.assertEqual(endpoints["gateway"], "http://127.0.0.1:8642/health")
         self.assertEqual(endpoints["dashboard"], "http://127.0.0.1:9119/api/status")
@@ -1419,7 +1419,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
         self.assertEqual(truth["canonical_recipe_digest"], "")
 
     def test_runtime_truth_compares_image_recipe_digest_to_local_canonical_recipe(self) -> None:
-        ok, name, detail = cli._local_canonical_recipe_check_from_truth(
+        ok, name, detail = local_canonical_recipe_check_from_truth(
             {
                 "canonical_recipe_name": "hermes-runtime",
                 "canonical_recipe_digest": hermes_runtime_recipe_digest(),
@@ -1428,7 +1428,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
         self.assertTrue(ok, detail)
         self.assertEqual(name, "truth_canonical_recipe_digest_matches_local")
 
-        ok, name, detail = cli._local_canonical_recipe_check_from_truth(
+        ok, name, detail = local_canonical_recipe_check_from_truth(
             {
                 "canonical_recipe_name": "hermes-runtime",
                 "canonical_recipe_digest": "sha256:" + "0" * 64,
@@ -1483,9 +1483,9 @@ class CliReleaseRolloutTests(unittest.TestCase):
             )
 
             with (
-                patch("agent_runtime_ops.commands.runtime_truth.parse_apache_route", return_value=apache_route),
-                patch("agent_runtime_ops.commands.runtime_truth._find_gateway_container_by_binding", return_value=("container-1", "instance_label")),
-                patch("agent_runtime_ops.commands.runtime_truth._run_text", return_value=inspect_result),
+                patch("agent_runtime_ops.domain.runtime_truth.parse_apache_route", return_value=apache_route),
+                patch("agent_runtime_ops.domain.runtime_truth.find_gateway_container_by_binding", return_value=("container-1", "instance_label")),
+                patch("agent_runtime_ops.domain.runtime_truth.run_text", return_value=inspect_result),
             ):
                 truth, checks = _live_runtime_truth("oc3", root)
 
@@ -1530,7 +1530,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
             output = io.StringIO()
             with (
                 patch(
-                    "agent_runtime_ops.cli._desired_from_live_image_truth",
+                    "agent_runtime_ops.commands.check._desired_from_live_image_truth",
                     return_value=(desired, load_profile("openclaw-dev")),
                 ),
                 patch(
@@ -1574,10 +1574,10 @@ class CliReleaseRolloutTests(unittest.TestCase):
             )
 
             with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
-                patch("agent_runtime_ops.cli._find_gateway_container", return_value=(None, "not_found")),
+                patch("agent_runtime_ops.domain.runtime_checks.is_root", return_value=True),
+                patch("agent_runtime_ops.domain.runtime_checks.find_gateway_container", return_value=(None, "not_found")),
             ):
-                checks = cli._run_live_slot_checks(desired, load_profile("openclaw-customer"), root)
+                checks = run_live_slot_checks(desired, load_profile("openclaw-customer"), root)
 
             self.assertIn((False, "live_container_lookup", "not_found"), checks)
 

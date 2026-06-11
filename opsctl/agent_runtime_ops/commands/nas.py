@@ -9,6 +9,11 @@ from pathlib import Path
 import sys
 import time
 
+from ..domain.actions import append_action_log as _append_action_log
+from ..domain.common import is_root as _is_root
+from ..domain.common import now_iso as _now_iso
+from ..domain.common import run_text as _run_text
+from ..domain.common import state_root as _state_root
 from ..host.account_files import (
     _atomic_write_key_value,
     _credential_file_is_safe_for_slot,
@@ -20,107 +25,29 @@ from ..host.account_files import (
     _slot_uid_gid,
     _write_credential_file,
 )
-
-def _cli_mod():
-    from .. import cli
-
-    return cli
-
-
-def _state_root(args: argparse.Namespace) -> Path:
-    return _cli_mod()._state_root(args)
-
-
-def _is_root() -> bool:
-    return _cli_mod()._is_root()
-
-
-def _now_iso() -> str:
-    return _cli_mod()._now_iso()
-
-
-def _run_text(command: list[str], timeout: int = 20):
-    return _cli_mod()._run_text(command, timeout=timeout)
-
-
-def _host_write_managed_fstab_entry(*args, **kwargs) -> None:
-    return _cli_mod()._host_write_managed_fstab_entry(*args, **kwargs)
-
-
-def _remove_managed_fstab_entry(*args, **kwargs):
-    return _cli_mod()._remove_managed_fstab_entry(*args, **kwargs)
-
-
-def _safe_mountpoint_path(path: Path) -> None:
-    return _cli_mod()._safe_mountpoint_path(path)
-
-
-def _mounted_child_cifs_count(slot: str) -> int:
-    return _cli_mod()._mounted_child_cifs_count(slot)
-
-
-def _findmnt_one(path: Path | str):
-    return _cli_mod()._findmnt_one(path)
-
-
-def _findmnt_under(path: str):
-    return _cli_mod()._findmnt_under(path)
-
-
-def _host_mount_prepared_share(decision):
-    return _cli_mod()._host_mount_prepared_share(decision)
-
-
-def _is_readonly_mount(row: dict[str, str]) -> bool:
-    return _cli_mod()._is_readonly_mount(row)
-
-
-def load_runtime_bindings(state_root: Path):
-    return _cli_mod().load_runtime_bindings(state_root)
-
-
-def get_runtime_binding(target: str, state_root: Path):
-    return _cli_mod().get_runtime_binding(target, state_root)
-
-
-def load_runtime_target(target: str, state_root: Path):
-    return _cli_mod().load_runtime_target(target, state_root)
-
-
-def agent_nas_dir(slot: str) -> Path:
-    return _cli_mod().agent_nas_dir(slot)
-
-
-def check_nas_policy(slot: str, share: str, state_root: Path):
-    return _cli_mod().check_nas_policy(slot, share, state_root)
-
-
-def customer_credential_path(slot: str, share) -> Path:
-    return _cli_mod().customer_credential_path(slot, share)
-
-
-def history_dir(slot: str, status: str) -> Path:
-    return _cli_mod().history_dir(slot, status)
-
-
-def mountpoint_for_share(slot: str, share) -> Path:
-    return _cli_mod().mountpoint_for_share(slot, share)
-
-
-def parse_smb_share(value: str):
-    return _cli_mod().parse_smb_share(value)
-
-
-def request_dir(slot: str) -> Path:
-    return _cli_mod().request_dir(slot)
-
-
-def request_path(slot: str, share) -> Path:
-    return _cli_mod().request_path(slot, share)
-
-
-def root_credential_path(slot: str, share) -> Path:
-    return _cli_mod().root_credential_path(slot, share)
+from ..host.fstab import remove_managed_fstab_entry as _remove_managed_fstab_entry
+from ..host.fstab import write_managed_fstab_entry as _host_write_managed_fstab_entry
+from ..host.mounts import (
+    findmnt_one as _findmnt_one,
+    findmnt_under as _findmnt_under,
+    is_readonly_mount as _is_readonly_mount,
+    mount_prepared_share as _host_mount_prepared_share,
+    mounted_child_cifs_count as _mounted_child_cifs_count,
+    safe_mountpoint_path as _safe_mountpoint_path,
+)
+from ..nas import (
+    agent_nas_dir,
+    check_nas_policy,
+    customer_credential_path,
+    history_dir,
+    mountpoint_for_share,
+    parse_smb_share,
+    request_dir,
+    request_path,
+    root_credential_path,
+)
+from ..routing import get_runtime_binding, load_runtime_bindings
+from ..state import load_runtime_target
 
 
 def _official_credential_paths(slot: str, share) -> dict[str, Path]:
@@ -182,35 +109,6 @@ def _write_managed_fstab_entry(
         fstab_path=fstab_path,
         lock_path=lock_path,
     )
-
-
-def _append_action_log(state_root: Path, action: str, slot: str, target: str, status: str, detail: str = "") -> None:
-    log_path = state_root / "actions.log"
-    if state_root.is_symlink():
-        raise ValueError(f"action log state root must not be symlink: {state_root}")
-    state_root.mkdir(mode=0o750, parents=True, exist_ok=True)
-    if log_path.exists() and log_path.is_symlink():
-        raise ValueError(f"action log must not be symlink: {log_path}")
-    record = {
-        "timestamp": _now_iso(),
-        "action": action,
-        "slot": slot,
-        "target": target,
-        "status": status,
-        "detail": str(detail or "")[:500],
-    }
-    if action.startswith("nas_") or (isinstance(target, str) and target.startswith("//")):
-        record["share"] = target
-    with log_path.open("a", encoding="utf-8") as handle:
-        try:
-            import fcntl
-
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        except ImportError:
-            pass
-        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
-        handle.flush()
-        os.fsync(handle.fileno())
 
 
 def _prepare_mount_entry(
