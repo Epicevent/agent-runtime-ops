@@ -1517,6 +1517,38 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertNotIn(image_ref("1"), text)
             self.assertIn("PASS live_container_image_matches_spec", text)
 
+    def test_live_slot_checks_resolve_gateway_lookup_after_module_split(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            route = next(item for item in load_runtime_bindings(root) if item.linux_account == "oc3")
+            desired = RuntimeTarget(
+                target="oc3",
+                family="openclaw",
+                runtime_class="customer",
+                image_name="direct-image",
+                image_spec={
+                    "family": "openclaw",
+                    "image_name": "direct-image",
+                    "wrapper_image": wrapper_image_ref("agent-runtime-openclaw", "9"),
+                    "product_image": wrapper_image_ref("openclaw-jitech", "8"),
+                    "digest": "sha256:" + "9" * 64,
+                    "product_digest": "sha256:" + "8" * 64,
+                    "mode": "wrapped_product_image",
+                    "image_recipe": openclaw_image_recipe(product_image=wrapper_image_ref("openclaw-jitech", "8")),
+                },
+                runtime_profile="openclaw-customer",
+                route=route,
+            )
+
+            with (
+                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.cli._find_gateway_container", return_value=(None, "not_found")),
+            ):
+                checks = cli._run_live_slot_checks(desired, load_profile("openclaw-customer"), root)
+
+            self.assertIn((False, "live_container_lookup", "not_found"), checks)
+
     def test_check_ignores_legacy_lane_release_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

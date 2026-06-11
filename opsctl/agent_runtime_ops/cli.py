@@ -34,7 +34,12 @@ from .commands.check import cmd_check
 from .commands.diagnostics import cmd_diagnostics_show
 from .commands.document_tools import cmd_document_tools_status
 from .commands.profile import cmd_profile_list
-from .commands.runtime_truth import _live_runtime_truth, cmd_runtime_truth
+from .commands.runtime_truth import (
+    _find_gateway_container,
+    _find_gateway_container_by_binding,
+    _live_runtime_truth,
+    cmd_runtime_truth,
+)
 from .commands.status import cmd_plan, cmd_status
 from .commands.update import cmd_self_update, cmd_update_approve, cmd_update_status
 from .canonical_recipes import (
