@@ -11,7 +11,7 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from agent_runtime_ops.cli import _run_runtime_secret_container_checks, cmd_runtime_secret_status
+from agent_runtime_ops.commands.runtime_secret import _run_runtime_secret_container_checks, cmd_runtime_secret_status
 from agent_runtime_ops.routing import RuntimeBinding, dump_runtime_bindings
 from agent_runtime_ops.runtime_secrets import RuntimeSecretFile
 from agent_runtime_ops.yamlio import dump_yaml
@@ -65,10 +65,10 @@ class CliRuntimeSecretTests(unittest.TestCase):
             )
             output = io.StringIO()
             with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
-                patch("agent_runtime_ops.cli._assert_secret_path_safe"),
+                patch("agent_runtime_ops.commands.runtime_secret._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.runtime_secret._assert_secret_path_safe"),
                 patch(
-                    "agent_runtime_ops.cli.primary_profile_secret_file",
+                    "agent_runtime_ops.commands.runtime_secret.primary_profile_secret_file",
                     return_value=RuntimeSecretFile(path=secret_file, owner_mode="runtime"),
                 ),
                 contextlib.redirect_stdout(output),
@@ -112,9 +112,9 @@ class CliRuntimeSecretTests(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 1, stdout="", stderr="unexpected")
 
         with (
-            patch("agent_runtime_ops.cli._is_root", return_value=True),
-            patch("agent_runtime_ops.cli.shutil.which", return_value="/usr/bin/docker"),
-            patch("agent_runtime_ops.cli._run_text", side_effect=fake_run),
+            patch("agent_runtime_ops.commands.runtime_secret._is_root", return_value=True),
+            patch("agent_runtime_ops.commands.runtime_secret.shutil.which", return_value="/usr/bin/docker"),
+            patch("agent_runtime_ops.commands.runtime_secret._run_text", side_effect=fake_run),
         ):
             checks = _run_runtime_secret_container_checks(desired, profile, {"API_SERVER_KEY"})
 

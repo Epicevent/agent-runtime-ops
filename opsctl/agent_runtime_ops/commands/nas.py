@@ -9,139 +9,142 @@ from pathlib import Path
 import sys
 import time
 
-from .. import cli as _cli
+def _cli_mod():
+    from .. import cli
+
+    return cli
 
 
 def _state_root(args: argparse.Namespace) -> Path:
-    return _cli._state_root(args)
+    return _cli_mod()._state_root(args)
 
 
 def _is_root() -> bool:
-    return _cli._is_root()
+    return _cli_mod()._is_root()
 
 
 def _now_iso() -> str:
-    return _cli._now_iso()
+    return _cli_mod()._now_iso()
 
 
 def _run_text(command: list[str], timeout: int = 20):
-    return _cli._run_text(command, timeout=timeout)
+    return _cli_mod()._run_text(command, timeout=timeout)
 
 
 def _read_key_value_file(path: Path) -> dict[str, str]:
-    return _cli._read_key_value_file(path)
+    return _cli_mod()._read_key_value_file(path)
 
 
 def _atomic_write_key_value(path: Path, data: dict[str, str], mode: int, uid: int | None = None, gid: int | None = None) -> None:
-    return _cli._atomic_write_key_value(path, data, mode, uid, gid)
+    return _cli_mod()._atomic_write_key_value(path, data, mode, uid, gid)
 
 
 def _slot_uid_gid(slot: str) -> tuple[int, int]:
-    return _cli._slot_uid_gid(slot)
+    return _cli_mod()._slot_uid_gid(slot)
 
 
 def _runtime_ids(slot: str) -> tuple[int, int, int]:
-    return _cli._runtime_ids(slot)
+    return _cli_mod()._runtime_ids(slot)
 
 
 def _ensure_customer_agent_dirs(slot: str) -> None:
-    return _cli._ensure_customer_agent_dirs(slot)
+    return _cli_mod()._ensure_customer_agent_dirs(slot)
 
 
 def _read_password_from_stdin() -> str:
-    return _cli._read_password_from_stdin()
+    return _cli_mod()._read_password_from_stdin()
 
 
 def _write_credential_file(path: Path, username: str, password: str, domain: str | None, uid: int, gid: int) -> None:
-    return _cli._write_credential_file(path, username, password, domain, uid, gid)
+    return _cli_mod()._write_credential_file(path, username, password, domain, uid, gid)
 
 
 def _credential_file_is_safe_for_slot(slot: str, path: Path, uid: int | None = None) -> None:
-    return _cli._credential_file_is_safe_for_slot(slot, path, uid=uid)
+    return _cli_mod()._credential_file_is_safe_for_slot(slot, path, uid=uid)
 
 
 def _credential_presence(path: Path) -> str:
-    return _cli._credential_presence(path)
+    return _cli_mod()._credential_presence(path)
 
 
 def _host_write_managed_fstab_entry(*args, **kwargs) -> None:
-    return _cli._host_write_managed_fstab_entry(*args, **kwargs)
+    return _cli_mod()._host_write_managed_fstab_entry(*args, **kwargs)
 
 
 def _remove_managed_fstab_entry(*args, **kwargs):
-    return _cli._remove_managed_fstab_entry(*args, **kwargs)
+    return _cli_mod()._remove_managed_fstab_entry(*args, **kwargs)
 
 
 def _safe_mountpoint_path(path: Path) -> None:
-    return _cli._safe_mountpoint_path(path)
+    return _cli_mod()._safe_mountpoint_path(path)
 
 
 def _mounted_child_cifs_count(slot: str) -> int:
-    return _cli._mounted_child_cifs_count(slot)
+    return _cli_mod()._mounted_child_cifs_count(slot)
 
 
 def _findmnt_one(path: Path | str):
-    return _cli._findmnt_one(path)
+    return _cli_mod()._findmnt_one(path)
 
 
 def _findmnt_under(path: str):
-    return _cli._findmnt_under(path)
+    return _cli_mod()._findmnt_under(path)
 
 
 def _host_mount_prepared_share(decision):
-    return _cli._host_mount_prepared_share(decision)
+    return _cli_mod()._host_mount_prepared_share(decision)
 
 
 def _is_readonly_mount(row: dict[str, str]) -> bool:
-    return _cli._is_readonly_mount(row)
+    return _cli_mod()._is_readonly_mount(row)
 
 
 def load_runtime_bindings(state_root: Path):
-    return _cli.load_runtime_bindings(state_root)
+    return _cli_mod().load_runtime_bindings(state_root)
 
 
 def get_runtime_binding(target: str, state_root: Path):
-    return _cli.get_runtime_binding(target, state_root)
+    return _cli_mod().get_runtime_binding(target, state_root)
 
 
 def load_runtime_target(target: str, state_root: Path):
-    return _cli.load_runtime_target(target, state_root)
+    return _cli_mod().load_runtime_target(target, state_root)
 
 
 def agent_nas_dir(slot: str) -> Path:
-    return _cli.agent_nas_dir(slot)
+    return _cli_mod().agent_nas_dir(slot)
 
 
 def check_nas_policy(slot: str, share: str, state_root: Path):
-    return _cli.check_nas_policy(slot, share, state_root)
+    return _cli_mod().check_nas_policy(slot, share, state_root)
 
 
 def customer_credential_path(slot: str, share) -> Path:
-    return _cli.customer_credential_path(slot, share)
+    return _cli_mod().customer_credential_path(slot, share)
 
 
 def history_dir(slot: str, status: str) -> Path:
-    return _cli.history_dir(slot, status)
+    return _cli_mod().history_dir(slot, status)
 
 
 def mountpoint_for_share(slot: str, share) -> Path:
-    return _cli.mountpoint_for_share(slot, share)
+    return _cli_mod().mountpoint_for_share(slot, share)
 
 
 def parse_smb_share(value: str):
-    return _cli.parse_smb_share(value)
+    return _cli_mod().parse_smb_share(value)
 
 
 def request_dir(slot: str) -> Path:
-    return _cli.request_dir(slot)
+    return _cli_mod().request_dir(slot)
 
 
 def request_path(slot: str, share) -> Path:
-    return _cli.request_path(slot, share)
+    return _cli_mod().request_path(slot, share)
 
 
 def root_credential_path(slot: str, share) -> Path:
-    return _cli.root_credential_path(slot, share)
+    return _cli_mod().root_credential_path(slot, share)
 
 
 def _official_credential_paths(slot: str, share) -> dict[str, Path]:

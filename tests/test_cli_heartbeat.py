@@ -10,7 +10,7 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from agent_runtime_ops.cli import cmd_heartbeat_disable, cmd_heartbeat_status
+from agent_runtime_ops.commands.heartbeat import cmd_heartbeat_disable, cmd_heartbeat_status
 from agent_runtime_ops.routing import RuntimeBinding, dump_runtime_bindings
 from agent_runtime_ops.yamlio import dump_yaml
 
@@ -72,7 +72,7 @@ class CliHeartbeatTests(unittest.TestCase):
             )
             output = io.StringIO()
             with (
-                patch("agent_runtime_ops.cli._slot_home", return_value=home),
+                patch("agent_runtime_ops.commands.heartbeat._slot_home", return_value=home),
                 contextlib.redirect_stdout(output),
             ):
                 rc = cmd_heartbeat_status(argparse.Namespace(slot="dev-oc", state_root=str(root)))
@@ -104,10 +104,10 @@ class CliHeartbeatTests(unittest.TestCase):
             )
             output = io.StringIO()
             with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
-                patch("agent_runtime_ops.cli._slot_home", return_value=home),
-                patch("agent_runtime_ops.cli._runtime_ids", return_value=(1234, 1234, 1235)),
-                patch("agent_runtime_ops.cli.os.chown", create=True),
+                patch("agent_runtime_ops.commands.heartbeat._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.heartbeat._slot_home", return_value=home),
+                patch("agent_runtime_ops.commands.heartbeat._runtime_ids", return_value=(1234, 1234, 1235)),
+                patch("agent_runtime_ops.commands.heartbeat.os.chown", create=True),
                 contextlib.redirect_stdout(output),
             ):
                 rc = cmd_heartbeat_disable(argparse.Namespace(slot="dev-oc", state_root=str(root)))

@@ -9,7 +9,7 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from agent_runtime_ops.cli import cmd_handoff_print, cmd_handoff_status, cmd_handoff_value_command
+from agent_runtime_ops.commands.handoff import cmd_handoff_print, cmd_handoff_status, cmd_handoff_value_command
 from agent_runtime_ops.routing import RuntimeBinding, dump_runtime_bindings
 from agent_runtime_ops.yamlio import dump_yaml
 
@@ -78,8 +78,8 @@ class CliHandoffTests(unittest.TestCase):
             )
             output = io.StringIO()
             with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
-                patch("agent_runtime_ops.cli._slot_home", return_value=home),
+                patch("agent_runtime_ops.commands.handoff._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.handoff._slot_home", return_value=home),
                 contextlib.redirect_stdout(output),
             ):
                 rc = cmd_handoff_status(argparse.Namespace(slot="dev-oc", state_root=str(root)))
@@ -106,7 +106,7 @@ class CliHandoffTests(unittest.TestCase):
             handoff.write_text(f"password={password}\n", encoding="utf-8")
             output = io.StringIO()
             with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.handoff._is_root", return_value=True),
                 contextlib.redirect_stdout(output),
             ):
                 rc = cmd_handoff_status(argparse.Namespace(slot="dev-hermess", state_root=str(root)))
@@ -150,8 +150,8 @@ class CliHandoffTests(unittest.TestCase):
             )
             output = io.StringIO()
             with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
-                patch("agent_runtime_ops.cli._slot_home", return_value=home),
+                patch("agent_runtime_ops.commands.handoff._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.handoff._slot_home", return_value=home),
                 contextlib.redirect_stdout(output),
             ):
                 rc = cmd_handoff_print(argparse.Namespace(slot="dev-oc", state_root=str(root)))
@@ -171,7 +171,7 @@ class CliHandoffTests(unittest.TestCase):
             handoff.write_text(f"password={password}\n", encoding="utf-8")
             output = io.StringIO()
             with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.handoff._is_root", return_value=True),
                 contextlib.redirect_stdout(output),
             ):
                 rc = cmd_handoff_print(argparse.Namespace(slot="dev-hermess", state_root=str(root)))
