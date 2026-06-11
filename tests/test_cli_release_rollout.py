@@ -22,7 +22,7 @@ from agent_runtime_ops.cli import (
     _image_recipe_from_wrapper_image,
     build_parser,
 )
-from agent_runtime_ops.commands.runtime_truth import _live_image_truth_from_info
+from agent_runtime_ops.commands.runtime_truth import _live_image_truth_from_info, _live_runtime_truth
 from agent_runtime_ops.commands.recipe import (
     cmd_recipe_capture_dev,
     cmd_recipe_dev_apply,
@@ -1423,6 +1423,42 @@ class CliReleaseRolloutTests(unittest.TestCase):
         self.assertEqual(truth["nas_read_only"], "true")
         self.assertEqual(truth["nas_mount_propagation"], "rslave")
         self.assertEqual(truth["nas_child_mount_mode"], "host-propagated-cifs")
+
+    def test_live_runtime_truth_runs_route_checks_after_module_split(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            route = next(item for item in load_runtime_bindings(root) if item.linux_account == "oc3")
+            product_image = wrapper_image_ref("openclaw-jitech", "8")
+            labels = openclaw_recipe_labels(product_image=product_image)
+            info = {
+                "Config": {
+                    "Image": wrapper_image_ref("agent-runtime-openclaw", "9"),
+                    "Labels": labels,
+                }
+            }
+            apache_route = argparse.Namespace(
+                public_host=route.public_host,
+                gateway_port=route.gateway_port,
+                websocket_port=None,
+            )
+            inspect_result = subprocess.CompletedProcess(
+                ["docker", "inspect", "container-1"],
+                0,
+                stdout=json.dumps([info]),
+                stderr="",
+            )
+
+            with (
+                patch("agent_runtime_ops.commands.runtime_truth.parse_apache_route", return_value=apache_route),
+                patch("agent_runtime_ops.commands.runtime_truth._find_gateway_container_by_binding", return_value=("container-1", "instance_label")),
+                patch("agent_runtime_ops.commands.runtime_truth._run_text", return_value=inspect_result),
+            ):
+                truth, checks = _live_runtime_truth("oc3", root)
+
+            self.assertEqual(truth["truth_status"], "ok")
+            self.assertIn((True, "apache_public_host_matches_binding", f"apache={route.public_host} binding={route.public_host}"), checks)
+            self.assertTrue(any(name == "truth_container_lookup" and ok for ok, name, _ in checks))
 
     def test_wrapper_image_recipe_rejects_component_mismatch(self) -> None:
         product_image = wrapper_image_ref("hermes-workspace", "2")

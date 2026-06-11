@@ -7,6 +7,7 @@ import shutil
 import sys
 
 from ..domain.runtime_truth import local_canonical_recipe_check_from_truth as _local_canonical_recipe_check_from_truth
+from ..routing import RuntimeBinding
 
 
 def _cli_mod():
@@ -37,6 +38,18 @@ def _profile_runtime_contract(profile) -> str:
 
 def _profile_customer_surface(profile) -> str:
     return _cli_mod()._profile_customer_surface(profile)
+
+
+def _apache_route_checks(binding: RuntimeBinding, apache_route) -> list[tuple[bool, str, str | None]]:
+    return _cli_mod()._apache_route_checks(binding, apache_route)
+
+
+def _check_line(ok: bool, name: str, detail: str | None = None) -> None:
+    _cli_mod()._check_line(ok, name, detail)
+
+
+def _is_root() -> bool:
+    return _cli_mod()._is_root()
 
 
 def _image_spec_recipe_tokens(image_spec: dict) -> dict[str, str]:
