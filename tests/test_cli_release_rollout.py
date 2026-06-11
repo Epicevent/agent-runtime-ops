@@ -12,6 +12,7 @@ import uuid
 from unittest.mock import patch
 
 import agent_runtime_ops.cli as cli
+import agent_runtime_ops.commands.document_tools as document_tools
 from agent_runtime_ops.cli import (
     IMAGE_RECIPE_LABEL_PREFIX,
     cmd_apply,
@@ -732,16 +733,16 @@ class CliReleaseRolloutTests(unittest.TestCase):
             "cmd_soffice": "yes",
             "python_olefile": "yes",
         }
-        self.assertEqual(cli._document_tool_payload_status(data), "baseline")
-        self.assertEqual(cli._hwp_readiness(data), "full")
+        self.assertEqual(document_tools._document_tool_payload_status(data), "baseline")
+        self.assertEqual(document_tools._hwp_readiness(data), "full")
 
         missing_alias = dict(data)
         missing_alias["cmd_hwp2txt"] = "no"
-        self.assertEqual(cli._document_tool_payload_status(missing_alias), "partial")
-        self.assertEqual(cli._hwp_readiness(missing_alias), "partial")
+        self.assertEqual(document_tools._document_tool_payload_status(missing_alias), "partial")
+        self.assertEqual(document_tools._hwp_readiness(missing_alias), "partial")
 
     def test_document_tools_failure_reasons_require_full_baseline_and_guidance(self) -> None:
-        result = {f"cmd_{key}": "yes" for key in cli._DOCUMENT_TOOL_REQUIRED_COMMAND_KEYS}
+        result = {f"cmd_{key}": "yes" for key in document_tools._DOCUMENT_TOOL_REQUIRED_COMMAND_KEYS}
         result.update(
             {
                 "probe_status": "ok",
@@ -755,10 +756,10 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 "workspace_guidance_status": "present",
             }
         )
-        self.assertEqual(cli._document_tools_failure_reasons(result), [])
+        self.assertEqual(document_tools._document_tools_failure_reasons(result), [])
 
         result["cmd_openclaw_hwp_text"] = "no"
-        self.assertIn("missing_commands=openclaw_hwp_text", ";".join(cli._document_tools_failure_reasons(result)))
+        self.assertIn("missing_commands=openclaw_hwp_text", ";".join(document_tools._document_tools_failure_reasons(result)))
 
     def test_workspace_guidance_status_is_family_specific(self) -> None:
         hermes = {
@@ -771,10 +772,10 @@ class CliReleaseRolloutTests(unittest.TestCase):
             "openclaw_claude_guidance": "yes",
             "openclaw_gemini_guidance": "yes",
         }
-        self.assertEqual(cli._workspace_guidance_status("hermes", hermes), "present")
-        self.assertEqual(cli._workspace_guidance_status("openclaw", openclaw), "present")
+        self.assertEqual(document_tools._workspace_guidance_status("hermes", hermes), "present")
+        self.assertEqual(document_tools._workspace_guidance_status("openclaw", openclaw), "present")
         openclaw["openclaw_gemini_guidance"] = "no"
-        self.assertEqual(cli._workspace_guidance_status("openclaw", openclaw), "missing")
+        self.assertEqual(document_tools._workspace_guidance_status("openclaw", openclaw), "missing")
 
     def test_document_tools_status_all_uses_runtime_bindings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -782,7 +783,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
             write_state(root)
 
             def fake_status(slot: str, state_root: Path) -> dict[str, str]:
-                result = {f"cmd_{key}": "yes" for key in cli._DOCUMENT_TOOL_REQUIRED_COMMAND_KEYS}
+                result = {f"cmd_{key}": "yes" for key in document_tools._DOCUMENT_TOOL_REQUIRED_COMMAND_KEYS}
                 result.update({
                     "target": slot,
                     "family": "openclaw",
@@ -805,8 +806,8 @@ class CliReleaseRolloutTests(unittest.TestCase):
 
             output = io.StringIO()
             with (
-                patch("agent_runtime_ops.cli._is_root", return_value=True),
-                patch("agent_runtime_ops.cli._document_tools_status_for_slot", side_effect=fake_status) as status_for_slot,
+                patch("agent_runtime_ops.commands.document_tools._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.document_tools._document_tools_status_for_slot", side_effect=fake_status) as status_for_slot,
                 contextlib.redirect_stdout(output),
             ):
                 rc = cmd_document_tools_status(argparse.Namespace(state_root=str(root), slot=None, all=True))
