@@ -20,6 +20,7 @@ import urllib.request
 from pathlib import Path
 
 from .apache import parse_apache_route
+from .commands.admin import cmd_admin_serve
 from .commands.apache import cmd_apache_set_host, cmd_apache_status
 from .commands.binding import (
     cmd_binding_list,
@@ -27,6 +28,7 @@ from .commands.binding import (
     cmd_binding_set_public_host,
     cmd_binding_status,
 )
+from .commands.blocked import cmd_blocked_mutation
 from .commands.check import cmd_check
 from .commands.diagnostics import cmd_diagnostics_show
 from .commands.document_tools import cmd_document_tools_status
@@ -1819,12 +1821,6 @@ from .commands.heartbeat import (
     cmd_heartbeat_status,
 )
 
-def cmd_blocked_mutation(args: argparse.Namespace) -> int:
-    print(f"error: {args.command_name} is intentionally disabled in the initial skeleton", file=sys.stderr)
-    print("hint: enable lane rollout only after single-slot apply/rollback migration tests pass", file=sys.stderr)
-    return 2
-
-
 from .commands.recipe import (
     _build_arg_lines_for_canonical_recipe,
     _dev_recipe_runtime_env,
@@ -2017,12 +2013,6 @@ from .commands.nas import (
     cmd_nas_requests,
     cmd_nas_unmount,
 )
-
-def cmd_admin_serve(args: argparse.Namespace) -> int:
-    from .admin_server import main as admin_main
-
-    return admin_main(["--host", args.host, "--port", str(args.port)])
-
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="opsctl")
