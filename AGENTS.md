@@ -192,6 +192,10 @@ sudo /usr/local/bin/opsctl update approve FULL_40_CHARACTER_COMMIT_SHA
 sudo /usr/local/bin/opsctl self-update
 ```
 
+The install root keeps only the active code release. After a successful install, old tool release
+directories are removed and only hash/summary history remains under
+`/opt/agent-runtime-ops/release-history`.
+
 5. Verify the server:
 
 ```bash

@@ -36,6 +36,9 @@ Install the approved SHA:
 ssh svcops "sudo /usr/local/bin/opsctl self-update"
 ```
 
+The server keeps only the active release as a code directory. Older installed tool releases are pruned
+after a successful install, leaving hash/summary history under `/opt/agent-runtime-ops/release-history`.
+
 Verify after install:
 
 ```bash

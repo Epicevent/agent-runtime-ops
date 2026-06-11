@@ -3,6 +3,7 @@ set -euo pipefail
 
 INSTALL_ROOT="${AGENT_RUNTIME_OPS_DIR:-/opt/agent-runtime-ops}"
 RELEASES_DIR="$INSTALL_ROOT/releases"
+RELEASE_HISTORY_DIR="${AGENT_RUNTIME_OPS_RELEASE_HISTORY_DIR:-$INSTALL_ROOT/release-history}"
 CURRENT_LINK="$INSTALL_ROOT/current"
 STATE_ROOT="${AGENT_RUNTIME_STATE_ROOT:-/srv/openclaw-ops}"
 OPS_USER="${AGENT_RUNTIME_OPS_USER:-svcops}"
@@ -142,13 +143,30 @@ source_commit() {
   fi
 }
 
+source_summary() {
+  local src="$1"
+  if git -C "$src" rev-parse --verify HEAD >/dev/null 2>&1; then
+    git -C "$src" log -1 --format=%s HEAD | tr '\r\n' ' '
+  else
+    printf 'unknown\n'
+  fi
+}
+
+manifest_value() {
+  local manifest="$1"
+  local key="$2"
+  awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$manifest"
+}
+
 write_manifest() {
   local release_dir="$1"
   local src="$2"
   local commit="$3"
+  local summary="$4"
   local tmp="$release_dir/.agent-runtime-ops-manifest.tmp"
   {
     printf 'source_commit=%s\n' "$commit"
+    printf 'source_summary=%s\n' "$summary"
     printf 'installed_at=%s\n' "$(date -Iseconds)"
     printf 'installed_dir=%s\n' "$release_dir"
     printf 'install_root=%s\n' "$INSTALL_ROOT"
@@ -161,6 +179,57 @@ write_manifest() {
   } >"$tmp"
   install -o root -g "$OPS_GROUP" -m 0644 "$tmp" "$release_dir/.agent-runtime-ops-manifest"
   rm -f "$tmp"
+}
+
+write_release_history_entry() {
+  local release_dir="$1"
+  local release_name manifest history tmp commit summary installed_at
+  release_name="$(basename "$release_dir")"
+  manifest="$release_dir/.agent-runtime-ops-manifest"
+  [[ -r "$manifest" ]] || return 0
+
+  [[ ! -L "$RELEASE_HISTORY_DIR" ]] || die "release history dir must not be a symlink: $RELEASE_HISTORY_DIR"
+  install -d -o root -g "$OPS_GROUP" -m 0755 "$RELEASE_HISTORY_DIR"
+  history="$RELEASE_HISTORY_DIR/$release_name.txt"
+  tmp="$RELEASE_HISTORY_DIR/.$release_name.tmp"
+  commit="$(manifest_value "$manifest" source_commit)"
+  summary="$(manifest_value "$manifest" source_summary)"
+  installed_at="$(manifest_value "$manifest" installed_at)"
+  [[ -n "$commit" ]] || commit="${release_name%%.*}"
+  [[ -n "$summary" ]] || summary="unknown"
+  [[ -n "$installed_at" ]] || installed_at="unknown"
+  {
+    printf 'release=%s\n' "$release_name"
+    printf 'source_commit=%s\n' "$commit"
+    printf 'source_summary=%s\n' "$summary"
+    printf 'installed_at=%s\n' "$installed_at"
+  } >"$tmp"
+  install -o root -g "$OPS_GROUP" -m 0644 "$tmp" "$history"
+  rm -f "$tmp"
+}
+
+prune_old_release_code() {
+  local current_real releases_real release_dir release_name release_real pruned
+  [[ -d "$RELEASES_DIR" ]] || return 0
+  current_real="$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)"
+  releases_real="$(realpath -m "$RELEASES_DIR")"
+  pruned=0
+
+  for release_dir in "$RELEASES_DIR"/*; do
+    [[ -e "$release_dir" ]] || continue
+    [[ -d "$release_dir" && ! -L "$release_dir" ]] || continue
+    release_name="$(basename "$release_dir")"
+    [[ "$release_name" == .* ]] && continue
+    release_real="$(realpath -m "$release_dir")"
+    [[ -n "$current_real" && "$release_real" == "$current_real" ]] && continue
+    [[ "$release_real" == "$releases_real"/* ]] || die "refusing to prune release outside releases dir: $release_dir"
+    write_release_history_entry "$release_dir"
+    rm -rf --one-file-system "$release_dir"
+    pruned=$((pruned + 1))
+  done
+
+  info "release_history=$RELEASE_HISTORY_DIR"
+  info "old_release_code_pruned=$pruned"
 }
 
 copy_tree() {
@@ -570,7 +639,7 @@ register_codex_mcp() {
 }
 
 install_package() {
-  local src commit release_name tmp_release release_dir
+  local src commit summary release_name tmp_release release_dir
   if ! src="$(repo_root)"; then
     bootstrap_from_git
   fi
@@ -583,6 +652,7 @@ install_package() {
   require_commands
 
   commit="$(source_commit "$src")"
+  summary="$(source_summary "$src")"
   require_full_sha "$commit"
   if [[ -n "$REPO_REF" && "$REPO_REF" != "$commit" ]]; then
     die "source commit does not match AGENT_RUNTIME_OPS_REF: $commit != $REPO_REF"
@@ -603,7 +673,7 @@ install_package() {
     rm -rf "$release_dir"
     die "failed to install Gemini CLI"
   fi
-  write_manifest "$release_dir" "$src" "$commit"
+  write_manifest "$release_dir" "$src" "$commit" "$summary"
   chown -R root:"$OPS_GROUP" "$release_dir"
 
   activate_release "$release_dir"
@@ -619,6 +689,7 @@ install_package() {
   seed_runtime_bindings
   archive_legacy_state_files
   repair_private_state_permissions
+  prune_old_release_code
 
   info "installed_dir=$release_dir"
   info "current=$CURRENT_LINK"
