@@ -1126,7 +1126,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
             write_state(root)
             (root / "runtime-bindings.json").unlink()
             output = io.StringIO()
-            with patch("agent_runtime_ops.cli._is_root", return_value=True), contextlib.redirect_stdout(output):
+            with patch("agent_runtime_ops.commands.binding._is_root", return_value=True), contextlib.redirect_stdout(output):
                 rc = cmd_binding_normalize(argparse.Namespace(state_root=str(root), write=True))
             self.assertEqual(rc, 1)
             self.assertIn("binding_normalize_status=fail", output.getvalue())
@@ -1137,7 +1137,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
             root = Path(tmp)
             write_state(root)
             output = io.StringIO()
-            with patch("agent_runtime_ops.cli._is_root", return_value=True), contextlib.redirect_stdout(output):
+            with patch("agent_runtime_ops.commands.binding._is_root", return_value=True), contextlib.redirect_stdout(output):
                 rc = cmd_binding_normalize(argparse.Namespace(state_root=str(root), write=True))
             text = (root / "runtime-bindings.json").read_text(encoding="utf-8")
             self.assertEqual(rc, 0, output.getvalue())
