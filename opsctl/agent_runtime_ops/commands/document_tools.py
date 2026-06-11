@@ -13,7 +13,7 @@ from ..domain.common import is_root as _is_root
 from ..domain.common import run_text as _run_text
 from ..domain.common import state_root as _state_root
 from ..domain.image_specs import recipe_label
-from ..domain.runtime_truth import _find_gateway_container_by_binding, _labels_from_container_info
+from ..domain.runtime_truth import find_gateway_container_by_binding, labels_from_container_info
 from ..routing import get_runtime_binding, load_runtime_bindings
 
 
@@ -223,7 +223,7 @@ def _document_tools_failure_reasons(result: dict[str, str]) -> list[str]:
 def _document_tools_status_for_slot(slot: str, state_root: Path) -> dict[str, str]:
     binding = get_runtime_binding(slot, state_root)
     apache_route = parse_apache_route(binding.linux_account)
-    container, lookup = _find_gateway_container_by_binding(binding)
+    container, lookup = find_gateway_container_by_binding(binding)
     result: dict[str, str] = {
         "target": binding.linux_account,
         "family": binding.family,
@@ -262,7 +262,7 @@ def _document_tools_status_for_slot(slot: str, state_root: Path) -> dict[str, st
 
     state = info.get("State") or {}
     config = info.get("Config") or {}
-    labels = _labels_from_container_info(info)
+    labels = labels_from_container_info(info)
     pid = int(state.get("Pid") or 0)
     running = str(state.get("Running")).lower() == "true"
     result.update(

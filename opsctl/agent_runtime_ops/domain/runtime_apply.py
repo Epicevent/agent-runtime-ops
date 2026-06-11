@@ -17,14 +17,14 @@ from .runtime_checks import (
 from .runtime_backup import backup_agent_runtime_state, restore_backup
 from .runtime_manifest import write_slot_manifests
 from .runtime_state import (
-    _agent_compose_path,
-    _agent_manifest_path,
-    _atomic_write,
-    _docker_compose_command,
-    _env_file_keys,
-    _required_compose_variables,
-    _slot_runtime_dir,
-    _state_manifest_path,
+    agent_compose_path,
+    agent_manifest_path,
+    atomic_write,
+    docker_compose_command,
+    env_file_keys,
+    required_compose_variables,
+    slot_runtime_dir,
+    state_manifest_path,
 )
 from .runtime_truth import find_gateway_container
 from .workspace_guidance import ensure_runtime_workspace_guidance
@@ -85,22 +85,22 @@ def apply_desired_slot(
         ]
         if static_failures:
             raise ValueError(f"static contract check failed: {','.join(static_failures)}")
-        runtime_dir = _slot_runtime_dir(desired.slot)
-        compose_path = _agent_compose_path(runtime_dir)
-        manifest_path = _agent_manifest_path(runtime_dir)
-        state_manifest_path = _state_manifest_path(state_root, desired.slot)
+        runtime_dir = slot_runtime_dir(desired.slot)
+        compose_path = agent_compose_path(runtime_dir)
+        manifest_path = agent_manifest_path(runtime_dir)
+        state_manifest_file = state_manifest_path(state_root, desired.slot)
         env_path = runtime_dir / ".env"
-        required = _required_compose_variables(rendered.text)
-        present = _env_file_keys(env_path)
+        required = required_compose_variables(rendered.text)
+        present = env_file_keys(env_path)
         missing = sorted(required - present)
         if missing:
             raise ValueError(f"missing required .env keys: {','.join(missing)}")
-        if not manifest_path.exists() and not state_manifest_path.exists() and not allow_first_apply:
+        if not manifest_path.exists() and not state_manifest_file.exists() and not allow_first_apply:
             raise ValueError("first agent-runtime apply requires --allow-first-apply")
-        previous_manifest = state_manifest_path if state_manifest_path.exists() else manifest_path if manifest_path.exists() else None
+        previous_manifest = state_manifest_file if state_manifest_file.exists() else manifest_path if manifest_path.exists() else None
         guidance_result = ensure_runtime_workspace_guidance(desired.slot, profile)
         backup_dir = backup_agent_runtime_state(desired.slot, runtime_dir, state_root)
-        _atomic_write(compose_path, rendered.text, 0o644)
+        atomic_write(compose_path, rendered.text, 0o644)
     except Exception as exc:
         print(f"target={getattr(desired, 'slot', '')}")
         print("apply_status=fail")
@@ -115,7 +115,7 @@ def apply_desired_slot(
     print(f"runtime_dir={runtime_dir}")
     print(f"compose_file={compose_path}")
     print(f"manifest={manifest_path}")
-    print(f"state_manifest={state_manifest_path}")
+    print(f"state_manifest={state_manifest_file}")
     print(f"backup_dir={backup_dir}")
     print(f"runtime_profile={profile.name}")
     print(f"runtime_profile_digest={profile.digest}")
@@ -123,7 +123,7 @@ def apply_desired_slot(
     for key, value in guidance_result.items():
         print(f"{key}={value}")
 
-    config = run_text_cwd(_docker_compose_command(desired.slot, compose_path, "config"), runtime_dir, timeout=60)
+    config = run_text_cwd(docker_compose_command(desired.slot, compose_path, "config"), runtime_dir, timeout=60)
     if config.returncode != 0:
         ok, reason = restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
         print("apply_status=fail")
@@ -134,7 +134,7 @@ def apply_desired_slot(
         return config.returncode or 1
 
     up = run_text_cwd(
-        _docker_compose_command(desired.slot, compose_path, "up", "-d", "--force-recreate", "--remove-orphans"),
+        docker_compose_command(desired.slot, compose_path, "up", "-d", "--force-recreate", "--remove-orphans"),
         runtime_dir,
         timeout=240,
     )

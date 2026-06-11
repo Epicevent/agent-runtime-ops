@@ -10,7 +10,7 @@ import sys
 from ..domain.actions import append_action_log as _append_action_log
 from ..domain.common import is_root as _is_root
 from ..domain.common import state_root as _state_root
-from ..host.account_files import _ensure_not_symlink_chain, _runtime_ids, _slot_home
+from ..host.account_files import ensure_not_symlink_chain, runtime_ids, slot_home
 from ..profiles import load_profile
 from ..state import RuntimeTarget, load_runtime_target
 
@@ -18,14 +18,14 @@ from ..state import RuntimeTarget, load_runtime_target
 def _assert_secret_path_safe(slot: str, path: Path, *, create_parent: bool = False) -> None:
     if not path.is_absolute():
         raise ValueError(f"secret file path must be absolute: {path}")
-    home = _slot_home(slot).resolve(strict=False)
+    home = slot_home(slot).resolve(strict=False)
     resolved = path.resolve(strict=False)
     if resolved != home and not str(resolved).startswith(str(home) + os.sep):
         raise ValueError(f"secret file path outside slot home: {path}")
-    _ensure_not_symlink_chain(path.parent, home)
+    ensure_not_symlink_chain(path.parent, home)
     if create_parent:
         path.parent.mkdir(parents=True, exist_ok=True)
-    _ensure_not_symlink_chain(path, home)
+    ensure_not_symlink_chain(path, home)
     if path.exists() and not path.is_file():
         raise ValueError(f"secret file path is not a regular file: {path}")
     if path.is_symlink():
@@ -42,11 +42,11 @@ def _require_openclaw_target(slot: str, state_root: Path) -> tuple[RuntimeTarget
 
 
 def _openclaw_config_path(slot: str) -> Path:
-    return _slot_home(slot) / ".openclaw" / "openclaw.json"
+    return slot_home(slot) / ".openclaw" / "openclaw.json"
 
 
 def _heartbeat_files(slot: str) -> list[Path]:
-    workspace = _slot_home(slot) / ".openclaw" / "workspace"
+    workspace = slot_home(slot) / ".openclaw" / "workspace"
     if not workspace.is_dir():
         return []
     rows: list[Path] = []
@@ -155,7 +155,7 @@ def cmd_heartbeat_status(args: argparse.Namespace) -> int:
 
 def _write_openclaw_config(slot: str, path: Path, data: dict[str, object]) -> None:
     _assert_secret_path_safe(slot, path, create_parent=True)
-    runtime_uid, runtime_gid, _ = _runtime_ids(slot)
+    runtime_uid, runtime_gid, _ = runtime_ids(slot)
     tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
     tmp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     os.chmod(tmp_path, 0o600)

@@ -10,7 +10,7 @@ import tempfile
 from ..nas import agent_nas_dir, history_dir, request_dir
 
 
-def _read_key_value_file(path: Path) -> dict[str, str]:
+def read_key_value_file(path: Path) -> dict[str, str]:
     data: dict[str, str] = {}
     for raw_line in path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
@@ -25,7 +25,7 @@ def _read_key_value_file(path: Path) -> dict[str, str]:
     return data
 
 
-def _atomic_write_key_value(path: Path, data: dict[str, str], mode: int, uid: int | None = None, gid: int | None = None) -> None:
+def atomic_write_key_value(path: Path, data: dict[str, str], mode: int, uid: int | None = None, gid: int | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
     tmp_path = Path(tmp_name)
@@ -44,34 +44,34 @@ def _atomic_write_key_value(path: Path, data: dict[str, str], mode: int, uid: in
             pass
 
 
-def _passwd_record(name: str):
+def passwd_record(name: str):
     import pwd
 
     return pwd.getpwnam(name)
 
 
-def _group_gid(name: str) -> int:
+def group_gid(name: str) -> int:
     import grp
 
     return grp.getgrnam(name).gr_gid
 
 
-def _slot_uid_gid(slot: str) -> tuple[int, int]:
-    record = _passwd_record(slot)
+def slot_uid_gid(slot: str) -> tuple[int, int]:
+    record = passwd_record(slot)
     return int(record.pw_uid), int(record.pw_gid)
 
 
-def _slot_home(slot: str) -> Path:
-    return Path(_passwd_record(slot).pw_dir)
+def slot_home(slot: str) -> Path:
+    return Path(passwd_record(slot).pw_dir)
 
 
-def _runtime_ids(slot: str) -> tuple[int, int, int]:
-    runtime = _passwd_record(f"{slot}_rt")
-    data_gid = _group_gid(f"{slot}_data")
+def runtime_ids(slot: str) -> tuple[int, int, int]:
+    runtime = passwd_record(f"{slot}_rt")
+    data_gid = group_gid(f"{slot}_data")
     return int(runtime.pw_uid), int(runtime.pw_gid), data_gid
 
 
-def _ensure_not_symlink_chain(path: Path, stop_at: Path) -> None:
+def ensure_not_symlink_chain(path: Path, stop_at: Path) -> None:
     current = path
     checked: list[Path] = []
     while True:
@@ -86,11 +86,11 @@ def _ensure_not_symlink_chain(path: Path, stop_at: Path) -> None:
             raise ValueError(f"path component must not be symlink: {candidate}")
 
 
-def _ensure_customer_agent_dirs(slot: str) -> None:
-    uid, gid = _slot_uid_gid(slot)
+def ensure_customer_agent_dirs(slot: str) -> None:
+    uid, gid = slot_uid_gid(slot)
     base = agent_nas_dir(slot)
     home = Path("/home") / slot
-    _ensure_not_symlink_chain(base, home)
+    ensure_not_symlink_chain(base, home)
     for path, mode in [
         (base, 0o700),
         (request_dir(slot), 0o700),
@@ -104,7 +104,7 @@ def _ensure_customer_agent_dirs(slot: str) -> None:
         os.chmod(path, mode)
 
 
-def _read_password_from_stdin() -> str:
+def read_password_from_stdin() -> str:
     password = sys.stdin.read()
     if password.endswith("\n"):
         password = password[:-1]
@@ -115,22 +115,22 @@ def _read_password_from_stdin() -> str:
     return password
 
 
-def _write_credential_file(path: Path, username: str, password: str, domain: str | None, uid: int, gid: int) -> None:
+def write_credential_file(path: Path, username: str, password: str, domain: str | None, uid: int, gid: int) -> None:
     if not username:
         raise ValueError("username is required")
     if not password:
         raise ValueError("password is required")
-    _ensure_not_symlink_chain(path.parent, path.parents[2] if len(path.parents) > 2 else path.parent)
+    ensure_not_symlink_chain(path.parent, path.parents[2] if len(path.parents) > 2 else path.parent)
     path.parent.mkdir(parents=True, exist_ok=True)
     os.chown(path.parent, uid, gid)
     os.chmod(path.parent, 0o700)
     data = {"username": username, "password": password}
     if domain:
         data["domain"] = domain
-    _atomic_write_key_value(path, data, 0o600, uid, gid)
+    atomic_write_key_value(path, data, 0o600, uid, gid)
 
 
-def _credential_file_is_safe(path: Path, uid: int | None = None) -> None:
+def credential_file_is_safe(path: Path, uid: int | None = None) -> None:
     if path.is_symlink():
         raise ValueError(f"credential file must not be symlink: {path}")
     stat_result = path.stat()
@@ -142,20 +142,20 @@ def _credential_file_is_safe(path: Path, uid: int | None = None) -> None:
         raise ValueError(f"credential file owner mismatch: {path}")
 
 
-def _credential_file_is_safe_for_slot(slot: str, path: Path, uid: int | None = None) -> None:
+def credential_file_is_safe_for_slot(slot: str, path: Path, uid: int | None = None) -> None:
     customer_root = agent_nas_dir(slot) / "credentials"
     root_credential_root = Path("/root") / "agent-runtime-ops" / "nas-credentials" / slot
     resolved = path.resolve(strict=False)
     if str(resolved).startswith(str(customer_root.resolve(strict=False)) + os.sep):
-        _ensure_not_symlink_chain(path.parent, Path("/home") / slot)
+        ensure_not_symlink_chain(path.parent, Path("/home") / slot)
     elif str(resolved).startswith(str(root_credential_root.resolve(strict=False)) + os.sep):
-        _ensure_not_symlink_chain(path.parent, Path("/root"))
+        ensure_not_symlink_chain(path.parent, Path("/root"))
     else:
         raise ValueError(f"credential path outside managed roots: {path}")
-    _credential_file_is_safe(path, uid=uid)
+    credential_file_is_safe(path, uid=uid)
 
 
-def _credential_presence(path: Path) -> str:
+def credential_presence(path: Path) -> str:
     try:
         path.stat()
         return "yes"

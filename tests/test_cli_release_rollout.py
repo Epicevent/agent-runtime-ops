@@ -532,7 +532,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
             output = io.StringIO()
             with (
                 patch("agent_runtime_ops.commands.apply._is_root", return_value=True),
-                patch("agent_runtime_ops.domain.runtime_apply._slot_runtime_dir", return_value=runtime_dir),
+                patch("agent_runtime_ops.domain.runtime_apply.slot_runtime_dir", return_value=runtime_dir),
                 patch("agent_runtime_ops.domain.runtime_apply.ensure_runtime_workspace_guidance", return_value={"workspace_guidance": "present"}),
                 patch("agent_runtime_ops.domain.runtime_apply.run_text_cwd", side_effect=fake_run),
                 patch(
@@ -574,7 +574,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
             output = io.StringIO()
             with (
                 patch("agent_runtime_ops.commands.apply._is_root", return_value=True),
-                patch("agent_runtime_ops.domain.runtime_apply._slot_runtime_dir", return_value=runtime_dir),
+                patch("agent_runtime_ops.domain.runtime_apply.slot_runtime_dir", return_value=runtime_dir),
                 patch("agent_runtime_ops.domain.runtime_apply.ensure_runtime_workspace_guidance", return_value={"workspace_guidance": "present"}),
                 patch(
                     "agent_runtime_ops.domain.runtime_apply.run_text_cwd",
@@ -635,7 +635,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
             output = io.StringIO()
             with (
                 patch("agent_runtime_ops.commands.diagnostics._is_root", return_value=True),
-                patch("agent_runtime_ops.commands.diagnostics._slot_runtime_dir", return_value=runtime_dir),
+                patch("agent_runtime_ops.commands.diagnostics.slot_runtime_dir", return_value=runtime_dir),
                 contextlib.redirect_stdout(output),
             ):
                 rc = cmd_diagnostics_show(argparse.Namespace(slot="oc3", dir=str(diag_dir), tail=20))
@@ -660,7 +660,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
             with (
                 patch("agent_runtime_ops.commands.recipe._is_root", return_value=True),
                 patch("agent_runtime_ops.commands.recipe._ensure_dev_runtime_dir", return_value=runtime_dir),
-                patch("agent_runtime_ops.commands.recipe._slot_uid_gid", return_value=(1000, 1000)),
+                patch("agent_runtime_ops.commands.recipe.slot_uid_gid", return_value=(1000, 1000)),
                 contextlib.redirect_stdout(output),
             ):
                 rc = cmd_recipe_dev_apply(
@@ -841,7 +841,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
 
             with (
                 patch("agent_runtime_ops.commands.document_tools.parse_apache_route", return_value=apache_route),
-                patch("agent_runtime_ops.commands.document_tools._find_gateway_container_by_binding", return_value=("container-1", "instance_label")),
+                patch("agent_runtime_ops.commands.document_tools.find_gateway_container_by_binding", return_value=("container-1", "instance_label")),
                 patch("agent_runtime_ops.commands.document_tools.shutil.which", return_value="/usr/bin/tool"),
                 patch("agent_runtime_ops.commands.document_tools._run_text", return_value=inspect_result),
             ):

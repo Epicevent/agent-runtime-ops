@@ -79,7 +79,7 @@ class CliHandoffTests(unittest.TestCase):
             output = io.StringIO()
             with (
                 patch("agent_runtime_ops.commands.handoff._is_root", return_value=True),
-                patch("agent_runtime_ops.commands.handoff._slot_home", return_value=home),
+                patch("agent_runtime_ops.commands.handoff.slot_home", return_value=home),
                 contextlib.redirect_stdout(output),
             ):
                 rc = cmd_handoff_status(argparse.Namespace(slot="dev-oc", state_root=str(root)))
@@ -151,7 +151,7 @@ class CliHandoffTests(unittest.TestCase):
             output = io.StringIO()
             with (
                 patch("agent_runtime_ops.commands.handoff._is_root", return_value=True),
-                patch("agent_runtime_ops.commands.handoff._slot_home", return_value=home),
+                patch("agent_runtime_ops.commands.handoff.slot_home", return_value=home),
                 contextlib.redirect_stdout(output),
             ):
                 rc = cmd_handoff_print(argparse.Namespace(slot="dev-oc", state_root=str(root)))

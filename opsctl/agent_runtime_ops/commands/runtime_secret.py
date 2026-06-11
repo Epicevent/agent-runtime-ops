@@ -16,9 +16,9 @@ from ..domain.common import run_text as _run_text
 from ..domain.common import run_text_cwd as _run_text_cwd
 from ..domain.common import state_root as _state_root
 from ..domain.runtime_checks import profile_startup_timeout_seconds as _profile_startup_timeout_seconds
-from ..domain.runtime_state import _agent_compose_path, _compose_project_name, _docker_compose_command, _slot_runtime_dir
+from ..domain.runtime_state import agent_compose_path, compose_project_name, docker_compose_command, slot_runtime_dir
 from ..domain.runtime_truth import find_gateway_container as _find_gateway_container
-from ..host.account_files import _ensure_not_symlink_chain, _runtime_ids, _slot_home
+from ..host.account_files import ensure_not_symlink_chain, runtime_ids, slot_home
 from ..profiles import load_profile
 from ..runtime_secrets import (
     RUNTIME_SECRET_KEYS,
@@ -33,14 +33,14 @@ from ..state import load_runtime_target
 def _assert_secret_path_safe(slot: str, path: Path, *, create_parent: bool = False) -> None:
     if not path.is_absolute():
         raise ValueError(f"secret file path must be absolute: {path}")
-    home = _slot_home(slot).resolve(strict=False)
+    home = slot_home(slot).resolve(strict=False)
     resolved = path.resolve(strict=False)
     if resolved != home and not str(resolved).startswith(str(home) + os.sep):
         raise ValueError(f"secret file path outside slot home: {path}")
-    _ensure_not_symlink_chain(path.parent, home)
+    ensure_not_symlink_chain(path.parent, home)
     if create_parent:
         path.parent.mkdir(parents=True, exist_ok=True)
-    _ensure_not_symlink_chain(path, home)
+    ensure_not_symlink_chain(path, home)
     if path.exists() and not path.is_file():
         raise ValueError(f"secret file path is not a regular file: {path}")
     if path.is_symlink():
@@ -100,7 +100,7 @@ def _safe_write_secret_env(path: Path, text: str, uid: int, gid: int) -> None:
 
 def _secret_owner_ids(slot: str, owner_mode: str) -> tuple[int, int]:
     if owner_mode == "runtime":
-        runtime_uid, _, data_gid = _runtime_ids(slot)
+        runtime_uid, _, data_gid = runtime_ids(slot)
         return runtime_uid, data_gid
     return 0, 0
 
@@ -118,10 +118,10 @@ def _upsert_runtime_secret_file(slot: str, profile, values: dict[str, str]) -> P
 
 
 def _restart_runtime_secret_slot(desired, profile, runtime_dir: Path) -> tuple[bool, str]:
-    compose_path = _agent_compose_path(runtime_dir)
+    compose_path = agent_compose_path(runtime_dir)
     service = str(profile.metadata.get("service") or "openclaw-gateway")
     if compose_path.is_file():
-        command = _docker_compose_command(desired.slot, compose_path, "up", "-d", "--force-recreate", service)
+        command = docker_compose_command(desired.slot, compose_path, "up", "-d", "--force-recreate", service)
         restart_mode = "agent-runtime-compose"
     else:
         legacy_compose = runtime_dir / "docker-compose.yml"
@@ -141,7 +141,7 @@ def _restart_runtime_secret_slot(desired, profile, runtime_dir: Path) -> tuple[b
                 item = runtime_dir / name
                 if item.is_file():
                     compose_files.append(item)
-        command = ["docker", "compose", "-p", _compose_project_name(desired.slot)]
+        command = ["docker", "compose", "-p", compose_project_name(desired.slot)]
         for item in compose_files:
             command.extend(["-f", str(item)])
         command.extend(["up", "-d", "--force-recreate", service])
@@ -244,7 +244,7 @@ def cmd_runtime_secret_set(args: argparse.Namespace) -> int:
         profile = load_profile(desired.runtime_profile)
         values = _secret_values_from_args(args)
         secret_path = _upsert_runtime_secret_file(desired.slot, profile, values)
-        runtime_dir = _slot_runtime_dir(desired.slot)
+        runtime_dir = slot_runtime_dir(desired.slot)
     except Exception as exc:
         print(f"target={args.slot}")
         print("runtime_secret_status=fail")

@@ -247,14 +247,3 @@ def live_runtime_truth(slot: str, state_root: Path) -> tuple[dict[str, str], lis
         ]
     )
     return truth, checks
-
-
-_find_gateway_container = find_gateway_container
-_find_gateway_container_by_binding = find_gateway_container_by_binding
-_labels_from_container_info = labels_from_container_info
-_live_image_truth_from_info = live_image_truth_from_info
-_live_runtime_truth = live_runtime_truth
-_label_map_from_labels = label_map_from_labels
-_image_spec_recipe_tokens = image_spec_recipe_tokens
-_profile_customer_surface = profile_customer_surface
-_profile_runtime_contract = profile_runtime_contract

@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Path
 
 from ..canonical_recipes import canonical_recipe_for_image_spec, canonical_recipe_identity
 from ..domain.actions import append_action_log as _append_action_log
@@ -18,7 +17,7 @@ from ..domain.image_specs import (
 )
 from ..domain.runtime_apply import apply_desired_slot as _apply_desired_slot
 from ..domain.runtime_checks import run_static_slot_checks as _run_static_slot_checks
-from ..domain.runtime_state import _state_manifest_path
+from ..domain.runtime_rollup import runtime_manifest_rollup
 from ..domain.runtime_targets import (
     desired_from_direct_images as _desired_from_direct_images,
     desired_from_live_image_truth as _desired_from_live_image_truth,
@@ -26,68 +25,6 @@ from ..domain.runtime_targets import (
 from ..domain.runtime_truth import live_runtime_truth
 from ..renderer import render_compose
 from ..routing import load_runtime_bindings
-from ..yamlio import load_yaml
-
-
-def _runtime_manifest_rollup(state_root: Path, slots: list[str], family: str) -> dict[str, object]:
-    rows: list[dict[str, object]] = []
-    seen_slots: set[str] = set()
-    for slot in slots:
-        path = _state_manifest_path(state_root, slot)
-        if path.exists() and path.is_symlink():
-            raise ValueError(f"managed runtime manifest must not be symlink: {path}")
-        if not path.is_file():
-            continue
-        manifest = load_yaml(path, default={})
-        if not isinstance(manifest, dict) or str(manifest.get("family") or "") != family:
-            continue
-        rows.append(manifest)
-        seen_slots.add(slot)
-
-    def item_target(item: dict[str, object]) -> str:
-        return str(item.get("target") or item.get("slot") or "")
-
-    def item_runtime_class(item: dict[str, object]) -> str:
-        return str(item.get("runtime_class") or item.get("slot_class") or "")
-
-    def item_image_name(item: dict[str, object]) -> str:
-        return str(item.get("image_name") or item.get("release") or "")
-
-    direct_targets = [item_target(item) for item in rows if item_image_name(item) == IMAGE_ROLLOUT_IMAGE_NAME]
-    customer_targets = [item_target(item) for item in rows if item_runtime_class(item) == "customer"]
-    dev_targets = [item_target(item) for item in rows if item_runtime_class(item) == "dev"]
-    recipes: list[str] = []
-    recipe_digests: list[str] = []
-    wrapper_images: list[str] = []
-    product_images: list[str] = []
-    for item in rows:
-        recipe = item.get("recipe")
-        recipe_name = ""
-        recipe_digest = ""
-        if isinstance(recipe, dict):
-            recipe_name = str(recipe.get("canonical_recipe_name") or "")
-            recipe_digest = str(recipe.get("canonical_recipe_digest") or "")
-        if recipe_name:
-            recipes.append(recipe_name)
-        if recipe_digest:
-            recipe_digests.append(recipe_digest)
-        if item.get("wrapper_image"):
-            wrapper_images.append(str(item.get("wrapper_image")))
-        if item.get("product_image"):
-            product_images.append(str(item.get("product_image")))
-
-    return {
-        "count": len(rows),
-        "targets": [item_target(item) for item in rows],
-        "customer_targets": customer_targets,
-        "dev_targets": dev_targets,
-        "direct_targets": direct_targets,
-        "missing_targets": [slot for slot in slots if slot not in seen_slots],
-        "wrapper_images": sorted(set(wrapper_images)),
-        "product_images": sorted(set(product_images)),
-        "canonical_recipe_names": sorted(set(recipes)),
-        "canonical_recipe_digests": sorted(set(recipe_digests)),
-    }
 
 
 def cmd_rollout_status(args: argparse.Namespace) -> int:
@@ -98,7 +35,7 @@ def cmd_rollout_status(args: argparse.Namespace) -> int:
             raise ValueError("family must be openclaw or hermes")
         bindings = [binding for binding in load_runtime_bindings(state_root) if binding.enabled and binding.family == family]
         runtime_slots = [binding.linux_account for binding in bindings]
-        runtime_rollup = _runtime_manifest_rollup(state_root, runtime_slots, family)
+        runtime_rollup = runtime_manifest_rollup(state_root, runtime_slots, family)
     except Exception as exc:
         print("rollout_status=fail")
         print(f"reason={exc}")

@@ -20,7 +20,7 @@ from ..domain.runtime_backup import (
 )
 from ..domain.runtime_manifest import desired_from_runtime_manifest
 from ..domain.runtime_state import (
-    _slot_runtime_dir,
+    slot_runtime_dir,
 )
 
 
@@ -55,7 +55,7 @@ def cmd_rollback(args: argparse.Namespace) -> int:
         return 2
     state_root = _state_root(args)
     try:
-        runtime_dir = _slot_runtime_dir(args.slot)
+        runtime_dir = slot_runtime_dir(args.slot)
         backup_dir = latest_backup(runtime_dir)
         if backup_dir is None:
             raise FileNotFoundError("no agent-runtime backup")

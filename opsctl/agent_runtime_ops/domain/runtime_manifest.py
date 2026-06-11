@@ -15,7 +15,7 @@ from .image_specs import (
     profile_customer_surface,
     profile_runtime_contract,
 )
-from .runtime_state import _agent_manifest_path, _atomic_write, _state_manifest_path
+from .runtime_state import agent_manifest_path, atomic_write, state_manifest_path
 from .update_policy import installed_source_commit as _installed_source_commit
 
 
@@ -103,7 +103,7 @@ def write_slot_manifest(
         f"compose_file={path.parent / 'docker-compose.agent-runtime.yml'}",
         f"applied_at={applied_at}",
     ]
-    _atomic_write(path, "\n".join(lines) + "\n", 0o644)
+    atomic_write(path, "\n".join(lines) + "\n", 0o644)
 
 
 def write_state_slot_manifest(
@@ -116,7 +116,7 @@ def write_state_slot_manifest(
     applied_at: str,
     previous_manifest: Path | None,
 ) -> None:
-    _atomic_write(
+    atomic_write(
         path,
         dump_yaml(
             manifest_payload(
@@ -143,8 +143,8 @@ def write_slot_manifests(
     applied_at: str,
     previous_manifest: Path | None,
 ) -> tuple[Path, Path]:
-    legacy_path = _agent_manifest_path(runtime_dir)
-    state_path = _state_manifest_path(state_root, desired.slot, create_parent=True)
+    legacy_path = agent_manifest_path(runtime_dir)
+    state_path = state_manifest_path(state_root, desired.slot, create_parent=True)
     write_slot_manifest(
         legacy_path,
         desired=desired,

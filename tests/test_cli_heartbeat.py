@@ -72,7 +72,7 @@ class CliHeartbeatTests(unittest.TestCase):
             )
             output = io.StringIO()
             with (
-                patch("agent_runtime_ops.commands.heartbeat._slot_home", return_value=home),
+                patch("agent_runtime_ops.commands.heartbeat.slot_home", return_value=home),
                 contextlib.redirect_stdout(output),
             ):
                 rc = cmd_heartbeat_status(argparse.Namespace(slot="dev-oc", state_root=str(root)))
@@ -105,8 +105,8 @@ class CliHeartbeatTests(unittest.TestCase):
             output = io.StringIO()
             with (
                 patch("agent_runtime_ops.commands.heartbeat._is_root", return_value=True),
-                patch("agent_runtime_ops.commands.heartbeat._slot_home", return_value=home),
-                patch("agent_runtime_ops.commands.heartbeat._runtime_ids", return_value=(1234, 1234, 1235)),
+                patch("agent_runtime_ops.commands.heartbeat.slot_home", return_value=home),
+                patch("agent_runtime_ops.commands.heartbeat.runtime_ids", return_value=(1234, 1234, 1235)),
                 patch("agent_runtime_ops.commands.heartbeat.os.chown", create=True),
                 contextlib.redirect_stdout(output),
             ):

@@ -4,12 +4,12 @@ import os
 import tempfile
 from pathlib import Path
 
-from ..host.account_files import _ensure_not_symlink_chain, _runtime_ids, _slot_home
+from ..host.account_files import ensure_not_symlink_chain, runtime_ids, slot_home
 from ..paths import REPO_ROOT
 
 
 def workspace_guidance_paths(slot: str, family: str) -> tuple[Path, Path, list[Path], Path, str, str]:
-    home = _slot_home(slot)
+    home = slot_home(slot)
     expected_home = Path("/home") / slot
     if home != expected_home:
         raise ValueError(f"unexpected slot home: {home}")
@@ -88,27 +88,27 @@ def ensure_runtime_workspace_guidance(slot: str, profile) -> dict[str, str]:
     if not source.is_file() or source.is_symlink():
         raise FileNotFoundError(f"workspace guidance source missing: {source}")
 
-    home = _slot_home(slot)
-    _ensure_not_symlink_chain(app_home, home)
-    _ensure_not_symlink_chain(workspace, home)
+    home = slot_home(slot)
+    ensure_not_symlink_chain(app_home, home)
+    ensure_not_symlink_chain(workspace, home)
     for target in targets:
-        _ensure_not_symlink_chain(target, home)
+        ensure_not_symlink_chain(target, home)
         if target.exists() and target.is_symlink():
             raise ValueError(f"managed guidance file must not be symlink: {target}")
 
     if family == "hermes":
-        uid, _runtime_gid, data_gid = _runtime_ids(slot)
+        uid, _runtime_gid, data_gid = runtime_ids(slot)
         gid = data_gid
         app_mode = 0o750
         workspace_mode = 0o750
     else:
-        uid, gid, _data_gid = _runtime_ids(slot)
+        uid, gid, _data_gid = runtime_ids(slot)
         app_mode = 0o750
         workspace_mode = 0o750
 
     app_home.mkdir(mode=app_mode, parents=True, exist_ok=True)
     workspace.mkdir(mode=workspace_mode, parents=True, exist_ok=True)
-    _ensure_not_symlink_chain(workspace, home)
+    ensure_not_symlink_chain(workspace, home)
     os.chown(app_home, uid, gid)
     os.chmod(app_home, app_mode)
     os.chown(workspace, uid, gid)
@@ -128,9 +128,3 @@ def ensure_runtime_workspace_guidance(slot: str, profile) -> dict[str, str]:
         "workspace_guidance_workspace": str(workspace),
         "workspace_guidance_files": ",".join(str(target) for target in targets),
     }
-
-
-_workspace_guidance_paths = workspace_guidance_paths
-_upsert_managed_guidance_block = upsert_managed_guidance_block
-_atomic_write_owned_text = atomic_write_owned_text
-_ensure_runtime_workspace_guidance = ensure_runtime_workspace_guidance

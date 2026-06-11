@@ -15,15 +15,15 @@ from ..domain.common import now_iso as _now_iso
 from ..domain.common import run_text as _run_text
 from ..domain.common import state_root as _state_root
 from ..host.account_files import (
-    _atomic_write_key_value,
-    _credential_file_is_safe_for_slot,
-    _credential_presence,
-    _ensure_customer_agent_dirs,
-    _read_key_value_file,
-    _read_password_from_stdin,
-    _runtime_ids,
-    _slot_uid_gid,
-    _write_credential_file,
+    atomic_write_key_value,
+    credential_file_is_safe_for_slot,
+    credential_presence,
+    ensure_customer_agent_dirs,
+    read_key_value_file,
+    read_password_from_stdin,
+    runtime_ids,
+    slot_uid_gid,
+    write_credential_file,
 )
 from ..host.fstab import remove_managed_fstab_entry as _remove_managed_fstab_entry
 from ..host.fstab import write_managed_fstab_entry as _host_write_managed_fstab_entry
@@ -67,8 +67,8 @@ def _combine_presence(*values: str) -> str:
 
 def _official_credential_status(slot: str, share) -> dict[str, str]:
     paths = _official_credential_paths(slot, share)
-    root_present = _credential_presence(paths["root"])
-    customer_present = _credential_presence(paths["customer"])
+    root_present = credential_presence(paths["root"])
+    customer_present = credential_presence(paths["customer"])
     official_present = _combine_presence(root_present, customer_present)
     return {
         "root_credential_present": root_present,
@@ -103,8 +103,8 @@ def _write_managed_fstab_entry(
         share,
         mountpoint,
         credential_path,
-        slot_uid_gid=_slot_uid_gid,
-        runtime_ids=_runtime_ids,
+        slot_uid_gid=slot_uid_gid,
+        runtime_ids=runtime_ids,
         claim_existing_same_source=claim_existing_same_source,
         fstab_path=fstab_path,
         lock_path=lock_path,
@@ -125,7 +125,7 @@ def _prepare_mount_entry(
     _safe_mountpoint_path(decision.mountpoint)
     decision.mountpoint.mkdir(parents=True, exist_ok=True)
     _safe_mountpoint_path(decision.mountpoint)
-    _credential_file_is_safe_for_slot(slot, credential_path)
+    credential_file_is_safe_for_slot(slot, credential_path)
     current_count = _mounted_child_cifs_count(decision.slot)
     existing_rc, _, existing_rows = _findmnt_one(decision.mountpoint)
     already_same_mount = (
@@ -163,7 +163,7 @@ def _move_request(path: Path, slot: str, status: str) -> Path:
 
 
 def _safe_request_file(path: Path, slot: str) -> None:
-    uid, _ = _slot_uid_gid(slot)
+    uid, _ = slot_uid_gid(slot)
     if path.is_symlink():
         raise ValueError(f"request file must not be symlink: {path}")
     stat_result = path.stat()
@@ -186,7 +186,7 @@ def _approve_auto_once(state_root: Path) -> dict[str, int]:
             result["checked"] += 1
             try:
                 _safe_request_file(path, slot)
-                data = _read_key_value_file(path)
+                data = read_key_value_file(path)
                 share_source = data.get("requested_share") or ""
                 decision = check_nas_policy(slot, share_source, state_root)
                 if not decision.allowed:
@@ -199,8 +199,8 @@ def _approve_auto_once(state_root: Path) -> dict[str, int]:
                     print(f"pending target={slot} share={decision.share.source} reason=credential_missing")
                     result["pending"] += 1
                     continue
-                slot_uid, _ = _slot_uid_gid(slot)
-                _credential_file_is_safe_for_slot(slot, credential_path, uid=slot_uid)
+                slot_uid, _ = slot_uid_gid(slot)
+                credential_file_is_safe_for_slot(slot, credential_path, uid=slot_uid)
                 decision, _ = _prepare_mount_entry(slot, decision.share.source, credential_path, state_root)
                 ok, reason = _host_mount_prepared_share(decision)
                 if ok:
@@ -215,7 +215,7 @@ def _approve_auto_once(state_root: Path) -> dict[str, int]:
                     result["failed"] += 1
             except Exception as exc:
                 try:
-                    share_source = _read_key_value_file(path).get("requested_share", "")
+                    share_source = read_key_value_file(path).get("requested_share", "")
                     _move_request(path, slot, "rejected")
                     _append_action_log(state_root, "nas_approve_auto", slot, share_source, "rejected", str(exc))
                 except Exception:
@@ -240,7 +240,7 @@ def cmd_nas_requests(args: argparse.Namespace) -> int:
             if path.is_symlink():
                 continue
             try:
-                data = _read_key_value_file(path)
+                data = read_key_value_file(path)
             except Exception as exc:
                 print(f"request target={slot} file={path.name} status=unreadable reason={exc}")
                 total += 1
@@ -323,10 +323,10 @@ def cmd_nas_request(args: argparse.Namespace) -> int:
         decision = check_nas_policy(slot, args.share, _state_root(args))
         if not decision.allowed:
             raise ValueError(f"policy denied: {decision.reason}")
-        _ensure_customer_agent_dirs(slot)
+        ensure_customer_agent_dirs(slot)
         path = request_path(slot, decision.share)
-        uid, gid = _slot_uid_gid(slot)
-        _atomic_write_key_value(
+        uid, gid = slot_uid_gid(slot)
+        atomic_write_key_value(
             path,
             {
                 "slot": slot,
@@ -359,11 +359,11 @@ def cmd_nas_credential_set(args: argparse.Namespace) -> int:
         if not decision.allowed:
             raise ValueError(f"policy denied: {decision.reason}")
         slot = decision.slot
-        password = _read_password_from_stdin()
-        _ensure_customer_agent_dirs(slot)
+        password = read_password_from_stdin()
+        ensure_customer_agent_dirs(slot)
         credential_path = customer_credential_path(slot, decision.share)
-        uid, gid = _slot_uid_gid(slot)
-        _write_credential_file(credential_path, args.username, password, args.domain, uid, gid)
+        uid, gid = slot_uid_gid(slot)
+        write_credential_file(credential_path, args.username, password, args.domain, uid, gid)
     except Exception as exc:
         print("credential_status=fail")
         print(f"reason={exc}")
@@ -460,9 +460,9 @@ def cmd_nas_mount(args: argparse.Namespace) -> int:
         if args.username or args.password_stdin:
             if not args.username or not args.password_stdin:
                 raise ValueError("--username and --password-stdin must be used together")
-            password = _read_password_from_stdin()
+            password = read_password_from_stdin()
             credential_path = root_credential_path(slot, decision.share)
-            _write_credential_file(credential_path, args.username, password, args.domain, 0, 0)
+            write_credential_file(credential_path, args.username, password, args.domain, 0, 0)
             credential_source = "stdin"
         else:
             credential_path = root_credential_path(slot, decision.share)
@@ -583,17 +583,17 @@ def cmd_nas_unmount(args: argparse.Namespace) -> int:
 
 def _validate_official_credentials_for_delete(slot: str, share) -> None:
     paths = _official_credential_paths(slot, share)
-    slot_uid, _ = _slot_uid_gid(slot)
+    slot_uid, _ = slot_uid_gid(slot)
     for name, path in paths.items():
-        if _credential_presence(path) == "yes":
-            _credential_file_is_safe_for_slot(slot, path, uid=0 if name == "root" else slot_uid)
+        if credential_presence(path) == "yes":
+            credential_file_is_safe_for_slot(slot, path, uid=0 if name == "root" else slot_uid)
 
 
 def _delete_official_credentials(slot: str, share) -> dict[str, str]:
     paths = _official_credential_paths(slot, share)
     removed: dict[str, str] = {}
     for name, path in paths.items():
-        if _credential_presence(path) == "yes":
+        if credential_presence(path) == "yes":
             path.unlink()
             removed[f"{name}_credential_removed"] = "yes"
         else:

@@ -9,7 +9,7 @@ import sys
 
 from ..domain.common import is_root as _is_root
 from ..domain.common import state_root as _state_root
-from ..host.account_files import _ensure_not_symlink_chain, _slot_home
+from ..host.account_files import ensure_not_symlink_chain, slot_home
 from ..profiles import load_profile
 from ..runtime_secrets import parse_secret_env_text
 from ..state import load_runtime_target
@@ -18,14 +18,14 @@ from ..state import load_runtime_target
 def _assert_secret_path_safe(slot: str, path: Path, *, create_parent: bool = False) -> None:
     if not path.is_absolute():
         raise ValueError(f"secret file path must be absolute: {path}")
-    home = _slot_home(slot).resolve(strict=False)
+    home = slot_home(slot).resolve(strict=False)
     resolved = path.resolve(strict=False)
     if resolved != home and not str(resolved).startswith(str(home) + os.sep):
         raise ValueError(f"secret file path outside slot home: {path}")
-    _ensure_not_symlink_chain(path.parent, home)
+    ensure_not_symlink_chain(path.parent, home)
     if create_parent:
         path.parent.mkdir(parents=True, exist_ok=True)
-    _ensure_not_symlink_chain(path, home)
+    ensure_not_symlink_chain(path, home)
     if path.exists() and not path.is_file():
         raise ValueError(f"secret file path is not a regular file: {path}")
     if path.is_symlink():
@@ -104,7 +104,7 @@ def cmd_handoff_status(args: argparse.Namespace) -> int:
     print("handoff_value_printed=no")
 
     if family == "openclaw":
-        config_path = _slot_home(desired.slot) / ".openclaw" / "openclaw.json"
+        config_path = slot_home(desired.slot) / ".openclaw" / "openclaw.json"
         try:
             _assert_secret_path_safe(desired.slot, config_path)
             file_state, token_state = _json_path_present(config_path, ["gateway", "auth", "token"])
@@ -176,7 +176,7 @@ def cmd_handoff_print(args: argparse.Namespace) -> int:
 
     try:
         if family == "openclaw":
-            config_path = _slot_home(desired.slot) / ".openclaw" / "openclaw.json"
+            config_path = slot_home(desired.slot) / ".openclaw" / "openclaw.json"
             _assert_secret_path_safe(desired.slot, config_path)
             token = _json_path_value(config_path, ["gateway", "auth", "token"])
             if not token:

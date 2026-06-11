@@ -10,16 +10,16 @@ from ..yamlio import load_yaml
 from .common import now_iso, run_text_cwd
 from .runtime_manifest import desired_from_manifest, read_legacy_slot_manifest
 from .runtime_state import (
-    _agent_backup_root,
-    _agent_compose_path,
-    _agent_manifest_path,
-    _docker_compose_command,
-    _state_manifest_path,
+    agent_backup_root,
+    agent_compose_path,
+    agent_manifest_path,
+    docker_compose_command,
+    state_manifest_path,
 )
 
 
 def backup_agent_runtime_state(slot: str, runtime_dir: Path, state_root: Path) -> Path:
-    backup_root = _agent_backup_root(runtime_dir)
+    backup_root = agent_backup_root(runtime_dir)
     if backup_root.exists() and backup_root.is_symlink():
         raise ValueError(f"backup root must not be symlink: {backup_root}")
     backup_root.mkdir(mode=0o755, exist_ok=True)
@@ -31,28 +31,28 @@ def backup_agent_runtime_state(slot: str, runtime_dir: Path, state_root: Path) -
         backup_dir = Path(f"{original_backup_dir}.{suffix}")
     backup_dir.mkdir(mode=0o755)
 
-    compose_path = _agent_compose_path(runtime_dir)
-    manifest_path = _agent_manifest_path(runtime_dir)
-    state_manifest_path = _state_manifest_path(state_root, slot)
+    compose_path = agent_compose_path(runtime_dir)
+    manifest_path = agent_manifest_path(runtime_dir)
+    state_manifest_file = state_manifest_path(state_root, slot)
     metadata = {
         "created_at": now_iso(),
         "had_compose": compose_path.is_file() and not compose_path.is_symlink(),
         "had_manifest": manifest_path.is_file() and not manifest_path.is_symlink(),
-        "had_state_manifest": state_manifest_path.is_file() and not state_manifest_path.is_symlink(),
-        "state_manifest_path": str(state_manifest_path),
+        "had_state_manifest": state_manifest_file.is_file() and not state_manifest_file.is_symlink(),
+        "state_manifest_path": str(state_manifest_file),
     }
     if metadata["had_compose"]:
         shutil.copy2(compose_path, backup_dir / "docker-compose.agent-runtime.yml")
     if metadata["had_manifest"]:
         shutil.copy2(manifest_path, backup_dir / ".agent-runtime-manifest")
     if metadata["had_state_manifest"]:
-        shutil.copy2(state_manifest_path, backup_dir / "manifest.yaml")
+        shutil.copy2(state_manifest_file, backup_dir / "manifest.yaml")
     (backup_dir / "backup.json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return backup_dir
 
 
 def latest_backup(runtime_dir: Path) -> Path | None:
-    backup_root = _agent_backup_root(runtime_dir)
+    backup_root = agent_backup_root(runtime_dir)
     if not backup_root.is_dir():
         return None
     backups = sorted([item for item in backup_root.iterdir() if item.is_dir()])
@@ -61,9 +61,9 @@ def latest_backup(runtime_dir: Path) -> Path | None:
 
 def restore_backup(slot: str, runtime_dir: Path, backup_dir: Path, state_root: Path) -> tuple[bool, str]:
     metadata = load_yaml(backup_dir / "backup.json")
-    compose_path = _agent_compose_path(runtime_dir)
-    manifest_path = _agent_manifest_path(runtime_dir)
-    state_manifest_path = _state_manifest_path(state_root, slot, create_parent=True)
+    compose_path = agent_compose_path(runtime_dir)
+    manifest_path = agent_manifest_path(runtime_dir)
+    state_manifest_file = state_manifest_path(state_root, slot, create_parent=True)
     had_compose = bool(metadata.get("had_compose"))
     had_manifest = bool(metadata.get("had_manifest"))
     had_state_manifest = bool(metadata.get("had_state_manifest"))
@@ -77,18 +77,18 @@ def restore_backup(slot: str, runtime_dir: Path, backup_dir: Path, state_root: P
     else:
         manifest_path.unlink(missing_ok=True)
     if had_state_manifest:
-        shutil.copy2(backup_dir / "manifest.yaml", state_manifest_path)
+        shutil.copy2(backup_dir / "manifest.yaml", state_manifest_file)
     else:
-        state_manifest_path.unlink(missing_ok=True)
+        state_manifest_file.unlink(missing_ok=True)
 
     if not had_compose:
         return False, "no_previous_agent_runtime_compose"
 
-    config = run_text_cwd(_docker_compose_command(slot, compose_path, "config"), runtime_dir, timeout=60)
+    config = run_text_cwd(docker_compose_command(slot, compose_path, "config"), runtime_dir, timeout=60)
     if config.returncode != 0:
         return False, (config.stderr or config.stdout).strip() or "rollback_compose_config_failed"
     up = run_text_cwd(
-        _docker_compose_command(slot, compose_path, "up", "-d", "--force-recreate", "--remove-orphans"),
+        docker_compose_command(slot, compose_path, "up", "-d", "--force-recreate", "--remove-orphans"),
         runtime_dir,
         timeout=180,
     )

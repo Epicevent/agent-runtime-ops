@@ -35,16 +35,14 @@ from ..domain.image_specs import (
 )
 from ..domain.runtime_apply import apply_desired_slot as _apply_desired_slot
 from ..domain.runtime_checks import run_live_slot_checks as _run_live_slot_checks
-from ..domain.runtime_state import _slot_runtime_dir
 from ..domain.runtime_targets import desired_from_live_image_truth as _desired_from_live_image_truth
 from ..domain.source_provenance import require_fresh_clean_source_provenance as _require_fresh_clean_source_provenance
 from ..domain.source_provenance import source_provenance as _source_provenance
 from ..host.account_files import (
-    _atomic_write_key_value,
-    _ensure_not_symlink_chain,
-    _read_key_value_file,
-    _runtime_ids,
-    _slot_uid_gid,
+    atomic_write_key_value,
+    read_key_value_file,
+    runtime_ids,
+    slot_uid_gid,
 )
 from ..host.files import atomic_write_text as _atomic_write_text
 from ..host.files import fsync_parent as _fsync_parent
@@ -240,7 +238,7 @@ def _assert_child_of(child: Path, parent: Path) -> None:
 
 
 def _ensure_dev_runtime_dir(slot: str) -> Path:
-    uid, gid = _slot_uid_gid(slot)
+    uid, gid = slot_uid_gid(slot)
     home = Path("/home") / slot
     if home.is_symlink():
         raise ValueError(f"managed home must not be symlink: {home}")
@@ -274,7 +272,7 @@ def _chmod_source_tree(root: Path, uid: int, gid: int) -> None:
 
 def _sync_dev_source_output(slot: str, recipe_name: str, source: Path) -> Path:
     _reject_tree_symlinks(source)
-    runtime_uid, _, data_gid = _runtime_ids(slot)
+    runtime_uid, _, data_gid = runtime_ids(slot)
     home = Path("/home") / slot
     stage_root = home / DEV_RECIPE_STAGE_ROOT
     if stage_root.exists() and stage_root.is_symlink():
@@ -306,9 +304,9 @@ def _sync_dev_source_output(slot: str, recipe_name: str, source: Path) -> Path:
 def _upsert_runtime_env_file(path: Path, updates: dict[str, str], uid: int, gid: int) -> None:
     if path.exists() and path.is_symlink():
         raise ValueError(f"runtime env file must not be symlink: {path}")
-    data = _read_key_value_file(path) if path.exists() else {}
+    data = read_key_value_file(path) if path.exists() else {}
     data.update({key: value for key, value in updates.items() if value})
-    _atomic_write_key_value(path, data, 0o640, uid, gid)
+    atomic_write_key_value(path, data, 0o640, uid, gid)
 
 
 def _dev_recipe_runtime_env(desired, state_root: Path) -> dict[str, str]:
@@ -381,7 +379,7 @@ def cmd_recipe_dev_apply(args: argparse.Namespace) -> int:
             sync_from_value = ""
         provenance_source = source if sync_from else source_output
         runtime_dir = _ensure_dev_runtime_dir(slot)
-        uid, gid = _slot_uid_gid(slot)
+        uid, gid = slot_uid_gid(slot)
         env_updates = _dev_recipe_runtime_env(desired, state_root)
         env_updates["SOURCE_OUTPUT"] = str(source_output)
         _upsert_runtime_env_file(runtime_dir / ".env", env_updates, uid, gid)
