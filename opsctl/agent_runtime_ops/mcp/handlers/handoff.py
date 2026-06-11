@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from .. import validation as v
+
 
 def status(server, args: dict[str, Any]) -> dict[str, Any]:
-    server._reject_unknown(args, {"target", "targets", "runtime_class", "family"})
-    slots, runs = server._resolve_slots(args)
+    v.reject_unknown(args, {"target", "targets", "runtime_class", "family"}, error_type=server.tool_error)
+    slots, runs = v.resolve_slots(server, args, error_type=server.tool_error)
     runs.extend(
         server._run([server.sudo, server.opsctl, "handoff", "status", slot], timeout=60)
         for slot in slots
@@ -14,7 +16,7 @@ def status(server, args: dict[str, Any]) -> dict[str, Any]:
 
 
 def value_command(server, args: dict[str, Any]) -> dict[str, Any]:
-    server._reject_unknown(args, {"target"})
-    slot = server._slot(args.get("target"))
+    v.reject_unknown(args, {"target"}, error_type=server.tool_error)
+    slot = v.linux_account(args.get("target"), error_type=server.tool_error)
     runs = [server._run([server.sudo, server.opsctl, "handoff", "value-command", slot], timeout=60)]
     return server._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)

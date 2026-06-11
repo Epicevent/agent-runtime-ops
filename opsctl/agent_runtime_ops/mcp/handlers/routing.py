@@ -3,10 +3,11 @@ from __future__ import annotations
 from typing import Any
 
 from ...paths import REPO_ROOT
+from .. import validation as v
 
 
 def ops_orientation(server, args: dict[str, Any]) -> dict[str, Any]:
-    server._reject_unknown(args, set())
+    v.reject_unknown(args, set(), error_type=server.tool_error)
     runs = [
         server._run([server.opsctl, "update", "status"]),
         server._run([server.opsctl, "binding", "list"]),
@@ -17,74 +18,74 @@ def ops_orientation(server, args: dict[str, Any]) -> dict[str, Any]:
 
 
 def binding_list(server, args: dict[str, Any]) -> dict[str, Any]:
-    server._reject_unknown(args, set())
+    v.reject_unknown(args, set(), error_type=server.tool_error)
     runs = [server._run([server.opsctl, "binding", "list"], timeout=60)]
     return server._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
 
 
 def binding_status(server, args: dict[str, Any]) -> dict[str, Any]:
-    server._reject_unknown(args, {"target"})
+    v.reject_unknown(args, {"target"}, error_type=server.tool_error)
     argv = [server.opsctl, "binding", "status"]
     if args.get("target"):
-        argv.append(server._target(args.get("target")))
+        argv.append(v.target(args.get("target"), error_type=server.tool_error))
     runs = [server._run(argv, timeout=60)]
     return server._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
 
 
 def binding_set_public_host(server, args: dict[str, Any]) -> dict[str, Any]:
-    server._reject_unknown(args, {"target", "host"})
-    target = server._target(args.get("target"))
-    host = server._host(args.get("host"))
+    v.reject_unknown(args, {"target", "host"}, error_type=server.tool_error)
+    target = v.target(args.get("target"), error_type=server.tool_error)
+    host = v.host(args.get("host"), error_type=server.tool_error)
     runs = [server._run([server.sudo, server.opsctl, "binding", "set-public-host", target, host], timeout=120)]
     return server._common_response(ok=runs[0]["returncode"] == 0, mutated=True, runs=runs)
 
 
 def apache_status(server, args: dict[str, Any]) -> dict[str, Any]:
-    server._reject_unknown(args, {"target"})
+    v.reject_unknown(args, {"target"}, error_type=server.tool_error)
     argv = [server.opsctl, "apache", "status"]
     if args.get("target"):
-        argv.append(server._target(args.get("target")))
+        argv.append(v.target(args.get("target"), error_type=server.tool_error))
     runs = [server._run(argv, timeout=60)]
     return server._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
 
 
 def apache_set_host(server, args: dict[str, Any]) -> dict[str, Any]:
-    server._reject_unknown(args, {"linux_account", "host"})
-    linux_account = server._linux_account(args.get("linux_account"))
-    host = server._host(args.get("host"))
+    v.reject_unknown(args, {"linux_account", "host"}, error_type=server.tool_error)
+    linux_account = v.linux_account(args.get("linux_account"), error_type=server.tool_error)
+    host = v.host(args.get("host"), error_type=server.tool_error)
     runs = [server._run([server.sudo, server.opsctl, "apache", "set-host", linux_account, host], timeout=120)]
     return server._common_response(ok=runs[0]["returncode"] == 0, mutated=True, runs=runs)
 
 
 def runtime_truth(server, args: dict[str, Any]) -> dict[str, Any]:
-    server._reject_unknown(args, {"target", "all"})
+    v.reject_unknown(args, {"target", "all"}, error_type=server.tool_error)
     argv = [server.sudo, server.opsctl, "runtime", "truth"]
     if bool(args.get("all", False)):
         if args.get("target") is not None:
             raise server.tool_error("provide either target or all, not both")
         argv.append("--all")
     else:
-        argv.append(server._target(args.get("target")))
+        argv.append(v.target(args.get("target"), error_type=server.tool_error))
     runs = [server._run(argv, timeout=120)]
     return server._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
 
 
 def document_tools_status(server, args: dict[str, Any]) -> dict[str, Any]:
-    server._reject_unknown(args, {"target", "all"})
+    v.reject_unknown(args, {"target", "all"}, error_type=server.tool_error)
     argv = [server.sudo, server.opsctl, "document-tools", "status"]
     if bool(args.get("all", False)):
         if args.get("target") is not None:
             raise server.tool_error("provide either target or all, not both")
         argv.append("--all")
     else:
-        argv.append(server._target(args.get("target")))
+        argv.append(v.target(args.get("target"), error_type=server.tool_error))
     runs = [server._run(argv, timeout=180)]
     return server._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
 
 
 def target_check(server, args: dict[str, Any]) -> dict[str, Any]:
-    server._reject_unknown(args, {"target", "targets", "runtime_class", "family"})
-    slots, runs = server._resolve_slots(args)
+    v.reject_unknown(args, {"target", "targets", "runtime_class", "family"}, error_type=server.tool_error)
+    slots, runs = v.resolve_slots(server, args, error_type=server.tool_error)
     for slot in slots:
         runs.append(server._run([server.opsctl, "binding", "status", slot]))
         runs.append(server._run([server.opsctl, "apache", "status", slot]))
@@ -95,8 +96,8 @@ def target_check(server, args: dict[str, Any]) -> dict[str, Any]:
 
 
 def target_rollback(server, args: dict[str, Any]) -> dict[str, Any]:
-    server._reject_unknown(args, {"target"})
-    slot = server._slot(args.get("target"))
+    v.reject_unknown(args, {"target"}, error_type=server.tool_error)
+    slot = v.linux_account(args.get("target"), error_type=server.tool_error)
     runs = [server._run([server.opsctl, "status", slot], timeout=60)]
     if runs[0]["returncode"] != 0:
         return server._common_response(ok=False, mutated=False, runs=runs, next_action="fix target status before rollback")

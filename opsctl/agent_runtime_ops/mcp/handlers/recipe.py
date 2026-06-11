@@ -2,17 +2,19 @@ from __future__ import annotations
 
 from typing import Any
 
+from .. import validation as v
+
 
 def canonical_validate(server, args: dict[str, Any]) -> dict[str, Any]:
-    server._reject_unknown(args, {"name"})
-    name = server._safe_name(args.get("name"))
+    v.reject_unknown(args, {"name"}, error_type=server.tool_error)
+    name = v.safe_name(args.get("name"), error_type=server.tool_error)
     runs = [server._run([server.opsctl, "recipe", "validate-canonical", name], timeout=60)]
     return server._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
 
 
 def dev_status(server, args: dict[str, Any]) -> dict[str, Any]:
-    server._reject_unknown(args, {"target"})
-    slot = server._slot(args.get("target"))
+    v.reject_unknown(args, {"target"}, error_type=server.tool_error)
+    slot = v.linux_account(args.get("target"), error_type=server.tool_error)
     if not slot.startswith("dev-"):
         raise server.tool_error("dev recipe tools require a dev target")
     runs = [server._run([server.opsctl, "recipe", "status", slot], timeout=60)]
@@ -20,7 +22,7 @@ def dev_status(server, args: dict[str, Any]) -> dict[str, Any]:
 
 
 def dev_apply(server, args: dict[str, Any]) -> dict[str, Any]:
-    server._reject_unknown(
+    v.reject_unknown(
         args,
         {
             "target",
@@ -31,8 +33,9 @@ def dev_apply(server, args: dict[str, Any]) -> dict[str, Any]:
             "allow_first_apply",
             "no_apply",
         },
+        error_type=server.tool_error,
     )
-    slot = server._slot(args.get("target"))
+    slot = v.linux_account(args.get("target"), error_type=server.tool_error)
     if not slot.startswith("dev-"):
         raise server.tool_error("dev recipe tools require a dev target")
     has_source_output = args.get("source_output") is not None
@@ -45,12 +48,12 @@ def dev_apply(server, args: dict[str, Any]) -> dict[str, Any]:
     argv = [server.sudo, server.opsctl, "recipe", "apply-dev", slot]
     recipe_name = args.get("recipe_name")
     if recipe_name:
-        argv.extend(["--recipe-name", server._safe_name(recipe_name)])
+        argv.extend(["--recipe-name", v.safe_name(recipe_name, error_type=server.tool_error)])
     if has_source_output:
-        argv.extend(["--source-output", server._path_text(args.get("source_output"), "source_output")])
+        argv.extend(["--source-output", v.path_text(args.get("source_output"), "source_output", error_type=server.tool_error)])
     else:
-        argv.extend(["--sync-from", server._path_text(args.get("sync_from"), "sync_from")])
-    build_command = server._safe_text(args.get("build_command"), "build_command")
+        argv.extend(["--sync-from", v.path_text(args.get("sync_from"), "sync_from", error_type=server.tool_error)])
+    build_command = v.safe_text(args.get("build_command"), "build_command", error_type=server.tool_error)
     if build_command:
         argv.extend(["--build-command", build_command])
     if bool(args.get("allow_first_apply", False)):

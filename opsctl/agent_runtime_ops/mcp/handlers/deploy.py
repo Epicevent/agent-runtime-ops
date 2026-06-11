@@ -4,6 +4,8 @@ import re
 import shlex
 from typing import Any
 
+from .. import validation as v
+
 
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
@@ -19,7 +21,7 @@ def _parse_key_values(text: str) -> dict[str, str]:
 
 
 def deploy_update(server, args: dict[str, Any]) -> dict[str, Any]:
-    server._reject_unknown(args, {"target_ref"})
+    v.reject_unknown(args, {"target_ref"}, error_type=server.tool_error)
     target_ref = args.get("target_ref")
     if target_ref is not None:
         target_ref = str(target_ref)

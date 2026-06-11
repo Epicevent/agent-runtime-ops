@@ -2,27 +2,29 @@ from __future__ import annotations
 
 from typing import Any
 
+from .. import validation as v
+
 
 def image_plan(server, args: dict[str, Any]) -> dict[str, Any]:
-    server._reject_unknown(args, {"wrapper_image", "product_image", "target", "targets"})
+    v.reject_unknown(args, {"wrapper_image", "product_image", "target", "targets"}, error_type=server.tool_error)
     argv = [
         server.sudo,
         server.opsctl,
         "rollout",
         "image-plan",
         "--wrapper-image",
-        server._image_ref(args.get("wrapper_image")),
+        v.image_ref(args.get("wrapper_image"), error_type=server.tool_error),
         "--product-image",
-        server._image_ref(args.get("product_image")),
+        v.image_ref(args.get("product_image"), error_type=server.tool_error),
     ]
     if args.get("target"):
-        argv.extend(["--target", server._slot(args.get("target"))])
+        argv.extend(["--target", v.linux_account(args.get("target"), error_type=server.tool_error)])
     slots = args.get("targets")
     if slots is not None:
         if not isinstance(slots, list) or not slots:
             raise server.tool_error("targets must be a non-empty array")
         argv.append("--targets")
-        argv.extend(server._slot(item) for item in slots)
+        argv.extend(v.linux_account(item, error_type=server.tool_error) for item in slots)
     runs = [server._run(argv, timeout=180)]
     return server._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
 
@@ -36,18 +38,18 @@ def image_canary(server, args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _image_apply(server, args: dict[str, Any], *, command: str) -> dict[str, Any]:
-    server._reject_unknown(args, {"target", "wrapper_image", "product_image", "allow_first_apply"})
+    v.reject_unknown(args, {"target", "wrapper_image", "product_image", "allow_first_apply"}, error_type=server.tool_error)
     argv = [
         server.sudo,
         server.opsctl,
         "rollout",
         command,
         "--target",
-        server._slot(args.get("target")),
+        v.linux_account(args.get("target"), error_type=server.tool_error),
         "--wrapper-image",
-        server._image_ref(args.get("wrapper_image")),
+        v.image_ref(args.get("wrapper_image"), error_type=server.tool_error),
         "--product-image",
-        server._image_ref(args.get("product_image")),
+        v.image_ref(args.get("product_image"), error_type=server.tool_error),
     ]
     if bool(args.get("allow_first_apply", False)):
         argv.append("--allow-first-apply")
@@ -56,18 +58,18 @@ def _image_apply(server, args: dict[str, Any], *, command: str) -> dict[str, Any
 
 
 def image_promote(server, args: dict[str, Any]) -> dict[str, Any]:
-    server._reject_unknown(args, {"from_target", "targets"})
+    v.reject_unknown(args, {"from_target", "targets"}, error_type=server.tool_error)
     slots = args.get("targets")
     if not isinstance(slots, list) or not slots:
         raise server.tool_error("targets must be a non-empty array")
-    slot_values = [server._slot(item) for item in slots]
+    slot_values = [v.linux_account(item, error_type=server.tool_error) for item in slots]
     argv = [
         server.sudo,
         server.opsctl,
         "rollout",
         "image-promote",
         "--from-target",
-        server._slot(args.get("from_target")),
+        v.linux_account(args.get("from_target"), error_type=server.tool_error),
         "--targets",
         ",".join(slot_values),
     ]

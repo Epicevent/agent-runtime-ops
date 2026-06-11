@@ -3,11 +3,12 @@ from __future__ import annotations
 from typing import Any
 
 from ...runtime_secrets import RUNTIME_SECRET_KEYS
+from .. import validation as v
 
 
 def status(server, args: dict[str, Any]) -> dict[str, Any]:
-    server._reject_unknown(args, {"target", "targets", "runtime_class", "family"})
-    slots, runs = server._resolve_slots(args)
+    v.reject_unknown(args, {"target", "targets", "runtime_class", "family"}, error_type=server.tool_error)
+    slots, runs = v.resolve_slots(server, args, error_type=server.tool_error)
     runs.extend(
         server._run([server.sudo, server.opsctl, "runtime-secret", "status", slot], timeout=60)
         for slot in slots
@@ -16,13 +17,13 @@ def status(server, args: dict[str, Any]) -> dict[str, Any]:
 
 
 def set_from_file(server, args: dict[str, Any]) -> dict[str, Any]:
-    server._reject_unknown(args, {"target", "key", "secret_file", "check", "no_restart"})
-    server._reject_sensitive_raw_args(args, allowed={"secret_file"})
-    slot = server._slot(args.get("target"))
+    v.reject_unknown(args, {"target", "key", "secret_file", "check", "no_restart"}, error_type=server.tool_error)
+    v.reject_sensitive_raw_args(args, allowed={"secret_file"}, error_type=server.tool_error)
+    slot = v.linux_account(args.get("target"), error_type=server.tool_error)
     key = str(args.get("key") or "")
     if key not in RUNTIME_SECRET_KEYS:
         raise server.tool_error(f"unsupported runtime secret key: {key}")
-    value = server._read_allowed_secret_file(args.get("secret_file"))
+    value = v.read_allowed_secret_file(args.get("secret_file"), server.secret_roots, error_type=server.tool_error)
     argv = [server.sudo, server.opsctl, "runtime-secret", "set", slot, "--key", key, "--value-stdin"]
     if bool(args.get("no_restart", False)):
         argv.append("--no-restart")
