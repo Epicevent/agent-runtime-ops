@@ -20,9 +20,9 @@ from agent_runtime_ops.cli import (
     cmd_diagnostics_show,
     cmd_document_tools_status,
     _image_recipe_from_wrapper_image,
-    _live_image_truth_from_info,
     build_parser,
 )
+from agent_runtime_ops.commands.runtime_truth import _live_image_truth_from_info
 from agent_runtime_ops.commands.recipe import (
     cmd_recipe_capture_dev,
     cmd_recipe_dev_apply,
