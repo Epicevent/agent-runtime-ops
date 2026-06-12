@@ -4,6 +4,7 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+      - "{{ target_home }}/.hermes/.env"
     environment:
       HERMES_HOME: /opt/data
       HERMES_DATA_DIR: /opt/data

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import posixpath
 from dataclasses import dataclass
 from typing import Any
 
 import yaml
+
+from .yamlio import load_yaml
 
 
 @dataclass(frozen=True)
@@ -87,6 +90,44 @@ def _command_as_list(raw_command: Any) -> list[str] | None:
     return None
 
 
+def _env_file_entries(raw_env_file: Any) -> list[str]:
+    if isinstance(raw_env_file, str):
+        return [raw_env_file]
+    if isinstance(raw_env_file, dict):
+        path = raw_env_file.get("path")
+        return [str(path)] if path else []
+    if not isinstance(raw_env_file, list):
+        return []
+    entries: list[str] = []
+    for item in raw_env_file:
+        if isinstance(item, str):
+            entries.append(item)
+        elif isinstance(item, dict) and item.get("path"):
+            entries.append(str(item["path"]))
+    return entries
+
+
+def _env_file_matches_secret(entry: str, expected_path: str, slot: str) -> bool:
+    if entry == expected_path:
+        return True
+    if entry.startswith("/"):
+        return False
+    runtime_dir = f"/home/{slot}/openclaw"
+    return posixpath.normpath(posixpath.join(runtime_dir, entry)) == expected_path
+
+
+def _profile_secret_file_paths(profile: Any, slot: str) -> list[str]:
+    contract = load_yaml(profile.path / "env.contract.yaml")
+    raw_files = contract.get("secret_files") if isinstance(contract, dict) else None
+    if not isinstance(raw_files, list):
+        return []
+    paths: list[str] = []
+    for item in raw_files:
+        if isinstance(item, str):
+            paths.append(item.format(slot=slot))
+    return paths
+
+
 def _port_targets_container_port(raw_port: Any, container_port: str) -> bool:
     if isinstance(raw_port, dict):
         target = raw_port.get("target")
@@ -153,6 +194,27 @@ def validate_compose_contract(profile: Any, desired: Any, rendered_text: str) ->
             ),
         ]
     )
+
+    env_files = _env_file_entries(service.get("env_file"))
+    secret_files = _profile_secret_file_paths(profile, desired.slot)
+    if secret_files:
+        missing_secret_files = [
+            path
+            for path in secret_files
+            if not any(_env_file_matches_secret(entry, path, desired.slot) for entry in env_files)
+        ]
+        checks.append(
+            ComposeContractCheck(
+                not missing_secret_files,
+                "compose_secret_files_present",
+                (
+                    "count="
+                    + str(len(secret_files))
+                    if not missing_secret_files
+                    else "missing=" + ",".join(missing_secret_files)
+                ),
+            )
+        )
 
     runtime_user_mode = str(profile.metadata.get("runtime_user_mode") or "compose")
     user_value = service.get("user")

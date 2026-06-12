@@ -49,6 +49,7 @@ from .commands.rollout import (
     cmd_rollout_status,
 )
 from .commands.runtime_secret import cmd_runtime_secret_set, cmd_runtime_secret_status
+from .commands.runtime_config import cmd_runtime_config_status, cmd_runtime_set_model
 from .commands.runtime_truth import cmd_runtime_truth
 from .commands.status import cmd_plan, cmd_status
 from .commands.update import cmd_self_update, cmd_update_approve, cmd_update_status
@@ -106,6 +107,14 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_truth.add_argument("slot", nargs="?", metavar="target")
     runtime_truth.add_argument("--all", action="store_true")
     runtime_truth.set_defaults(func=cmd_runtime_truth)
+    runtime_config_status = runtime_sub.add_parser("config-status")
+    runtime_config_status.add_argument("slot", metavar="target")
+    runtime_config_status.set_defaults(func=cmd_runtime_config_status)
+    runtime_set_model = runtime_sub.add_parser("set-model")
+    runtime_set_model.add_argument("slot", metavar="target")
+    runtime_set_model.add_argument("--provider", required=True)
+    runtime_set_model.add_argument("--model", required=True)
+    runtime_set_model.set_defaults(func=cmd_runtime_set_model)
 
     document_tools = sub.add_parser("document-tools")
     document_tools_sub = document_tools.add_subparsers(dest="document_tools_command", required=True)

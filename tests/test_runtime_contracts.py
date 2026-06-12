@@ -80,6 +80,7 @@ class RuntimeContractTests(unittest.TestCase):
         desired = desired_slot("oc1", "openclaw", "customer", "openclaw-customer")
         results = contract_results("openclaw-customer", desired)
         self.assertTrue(results["compose_runtime_user_model"])
+        self.assertTrue(results["compose_secret_files_present"])
         self.assertTrue(results["compose_nas_root_bind_present"])
         self.assertTrue(results["compose_nas_root_readonly"])
         self.assertTrue(results["compose_nas_root_propagation"])
@@ -90,6 +91,7 @@ class RuntimeContractTests(unittest.TestCase):
         desired = desired_slot("oc2", "hermes", "customer", "hermes-customer", product_repo="openclaw-nas-agent")
         results = contract_results("hermes-customer", desired)
         self.assertTrue(results["compose_runtime_user_model"])
+        self.assertTrue(results["compose_secret_files_present"])
         self.assertTrue(results["compose_required_command"])
         self.assertTrue(results["compose_required_working_dir"])
         self.assertTrue(results["compose_nas_root_bind_present"])
@@ -108,6 +110,7 @@ class RuntimeContractTests(unittest.TestCase):
         )
         results = contract_results("hermes-workspace-customer", desired)
         self.assertTrue(results["compose_runtime_user_model"])
+        self.assertTrue(results["compose_secret_files_present"])
         self.assertTrue(results["compose_uses_image_default_command"])
         self.assertTrue(results["compose_required_working_dir"])
         self.assertTrue(results["compose_nas_root_bind_present"])
@@ -117,6 +120,7 @@ class RuntimeContractTests(unittest.TestCase):
         desired = desired_slot("dev-hermess", "hermes", "dev", "hermes-dev", product_repo="openclaw-nas-agent")
         results = contract_results("hermes-dev", desired)
         self.assertTrue(results["compose_runtime_user_model"])
+        self.assertTrue(results["compose_secret_files_present"])
         self.assertTrue(results["compose_required_command"])
         self.assertTrue(results["compose_required_working_dir"])
         self.assertTrue(results["compose_customer_surface_port"])
@@ -132,6 +136,7 @@ class RuntimeContractTests(unittest.TestCase):
         )
         results = contract_results("hermes-workspace-dev", desired)
         self.assertTrue(results["compose_runtime_user_model"])
+        self.assertTrue(results["compose_secret_files_present"])
         self.assertTrue(results["compose_uses_image_default_command"])
         self.assertTrue(results["compose_required_working_dir"])
         self.assertTrue(results["compose_customer_surface_port"])
@@ -147,6 +152,7 @@ class RuntimeContractTests(unittest.TestCase):
         )
         results = contract_results("hermes-runtime-customer", desired)
         self.assertTrue(results["compose_runtime_user_model"])
+        self.assertTrue(results["compose_secret_files_present"])
         self.assertTrue(results["compose_uses_image_default_command"])
         self.assertTrue(results["compose_required_working_dir"])
         self.assertTrue(results["compose_nas_root_bind_present"])
@@ -164,6 +170,7 @@ class RuntimeContractTests(unittest.TestCase):
         )
         results = contract_results("hermes-runtime-dev", desired)
         self.assertTrue(results["compose_runtime_user_model"])
+        self.assertTrue(results["compose_secret_files_present"])
         self.assertTrue(results["compose_uses_image_default_command"])
         self.assertTrue(results["compose_required_working_dir"])
         self.assertTrue(results["compose_customer_surface_port"])
@@ -179,6 +186,17 @@ class RuntimeContractTests(unittest.TestCase):
         )
         checks = {item.name: item.ok for item in validate_compose_contract(profile, desired, rendered)}
         self.assertFalse(checks["compose_required_command"])
+
+    def test_hermes_rejects_missing_secret_env_file(self) -> None:
+        desired = desired_slot("oc2", "hermes", "customer", "hermes-runtime-customer", product_repo="hermes-runtime")
+        profile = load_profile("hermes-runtime-customer")
+        rendered = render_compose(profile, desired).text.replace(
+            '      - "/home/oc2/.hermes/.env"\n',
+            "",
+            1,
+        )
+        checks = {item.name: item.ok for item in validate_compose_contract(profile, desired, rendered)}
+        self.assertFalse(checks["compose_secret_files_present"])
 
     def test_hermes_workspace_rejects_command_override(self) -> None:
         desired = desired_slot("oc2", "hermes", "customer", "hermes-workspace-customer", product_repo="hermes-workspace")
