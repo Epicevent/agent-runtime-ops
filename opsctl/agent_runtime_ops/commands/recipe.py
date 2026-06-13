@@ -57,24 +57,25 @@ def _refresh_git_source_output(source_output: Path, git_ref: str) -> None:
     git_dir = source_output / ".git"
     if not git_dir.exists() or git_dir.is_symlink():
         raise ValueError("--git-ref requires --source-output to be a git checkout")
-    remote = _run_text_cwd(["git", "remote", "get-url", "origin"], source_output, timeout=20)
+    git = ["git", "-c", f"safe.directory={source_output}"]
+    remote = _run_text_cwd([*git, "remote", "get-url", "origin"], source_output, timeout=20)
     if remote.returncode != 0:
         detail = (remote.stderr or remote.stdout).strip()
         raise ValueError(f"failed to read source git origin: {detail}")
     origin = remote.stdout.strip()
     if origin != "https://github.com/Epicevent/hermes-workspace.git":
         raise ValueError(f"unsupported dev source git origin: {origin}")
-    status = _run_text_cwd(["git", "status", "--porcelain"], source_output, timeout=20)
+    status = _run_text_cwd([*git, "status", "--porcelain"], source_output, timeout=20)
     if status.returncode != 0:
         detail = (status.stderr or status.stdout).strip()
         raise ValueError(f"failed to read source git status: {detail}")
     if status.stdout.strip():
         raise ValueError("source git tree is dirty; commit or clean it before --git-ref")
-    fetch = _run_text_cwd(["git", "fetch", "--prune", "origin", ref], source_output, timeout=180)
+    fetch = _run_text_cwd([*git, "fetch", "--prune", "origin", ref], source_output, timeout=180)
     if fetch.returncode != 0:
         detail = (fetch.stderr or fetch.stdout).strip()
         raise ValueError(f"failed to fetch source git ref: {detail}")
-    merge = _run_text_cwd(["git", "merge", "--ff-only", "FETCH_HEAD"], source_output, timeout=180)
+    merge = _run_text_cwd([*git, "merge", "--ff-only", "FETCH_HEAD"], source_output, timeout=180)
     if merge.returncode != 0:
         detail = (merge.stderr or merge.stdout).strip()
         raise ValueError(f"failed to fast-forward source git ref: {detail}")
@@ -338,5 +339,4 @@ def cmd_recipe_capture_dev(args: argparse.Namespace) -> int:
     print("secret_value_printed=no")
     print("next_action=build product image from source_git_head, then wrap with this canonical_recipe_digest")
     return 0
-
 
