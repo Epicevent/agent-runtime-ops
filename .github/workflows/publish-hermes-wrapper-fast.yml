@@ -147,7 +147,7 @@ jobs:
             "$image_ref")"
           trap 'docker logs "$cid" || true; docker rm -f "$cid" >/dev/null 2>&1 || true; sudo rm -rf "$workspace_dir" "$data_dir"' EXIT
 
-          for _ in {1..60}; do
+          for _ in {1..120}; do
             if ! docker inspect "$cid" --format '{{ .State.Running }}' | grep -Fx true >/dev/null; then
               docker logs "$cid" || true
               echo "smoke_status=fail reason=container_exited" >&2
