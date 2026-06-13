@@ -20,6 +20,8 @@ from ..host.mounts import (
 from ..host.account_files import runtime_ids
 from ..nas import check_nas_policy
 from ..routing import get_runtime_binding
+from ..runtime_secrets import parse_secret_env_text
+from ..yamlio import load_yaml
 from .common import is_root, run_text
 from .image_specs import (
     allowed_image_ref,
@@ -50,6 +52,145 @@ def http_backend_smoke(slot: str, path: str, state_root: Path) -> tuple[bool, st
         return 200 <= status < 500, f"url={url} host={binding.public_host} status={status}"
     except Exception as exc:
         return False, f"url={url} host={binding.public_host} reason={exc}"
+
+
+def _slot_hermes_config(slot: str) -> tuple[str, str]:
+    path = Path("/home") / slot / ".hermes" / "config.yaml"
+    try:
+        data = load_yaml(path, default={})
+    except Exception:
+        return "", ""
+    if not isinstance(data, dict):
+        return "", ""
+    provider = str(data.get("provider") or "").strip()
+    model_value = data.get("model")
+    if isinstance(model_value, dict):
+        nested_provider = str(model_value.get("provider") or provider).strip()
+        nested_model = str(model_value.get("default") or model_value.get("model") or "").strip()
+        return nested_provider, nested_model
+    if isinstance(model_value, str):
+        return provider, model_value.strip()
+    return provider, ""
+
+
+def _handoff_password(slot: str, state_root: Path) -> str:
+    path = state_root / "handoff" / f"hermes-workspace-{slot}.env"
+    if path.is_symlink() or not path.is_file():
+        return ""
+    try:
+        values = parse_secret_env_text(path.read_text(encoding="utf-8", errors="replace"), source=str(path))
+    except Exception:
+        return ""
+    return values.get("password", "")
+
+
+def workspace_hermes_config_api_checks(slot: str, state_root: Path) -> list[tuple[bool, str, str | None]]:
+    checks: list[tuple[bool, str, str | None]] = []
+    try:
+        binding = get_runtime_binding(slot, state_root)
+    except Exception as exc:
+        return [(False, "live_workspace_hermes_config_api_binding_ok", str(exc))]
+    password = _handoff_password(binding.linux_account, state_root)
+    checks.append((bool(password), "live_workspace_handoff_password_present", "secret_value_printed=no"))
+    if not password:
+        return checks
+
+    base = f"http://127.0.0.1:{binding.gateway_port}"
+    auth_body = json.dumps({"password": password}).encode("utf-8")
+    auth_request = urllib.request.Request(
+        f"{base}/api/auth",
+        data=auth_body,
+        headers={
+            "Host": binding.public_host,
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(auth_request, timeout=8) as response:
+            status = int(response.getcode())
+            cookie = response.headers.get("Set-Cookie", "")
+    except urllib.error.HTTPError as exc:
+        status = int(exc.code)
+        cookie = ""
+    except Exception as exc:
+        checks.append((False, "live_workspace_auth_login_ok", f"reason={exc}"))
+        return checks
+
+    session_cookie = cookie.split(";", 1)[0].strip()
+    checks.append((status == 200 and session_cookie.startswith("claude-auth="), "live_workspace_auth_login_ok", f"status={status}"))
+    if not session_cookie.startswith("claude-auth="):
+        return checks
+
+    config_request = urllib.request.Request(
+        f"{base}/api/hermes-config",
+        headers={
+            "Host": binding.public_host,
+            "Cookie": session_cookie,
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(config_request, timeout=8) as response:
+            config_status = int(response.getcode())
+            raw = response.read(128 * 1024).decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        config_status = int(exc.code)
+        raw = exc.read(4096).decode("utf-8", errors="replace")
+    except Exception as exc:
+        checks.append((False, "live_workspace_hermes_config_api_ok", f"reason={exc}"))
+        return checks
+
+    try:
+        payload = json.loads(raw)
+    except Exception as exc:
+        checks.append((False, "live_workspace_hermes_config_api_json_ok", f"status={config_status} reason={exc}"))
+        return checks
+    active_provider = str(payload.get("activeProvider") or "")
+    active_model = str(payload.get("activeModel") or "")
+    expected_provider, expected_model = _slot_hermes_config(binding.linux_account)
+    checks.append(
+        (
+            config_status == 200 and payload.get("ok") is True,
+            "live_workspace_hermes_config_api_ok",
+            f"status={config_status} provider={active_provider or 'missing'} model={active_model or 'missing'}",
+        )
+    )
+    if expected_model:
+        checks.append(
+            (
+                active_model == expected_model,
+                "live_workspace_hermes_config_model_matches_file",
+                f"api={active_model or 'missing'} file={expected_model}",
+            )
+        )
+    if expected_provider:
+        provider_matches = active_provider == expected_provider or {active_provider, expected_provider} == {"google", "gemini"}
+        checks.append(
+            (
+                provider_matches,
+                "live_workspace_hermes_config_provider_matches_file",
+                f"api={active_provider or 'missing'} file={expected_provider}",
+            )
+        )
+    if "gemini" in expected_model.lower() or expected_provider in {"google", "gemini"}:
+        providers = payload.get("providers")
+        google = None
+        if isinstance(providers, list):
+            for item in providers:
+                if isinstance(item, dict) and item.get("id") == "google":
+                    google = item
+                    break
+        configured = bool(google and google.get("configured") is True and google.get("authenticated") is True)
+        checks.append(
+            (
+                configured,
+                "live_workspace_google_gemini_configured",
+                f"provider=google configured={str(bool(google and google.get('configured'))).lower()} authenticated={str(bool(google and google.get('authenticated'))).lower()}",
+            )
+        )
+    return checks
 
 
 def contract_health_endpoints(desired, profile) -> dict[str, str]:
@@ -368,6 +509,7 @@ def run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool,
     if str(profile.metadata.get("family") or "") == "hermes":
         checks.extend(run_workspace_node_checks(container, desired.slot))
         checks.extend(run_workspace_api_smoke_checks(container))
+        checks.extend(workspace_hermes_config_api_checks(desired.slot, state_root))
 
     host_rc, host_error, host_mounts = _findmnt_under(host_nas_root)
     checks.append((host_rc == 0, "live_host_nas_root_findmnt_ok", host_error if host_rc != 0 else host_nas_root))

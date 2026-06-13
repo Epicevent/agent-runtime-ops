@@ -194,6 +194,7 @@ def build_parser() -> argparse.ArgumentParser:
     source_group = recipe_apply_dev.add_mutually_exclusive_group(required=True)
     source_group.add_argument("--source-output")
     source_group.add_argument("--sync-from")
+    recipe_apply_dev.add_argument("--git-ref")
     recipe_apply_dev.add_argument("--build-command")
     recipe_apply_dev.add_argument("--allow-first-apply", action="store_true")
     recipe_apply_dev.add_argument("--no-apply", action="store_true")

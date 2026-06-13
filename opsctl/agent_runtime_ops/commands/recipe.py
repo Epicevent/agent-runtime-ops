@@ -19,6 +19,7 @@ from ..domain.actions import append_action_log as _append_action_log
 from ..domain.common import check_line as _check_line
 from ..domain.common import is_root as _is_root
 from ..domain.common import now_iso as _now_iso
+from ..domain.common import run_text_cwd as _run_text_cwd
 from ..domain.common import state_root as _state_root
 from ..domain.dev_recipe_state import load_dev_recipe_state as _load_dev_recipe_state
 from ..domain.dev_recipe_state import write_dev_recipe_state as _write_dev_recipe_state
@@ -47,6 +48,36 @@ from .apply import cmd_apply
 
 def _validate_recipe_name(name: str) -> None:
     validate_safe_name(name)
+
+
+def _refresh_git_source_output(source_output: Path, git_ref: str) -> None:
+    ref = optional_safe_text(git_ref, "--git-ref")
+    if not ref:
+        return
+    git_dir = source_output / ".git"
+    if not git_dir.exists() or git_dir.is_symlink():
+        raise ValueError("--git-ref requires --source-output to be a git checkout")
+    remote = _run_text_cwd(["git", "remote", "get-url", "origin"], source_output, timeout=20)
+    if remote.returncode != 0:
+        detail = (remote.stderr or remote.stdout).strip()
+        raise ValueError(f"failed to read source git origin: {detail}")
+    origin = remote.stdout.strip()
+    if origin != "https://github.com/Epicevent/hermes-workspace.git":
+        raise ValueError(f"unsupported dev source git origin: {origin}")
+    status = _run_text_cwd(["git", "status", "--porcelain"], source_output, timeout=20)
+    if status.returncode != 0:
+        detail = (status.stderr or status.stdout).strip()
+        raise ValueError(f"failed to read source git status: {detail}")
+    if status.stdout.strip():
+        raise ValueError("source git tree is dirty; commit or clean it before --git-ref")
+    fetch = _run_text_cwd(["git", "fetch", "--prune", "origin", ref], source_output, timeout=180)
+    if fetch.returncode != 0:
+        detail = (fetch.stderr or fetch.stdout).strip()
+        raise ValueError(f"failed to fetch source git ref: {detail}")
+    merge = _run_text_cwd(["git", "merge", "--ff-only", "FETCH_HEAD"], source_output, timeout=180)
+    if merge.returncode != 0:
+        detail = (merge.stderr or merge.stdout).strip()
+        raise ValueError(f"failed to fast-forward source git ref: {detail}")
 
 
 def _build_arg_lines_for_canonical_recipe(name: str) -> list[str]:
@@ -170,8 +201,11 @@ def cmd_recipe_dev_apply(args: argparse.Namespace) -> int:
             source = _safe_existing_directory(sync_from, "--sync-from")
             source_output = _sync_dev_source_output(slot, recipe_name, source)
             sync_from_value = str(source)
+            if getattr(args, "git_ref", None):
+                raise ValueError("--git-ref is only supported with --source-output")
         else:
             source_output = _safe_existing_directory(source_output_arg, "--source-output")
+            _refresh_git_source_output(source_output, str(getattr(args, "git_ref", "") or ""))
             sync_from_value = ""
         provenance_source = source if sync_from else source_output
         runtime_dir = _ensure_dev_runtime_dir(slot)
