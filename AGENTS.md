@@ -133,6 +133,11 @@ Product source provenance is a separate layer. `opsctl recipe apply-dev` may rec
 a dev source tree, but that proves source lineage, not runtime shape. Do not use source provenance to
 explain away a runtime recipe/profile mismatch.
 
+Hermes image-mode dev validation uses a `dev-*` Linux account with the customer
+runtime profile, for example `dev-hermes-img`. That target exists to separate
+source-mode failures from image boot failures. It must not have a source mount,
+and `image-promote` must not use any `dev-*` account as either source or target.
+
 `install.sh` and `opsctl self-update` install tools, profile definitions, and the managed operation
 skill only. They may normalize `/srv/openclaw-ops/runtime-bindings.json` and archive legacy root
 state after runtime manifests are present, but they must not rebuild intended bindings from legacy

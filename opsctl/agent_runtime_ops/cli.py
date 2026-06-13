@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 
-from .commands.admin import cmd_admin_serve
+from .commands.admin import cmd_admin_create_image_dev, cmd_admin_serve
 from .commands.apache import cmd_apache_set_host, cmd_apache_status
 from .commands.apply import cmd_apply, cmd_rollback
 from .commands.binding import (
@@ -13,6 +13,7 @@ from .commands.binding import (
 )
 from .commands.blocked import cmd_blocked_mutation
 from .commands.check import cmd_check
+from .commands.checklist import cmd_checklist_pack
 from .commands.diagnostics import cmd_diagnostics_show
 from .commands.document_tools import cmd_document_tools_status
 from .commands.handoff import (
@@ -34,6 +35,7 @@ from .commands.nas import (
     cmd_nas_unmount,
 )
 from .commands.profile import cmd_profile_list
+from .commands.projection import cmd_projection_compare, cmd_projection_describe, cmd_projection_verify_target
 from .commands.recipe import (
     cmd_recipe_capture_dev,
     cmd_recipe_dev_apply,
@@ -294,6 +296,41 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", default=18088, type=int)
     serve.set_defaults(func=cmd_admin_serve)
+    create_image_dev = admin_sub.add_parser("create-image-dev")
+    create_image_dev.add_argument("target")
+    create_image_dev.add_argument("--public-host", required=True)
+    create_image_dev.add_argument("--family", required=True, choices=["hermes", "openclaw"])
+    create_image_dev.add_argument("--gateway-port", required=True, type=int)
+    create_image_dev.add_argument("--bridge-port", required=True, type=int)
+    create_image_dev.add_argument("--instance-id")
+    create_image_dev.add_argument("--clone-config-from")
+    create_image_dev.add_argument("--clone-provider-secrets-from")
+    create_image_dev.set_defaults(func=cmd_admin_create_image_dev)
+
+    projection = sub.add_parser("projection")
+    projection_sub = projection.add_subparsers(dest="projection_command", required=True)
+    projection_describe = projection_sub.add_parser("describe")
+    projection_describe.add_argument("slot", metavar="target")
+    projection_describe.add_argument("--live", action="store_true")
+    projection_describe.set_defaults(func=cmd_projection_describe)
+    projection_compare = projection_sub.add_parser("compare")
+    projection_compare.add_argument("--from-target", dest="from_slot", required=True)
+    projection_compare.add_argument("--to-target", dest="to_slot", required=True)
+    projection_compare.set_defaults(func=cmd_projection_compare)
+    projection_verify = projection_sub.add_parser("verify-target")
+    projection_verify.add_argument("slot", metavar="target")
+    projection_verify.add_argument("--wrapper-image", required=True)
+    projection_verify.add_argument("--product-image", required=True)
+    projection_verify.add_argument("--live", action="store_true")
+    projection_verify.set_defaults(func=cmd_projection_verify_target)
+
+    checklist = sub.add_parser("checklist")
+    checklist_sub = checklist.add_subparsers(dest="checklist_command", required=True)
+    checklist_pack = checklist_sub.add_parser("pack")
+    checklist_pack.add_argument("slot", metavar="target")
+    checklist_pack.add_argument("--pack", default="hermes-runtime", choices=["hermes-runtime"])
+    checklist_pack.add_argument("--gemini-chat-smoke", action="store_true")
+    checklist_pack.set_defaults(func=cmd_checklist_pack)
 
     return parser
 

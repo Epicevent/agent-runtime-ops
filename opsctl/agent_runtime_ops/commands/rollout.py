@@ -6,6 +6,7 @@ import sys
 
 from ..canonical_recipes import canonical_recipe_for_image_spec, canonical_recipe_identity
 from ..domain.actions import append_action_log as _append_action_log
+from ..domain.common import check_line as _check_line
 from ..domain.common import apache_public_host as _apache_public_host
 from ..domain.common import is_root as _is_root
 from ..domain.common import state_root as _state_root
@@ -16,15 +17,19 @@ from ..domain.image_specs import (
     profile_runtime_contract,
 )
 from ..domain.runtime_apply import apply_desired_slot as _apply_desired_slot
+from ..domain.runtime_checks import run_live_slot_checks as _run_live_slot_checks
 from ..domain.runtime_checks import run_static_slot_checks as _run_static_slot_checks
 from ..domain.runtime_rollup import runtime_manifest_rollup
 from ..domain.runtime_targets import (
     desired_from_direct_images as _desired_from_direct_images,
     desired_from_live_image_truth as _desired_from_live_image_truth,
 )
-from ..domain.runtime_truth import live_runtime_truth
 from ..renderer import render_compose
 from ..routing import load_runtime_bindings
+
+
+def _is_dev_named_target(slot: str) -> bool:
+    return str(slot).startswith("dev-")
 
 
 def cmd_rollout_status(args: argparse.Namespace) -> int:
@@ -167,20 +172,41 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
     state_root = _state_root(args)
     from_slot = str(args.from_slot)
     try:
-        source_truth, source_checks = live_runtime_truth(from_slot, state_root)
-        failed = [name for ok, name, _ in source_checks if not ok]
-        if failed or source_truth.get("truth_status") != "ok":
-            raise ValueError(
-                f"from-target live image truth is not ok: status={source_truth.get('truth_status')} failed={','.join(failed)}"
-            )
-        wrapper_image = str(source_truth.get("wrapper_image") or "")
-        product_image = str(source_truth.get("product_image") or "")
+        if _is_dev_named_target(from_slot):
+            raise ValueError(f"image-promote source must not be a dev target: {from_slot}")
+        source_desired, source_profile = _desired_from_live_image_truth(from_slot, state_root)
+        if source_desired.runtime_class != "customer":
+            raise ValueError(f"image-promote source must be a customer target: {from_slot}")
+        print("phase=projection_gate")
+        rendered = render_compose(source_profile, source_desired)
+        projection_failed = 0
+        for ok, name, detail in _run_static_slot_checks(source_desired, source_profile, rendered):
+            _check_line(ok, name, detail)
+            if not ok:
+                projection_failed += 1
+        _check_line(bool(rendered.text.strip()), "projection_compose_rendered", rendered.sha256)
+        if not rendered.text.strip():
+            projection_failed += 1
+        if projection_failed:
+            raise ValueError(f"projection gate failed: failed={projection_failed}")
+        print("phase=checklist_gate")
+        checklist_failed = 0
+        for ok, name, detail in _run_live_slot_checks(source_desired, source_profile, state_root):
+            _check_line(ok, name, detail)
+            if not ok:
+                checklist_failed += 1
+        if checklist_failed:
+            raise ValueError(f"checklist gate failed: failed={checklist_failed}")
+        wrapper_image = str(source_desired.image_spec.get("wrapper_image") or "")
+        product_image = str(source_desired.image_spec.get("product_image") or "")
         image_spec = image_spec_from_direct_images(wrapper_image, product_image)
         slots = [item.strip() for item in str(args.slots).split(",") if item.strip()]
         if not slots:
             raise ValueError("--targets must name the promotion targets explicitly")
         applied: list[str] = []
         for slot in slots:
+            if _is_dev_named_target(slot):
+                raise ValueError(f"image-promote target must not be a dev target: {slot}")
             desired, profile = _desired_from_direct_images(slot, image_spec, state_root)
             if desired.runtime_class != "customer":
                 raise ValueError(f"promotion target is not a customer target: {slot}")
@@ -212,5 +238,3 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
     print(f"product_image={image_spec.get('product_image')}")
     _append_action_log(state_root, "rollout_image_promote", from_slot, str(image_spec.get("wrapper_image") or ""), "ok", f"targets={len(applied)}")
     return 0
-
-
