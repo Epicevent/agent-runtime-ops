@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from agent_runtime_ops.commands.admin import cmd_admin_create_image_dev
 from agent_runtime_ops.commands.checklist import HERMES_RUNTIME_REQUIRED_CHECKS, cmd_checklist_pack
-from agent_runtime_ops.commands.rollout import cmd_rollout_image_promote
+from agent_runtime_ops.commands.rollout import cmd_rollout_image_canary, cmd_rollout_image_promote
 from agent_runtime_ops.profiles import load_profile
 from agent_runtime_ops.routing import RuntimeBinding, dump_runtime_bindings, load_runtime_bindings
 from agent_runtime_ops.state import RuntimeTarget
@@ -68,7 +68,86 @@ class ImageDevProjectionChecklistTests(unittest.TestCase):
             self.assertEqual(rows["dev-hermes-img"].runtime_class, "customer")
             self.assertEqual(rows["dev-hermes-img"].family, "hermes")
             self.assertIn("profile_mode=image", text)
+            self.assertIn("binding=created", text)
             self.assertIn("secret_value_printed=no", text)
+
+    def test_admin_create_image_dev_reuses_existing_matching_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_bindings(root, [binding("dev-hermes-img", "hermes", "customer", 30989, 30990)])
+
+            args = argparse.Namespace(
+                state_root=str(root),
+                target="dev-hermes-img",
+                public_host="dev-hermes-img.ji-tech.co.kr",
+                family="hermes",
+                gateway_port=30989,
+                bridge_port=30990,
+                instance_id=None,
+                clone_config_from=None,
+                clone_provider_secrets_from=None,
+            )
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.commands.admin._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.admin._ensure_group", return_value="exists"),
+                patch("agent_runtime_ops.commands.admin._ensure_user", return_value="exists"),
+                patch("agent_runtime_ops.commands.admin._ensure_runtime_membership"),
+                patch("agent_runtime_ops.commands.admin._ensure_target_dirs_and_secrets", return_value=("present", "not_cloned", "not_cloned")),
+                patch("agent_runtime_ops.commands.admin._ensure_apache_route", return_value=(Path("/etc/apache2/openclaw/apache-subdomain-dev-hermes-img.conf"), "exists")),
+                patch("agent_runtime_ops.commands.admin._write_runtime_bindings_file") as write_bindings_file,
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_admin_create_image_dev(args)
+
+            text = output.getvalue()
+            self.assertEqual(rc, 0, text)
+            self.assertIn("binding=exists", text)
+            self.assertEqual(len(load_runtime_bindings(root)), 1)
+            write_bindings_file.assert_not_called()
+
+    def test_rollout_image_canary_prepares_runtime_env_before_apply(self) -> None:
+        route = binding("dev-hermes-img", "hermes", "customer", 30989, 30990)
+        profile = load_profile("hermes-runtime-customer")
+        image_spec = {
+            "family": "hermes",
+            "wrapper_image": "ghcr.io/epicevent/agent-runtime-hermes@sha256:" + "1" * 64,
+            "product_image": "ghcr.io/epicevent/hermes-runtime@sha256:" + "2" * 64,
+            "digest": "sha256:" + "1" * 64,
+            "product_digest": "sha256:" + "2" * 64,
+            "mode": "wrapped_product_image",
+        }
+        desired = RuntimeTarget(
+            target="dev-hermes-img",
+            family="hermes",
+            runtime_class="customer",
+            image_name="direct-image",
+            image_spec=image_spec,
+            runtime_profile="hermes-runtime-customer",
+            route=route,
+        )
+        output = io.StringIO()
+        with (
+            patch("agent_runtime_ops.commands.rollout._is_root", return_value=True),
+            patch("agent_runtime_ops.commands.rollout._direct_image_spec_from_args", return_value=image_spec),
+            patch("agent_runtime_ops.commands.rollout._desired_from_direct_images", return_value=(desired, profile)),
+            patch("agent_runtime_ops.commands.rollout._prepare_runtime_env_for_direct_image") as prepare_env,
+            patch("agent_runtime_ops.commands.rollout._apply_desired_slot", return_value=0) as apply_slot,
+            contextlib.redirect_stdout(output),
+        ):
+            rc = cmd_rollout_image_canary(
+                argparse.Namespace(
+                    state_root="/tmp/missing",
+                    slot="dev-hermes-img",
+                    wrapper_image=image_spec["wrapper_image"],
+                    product_image=image_spec["product_image"],
+                    allow_first_apply=True,
+                )
+            )
+
+        self.assertEqual(rc, 0, output.getvalue())
+        prepare_env.assert_called_once_with(desired, profile)
+        apply_slot.assert_called_once()
 
     def test_rollout_promote_rejects_dev_named_source(self) -> None:
         output = io.StringIO()

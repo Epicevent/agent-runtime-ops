@@ -16,6 +16,8 @@ from ..domain.image_specs import (
     image_spec_recipe_payload,
     profile_runtime_contract,
 )
+from ..domain.dev_recipe_runtime import ensure_dev_runtime_dir as _ensure_runtime_dir
+from ..domain.dev_recipe_runtime import upsert_runtime_env_file as _upsert_runtime_env_file
 from ..domain.runtime_apply import apply_desired_slot as _apply_desired_slot
 from ..domain.runtime_checks import run_live_slot_checks as _run_live_slot_checks
 from ..domain.runtime_checks import run_static_slot_checks as _run_static_slot_checks
@@ -25,7 +27,9 @@ from ..domain.runtime_targets import (
     desired_from_live_image_truth as _desired_from_live_image_truth,
 )
 from ..renderer import render_compose
+from ..host.account_files import slot_uid_gid
 from ..routing import load_runtime_bindings
+from ..runtime_secrets import parse_secret_env_text, primary_profile_secret_file
 
 
 def _is_dev_named_target(slot: str) -> bool:
@@ -68,6 +72,28 @@ def _image_spec_canonical_record(image_spec: dict) -> dict[str, str]:
 
 def _direct_image_spec_from_args(args: argparse.Namespace) -> dict[str, object]:
     return image_spec_from_direct_images(str(args.wrapper_image), str(args.product_image))
+
+
+def _prepare_runtime_env_for_direct_image(desired, profile) -> None:
+    runtime_dir = _ensure_runtime_dir(desired.slot)
+    uid, gid = slot_uid_gid(desired.slot)
+    updates = {
+        "OPENCLAW_RUNTIME_FAMILY": str(desired.family or ""),
+        "OPENCLAW_IMAGE": str(desired.image_spec.get("wrapper_image") or ""),
+        "OPENCLAW_GATEWAY_PORT": str(desired.route.gateway_port if desired.route else ""),
+        "OPENCLAW_BRIDGE_PORT": str(desired.route.bridge_port if desired.route else ""),
+    }
+    secret_file = primary_profile_secret_file(profile, desired.slot)
+    if secret_file.path.exists():
+        if secret_file.path.is_symlink() or not secret_file.path.is_file():
+            raise ValueError(f"unsafe runtime secret file: {secret_file.path}")
+        values = parse_secret_env_text(
+            secret_file.path.read_text(encoding="utf-8", errors="replace"),
+            source=str(secret_file.path),
+        )
+        if values.get("API_SERVER_KEY"):
+            updates["API_SERVER_KEY"] = values["API_SERVER_KEY"]
+    _upsert_runtime_env_file(runtime_dir / ".env", updates, uid, gid)
 
 
 def cmd_rollout_image_plan(args: argparse.Namespace) -> int:
@@ -129,6 +155,7 @@ def _cmd_rollout_image_apply_slot(args: argparse.Namespace, *, required_runtime_
         desired, profile = _desired_from_direct_images(slot, image_spec, state_root)
         if desired.runtime_class != required_runtime_class:
             raise ValueError(f"{action_name} requires runtime_class={required_runtime_class}: {slot}")
+        _prepare_runtime_env_for_direct_image(desired, profile)
     except Exception as exc:
         print(f"rollout_{action_name.replace('-', '_')}_status=fail")
         print(f"reason={exc}")

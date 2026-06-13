@@ -14,6 +14,7 @@ import sys
 from ..apache import apache_route_path, parse_apache_route
 from ..domain.common import is_root as _is_root
 from ..domain.common import state_root as _state_root
+from ..domain.dev_recipe_runtime import upsert_runtime_env_file
 from ..host.account_files import ensure_customer_agent_dirs, ensure_not_symlink_chain, runtime_ids, slot_uid_gid
 from ..host.files import fsync_parent
 from ..profiles import load_profile
@@ -225,6 +226,9 @@ def _clone_provider_secret_values(source_slot: str, state_root: Path) -> dict[st
 def _ensure_target_dirs_and_secrets(
     target: str,
     *,
+    family: str,
+    gateway_port: int,
+    bridge_port: int,
     clone_config_from: str | None,
     clone_provider_secrets_from: str | None,
     state_root: Path,
@@ -237,9 +241,14 @@ def _ensure_target_dirs_and_secrets(
     os.chown(home, slot_uid, slot_gid)
     os.chmod(home, 0o750)
 
+    runtime_dir = home / "openclaw"
     hermes_dir = home / ".hermes"
     workspace_dir = hermes_dir / "workspace"
     nas_docs_dir = home / "nas_docs"
+    ensure_not_symlink_chain(runtime_dir, home)
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    os.chown(runtime_dir, slot_uid, slot_gid)
+    os.chmod(runtime_dir, 0o750)
     for path in (hermes_dir, workspace_dir):
         ensure_not_symlink_chain(path, home)
         path.mkdir(parents=True, exist_ok=True)
@@ -256,13 +265,25 @@ def _ensure_target_dirs_and_secrets(
     values: dict[str, str] = {}
     if clone_provider_secrets_from:
         values.update(_clone_provider_secret_values(clone_provider_secrets_from, state_root))
+    api_server_key = existing_values.get("API_SERVER_KEY") or secrets.token_urlsafe(48)
     if not existing_values.get("API_SERVER_KEY"):
-        values["API_SERVER_KEY"] = secrets.token_urlsafe(48)
+        values["API_SERVER_KEY"] = api_server_key
     if values:
         _write_owned_text(env_path, render_upserted_secret_env(existing_text, values), 0o600, runtime_uid, data_gid)
     else:
         os.chown(env_path, runtime_uid, data_gid)
         os.chmod(env_path, 0o600)
+    upsert_runtime_env_file(
+        runtime_dir / ".env",
+        {
+            "API_SERVER_KEY": api_server_key,
+            "OPENCLAW_RUNTIME_FAMILY": family,
+            "OPENCLAW_GATEWAY_PORT": str(gateway_port),
+            "OPENCLAW_BRIDGE_PORT": str(bridge_port),
+        },
+        slot_uid,
+        slot_gid,
+    )
 
     config_status = "not_cloned"
     if clone_config_from:
@@ -301,7 +322,19 @@ def cmd_admin_create_image_dev(args: argparse.Namespace) -> int:
             enabled=True,
         )
         bindings = load_runtime_bindings(state_root)
-        bindings.append(binding)
+        existing_binding = next((item for item in bindings if item.linux_account == linux_account), None)
+        if existing_binding is not None:
+            mismatches = []
+            for field in ("public_host", "family", "runtime_class", "gateway_port", "bridge_port", "enabled"):
+                if getattr(existing_binding, field) != getattr(binding, field):
+                    mismatches.append(field)
+            if mismatches:
+                raise ValueError("existing image dev binding mismatch: " + ",".join(mismatches))
+            binding = existing_binding
+            binding_status = "exists"
+        else:
+            bindings.append(binding)
+            binding_status = "created"
         # Validate uniqueness before mutating host state.
         from ..routing import dump_runtime_bindings
 
@@ -328,12 +361,19 @@ def cmd_admin_create_image_dev(args: argparse.Namespace) -> int:
         _ensure_runtime_membership(runtime_group, data_group)
         secret_status, config_status, provider_secret_status = _ensure_target_dirs_and_secrets(
             linux_account,
+            family=family,
+            gateway_port=gateway_port,
+            bridge_port=bridge_port,
             clone_config_from=getattr(args, "clone_config_from", None),
             clone_provider_secrets_from=getattr(args, "clone_provider_secrets_from", None),
             state_root=state_root,
         )
         apache_path, apache_status = _ensure_apache_route(binding)
-        bindings_path = _write_runtime_bindings_file(state_root, bindings)
+        bindings_path = (
+            _write_runtime_bindings_file(state_root, bindings)
+            if binding_status == "created"
+            else state_root / "runtime-bindings.json"
+        )
     except Exception as exc:
         print(f"target={target}")
         print("admin_create_image_dev_status=fail")
@@ -347,6 +387,7 @@ def cmd_admin_create_image_dev(args: argparse.Namespace) -> int:
     print(f"public_host={public_host}")
     print(f"gateway_port={gateway_port}")
     print(f"bridge_port={bridge_port}")
+    print(f"binding={binding_status}")
     print(f"slot_group={slot_group_status}")
     print(f"runtime_group={runtime_group_status}")
     print(f"data_group={data_group_status}")
