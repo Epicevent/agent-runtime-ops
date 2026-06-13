@@ -16,6 +16,7 @@ from ..domain.common import run_text as _run_text
 from ..domain.common import run_text_cwd as _run_text_cwd
 from ..domain.common import state_root as _state_root
 from ..domain.runtime_checks import profile_startup_timeout_seconds as _profile_startup_timeout_seconds
+from ..domain.runtime_apply import apply_desired_slot as _apply_desired_slot
 from ..domain.docker_compose import compose_project_name, docker_compose_command
 from ..domain.runtime_paths import agent_compose_path, slot_runtime_dir
 from ..domain.runtime_truth import find_gateway_container as _find_gateway_container
@@ -261,6 +262,7 @@ def cmd_runtime_secret_set(args: argparse.Namespace) -> int:
     print(f"secret_file={secret_path}")
     print("secret_value_printed=no")
     print("secret_keys_imported=" + ",".join(sorted(values)))
+    print("phase=secret_write")
 
     if args.no_restart:
         print("restart=skipped")
@@ -268,15 +270,31 @@ def cmd_runtime_secret_set(args: argparse.Namespace) -> int:
         print("runtime_secret_status=stored")
         return 0
 
-    restart_ok, restart_reason = _restart_runtime_secret_slot(desired, profile, runtime_dir)
-    print(f"restart_status={'ok' if restart_ok else 'fail'}")
-    print(f"restart_reason={restart_reason}")
-    if not restart_ok:
-        _append_action_log(state_root, "runtime_secret_set", desired.slot, desired.slot, "fail", restart_reason)
-        print("runtime_secret_status=fail")
-        return 1
+    if getattr(args, "unsafe_service_recreate", False):
+        print("phase=unsafe_service_recreate")
+        restart_ok, restart_reason = _restart_runtime_secret_slot(desired, profile, runtime_dir)
+        print(f"restart_status={'ok' if restart_ok else 'fail'}")
+        print(f"restart_reason={restart_reason}")
+        if not restart_ok:
+            _append_action_log(state_root, "runtime_secret_set", desired.slot, desired.slot, "fail", restart_reason)
+            print("runtime_secret_status=fail")
+            return 1
+    else:
+        print("phase=full_recreate")
+        apply_rc = _apply_desired_slot(
+            desired=desired,
+            profile=profile,
+            state_root=state_root,
+            allow_first_apply=False,
+            action_name="runtime_secret_recreate",
+        )
+        if apply_rc != 0:
+            _append_action_log(state_root, "runtime_secret_set", desired.slot, desired.slot, "fail", f"full_recreate_failed rc={apply_rc}")
+            print("runtime_secret_status=fail")
+            return apply_rc or 1
 
     if args.check:
+        print("phase=secret_check")
         failed = 0
         for check_ok, name, detail in _run_runtime_secret_container_checks_with_wait(
             desired,
@@ -291,9 +309,12 @@ def cmd_runtime_secret_set(args: argparse.Namespace) -> int:
             _append_action_log(state_root, "runtime_secret_set", desired.slot, desired.slot, "fail", f"live_failed={failed}")
             print(f"runtime_secret_status=fail live_failed={failed}")
             return 1
+        if profile.metadata.get("family") == "hermes":
+            print("phase=hermes_smoke")
+            print("hermes_smoke_status=covered_by_live_check")
 
     _append_action_log(state_root, "runtime_secret_set", desired.slot, desired.slot, "ok", "keys=" + ",".join(sorted(values)))
-    print("runtime_secret_status=stored")
+    print(f"runtime_secret_status={'stored_checked' if args.check else 'stored'}")
     return 0
 
 
@@ -323,5 +344,3 @@ def cmd_runtime_secret_status(args: argparse.Namespace) -> int:
     print("secret_value_printed=no")
     print("runtime_secret_status=ok")
     return 0
-
-

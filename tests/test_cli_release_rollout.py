@@ -1372,6 +1372,152 @@ class CliReleaseRolloutTests(unittest.TestCase):
         self.assertEqual(endpoints["gateway"], "http://127.0.0.1:8642/health")
         self.assertEqual(endpoints["dashboard"], "http://127.0.0.1:9119/api/status")
 
+    def test_live_slot_checks_include_hermes_workspace_node_and_nas_listing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_hermes_state(root)
+            product_image = wrapper_image_ref("hermes-runtime", "4")
+            wrapper_image = wrapper_image_ref("agent-runtime-hermes", "5")
+            route = binding("dev-hermess", "hermes", "dev", 30889, 30890)
+            desired = RuntimeTarget(
+                target="dev-hermess",
+                family="hermes",
+                runtime_class="dev",
+                image_name="direct-image",
+                image_spec={
+                    "family": "hermes",
+                    "image_name": "direct-image",
+                    "wrapper_image": wrapper_image,
+                    "product_image": product_image,
+                    "digest": "sha256:" + "5" * 64,
+                    "product_digest": "sha256:" + "4" * 64,
+                    "mode": "wrapped_product_image",
+                    "image_recipe": hermes_runtime_image_recipe(product_image=product_image),
+                },
+                runtime_profile="hermes-runtime-dev",
+                route=route,
+            )
+            inspect_result = subprocess.CompletedProcess(
+                ["docker", "inspect", "container-1"],
+                0,
+                stdout=json.dumps(
+                    [
+                        {
+                            "State": {
+                                "Running": True,
+                                "Pid": 123,
+                                "Health": {"Status": "healthy"},
+                            },
+                            "Config": {"Image": wrapper_image, "User": ""},
+                            "Image": "image-id",
+                            "RepoDigests": [wrapper_image],
+                        }
+                    ]
+                ),
+                stderr="",
+            )
+
+            def fake_run_text(command, timeout=20):
+                if command == ["docker", "inspect", "container-1"]:
+                    return inspect_result
+                if command[:4] == ["docker", "exec", "container-1", "node"]:
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        stdout=json.dumps(
+                            [
+                                {
+                                    "name": "live_workspace_api_status_ok",
+                                    "ok": True,
+                                    "detail": "status=200 isValid=true path=/workspace source=env",
+                                },
+                                {
+                                    "name": "live_workspace_files_root_listing_ok",
+                                    "ok": True,
+                                    "detail": "status=200 entries_array=true error=none",
+                                },
+                                {
+                                    "name": "live_workspace_files_nas_docs_listing_ok",
+                                    "ok": True,
+                                    "detail": "status=200 root=nas_docs entries_array=true error=none",
+                                },
+                            ]
+                        ),
+                        stderr="",
+                    )
+                if command[:4] == ["docker", "exec", "container-1", "sh"]:
+                    script = command[-1]
+                    if "server-entry[.]js" in script:
+                        return subprocess.CompletedProcess(command, 0, stdout="42 12345 12346\n", stderr="")
+                    if "ls -la" in script:
+                        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+                if command and command[0].endswith("nsenter"):
+                    return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+                return subprocess.CompletedProcess(command, 1, stdout="", stderr="unexpected command")
+
+            with (
+                patch("agent_runtime_ops.domain.runtime_checks.is_root", return_value=True),
+                patch("agent_runtime_ops.domain.runtime_checks.find_gateway_container", return_value=("container-1", "instance_label")),
+                patch(
+                    "agent_runtime_ops.domain.runtime_checks.live_runtime_truth",
+                    return_value=(
+                        {
+                            "truth_status": "ok",
+                            "runtime_profile": "hermes-runtime-dev",
+                            "canonical_recipe_name": "hermes-runtime",
+                        },
+                        [],
+                    ),
+                ),
+                patch("agent_runtime_ops.domain.runtime_checks.runtime_ids", return_value=(12345, 12346, 12347)),
+                patch("agent_runtime_ops.domain.runtime_checks.shutil.which", side_effect=lambda name: f"/usr/bin/{name}"),
+                patch("agent_runtime_ops.domain.runtime_checks._findmnt_under", return_value=(0, "", [])),
+                patch(
+                    "agent_runtime_ops.domain.runtime_checks._findmnt_tree",
+                    return_value=(
+                        0,
+                        "",
+                        [
+                            {
+                                "target": "/workspace/nas_docs",
+                                "source": "/home/dev-hermess/nas_docs",
+                                "fstype": "bind",
+                                "options": "rw,ro",
+                                "propagation": "rslave",
+                            }
+                        ],
+                    ),
+                ),
+                patch("agent_runtime_ops.domain.runtime_checks.run_text", side_effect=fake_run_text),
+            ):
+                checks = run_live_slot_checks(desired, load_profile("hermes-runtime-dev"), root)
+
+            results = {name: (ok, detail) for ok, name, detail in checks}
+            self.assertEqual(results["live_workspace_node_process_present"], (True, "pid=42"))
+            self.assertEqual(results["live_workspace_node_uid_not_default_10000"], (True, "uid=12345"))
+            self.assertEqual(results["live_workspace_node_gid_not_default_10000"], (True, "gid=12346"))
+            self.assertEqual(
+                results["live_workspace_node_uid_matches_slot"],
+                (True, "actual=12345 expected=12345"),
+            )
+            self.assertEqual(
+                results["live_workspace_node_gid_matches_slot"],
+                (True, "actual=12346 expected=12346"),
+            )
+            self.assertEqual(results["live_container_nas_docs_listing_ok"], (True, "/workspace/nas_docs"))
+            self.assertEqual(
+                results["live_workspace_api_status_ok"],
+                (True, "status=200 isValid=true path=/workspace source=env"),
+            )
+            self.assertEqual(
+                results["live_workspace_files_root_listing_ok"],
+                (True, "status=200 entries_array=true error=none"),
+            )
+            self.assertEqual(
+                results["live_workspace_files_nas_docs_listing_ok"],
+                (True, "status=200 root=nas_docs entries_array=true error=none"),
+            )
+
     def test_wrapper_image_recipe_rejects_canonical_digest_mismatch(self) -> None:
         product_image = wrapper_image_ref("hermes-workspace", "2")
         wrapper_image = wrapper_image_ref("agent-runtime-hermes", "3")

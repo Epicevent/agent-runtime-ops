@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import shutil
 import time
 import urllib.error
@@ -16,6 +17,7 @@ from ..host.mounts import (
     is_readonly_mount as _is_readonly_mount,
     propagation_satisfies as _propagation_satisfies,
 )
+from ..host.account_files import runtime_ids
 from ..nas import check_nas_policy
 from ..routing import get_runtime_binding
 from .common import is_root, run_text
@@ -76,6 +78,162 @@ def run_internal_http_check(nsenter: str, pid: int, name: str, url: str) -> tupl
         return True, check_name, f"url={url}"
     detail = (proc.stderr or proc.stdout).strip() or f"returncode={proc.returncode}"
     return False, check_name, f"url={url} error={detail[:160]}"
+
+
+def run_workspace_node_checks(container: str, slot: str) -> list[tuple[bool, str, str | None]]:
+    script = r'''
+      node_pid="$(pgrep -f "node .*server-entry[.]js" 2>/dev/null | head -n1 || true)"
+      if [ -z "$node_pid" ]; then
+        node_pid="$(ps -eo pid=,args= 2>/dev/null | awk '/node .*server-entry[.]js/ {print $1; exit}')"
+      fi
+      test -n "$node_pid"
+
+      uid="$(awk "/^Uid:/ {print \$2}" /proc/"$node_pid"/status)"
+      gid="$(awk "/^Gid:/ {print \$2}" /proc/"$node_pid"/status)"
+      printf "%s %s %s\n" "$node_pid" "$uid" "$gid"
+    '''
+    proc = run_text(["docker", "exec", container, "sh", "-lc", script], timeout=10)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip() or f"returncode={proc.returncode}"
+        return [(False, "live_workspace_node_process_present", detail[:200])]
+
+    parts = proc.stdout.strip().split()
+    if len(parts) < 3:
+        return [(False, "live_workspace_node_process_present", f"unparseable_output={proc.stdout.strip()[:120]}")]
+
+    node_pid, uid_text, gid_text = parts[:3]
+    checks: list[tuple[bool, str, str | None]] = [
+        (True, "live_workspace_node_process_present", f"pid={node_pid}"),
+        (uid_text != "10000", "live_workspace_node_uid_not_default_10000", f"uid={uid_text}"),
+        (gid_text != "10000", "live_workspace_node_gid_not_default_10000", f"gid={gid_text}"),
+    ]
+    try:
+        expected_uid, expected_gid, _ = runtime_ids(slot)
+        checks.extend(
+            [
+                (
+                    uid_text == str(expected_uid),
+                    "live_workspace_node_uid_matches_slot",
+                    f"actual={uid_text} expected={expected_uid}",
+                ),
+                (
+                    gid_text == str(expected_gid),
+                    "live_workspace_node_gid_matches_slot",
+                    f"actual={gid_text} expected={expected_gid}",
+                ),
+            ]
+        )
+    except Exception as exc:
+        checks.append((False, "live_slot_runtime_ids_read_ok", str(exc)))
+    return checks
+
+
+def run_container_nas_docs_listing_check(container: str, container_nas_root: str) -> tuple[bool, str, str | None]:
+    script = f'root={shlex.quote(container_nas_root)}; test -d "$root" && ls -la "$root" >/dev/null'
+    proc = run_text(["docker", "exec", container, "sh", "-lc", script], timeout=15)
+    if proc.returncode == 0:
+        return True, "live_container_nas_docs_listing_ok", container_nas_root
+    detail = (proc.stderr or proc.stdout).strip() or f"returncode={proc.returncode}"
+    return False, "live_container_nas_docs_listing_ok", f"path={container_nas_root} error={detail[:160]}"
+
+
+def run_workspace_api_smoke_checks(container: str) -> list[tuple[bool, str, str | None]]:
+    script = r'''
+const http = require('http');
+const password = process.env.HERMES_PASSWORD || process.env.CLAUDE_PASSWORD || '';
+
+function request(method, path, headers = {}, body = '') {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port: 3000, method, path, headers }, (res) => {
+      let data = '';
+      res.setEncoding('utf8');
+      res.on('data', chunk => { data += chunk; });
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: data }));
+    });
+    req.on('error', reject);
+    req.setTimeout(5000, () => req.destroy(new Error(`${method} ${path} timed out`)));
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+function parseJson(label, response) {
+  try {
+    return JSON.parse(response.body);
+  } catch {
+    throw new Error(`${label} returned non-JSON status=${response.status}`);
+  }
+}
+
+(async () => {
+  let cookie = '';
+  if (password) {
+    const auth = await request('POST', '/api/auth', {'content-type': 'application/json'}, JSON.stringify({password}));
+    if (auth.status !== 200) throw new Error(`/api/auth status=${auth.status}`);
+    const setCookie = auth.headers['set-cookie'];
+    cookie = Array.isArray(setCookie) ? setCookie[0].split(';')[0] : String(setCookie || '').split(';')[0];
+    if (!cookie) throw new Error('/api/auth missing cookie');
+  }
+  const headers = cookie ? {cookie} : {};
+
+  const workspaceRes = await request('GET', '/api/workspace', headers);
+  const workspace = parseJson('/api/workspace', workspaceRes);
+  const rootRes = await request('GET', '/api/files?action=list', headers);
+  const root = parseJson('/api/files?action=list', rootRes);
+  const nasRes = await request('GET', '/api/files?path=nas_docs', headers);
+  const nas = parseJson('/api/files?path=nas_docs', nasRes);
+
+  const checks = [
+    {
+      name: 'live_workspace_api_status_ok',
+      ok: workspaceRes.status === 200 && workspace.isValid === true && workspace.path === '/workspace' && workspace.source === 'env',
+      detail: `status=${workspaceRes.status} isValid=${workspace.isValid} path=${workspace.path || ''} source=${workspace.source || ''}`,
+    },
+    {
+      name: 'live_workspace_files_root_listing_ok',
+      ok: rootRes.status === 200 && !root.error && Array.isArray(root.entries),
+      detail: `status=${rootRes.status} entries_array=${Array.isArray(root.entries)} error=${root.error || 'none'}`,
+    },
+    {
+      name: 'live_workspace_files_nas_docs_listing_ok',
+      ok: nasRes.status === 200 && nas.root === 'nas_docs' && !nas.error && Array.isArray(nas.entries),
+      detail: `status=${nasRes.status} root=${nas.root || ''} entries_array=${Array.isArray(nas.entries)} error=${nas.error || 'none'}`,
+    },
+  ];
+  console.log(JSON.stringify(checks));
+})().catch(error => {
+  console.error(error.message);
+  process.exit(1);
+});
+    '''
+    names = [
+        "live_workspace_api_status_ok",
+        "live_workspace_files_root_listing_ok",
+        "live_workspace_files_nas_docs_listing_ok",
+    ]
+    proc = run_text(["docker", "exec", container, "node", "-e", script], timeout=20)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip() or f"returncode={proc.returncode}"
+        return [(False, name, detail[:200]) for name in names]
+    try:
+        payload = json.loads(proc.stdout)
+    except Exception as exc:
+        return [(False, name, f"parse_failed:{exc}") for name in names]
+    checks: list[tuple[bool, str, str | None]] = []
+    seen: set[str] = set()
+    if isinstance(payload, list):
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "")
+            if name not in names:
+                continue
+            seen.add(name)
+            checks.append((bool(item.get("ok")), name, str(item.get("detail") or "")))
+    for name in names:
+        if name not in seen:
+            checks.append((False, name, "missing_result"))
+    return checks
 
 
 def run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool, str, str | None]]:
@@ -179,6 +337,10 @@ def run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool,
     for endpoint_name, endpoint_url in contract_health_endpoints(desired, profile).items():
         checks.append(run_internal_http_check(nsenter, pid, endpoint_name, endpoint_url))
 
+    if str(profile.metadata.get("family") or "") == "hermes":
+        checks.extend(run_workspace_node_checks(container, desired.slot))
+        checks.extend(run_workspace_api_smoke_checks(container))
+
     host_rc, host_error, host_mounts = _findmnt_under(host_nas_root)
     checks.append((host_rc == 0, "live_host_nas_root_findmnt_ok", host_error if host_rc != 0 else host_nas_root))
     host_cifs = [row for row in host_mounts if row.get("fstype") == "cifs" and row.get("target", "").startswith(host_nas_root + "/")]
@@ -200,6 +362,8 @@ def run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool,
     if not container_nas_root:
         checks.append((False, "live_container_nas_root_configured", None))
         return checks
+
+    checks.append(run_container_nas_docs_listing_check(container, container_nas_root))
 
     container_rc, container_error, container_mounts = _findmnt_tree(container_nas_root, container_pid=pid)
     checks.append(
@@ -347,6 +511,11 @@ def run_live_slot_checks_with_wait(desired, profile, state_root: Path, timeout_s
         "live_container_pid_present",
         "live_container_health_ok",
         "live_backend_http_smoke_ok",
+        "live_workspace_node_process_present",
+        "live_container_nas_docs_listing_ok",
+        "live_workspace_api_status_ok",
+        "live_workspace_files_root_listing_ok",
+        "live_workspace_files_nas_docs_listing_ok",
     }
     while True:
         checks = run_live_slot_checks(desired, profile, state_root)
