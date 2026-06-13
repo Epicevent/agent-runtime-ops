@@ -195,58 +195,58 @@ jobs:
                 printf "%s\n" "$groups" | grep -Fx "$OPENCLAW_NAS_DATA_GID" >/dev/null
               '
               docker exec -i "$cid" node <<'NODE'
-const http = require('http');
+          const http = require('http');
 
-function getJson(path) {
-  return new Promise((resolve, reject) => {
-    const request = http.get(`http://127.0.0.1:3000${path}`, (response) => {
-      let body = '';
-      response.setEncoding('utf8');
-      response.on('data', (chunk) => {
-        body += chunk;
-      });
-      response.on('end', () => {
-        let json;
-        try {
-          json = JSON.parse(body);
-        } catch (error) {
-          reject(new Error(`${path} returned non-JSON status=${response.statusCode}: ${body.slice(0, 200)}`));
-          return;
-        }
-        resolve({ status: response.statusCode, json });
-      });
-    });
-    request.on('error', reject);
-    request.setTimeout(2000, () => request.destroy(new Error(`${path} timed out`)));
-  });
-}
+          function getJson(path) {
+            return new Promise((resolve, reject) => {
+              const request = http.get(`http://127.0.0.1:3000${path}`, (response) => {
+                let body = '';
+                response.setEncoding('utf8');
+                response.on('data', (chunk) => {
+                  body += chunk;
+                });
+                response.on('end', () => {
+                  let json;
+                  try {
+                    json = JSON.parse(body);
+                  } catch (error) {
+                    reject(new Error(`${path} returned non-JSON status=${response.statusCode}: ${body.slice(0, 200)}`));
+                    return;
+                  }
+                  resolve({ status: response.statusCode, json });
+                });
+              });
+              request.on('error', reject);
+              request.setTimeout(2000, () => request.destroy(new Error(`${path} timed out`)));
+            });
+          }
 
-function assert(condition, message) {
-  if (!condition) throw new Error(message);
-}
+          function assert(condition, message) {
+            if (!condition) throw new Error(message);
+          }
 
-(async () => {
-  const workspace = await getJson('/api/workspace');
-  assert(workspace.status === 200, `/api/workspace status=${workspace.status}`);
-  assert(workspace.json.isValid === true, '/api/workspace isValid must be true');
-  assert(workspace.json.path === '/workspace', `/api/workspace path=${workspace.json.path}`);
-  assert(workspace.json.source === 'env', `/api/workspace source=${workspace.json.source}`);
+          (async () => {
+            const workspace = await getJson('/api/workspace');
+            assert(workspace.status === 200, `/api/workspace status=${workspace.status}`);
+            assert(workspace.json.isValid === true, '/api/workspace isValid must be true');
+            assert(workspace.json.path === '/workspace', `/api/workspace path=${workspace.json.path}`);
+            assert(workspace.json.source === 'env', `/api/workspace source=${workspace.json.source}`);
 
-  const rootFiles = await getJson('/api/files?action=list');
-  assert(rootFiles.status === 200, `/api/files?action=list status=${rootFiles.status}`);
-  assert(!rootFiles.json.error, `/api/files?action=list error=${rootFiles.json.error}`);
-  assert(Array.isArray(rootFiles.json.entries), '/api/files?action=list entries must be an array');
+            const rootFiles = await getJson('/api/files?action=list');
+            assert(rootFiles.status === 200, `/api/files?action=list status=${rootFiles.status}`);
+            assert(!rootFiles.json.error, `/api/files?action=list error=${rootFiles.json.error}`);
+            assert(Array.isArray(rootFiles.json.entries), '/api/files?action=list entries must be an array');
 
-  const nasFiles = await getJson('/api/files?path=nas_docs');
-  assert(nasFiles.status === 200, `/api/files?path=nas_docs status=${nasFiles.status}`);
-  assert(nasFiles.json.root === 'nas_docs', `/api/files?path=nas_docs root=${nasFiles.json.root}`);
-  assert(!nasFiles.json.error, `/api/files?path=nas_docs error=${nasFiles.json.error}`);
-  assert(Array.isArray(nasFiles.json.entries), '/api/files?path=nas_docs entries must be an array');
-})().catch((error) => {
-  console.error(error.message);
-  process.exit(1);
-});
-NODE
+            const nasFiles = await getJson('/api/files?path=nas_docs');
+            assert(nasFiles.status === 200, `/api/files?path=nas_docs status=${nasFiles.status}`);
+            assert(nasFiles.json.root === 'nas_docs', `/api/files?path=nas_docs root=${nasFiles.json.root}`);
+            assert(!nasFiles.json.error, `/api/files?path=nas_docs error=${nasFiles.json.error}`);
+            assert(Array.isArray(nasFiles.json.entries), '/api/files?path=nas_docs entries must be an array');
+          })().catch((error) => {
+            console.error(error.message);
+            process.exit(1);
+          });
+          NODE
               echo "smoke_status=ok recipe_name=$recipe_name"
               exit 0
             fi
