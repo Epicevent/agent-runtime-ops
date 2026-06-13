@@ -84,41 +84,71 @@ def _handoff_password(slot: str, state_root: Path) -> str:
     return values.get("password", "")
 
 
+def _existing_workspace_session_cookie(slot: str) -> str:
+    path = Path("/home") / slot / ".hermes" / "workspace-sessions.json"
+    if path.is_symlink() or not path.is_file():
+        return ""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    tokens = payload.get("tokens")
+    if not isinstance(tokens, dict):
+        return ""
+    now_ms = int(time.time() * 1000)
+    for token, expiry in tokens.items():
+        if not isinstance(token, str) or not token:
+            continue
+        try:
+            expiry_ms = int(expiry)
+        except (TypeError, ValueError):
+            continue
+        if expiry_ms > now_ms:
+            return f"claude-auth={token}"
+    return ""
+
+
 def workspace_hermes_config_api_checks(slot: str, state_root: Path) -> list[tuple[bool, str, str | None]]:
     checks: list[tuple[bool, str, str | None]] = []
     try:
         binding = get_runtime_binding(slot, state_root)
     except Exception as exc:
         return [(False, "live_workspace_hermes_config_api_binding_ok", str(exc))]
-    password = _handoff_password(binding.linux_account, state_root)
-    checks.append((bool(password), "live_workspace_handoff_password_present", "secret_value_printed=no"))
-    if not password:
-        return checks
-
     base = f"http://127.0.0.1:{binding.gateway_port}"
-    auth_body = json.dumps({"password": password}).encode("utf-8")
-    auth_request = urllib.request.Request(
-        f"{base}/api/auth",
-        data=auth_body,
-        headers={
-            "Host": binding.public_host,
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(auth_request, timeout=8) as response:
-            status = int(response.getcode())
-            cookie = response.headers.get("Set-Cookie", "")
-    except urllib.error.HTTPError as exc:
-        status = int(exc.code)
-        cookie = ""
-    except Exception as exc:
-        checks.append((False, "live_workspace_auth_login_ok", f"reason={exc}"))
-        return checks
+    session_cookie = _existing_workspace_session_cookie(binding.linux_account)
+    if session_cookie:
+        checks.append((True, "live_workspace_session_cookie_present", "secret_value_printed=no"))
+    else:
+        password = _handoff_password(binding.linux_account, state_root)
+        checks.append((bool(password), "live_workspace_handoff_password_present", "secret_value_printed=no"))
+        if not password:
+            return checks
 
-    session_cookie = cookie.split(";", 1)[0].strip()
-    checks.append((status == 200 and session_cookie.startswith("claude-auth="), "live_workspace_auth_login_ok", f"status={status}"))
+        auth_body = json.dumps({"password": password}).encode("utf-8")
+        auth_request = urllib.request.Request(
+            f"{base}/api/auth",
+            data=auth_body,
+            headers={
+                "Host": binding.public_host,
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(auth_request, timeout=8) as response:
+                status = int(response.getcode())
+                cookie = response.headers.get("Set-Cookie", "")
+        except urllib.error.HTTPError as exc:
+            status = int(exc.code)
+            cookie = ""
+        except Exception as exc:
+            checks.append((False, "live_workspace_auth_login_ok", f"reason={exc}"))
+            return checks
+
+        session_cookie = cookie.split(";", 1)[0].strip()
+        checks.append((status == 200 and session_cookie.startswith("claude-auth="), "live_workspace_auth_login_ok", f"status={status}"))
     if not session_cookie.startswith("claude-auth="):
         return checks
 

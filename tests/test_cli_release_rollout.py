@@ -35,7 +35,11 @@ from agent_runtime_ops.commands.rollout import (
 )
 from agent_runtime_ops.canonical_recipes import load_canonical_recipe
 from agent_runtime_ops.domain.image_specs import IMAGE_RECIPE_LABEL_PREFIX, image_recipe_from_wrapper_image
-from agent_runtime_ops.domain.runtime_checks import contract_health_endpoints, run_live_slot_checks
+from agent_runtime_ops.domain.runtime_checks import (
+    contract_health_endpoints,
+    run_live_slot_checks,
+    workspace_hermes_config_api_checks,
+)
 from agent_runtime_ops.domain.runtime_truth import local_canonical_recipe_check_from_truth
 from agent_runtime_ops.domain.source_provenance import source_provenance
 from agent_runtime_ops.profiles import load_profile
@@ -1522,6 +1526,67 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 results["live_workspace_files_nas_docs_listing_ok"],
                 (True, "status=200 root=nas_docs entries_array=true error=none"),
             )
+
+    def test_workspace_hermes_config_api_reuses_existing_session_cookie(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_hermes_state(root)
+            calls: list[str] = []
+
+            class FakeResponse:
+                headers: dict[str, str] = {}
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback) -> None:
+                    return None
+
+                def getcode(self) -> int:
+                    return 200
+
+                def read(self, size: int = -1) -> bytes:
+                    return json.dumps(
+                        {
+                            "ok": True,
+                            "activeProvider": "google",
+                            "activeModel": "gemini-3.1-pro-preview",
+                            "providers": [
+                                {
+                                    "id": "google",
+                                    "configured": True,
+                                    "authenticated": True,
+                                }
+                            ],
+                        }
+                    ).encode("utf-8")
+
+            def fake_urlopen(request, timeout=8):
+                calls.append(request.full_url)
+                self.assertNotIn("/api/auth", request.full_url)
+                self.assertEqual(request.get_header("Cookie"), "claude-auth=session-token")
+                return FakeResponse()
+
+            with (
+                patch(
+                    "agent_runtime_ops.domain.runtime_checks._existing_workspace_session_cookie",
+                    return_value="claude-auth=session-token",
+                ),
+                patch(
+                    "agent_runtime_ops.domain.runtime_checks._slot_hermes_config",
+                    return_value=("google", "gemini-3.1-pro-preview"),
+                ),
+                patch("agent_runtime_ops.domain.runtime_checks.urllib.request.urlopen", side_effect=fake_urlopen),
+            ):
+                checks = workspace_hermes_config_api_checks("dev-hermess", root)
+
+            results = {name: (ok, detail) for ok, name, detail in checks}
+            self.assertEqual(results["live_workspace_session_cookie_present"], (True, "secret_value_printed=no"))
+            self.assertEqual(
+                results["live_workspace_hermes_config_api_ok"],
+                (True, "status=200 provider=google model=gemini-3.1-pro-preview"),
+            )
+            self.assertEqual(calls, ["http://127.0.0.1:30889/api/hermes-config"])
 
     def test_wrapper_image_recipe_rejects_canonical_digest_mismatch(self) -> None:
         product_image = wrapper_image_ref("hermes-workspace", "2")
