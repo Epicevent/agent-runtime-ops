@@ -212,7 +212,11 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_secret_set.add_argument("--value-stdin", action="store_true")
     runtime_secret_set.add_argument("--no-restart", action="store_true")
     runtime_secret_set.add_argument("--check", action="store_true")
-    runtime_secret_set.add_argument("--unsafe-service-recreate", action="store_true")
+    runtime_secret_set.add_argument(
+        "--unsafe-service-recreate",
+        action="store_true",
+        help="bypass full apply/live check and recreate only the service; emergency use only",
+    )
     runtime_secret_set.set_defaults(func=cmd_runtime_secret_set)
     runtime_secret_status = runtime_secret_sub.add_parser("status")
     runtime_secret_status.add_argument("slot", metavar="target")

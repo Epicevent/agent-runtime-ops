@@ -30,6 +30,7 @@ WORKSPACE_AUTH_SECRET_KEYS = {
 
 INTERNAL_RUNTIME_SECRET_KEYS = {
     "API_SERVER_KEY",
+    "HERMES_API_TOKEN",
 }
 
 RUNTIME_SECRET_KEYS = PROVIDER_SECRET_KEYS | WORKSPACE_AUTH_SECRET_KEYS | INTERNAL_RUNTIME_SECRET_KEYS
@@ -75,11 +76,30 @@ def validate_provider_secret_values(values: dict[str, str]) -> dict[str, str]:
     return validate_runtime_secret_values(values)
 
 
+def _sync_alias_pair(out: dict[str, str], left: str, right: str) -> None:
+    left_value = out.get(left)
+    right_value = out.get(right)
+    if left_value and right_value and left_value != right_value:
+        raise ValueError(f"{left} and {right} differ")
+    if left_value and not right_value:
+        out[right] = left_value
+    if right_value and not left_value:
+        out[left] = right_value
+
+
+def expand_runtime_secret_aliases(values: dict[str, str]) -> dict[str, str]:
+    out = dict(values)
+    _sync_alias_pair(out, "GOOGLE_API_KEY", "GEMINI_API_KEY")
+    _sync_alias_pair(out, "API_SERVER_KEY", "HERMES_API_TOKEN")
+    _sync_alias_pair(out, "HERMES_PASSWORD", "CLAUDE_PASSWORD")
+    return out
+
+
 def validate_runtime_secret_values(values: dict[str, str]) -> dict[str, str]:
     unknown = sorted(set(values) - RUNTIME_SECRET_KEYS)
     if unknown:
         raise ValueError("unsupported runtime secret key(s): " + ",".join(unknown))
-    supported = {key: value for key, value in values.items() if value}
+    supported = expand_runtime_secret_aliases({key: value for key, value in values.items() if value})
     if not supported:
         raise ValueError("no supported runtime secret keys found")
     return supported

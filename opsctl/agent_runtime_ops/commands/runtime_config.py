@@ -18,6 +18,14 @@ from ..yamlio import dump_yaml, load_yaml
 GOOGLE_GEMINI_31_PRO_PREVIEW = "gemini-3.1-pro-preview"
 _PROVIDER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,80}$")
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,160}$")
+RUNTIME_PROVIDER_ALIASES = {
+    "google": "gemini",
+    "google-ai": "gemini",
+    "google_ai": "gemini",
+    "google-gemini": "gemini",
+    "google_gemini": "gemini",
+    "gemini": "gemini",
+}
 
 
 def _assert_name(value: str, pattern: re.Pattern[str], label: str) -> str:
@@ -25,6 +33,11 @@ def _assert_name(value: str, pattern: re.Pattern[str], label: str) -> str:
     if not item or not pattern.match(item):
         raise ValueError(f"invalid {label}: {value!r}")
     return item
+
+
+def runtime_provider_id(value: str) -> str:
+    raw = value.strip().lower()
+    return RUNTIME_PROVIDER_ALIASES.get(raw, raw)
 
 
 def _hermes_config_path(slot: str) -> Path:
@@ -102,6 +115,7 @@ def cmd_runtime_config_status(args: argparse.Namespace) -> int:
         config_path = _hermes_config_path(desired.slot)
         config = _read_config(config_path)
         provider, model, source = _current_model(config)
+        provider_runtime = runtime_provider_id(provider) if provider else ""
     except Exception as exc:
         print(f"target={args.slot}")
         print("runtime_config_status=fail")
@@ -109,7 +123,9 @@ def cmd_runtime_config_status(args: argparse.Namespace) -> int:
         return 1
     print(f"target={desired.slot}")
     print(f"config_file={config_path}")
-    print(f"provider={provider or 'missing'}")
+    print(f"provider={provider_runtime or 'missing'}")
+    print(f"provider_raw={provider or 'missing'}")
+    print(f"provider_runtime={provider_runtime or 'missing'}")
     print(f"model={model or 'missing'}")
     print(f"model_source={source}")
     print("secret_value_printed=no")
@@ -123,12 +139,14 @@ def cmd_runtime_set_model(args: argparse.Namespace) -> int:
         return 2
     target = str(args.slot)
     try:
-        provider = _assert_name(str(args.provider), _PROVIDER_RE, "provider")
+        provider_raw = _assert_name(str(args.provider), _PROVIDER_RE, "provider")
+        provider = runtime_provider_id(provider_raw)
         model = _assert_name(str(args.model), _MODEL_RE, "model")
         desired = _load_hermes_target(target, args)
         config_path = _hermes_config_path(desired.slot)
         config = _read_config(config_path)
         previous_provider, previous_model, previous_source = _current_model(config)
+        previous_provider_runtime = runtime_provider_id(previous_provider) if previous_provider else ""
         config["provider"] = provider
         current_model_value = config.get("model")
         if isinstance(current_model_value, dict):
@@ -152,9 +170,12 @@ def cmd_runtime_set_model(args: argparse.Namespace) -> int:
     print(f"target={desired.slot}")
     print(f"config_file={config_path}")
     print(f"previous_provider={previous_provider or 'missing'}")
+    print(f"previous_provider_runtime={previous_provider_runtime or 'missing'}")
     print(f"previous_model={previous_model or 'missing'}")
     print(f"previous_model_source={previous_source}")
+    print(f"provider_raw={provider_raw}")
     print(f"provider={provider}")
+    print(f"provider_runtime={provider}")
     print(f"model={model}")
     print("secret_value_printed=no")
     print("runtime_config_status=updated")
@@ -164,6 +185,6 @@ def cmd_runtime_set_model(args: argparse.Namespace) -> int:
         desired.slot,
         desired.slot,
         "ok",
-        f"{previous_provider or 'missing'}/{previous_model or 'missing'} -> {provider}/{model}",
+        f"{previous_provider_runtime or previous_provider or 'missing'}/{previous_model or 'missing'} -> {provider}/{model}",
     )
     return 0

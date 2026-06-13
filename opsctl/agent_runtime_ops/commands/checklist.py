@@ -13,7 +13,7 @@ from ..domain.runtime_checks import run_live_slot_checks as _run_live_slot_check
 from ..domain.runtime_targets import desired_from_live_image_truth as _desired_from_live_image_truth
 from ..domain.runtime_truth import find_gateway_container
 from ..runtime_secrets import parse_secret_env_text, primary_profile_secret_file
-from ..commands.runtime_config import _current_model, _hermes_config_path, _read_config
+from ..commands.runtime_config import _current_model, _hermes_config_path, _read_config, runtime_provider_id
 
 
 HERMES_RUNTIME_REQUIRED_CHECKS = {
@@ -58,7 +58,7 @@ def _provider_state_checks(desired, profile) -> list[tuple[bool, str, str | None
         secret_file = primary_profile_secret_file(profile, desired.slot)
         values = parse_secret_env_text(secret_file.path.read_text(encoding="utf-8", errors="replace"), source=str(secret_file.path))
         checks.append((bool(values.get("API_SERVER_KEY")), "checklist_api_server_key_present", "secret_value_printed=no"))
-        provider_name = str(provider or "").lower()
+        provider_name = runtime_provider_id(str(provider or ""))
         if provider_name in {"google", "gemini"} or "gemini" in provider_name:
             gemini_present = bool(values.get("GEMINI_API_KEY") or values.get("GOOGLE_API_KEY"))
             checks.append((gemini_present, "checklist_gemini_secret_present", "secret_value_printed=no"))

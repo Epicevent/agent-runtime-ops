@@ -4,6 +4,7 @@ import unittest
 
 from agent_runtime_ops.profiles import load_profile
 from agent_runtime_ops.runtime_secrets import (
+    expand_runtime_secret_aliases,
     parse_secret_env_text,
     primary_profile_secret_file,
     render_upserted_secret_env,
@@ -32,10 +33,21 @@ class RuntimeSecretTests(unittest.TestCase):
     def test_validate_runtime_secret_values_accepts_internal_api_server_key(self) -> None:
         values = validate_runtime_secret_values({"API_SERVER_KEY": "internal-token"})
         self.assertEqual(values["API_SERVER_KEY"], "internal-token")
+        self.assertEqual(values["HERMES_API_TOKEN"], "internal-token")
 
     def test_validate_runtime_secret_values_accepts_workspace_auth_secret(self) -> None:
         values = validate_runtime_secret_values({"HERMES_PASSWORD": "workspace-password"})
         self.assertEqual(values["HERMES_PASSWORD"], "workspace-password")
+        self.assertEqual(values["CLAUDE_PASSWORD"], "workspace-password")
+
+    def test_expand_runtime_secret_aliases_syncs_provider_keys(self) -> None:
+        values = expand_runtime_secret_aliases({"GOOGLE_API_KEY": "provider-token"})
+        self.assertEqual(values["GOOGLE_API_KEY"], "provider-token")
+        self.assertEqual(values["GEMINI_API_KEY"], "provider-token")
+
+    def test_expand_runtime_secret_aliases_rejects_divergent_provider_keys(self) -> None:
+        with self.assertRaisesRegex(ValueError, "GOOGLE_API_KEY and GEMINI_API_KEY differ"):
+            expand_runtime_secret_aliases({"GOOGLE_API_KEY": "google-token", "GEMINI_API_KEY": "gemini-token"})
 
     def test_render_upserted_secret_env_preserves_other_lines(self) -> None:
         rendered = render_upserted_secret_env(

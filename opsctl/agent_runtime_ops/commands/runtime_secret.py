@@ -272,6 +272,7 @@ def cmd_runtime_secret_set(args: argparse.Namespace) -> int:
 
     if getattr(args, "unsafe_service_recreate", False):
         print("phase=unsafe_service_recreate")
+        print("warning=unsafe_service_recreate_bypasses_full_apply_live_check")
         restart_ok, restart_reason = _restart_runtime_secret_slot(desired, profile, runtime_dir)
         print(f"restart_status={'ok' if restart_ok else 'fail'}")
         print(f"restart_reason={restart_reason}")
