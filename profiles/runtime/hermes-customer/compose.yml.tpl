@@ -22,6 +22,8 @@ services:
       API_SERVER_HOST: 127.0.0.1
       HERMES_API_TOKEN: ${API_SERVER_KEY}
       OPENCLAW_NAS_CONTAINER_PATH: /workspace/nas_docs
+      HERMES_UID: "{{ runtime_uid }}"
+      HERMES_GID: "{{ runtime_gid }}"
       OPENCLAW_NAS_DATA_GID: "{{ data_gid }}"
       HOME: /opt/data/home
       HOST: 0.0.0.0
