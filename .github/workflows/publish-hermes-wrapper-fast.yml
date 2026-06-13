@@ -1,0 +1,179 @@
+name: Publish Hermes Wrapper Fast
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Fast dev/canary tag to publish
+        required: true
+      product_image:
+        description: Digest-pinned Hermes product image
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_REPOSITORY: ghcr.io/epicevent/agent-runtime-hermes
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install opsctl
+        run: python -m pip install .
+
+      - name: Validate inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${{ inputs.image_tag }}" =~ ^hermes-fast-[A-Za-z0-9._-]+$ ]]
+          [[ "${{ inputs.product_image }}" =~ ^ghcr\.io/epicevent/(hermes-runtime|hermes-workspace|openclaw-nas-agent)@sha256:[0-9a-f]{64}$ ]]
+
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build wrapper
+        run: |
+          set -euo pipefail
+          image_ref="$IMAGE_REPOSITORY:${{ inputs.image_tag }}"
+          product_repo="${{ inputs.product_image }}"
+          product_repo="${product_repo%@sha256:*}"
+          case "$product_repo" in
+            ghcr.io/epicevent/hermes-workspace)
+              recipe_name="hermes-workspace"
+              ;;
+            ghcr.io/epicevent/hermes-runtime)
+              recipe_name="hermes-runtime"
+              ;;
+            ghcr.io/epicevent/openclaw-nas-agent)
+              recipe_name="hermes-combined"
+              ;;
+            *)
+              echo "unsupported Hermes product image repo: $product_repo" >&2
+              exit 1
+              ;;
+          esac
+          python -m agent_runtime_ops.cli recipe validate-canonical "$recipe_name" --emit-build-args > recipe.env
+          set -a
+          . ./recipe.env
+          set +a
+          [[ "$RUNTIME_FAMILY" == "hermes" ]]
+          docker build \
+            --build-arg BASE_IMAGE="${{ inputs.product_image }}" \
+            --build-arg PRODUCT_IMAGE="${{ inputs.product_image }}" \
+            --build-arg OPS_REPO_COMMIT="${{ github.sha }}" \
+            --build-arg PRODUCT_COMPONENT="$PRODUCT_COMPONENT" \
+            --build-arg RUNTIME_PROFILE_CUSTOMER="$RUNTIME_PROFILE_CUSTOMER" \
+            --build-arg RUNTIME_PROFILE_DEV="$RUNTIME_PROFILE_DEV" \
+            --build-arg RUNTIME_CONTRACT_CUSTOMER="$RUNTIME_CONTRACT_CUSTOMER" \
+            --build-arg RUNTIME_CONTRACT_DEV="$RUNTIME_CONTRACT_DEV" \
+            --build-arg RUNTIME_COMMAND_MODE="$RUNTIME_COMMAND_MODE" \
+            --build-arg RUNTIME_WORKING_DIR="$RUNTIME_WORKING_DIR" \
+            --build-arg RUNTIME_HTTP_PORT="$RUNTIME_HTTP_PORT" \
+            --build-arg RUNTIME_CONTRACT_VERSION="$RUNTIME_CONTRACT_VERSION" \
+            --build-arg RUNTIME_SOURCE_OUTPUT_TARGET="$RUNTIME_SOURCE_OUTPUT_TARGET" \
+            --build-arg RUNTIME_NAS_CONTAINER_ROOT="$RUNTIME_NAS_CONTAINER_ROOT" \
+            --build-arg RUNTIME_NAS_HOST_ROOT_TEMPLATE="$RUNTIME_NAS_HOST_ROOT_TEMPLATE" \
+            --build-arg RUNTIME_NAS_READ_ONLY="$RUNTIME_NAS_READ_ONLY" \
+            --build-arg RUNTIME_NAS_PROPAGATION="$RUNTIME_NAS_PROPAGATION" \
+            --build-arg RUNTIME_NAS_CHILD_MOUNT_MODE="$RUNTIME_NAS_CHILD_MOUNT_MODE" \
+            --build-arg RUNTIME_HEALTH_ENDPOINTS="$RUNTIME_HEALTH_ENDPOINTS" \
+            --build-arg RUNTIME_HEALTH_ENDPOINTS_JSON="$RUNTIME_HEALTH_ENDPOINTS_JSON" \
+            --build-arg CANONICAL_RECIPE_NAME="$CANONICAL_RECIPE_NAME" \
+            --build-arg CANONICAL_RECIPE_DIGEST="$CANONICAL_RECIPE_DIGEST" \
+            -t "$image_ref" \
+            -f images/hermes-wrapper/Dockerfile .
+
+      - name: Verify wrapper labels
+        run: |
+          set -euo pipefail
+          image_ref="$IMAGE_REPOSITORY:${{ inputs.image_tag }}"
+          cid="$(docker create "$image_ref")"
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          docker cp "$cid:/usr/local/share/agent-runtime-ops/wrapper.manifest" ./wrapper.manifest
+          grep -Fx "family=hermes" ./wrapper.manifest
+          grep -Fx "product_image=${{ inputs.product_image }}" ./wrapper.manifest
+          grep -E "^canonical_recipe_name=hermes-(combined|workspace|runtime)$" ./wrapper.manifest
+          grep -E "^canonical_recipe_digest=sha256:[0-9a-f]{64}$" ./wrapper.manifest
+          grep -Fx "nas_container_root=/workspace/nas_docs" ./wrapper.manifest
+          grep -Fx "nas_host_root_template=/home/{slot}/nas_docs" ./wrapper.manifest
+          docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.recipe.schema" }}' | grep -Fx v1
+          docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.recipe.name" }}' | grep -E '^hermes-(combined|workspace|runtime)$'
+          docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.recipe.digest" }}' | grep -E '^sha256:[0-9a-f]{64}$'
+          docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.product-image" }}' | grep -Fx "${{ inputs.product_image }}"
+          if grep -Fx "canonical_recipe_name=hermes-runtime" ./wrapper.manifest; then
+            docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.health.endpoints.json" }}' | grep -Fx '{"dashboard":"http://127.0.0.1:9119/api/status","gateway":"http://127.0.0.1:8642/health","workspace":"http://127.0.0.1:3000/"}'
+          fi
+
+      - name: Smoke Hermes runtime services
+        shell: bash
+        run: |
+          set -euo pipefail
+          image_ref="$IMAGE_REPOSITORY:${{ inputs.image_tag }}"
+          recipe_name="$(docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.recipe.name" }}')"
+          if [[ "$recipe_name" != "hermes-runtime" ]]; then
+            echo "smoke_status=skipped recipe_name=$recipe_name"
+            exit 0
+          fi
+
+          cid="$(docker run -d --rm -e API_SERVER_KEY=dummy-local-smoke-key -e HERMES_PASSWORD=dummy-local-smoke-password "$image_ref")"
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+
+          for _ in {1..60}; do
+            if ! docker inspect "$cid" --format '{{ .State.Running }}' | grep -Fx true >/dev/null; then
+              docker logs "$cid" || true
+              echo "smoke_status=fail reason=container_exited" >&2
+              exit 1
+            fi
+            if docker exec "$cid" node -e '
+              const http = require("http");
+              const endpoints = [
+                "http://127.0.0.1:3000/",
+                "http://127.0.0.1:8642/health",
+                "http://127.0.0.1:9119/api/status",
+              ];
+              function check(url) {
+                return new Promise((resolve, reject) => {
+                  const request = http.get(url, (response) => {
+                    response.resume();
+                    if (response.statusCode >= 200 && response.statusCode < 400) {
+                      resolve();
+                    } else {
+                      reject(new Error(`${url} returned ${response.statusCode}`));
+                    }
+                  });
+                  request.on("error", reject);
+                  request.setTimeout(2000, () => request.destroy(new Error(`${url} timed out`)));
+                });
+              }
+              Promise.all(endpoints.map(check)).then(
+                () => process.exit(0),
+                (error) => {
+                  console.error(error.message);
+                  process.exit(1);
+                }
+              );
+            '; then
+              echo "smoke_status=ok recipe_name=$recipe_name"
+              exit 0
+            fi
+            sleep 2
+          done
+
+          docker logs "$cid" || true
+          echo "smoke_status=fail reason=endpoints_not_ready" >&2
+          exit 1
+
+      - name: Push wrapper
+        run: docker push "$IMAGE_REPOSITORY:${{ inputs.image_tag }}"
+
+      - name: Show digest
+        run: docker buildx imagetools inspect "$IMAGE_REPOSITORY:${{ inputs.image_tag }}"
