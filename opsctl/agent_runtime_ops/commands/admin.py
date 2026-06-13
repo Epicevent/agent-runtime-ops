@@ -28,6 +28,7 @@ from ..routing import (
 )
 from ..runtime_secrets import (
     PROVIDER_SECRET_KEYS,
+    WORKSPACE_AUTH_SECRET_KEYS,
     parse_secret_env_text,
     primary_profile_secret_file,
     render_upserted_secret_env,
@@ -219,8 +220,9 @@ def _clone_provider_secret_values(source_slot: str, state_root: Path) -> dict[st
     if source_file.path.is_symlink() or not source_file.path.is_file():
         raise ValueError(f"unsafe provider secret source: {source_file.path}")
     values = parse_secret_env_text(source_file.path.read_text(encoding="utf-8", errors="replace"), source=str(source_file.path))
-    provider_values = {key: values[key] for key in sorted(PROVIDER_SECRET_KEYS) if values.get(key)}
-    return validate_runtime_secret_values(provider_values) if provider_values else {}
+    cloned_secret_keys = PROVIDER_SECRET_KEYS | WORKSPACE_AUTH_SECRET_KEYS
+    cloned_values = {key: values[key] for key in sorted(cloned_secret_keys) if values.get(key)}
+    return validate_runtime_secret_values(cloned_values) if cloned_values else {}
 
 
 def _ensure_target_dirs_and_secrets(

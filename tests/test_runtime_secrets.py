@@ -33,6 +33,10 @@ class RuntimeSecretTests(unittest.TestCase):
         values = validate_runtime_secret_values({"API_SERVER_KEY": "internal-token"})
         self.assertEqual(values["API_SERVER_KEY"], "internal-token")
 
+    def test_validate_runtime_secret_values_accepts_workspace_auth_secret(self) -> None:
+        values = validate_runtime_secret_values({"HERMES_PASSWORD": "workspace-password"})
+        self.assertEqual(values["HERMES_PASSWORD"], "workspace-password")
+
     def test_render_upserted_secret_env_preserves_other_lines(self) -> None:
         rendered = render_upserted_secret_env(
             "OPENCLAW_RUNTIME_FAMILY=openclaw\nGEMINI_API_KEY='old'\n",

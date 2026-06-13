@@ -9,7 +9,7 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from agent_runtime_ops.commands.admin import cmd_admin_create_image_dev
+from agent_runtime_ops.commands.admin import _clone_provider_secret_values, cmd_admin_create_image_dev
 from agent_runtime_ops.commands.checklist import HERMES_RUNTIME_REQUIRED_CHECKS, cmd_checklist_pack
 from agent_runtime_ops.commands.rollout import cmd_rollout_image_canary, cmd_rollout_image_promote
 from agent_runtime_ops.profiles import load_profile
@@ -105,6 +105,37 @@ class ImageDevProjectionChecklistTests(unittest.TestCase):
             self.assertIn("binding=exists", text)
             self.assertEqual(len(load_runtime_bindings(root)), 1)
             write_bindings_file.assert_not_called()
+
+    def test_image_dev_secret_clone_includes_workspace_auth(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            secret_path = root / "source.env"
+            secret_path.write_text(
+                "GEMINI_API_KEY='provider'\nHERMES_PASSWORD='workspace-auth'\nAPI_SERVER_KEY='do-not-clone'\n",
+                encoding="utf-8",
+            )
+            source = RuntimeTarget(
+                target="dev-hermess",
+                family="hermes",
+                runtime_class="dev",
+                image_name="direct-image",
+                image_spec={},
+                runtime_profile="hermes-runtime-dev",
+                route=binding("dev-hermess", "hermes", "dev", 30889, 30890),
+            )
+            with (
+                patch("agent_runtime_ops.commands.admin.load_runtime_target", return_value=source),
+                patch("agent_runtime_ops.commands.admin.load_profile", return_value=load_profile("hermes-runtime-dev")),
+                patch(
+                    "agent_runtime_ops.commands.admin.primary_profile_secret_file",
+                    return_value=argparse.Namespace(path=secret_path),
+                ),
+            ):
+                values = _clone_provider_secret_values("dev-hermess", root)
+
+            self.assertEqual(values["GEMINI_API_KEY"], "provider")
+            self.assertEqual(values["HERMES_PASSWORD"], "workspace-auth")
+            self.assertNotIn("API_SERVER_KEY", values)
 
     def test_rollout_image_canary_prepares_runtime_env_before_apply(self) -> None:
         route = binding("dev-hermes-img", "hermes", "customer", 30989, 30990)
