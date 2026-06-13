@@ -142,7 +142,6 @@ jobs:
             -v "$workspace_dir:/workspace" \
             -e API_SERVER_KEY=dummy-local-smoke-key \
             -e HERMES_API_TOKEN=dummy-local-smoke-key \
-            -e HERMES_PASSWORD=dummy-local-smoke-password \
             -e HERMES_UID="$runtime_uid" \
             -e HERMES_GID="$runtime_gid" \
             -e OPENCLAW_NAS_DATA_GID="$data_gid" \
