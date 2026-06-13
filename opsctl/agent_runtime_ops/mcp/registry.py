@@ -33,6 +33,8 @@ HANDLERS: dict[str, ToolHandler] = {
     "rollout_image_dev_apply": _bind(rollout_handlers.image_dev_apply),
     "rollout_image_canary": _bind(rollout_handlers.image_canary),
     "rollout_image_promote": _bind(rollout_handlers.image_promote),
+    "projection_verify_target": _bind(rollout_handlers.projection_verify_target),
+    "checklist_pack": _bind(rollout_handlers.checklist_pack),
     "canonical_recipe_validate": _bind(recipe_handlers.canonical_validate),
     "dev_recipe_status": _bind(recipe_handlers.dev_status),
     "dev_recipe_apply": _bind(recipe_handlers.dev_apply),

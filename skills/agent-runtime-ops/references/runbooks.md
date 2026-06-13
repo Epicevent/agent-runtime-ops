@@ -214,6 +214,9 @@ directory, secrets, NAS, containers, labels, backups, and state.
 
 ## Image Rollout
 
+This is runtime product/wrapper image deployment. It is not `opsctl self-update` and not the
+"Deploy an Approved Repo Update" flow.
+
 Use digest-pinned wrapper and product images. Do not use release-state rollout commands; the public
 operating path is the image rollout toolset below.
 
@@ -232,6 +235,28 @@ Plan:
 ssh svcops "sudo /usr/local/bin/opsctl rollout image-plan --wrapper-image WRAP@sha256:... --product-image PROD@sha256:..."
 ```
 
+Hermes runtime deployment order:
+
+```text
+dev-hermess source-mode check
+-> fast hermes-runtime product image
+-> fast agent-runtime-hermes wrapper image
+-> dev-hermes-img image-mode validation
+-> oc20 customer canary
+-> image-promote from oc20 to explicit customer targets
+```
+
+Hermes target rules:
+
+```text
+dev-hermess     source mode; never a promote source
+dev-hermes-img  image mode using runtime_class=customer; no source mount; never a promote source or target
+oc20            customer canary; valid promotion source after checks pass
+```
+
+`dev-hermes-img` has a `dev-*` Linux account for operator visibility but uses the customer runtime
+profile. Apply images to it with `image-canary`, not `image-dev-apply`.
+
 Apply to a dev target:
 
 ```bash
@@ -248,10 +273,34 @@ ssh svcops "sudo /usr/local/bin/opsctl runtime truth oc3"
 ssh svcops "sudo /usr/local/bin/opsctl check --live oc3"
 ```
 
+Hermes image-mode dev validation:
+
+```bash
+ssh svcops "sudo /usr/local/bin/opsctl rollout image-canary --target dev-hermes-img --wrapper-image WRAP@sha256:... --product-image PROD@sha256:..."
+ssh svcops "sudo /usr/local/bin/opsctl check --live dev-hermes-img"
+ssh svcops "sudo /usr/local/bin/opsctl projection verify-target dev-hermes-img --wrapper-image WRAP@sha256:... --product-image PROD@sha256:... --live"
+ssh svcops "sudo /usr/local/bin/opsctl checklist pack dev-hermes-img --pack hermes-runtime --gemini-chat-smoke"
+```
+
+Hermes customer canary:
+
+```bash
+ssh svcops "sudo /usr/local/bin/opsctl rollout image-canary --target oc20 --wrapper-image WRAP@sha256:... --product-image PROD@sha256:..."
+ssh svcops "sudo /usr/local/bin/opsctl check --live oc20"
+ssh svcops "sudo /usr/local/bin/opsctl projection verify-target oc20 --wrapper-image WRAP@sha256:... --product-image PROD@sha256:... --live"
+ssh svcops "sudo /usr/local/bin/opsctl checklist pack oc20 --pack hermes-runtime --gemini-chat-smoke"
+```
+
 Promote the exact live canary image to explicit targets:
 
 ```bash
 ssh svcops "sudo /usr/local/bin/opsctl rollout image-promote --from-target oc3 --targets oc1,oc2,oc4"
+```
+
+For Hermes, promote from `oc20`, not from `dev-hermes-img`:
+
+```bash
+ssh svcops "sudo /usr/local/bin/opsctl rollout image-promote --from-target oc20 --targets oc15,oc16,oc17,oc18,oc19"
 ```
 
 After promotion, verify each target with `runtime truth` and `check --live`.

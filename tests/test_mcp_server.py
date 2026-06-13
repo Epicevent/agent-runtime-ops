@@ -80,6 +80,8 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("rollout_image_dev_apply", names)
         self.assertIn("rollout_image_canary", names)
         self.assertIn("rollout_image_promote", names)
+        self.assertIn("projection_verify_target", names)
+        self.assertIn("checklist_pack", names)
         self.assertNotIn("release_import", names)
         self.assertNotIn("rollout_status", names)
         self.assertNotIn("rollout_plan", names)
@@ -196,6 +198,63 @@ class McpServerTests(unittest.TestCase):
                 product,
                 "--target",
                 "oc3",
+            ],
+        )
+
+    def test_projection_verify_target_uses_existing_opsctl_gate(self) -> None:
+        wrapper = "ghcr.io/epicevent/agent-runtime-hermes@sha256:" + "a" * 64
+        product = "ghcr.io/epicevent/hermes-runtime@sha256:" + "b" * 64
+        runner = FakeRunner([(0, "projection_status=pass failed=0\n", "")])
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        payload = call_tool(
+            server,
+            "projection_verify_target",
+            {
+                "target": "dev-hermes-img",
+                "wrapper_image": wrapper,
+                "product_image": product,
+                "live": True,
+            },
+        )
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["mutated"])
+        self.assertEqual(
+            runner.calls[0]["argv"],
+            [
+                "sudo",
+                "opsctl",
+                "projection",
+                "verify-target",
+                "dev-hermes-img",
+                "--wrapper-image",
+                wrapper,
+                "--product-image",
+                product,
+                "--live",
+            ],
+        )
+
+    def test_checklist_pack_uses_existing_opsctl_gate(self) -> None:
+        runner = FakeRunner([(0, "checklist_status=pass failed=0\n", "")])
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        payload = call_tool(
+            server,
+            "checklist_pack",
+            {"target": "oc20", "pack": "hermes-runtime", "gemini_chat_smoke": True},
+        )
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["mutated"])
+        self.assertEqual(
+            runner.calls[0]["argv"],
+            [
+                "sudo",
+                "opsctl",
+                "checklist",
+                "pack",
+                "oc20",
+                "--pack",
+                "hermes-runtime",
+                "--gemini-chat-smoke",
             ],
         )
 

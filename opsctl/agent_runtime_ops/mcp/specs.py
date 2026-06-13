@@ -179,6 +179,37 @@ def list_tool_specs() -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "projection_verify_target",
+            "title": "Verify Target Projection",
+            "description": "Run the existing opsctl projection gate for a digest-pinned wrapper/product image, optionally against live truth.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string"},
+                    "wrapper_image": {"type": "string"},
+                    "product_image": {"type": "string"},
+                    "live": {"type": "boolean", "default": True},
+                },
+                "required": ["target", "wrapper_image", "product_image"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "checklist_pack",
+            "title": "Run Checklist Pack",
+            "description": "Run an existing opsctl checklist pack such as hermes-runtime, including optional Gemini chat smoke.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string"},
+                    "pack": {"type": "string", "enum": ["hermes-runtime"]},
+                    "gemini_chat_smoke": {"type": "boolean", "default": False},
+                },
+                "required": ["target", "pack"],
+                "additionalProperties": False,
+            },
+        },
+        {
             "name": "canonical_recipe_validate",
             "title": "Validate Canonical Recipe",
             "description": "Validate the repo-owned canonical runtime recipe that generates dev/customer projections and wrapper labels.",

@@ -56,7 +56,7 @@ Read the named section from `references/runbooks.md` when the task matches:
 - MCP registration or smoke test: "MCP Setup and Smoke Test"
 - Runtime target diagnosis: "Check a Runtime Binding"
 - Router, public host, or subdomain diagnosis/change: "Binding and Public Host Diagnosis"
-- Image rollout from wrapper/product digests: "Image Rollout"
+- Runtime image deployment from wrapper/product digests, including Hermes `dev-hermes-img` and `oc20`: "Image Rollout"
 - Dev source-mode work: "Dev Recipe"
 - Runtime API keys such as Gemini/OpenAI: "Runtime Secret Injection"
 - Gateway tokens or workspace passwords: "Handoff Credentials"
