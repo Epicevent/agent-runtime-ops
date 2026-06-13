@@ -1448,7 +1448,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 if command[:4] == ["docker", "exec", "container-1", "sh"]:
                     script = command[-1]
                     if "server-entry[.]js" in script:
-                        return subprocess.CompletedProcess(command, 0, stdout="42 12345 12346\n", stderr="")
+                        return subprocess.CompletedProcess(command, 0, stdout="42 12345 12346 12347\n", stderr="")
                     if "ls -la" in script:
                         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
                 if command and command[0].endswith("nsenter"):
@@ -1504,7 +1504,12 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 results["live_workspace_node_gid_matches_slot"],
                 (True, "actual=12346 expected=12346"),
             )
+            self.assertEqual(
+                results["live_workspace_node_groups_include_data_gid"],
+                (True, "groups=12347 expected=12347"),
+            )
             self.assertEqual(results["live_container_nas_docs_listing_ok"], (True, "/workspace/nas_docs"))
+            self.assertEqual(results["live_workspace_user_nas_docs_listing_ok"], (True, "/workspace/nas_docs"))
             self.assertEqual(
                 results["live_workspace_api_status_ok"],
                 (True, "status=200 isValid=true path=/workspace source=env"),

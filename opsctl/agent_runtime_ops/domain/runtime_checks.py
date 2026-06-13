@@ -90,7 +90,8 @@ def run_workspace_node_checks(container: str, slot: str) -> list[tuple[bool, str
 
       uid="$(awk "/^Uid:/ {print \$2}" /proc/"$node_pid"/status)"
       gid="$(awk "/^Gid:/ {print \$2}" /proc/"$node_pid"/status)"
-      printf "%s %s %s\n" "$node_pid" "$uid" "$gid"
+      groups="$(awk "/^Groups:/ {for (i=2; i<=NF; i++) printf \"%s%s\", (i == 2 ? \"\" : \",\"), \$i}" /proc/"$node_pid"/status)"
+      printf "%s %s %s %s\n" "$node_pid" "$uid" "$gid" "$groups"
     '''
     proc = run_text(["docker", "exec", container, "sh", "-lc", script], timeout=10)
     if proc.returncode != 0:
@@ -102,13 +103,15 @@ def run_workspace_node_checks(container: str, slot: str) -> list[tuple[bool, str
         return [(False, "live_workspace_node_process_present", f"unparseable_output={proc.stdout.strip()[:120]}")]
 
     node_pid, uid_text, gid_text = parts[:3]
+    groups_text = parts[3] if len(parts) >= 4 else ""
+    group_ids = {item for item in groups_text.split(",") if item}
     checks: list[tuple[bool, str, str | None]] = [
         (True, "live_workspace_node_process_present", f"pid={node_pid}"),
         (uid_text != "10000", "live_workspace_node_uid_not_default_10000", f"uid={uid_text}"),
         (gid_text != "10000", "live_workspace_node_gid_not_default_10000", f"gid={gid_text}"),
     ]
     try:
-        expected_uid, expected_gid, _ = runtime_ids(slot)
+        expected_uid, expected_gid, data_gid = runtime_ids(slot)
         checks.extend(
             [
                 (
@@ -120,6 +123,11 @@ def run_workspace_node_checks(container: str, slot: str) -> list[tuple[bool, str
                     gid_text == str(expected_gid),
                     "live_workspace_node_gid_matches_slot",
                     f"actual={gid_text} expected={expected_gid}",
+                ),
+                (
+                    str(data_gid) in group_ids,
+                    "live_workspace_node_groups_include_data_gid",
+                    f"groups={groups_text or 'none'} expected={data_gid}",
                 ),
             ]
         )
@@ -135,6 +143,26 @@ def run_container_nas_docs_listing_check(container: str, container_nas_root: str
         return True, "live_container_nas_docs_listing_ok", container_nas_root
     detail = (proc.stderr or proc.stdout).strip() or f"returncode={proc.returncode}"
     return False, "live_container_nas_docs_listing_ok", f"path={container_nas_root} error={detail[:160]}"
+
+
+def run_workspace_user_nas_docs_listing_check(container: str, container_nas_root: str) -> tuple[bool, str, str | None]:
+    quoted_root = shlex.quote(container_nas_root)
+    script = f'''
+      root={quoted_root}
+      if command -v s6-setuidgid >/dev/null 2>&1; then
+        exec s6-setuidgid hermes sh -lc 'test -d "$1" && ls -la "$1" >/dev/null' sh "$root"
+      fi
+      if command -v runuser >/dev/null 2>&1; then
+        exec runuser -u hermes -- sh -lc 'test -d "$1" && ls -la "$1" >/dev/null' sh "$root"
+      fi
+      echo "no supported setuid helper found" >&2
+      exit 127
+    '''
+    proc = run_text(["docker", "exec", container, "sh", "-lc", script], timeout=15)
+    if proc.returncode == 0:
+        return True, "live_workspace_user_nas_docs_listing_ok", container_nas_root
+    detail = (proc.stderr or proc.stdout).strip() or f"returncode={proc.returncode}"
+    return False, "live_workspace_user_nas_docs_listing_ok", f"path={container_nas_root} error={detail[:160]}"
 
 
 def run_workspace_api_smoke_checks(container: str) -> list[tuple[bool, str, str | None]]:
@@ -364,6 +392,7 @@ def run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool,
         return checks
 
     checks.append(run_container_nas_docs_listing_check(container, container_nas_root))
+    checks.append(run_workspace_user_nas_docs_listing_check(container, container_nas_root))
 
     container_rc, container_error, container_mounts = _findmnt_tree(container_nas_root, container_pid=pid)
     checks.append(
@@ -513,6 +542,7 @@ def run_live_slot_checks_with_wait(desired, profile, state_root: Path, timeout_s
         "live_backend_http_smoke_ok",
         "live_workspace_node_process_present",
         "live_container_nas_docs_listing_ok",
+        "live_workspace_user_nas_docs_listing_ok",
         "live_workspace_api_status_ok",
         "live_workspace_files_root_listing_ok",
         "live_workspace_files_nas_docs_listing_ok",
