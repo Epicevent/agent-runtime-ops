@@ -132,10 +132,10 @@ jobs:
           runtime_uid="10000"
           runtime_gid="10001"
           data_gid="$runtime_gid"
-          sudo chown -R "$workspace_uid:$data_gid" "$workspace_dir"
-          sudo chown "$runtime_uid:$runtime_gid" "$data_dir"
           chmod 0750 "$workspace_dir" "$workspace_dir/nas_docs" "$data_dir"
           chmod 0640 "$workspace_dir/nas_docs/README.txt"
+          sudo chown -R "$workspace_uid:$data_gid" "$workspace_dir"
+          sudo chown "$runtime_uid:$runtime_gid" "$data_dir"
 
           cid="$(docker run -d --rm \
             -v "$data_dir:/opt/data" \
