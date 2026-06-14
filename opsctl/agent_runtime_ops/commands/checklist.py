@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import argparse
-import json
 import shutil
 import sys
 
 from ..domain.common import check_line as _check_line
 from ..domain.common import is_root as _is_root
-from ..domain.common import run_text as _run_text
+from ..domain.hermes_smoke import run_hermes_http_smoke
 from ..domain.common import state_root as _state_root
 from ..domain.runtime_checks import run_live_slot_checks as _run_live_slot_checks
 from ..domain.runtime_targets import desired_from_live_image_truth as _desired_from_live_image_truth
@@ -40,9 +39,14 @@ def _provider_state_checks(desired, profile) -> list[tuple[bool, str, str | None
         config_path = _hermes_config_path(desired.slot)
         config = _read_config(config_path)
         provider, model, source = _current_model(config)
+        provider_runtime = runtime_provider_id(provider) if provider else ""
         checks.extend(
             [
-                (bool(provider), "checklist_provider_configured", f"provider={provider or 'missing'} source={source}"),
+                (
+                    bool(provider_runtime),
+                    "checklist_provider_configured",
+                    f"provider_raw={provider or 'missing'} provider_runtime={provider_runtime or 'missing'} source={source}",
+                ),
                 (bool(model), "checklist_model_configured", f"model={model or 'missing'} source={source}"),
             ]
         )
@@ -68,122 +72,7 @@ def _provider_state_checks(desired, profile) -> list[tuple[bool, str, str | None
 
 
 def _workspace_endpoint_checks(container: str, *, gemini_chat_smoke: bool) -> list[tuple[bool, str, str | None]]:
-    script = r'''
-const http = require('http');
-const runChatSmoke = process.env.CHECKLIST_GEMINI_CHAT_SMOKE === '1';
-const password = process.env.HERMES_PASSWORD || process.env.CLAUDE_PASSWORD || '';
-
-function request(method, path, headers = {}, body = '') {
-  return new Promise((resolve, reject) => {
-    const req = http.request({ host: '127.0.0.1', port: 3000, method, path, headers }, (res) => {
-      let data = '';
-      res.setEncoding('utf8');
-      res.on('data', chunk => { data += chunk; });
-      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: data }));
-    });
-    req.on('error', reject);
-    req.setTimeout(15000, () => req.destroy(new Error(`${method} ${path} timed out`)));
-    if (body) req.write(body);
-    req.end();
-  });
-}
-
-function parseJson(label, response) {
-  try {
-    return JSON.parse(response.body || '{}');
-  } catch {
-    throw new Error(`${label} returned non-JSON status=${response.status}`);
-  }
-}
-
-(async () => {
-  const checks = [];
-  let cookie = '';
-  if (password) {
-    const auth = await request('POST', '/api/auth', {'content-type': 'application/json'}, JSON.stringify({password}));
-    if (auth.status !== 200) throw new Error(`/api/auth status=${auth.status}`);
-    const setCookie = auth.headers['set-cookie'];
-    cookie = Array.isArray(setCookie) ? setCookie[0].split(';')[0] : String(setCookie || '').split(';')[0];
-    if (!cookie) throw new Error('/api/auth missing cookie');
-  }
-  const headers = cookie ? {cookie} : {};
-
-  const modelInfoRes = await request('GET', '/api/model/info', headers);
-  const modelInfo = parseJson('/api/model/info', modelInfoRes);
-  checks.push({
-    name: 'checklist_model_info_ok',
-    ok: modelInfoRes.status === 200 && !modelInfo.error,
-    detail: `status=${modelInfoRes.status} gatewayMode=${modelInfo.gatewayMode || ''} error=${modelInfo.error || 'none'}`
-  });
-
-  const modelsRes = await request('GET', '/api/claude-proxy/v1/models', headers);
-  const models = parseJson('/api/claude-proxy/v1/models', modelsRes);
-  const hasModels = Array.isArray(models.data) || Array.isArray(models.models);
-  checks.push({
-    name: 'checklist_claude_proxy_models_ok',
-    ok: modelsRes.status === 200 && hasModels,
-    detail: `status=${modelsRes.status} models_array=${hasModels} error=${models.error || 'none'}`
-  });
-
-  if (!runChatSmoke) {
-    checks.push({
-      name: 'checklist_gemini_chat_smoke_skipped',
-      ok: true,
-      detail: 'not_requested'
-    });
-    console.log(JSON.stringify(checks));
-    return;
-  }
-
-  const body = JSON.stringify({
-    sessionKey: `ops-smoke-${Date.now()}`,
-    message: 'Reply with exactly: OK',
-    history: []
-  });
-  const chatRes = await request('POST', '/api/send-stream', {...headers, 'content-type': 'application/json'}, body);
-  const chatOk = chatRes.status === 200 && (/event: (chunk|done)/.test(chatRes.body) || /data:/.test(chatRes.body));
-  checks.push({
-    name: 'checklist_gemini_chat_smoke_ok',
-    ok: chatOk,
-    detail: `status=${chatRes.status} stream_event=${chatOk}`
-  });
-  console.log(JSON.stringify(checks));
-})().catch(error => {
-  console.error(error.message);
-  process.exit(1);
-});
-'''
-    names = [
-        "checklist_model_info_ok",
-        "checklist_claude_proxy_models_ok",
-        "checklist_gemini_chat_smoke_ok" if gemini_chat_smoke else "checklist_gemini_chat_smoke_skipped",
-    ]
-    argv = ["docker", "exec"]
-    if gemini_chat_smoke:
-        argv.extend(["-e", "CHECKLIST_GEMINI_CHAT_SMOKE=1"])
-    argv.extend([container, "node", "-e", script])
-    proc = _run_text(argv, timeout=120 if gemini_chat_smoke else 30)
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout).strip() or f"returncode={proc.returncode}"
-        return [(False, name, detail[:200]) for name in names]
-    try:
-        payload = json.loads(proc.stdout)
-    except Exception as exc:
-        return [(False, name, f"parse_failed:{exc}") for name in names]
-    checks: list[tuple[bool, str, str | None]] = []
-    seen: set[str] = set()
-    if isinstance(payload, list):
-        for item in payload:
-            if not isinstance(item, dict):
-                continue
-            name = str(item.get("name") or "")
-            if name in names:
-                seen.add(name)
-                checks.append((bool(item.get("ok")), name, str(item.get("detail") or "")))
-    for name in names:
-        if name not in seen:
-            checks.append((False, name, "missing_result"))
-    return checks
+    return run_hermes_http_smoke(container, chat_smoke=gemini_chat_smoke)
 
 
 def _hermes_runtime_pack_checks(desired, profile, *, gemini_chat_smoke: bool) -> list[tuple[bool, str, str | None]]:

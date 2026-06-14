@@ -11,7 +11,13 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from agent_runtime_ops.commands.runtime_secret import _run_runtime_secret_container_checks, cmd_runtime_secret_set, cmd_runtime_secret_status
+from agent_runtime_ops.commands.runtime_secret import (
+    _run_runtime_secret_container_checks,
+    _secret_value_matches_container_env,
+    _sync_runtime_compose_env_for_secret_values,
+    cmd_runtime_secret_set,
+    cmd_runtime_secret_status,
+)
 from agent_runtime_ops.routing import RuntimeBinding, dump_runtime_bindings
 from agent_runtime_ops.runtime_secrets import RuntimeSecretFile
 from agent_runtime_ops.yamlio import dump_yaml
@@ -116,15 +122,65 @@ class CliRuntimeSecretTests(unittest.TestCase):
             patch("agent_runtime_ops.commands.runtime_secret.shutil.which", return_value="/usr/bin/docker"),
             patch("agent_runtime_ops.domain.runtime_truth.run_text", side_effect=fake_run),
             patch("agent_runtime_ops.commands.runtime_secret._run_text", side_effect=fake_run),
+            patch(
+                "agent_runtime_ops.commands.runtime_secret._secret_value_matches_container_env",
+                side_effect=lambda _container, key, _value: (
+                    True,
+                    f"runtime_secret_{key.lower()}_matches_intended_value",
+                    "secret_value_printed=no",
+                ),
+            ),
         ):
-            checks = _run_runtime_secret_container_checks(desired, profile, {"API_SERVER_KEY"})
+            checks = _run_runtime_secret_container_checks(desired, profile, {"API_SERVER_KEY": "secret"})
 
         self.assertTrue(all(ok for ok, _, _ in checks))
         self.assertTrue(any("label=agent-runtime.instance-id=instance-oc16" in call for argv in calls for call in argv))
         self.assertIn(
+            (True, "runtime_secret_api_server_key_matches_intended_value", "secret_value_printed=no"),
+            checks,
+        )
+        self.assertIn(
             (True, "runtime_secret_hermes_api_token_matches_api_server_key", "secret_value_printed=no"),
             checks,
         )
+
+    def test_runtime_secret_value_match_passes_hash_over_stdin_only(self) -> None:
+        calls: list[tuple[list[str], str | None]] = []
+
+        def fake_run(argv, **kwargs):
+            calls.append((list(argv), kwargs.get("input")))
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        with patch("agent_runtime_ops.commands.runtime_secret.subprocess.run", side_effect=fake_run):
+            ok, name, detail = _secret_value_matches_container_env("container123", "API_SERVER_KEY", "raw-secret-value")
+
+        self.assertTrue(ok)
+        self.assertEqual(name, "runtime_secret_api_server_key_matches_intended_value")
+        self.assertEqual(detail, "secret_value_printed=no")
+        argv, stdin_text = calls[0]
+        joined = " ".join(argv)
+        self.assertNotIn("raw-secret-value", joined)
+        self.assertNotIn(stdin_text or "", joined)
+        self.assertEqual(len(stdin_text or ""), 64)
+
+    def test_sync_runtime_compose_env_uses_expanded_api_server_key(self) -> None:
+        calls: list[tuple[Path, dict[str, str], int, int]] = []
+
+        def fake_upsert(path: Path, updates: dict[str, str], uid: int, gid: int) -> None:
+            calls.append((path, updates, uid, gid))
+
+        with (
+            patch("agent_runtime_ops.commands.runtime_secret.slot_uid_gid", return_value=(12000, 22000)),
+            patch("agent_runtime_ops.commands.runtime_secret._upsert_runtime_env_file", side_effect=fake_upsert),
+        ):
+            synced = _sync_runtime_compose_env_for_secret_values(
+                "oc16",
+                Path("/home/oc16/openclaw"),
+                {"HERMES_API_TOKEN": "token", "API_SERVER_KEY": "token"},
+            )
+
+        self.assertEqual(synced, ["API_SERVER_KEY"])
+        self.assertEqual(calls, [(Path("/home/oc16/openclaw/.env"), {"API_SERVER_KEY": "token"}, 12000, 22000)])
 
     def test_runtime_secret_set_check_uses_full_apply_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -138,13 +194,19 @@ class CliRuntimeSecretTests(unittest.TestCase):
                     "agent_runtime_ops.commands.runtime_secret._upsert_runtime_secret_file",
                     return_value=Path("/home/dev-hermess/.config/hermes/runtime.env"),
                 ),
-                patch("agent_runtime_ops.commands.runtime_secret._restart_runtime_secret_slot") as restart,
+                patch("agent_runtime_ops.commands.runtime_secret._sync_runtime_compose_env_for_secret_values", return_value=["API_SERVER_KEY"]) as sync_env,
+                patch("agent_runtime_ops.commands.runtime_secret._unsafe_service_recreate_after_runtime_secret_set") as restart,
                 patch("agent_runtime_ops.commands.runtime_secret.slot_runtime_dir", return_value=Path("/home/dev-hermess/openclaw")),
                 patch("agent_runtime_ops.commands.runtime_secret._apply_desired_slot", return_value=0) as apply,
                 patch(
                     "agent_runtime_ops.commands.runtime_secret._run_runtime_secret_container_checks_with_wait",
-                    return_value=[(True, "runtime_secret_api_server_key_present_in_container", "secret_value_printed=no")],
+                    return_value=[(True, "runtime_secret_api_server_key_matches_intended_value", "secret_value_printed=no")],
                 ),
+                patch("agent_runtime_ops.commands.runtime_secret._find_gateway_container", return_value=("container123", "lookup_ok")),
+                patch(
+                    "agent_runtime_ops.commands.runtime_secret._run_hermes_http_smoke",
+                    return_value=[(True, "hermes_smoke_chat_not_required", "not_required")],
+                ) as smoke,
                 patch("agent_runtime_ops.commands.runtime_secret._append_action_log"),
                 contextlib.redirect_stdout(output),
             ):
@@ -164,14 +226,55 @@ class CliRuntimeSecretTests(unittest.TestCase):
         text = output.getvalue()
         self.assertEqual(rc, 0, text)
         restart.assert_not_called()
+        sync_env.assert_called_once()
         apply.assert_called_once()
         self.assertEqual(apply.call_args.kwargs["action_name"], "runtime_secret_recreate")
         self.assertFalse(apply.call_args.kwargs["allow_first_apply"])
+        smoke.assert_called_once_with("container123", chat_smoke=False)
         self.assertIn("phase=secret_write", text)
+        self.assertIn("runtime_env_synced_keys=API_SERVER_KEY", text)
         self.assertIn("phase=full_recreate", text)
         self.assertIn("phase=secret_check", text)
         self.assertIn("phase=hermes_smoke", text)
         self.assertIn("runtime_secret_status=stored_checked", text)
+
+    def test_runtime_secret_set_no_restart_still_syncs_runtime_env(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.commands.runtime_secret._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.runtime_secret._secret_values_from_args", return_value={"API_SERVER_KEY": "secret"}),
+                patch(
+                    "agent_runtime_ops.commands.runtime_secret._upsert_runtime_secret_file",
+                    return_value=Path("/home/dev-hermess/.hermes/.env"),
+                ),
+                patch("agent_runtime_ops.commands.runtime_secret.slot_runtime_dir", return_value=Path("/home/dev-hermess/openclaw")),
+                patch("agent_runtime_ops.commands.runtime_secret._sync_runtime_compose_env_for_secret_values", return_value=["API_SERVER_KEY"]) as sync_env,
+                patch("agent_runtime_ops.commands.runtime_secret._apply_desired_slot") as apply,
+                patch("agent_runtime_ops.commands.runtime_secret._append_action_log"),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_runtime_secret_set(
+                    argparse.Namespace(
+                        slot="dev-hermess",
+                        state_root=str(root),
+                        env_file=None,
+                        key="API_SERVER_KEY",
+                        value_stdin=True,
+                        no_restart=True,
+                        check=False,
+                        unsafe_service_recreate=False,
+                    )
+                )
+
+        text = output.getvalue()
+        self.assertEqual(rc, 0, text)
+        sync_env.assert_called_once()
+        apply.assert_not_called()
+        self.assertIn("runtime_env_synced_keys=API_SERVER_KEY", text)
+        self.assertIn("restart=skipped", text)
 
 
 if __name__ == "__main__":

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
 import stat
+import subprocess
 import sys
 import time
 
@@ -15,12 +17,14 @@ from ..domain.common import is_root as _is_root
 from ..domain.common import run_text as _run_text
 from ..domain.common import run_text_cwd as _run_text_cwd
 from ..domain.common import state_root as _state_root
+from ..domain.dev_recipe_runtime import upsert_runtime_env_file as _upsert_runtime_env_file
+from ..domain.hermes_smoke import run_hermes_http_smoke as _run_hermes_http_smoke
 from ..domain.runtime_checks import profile_startup_timeout_seconds as _profile_startup_timeout_seconds
 from ..domain.runtime_apply import apply_desired_slot as _apply_desired_slot
 from ..domain.docker_compose import compose_project_name, docker_compose_command
 from ..domain.runtime_paths import agent_compose_path, slot_runtime_dir
 from ..domain.runtime_truth import find_gateway_container as _find_gateway_container
-from ..host.account_files import ensure_not_symlink_chain, runtime_ids, slot_home
+from ..host.account_files import ensure_not_symlink_chain, runtime_ids, slot_home, slot_uid_gid
 from ..profiles import load_profile
 from ..runtime_secrets import (
     RUNTIME_SECRET_KEYS,
@@ -119,7 +123,18 @@ def _upsert_runtime_secret_file(slot: str, profile, values: dict[str, str]) -> P
     return secret_file.path
 
 
-def _restart_runtime_secret_slot(desired, profile, runtime_dir: Path) -> tuple[bool, str]:
+def _sync_runtime_compose_env_for_secret_values(slot: str, runtime_dir: Path, values: dict[str, str]) -> list[str]:
+    updates: dict[str, str] = {}
+    if values.get("API_SERVER_KEY"):
+        updates["API_SERVER_KEY"] = values["API_SERVER_KEY"]
+    if not updates:
+        return []
+    uid, gid = slot_uid_gid(slot)
+    _upsert_runtime_env_file(runtime_dir / ".env", updates, uid, gid)
+    return sorted(updates)
+
+
+def _unsafe_service_recreate_after_runtime_secret_set(desired, profile, runtime_dir: Path) -> tuple[bool, str]:
     compose_path = agent_compose_path(runtime_dir)
     service = str(profile.metadata.get("service") or "openclaw-gateway")
     if compose_path.is_file():
@@ -158,7 +173,33 @@ def _restart_runtime_secret_slot(desired, profile, runtime_dir: Path) -> tuple[b
     return True, restart_mode
 
 
-def _run_runtime_secret_container_checks(desired, profile, keys: set[str]) -> list[tuple[bool, str, str | None]]:
+def _secret_value_matches_container_env(container: str, key: str, intended_value: str) -> tuple[bool, str, str | None]:
+    expected_hash = hashlib.sha256(intended_value.encode("utf-8")).hexdigest()
+    script = f'''
+set -eu
+expected="$(cat)"
+actual="${{{key}:-}}"
+test -n "$actual"
+actual_hash="$(printf "%s" "$actual" | sha256sum | awk '{{print $1}}')"
+test "$actual_hash" = "$expected"
+'''
+    try:
+        proc = subprocess.run(
+            ["docker", "exec", "-i", container, "sh", "-lc", script],
+            input=expected_hash,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+    except FileNotFoundError as exc:
+        proc = subprocess.CompletedProcess(["docker"], 127, "", str(exc))
+    except subprocess.TimeoutExpired:
+        proc = subprocess.CompletedProcess(["docker"], 124, "", "timeout")
+    detail = "secret_value_printed=no"
+    return proc.returncode == 0, f"runtime_secret_{key.lower()}_matches_intended_value", detail
+
+
+def _run_runtime_secret_container_checks(desired, profile, intended_values: dict[str, str]) -> list[tuple[bool, str, str | None]]:
     checks: list[tuple[bool, str, str | None]] = []
     if not _is_root():
         return [(False, "runtime_secret_check_requires_root", "run as root/admin")]
@@ -185,9 +226,8 @@ def _run_runtime_secret_container_checks(desired, profile, keys: set[str]) -> li
     health = str(health_data.get("Status") or "none")
     checks.append((running == "true", "runtime_secret_container_running", f"running={running}"))
     checks.append((health in {"healthy", "none", ""}, "runtime_secret_container_health_ok", f"health={health}"))
-    for key in sorted(keys):
-        proc = _run_text(["docker", "exec", container, "sh", "-lc", f'test -n "${{{key}:-}}"'])
-        checks.append((proc.returncode == 0, f"runtime_secret_{key.lower()}_present_in_container", "secret_value_printed=no"))
+    for key in sorted(intended_values):
+        checks.append(_secret_value_matches_container_env(container, key, intended_values[key]))
         if key == "API_SERVER_KEY":
             token_proc = _run_text(
                 [
@@ -209,11 +249,11 @@ def _run_runtime_secret_container_checks(desired, profile, keys: set[str]) -> li
     return checks
 
 
-def _run_runtime_secret_container_checks_with_wait(desired, profile, keys: set[str], timeout_seconds: int) -> list[tuple[bool, str, str | None]]:
+def _run_runtime_secret_container_checks_with_wait(desired, profile, intended_values: dict[str, str], timeout_seconds: int) -> list[tuple[bool, str, str | None]]:
     deadline = time.monotonic() + timeout_seconds
     last_checks: list[tuple[bool, str, str | None]] = []
     while True:
-        checks = _run_runtime_secret_container_checks(desired, profile, keys)
+        checks = _run_runtime_secret_container_checks(desired, profile, intended_values)
         last_checks = checks
         if not any(not ok for ok, _, _ in checks):
             return checks
@@ -247,6 +287,7 @@ def cmd_runtime_secret_set(args: argparse.Namespace) -> int:
         values = _secret_values_from_args(args)
         secret_path = _upsert_runtime_secret_file(desired.slot, profile, values)
         runtime_dir = slot_runtime_dir(desired.slot)
+        runtime_env_synced_keys = _sync_runtime_compose_env_for_secret_values(desired.slot, runtime_dir, values)
     except Exception as exc:
         print(f"target={args.slot}")
         print("runtime_secret_status=fail")
@@ -262,6 +303,7 @@ def cmd_runtime_secret_set(args: argparse.Namespace) -> int:
     print(f"secret_file={secret_path}")
     print("secret_value_printed=no")
     print("secret_keys_imported=" + ",".join(sorted(values)))
+    print("runtime_env_synced_keys=" + (",".join(runtime_env_synced_keys) if runtime_env_synced_keys else "none"))
     print("phase=secret_write")
 
     if args.no_restart:
@@ -273,7 +315,7 @@ def cmd_runtime_secret_set(args: argparse.Namespace) -> int:
     if getattr(args, "unsafe_service_recreate", False):
         print("phase=unsafe_service_recreate")
         print("warning=unsafe_service_recreate_bypasses_full_apply_live_check")
-        restart_ok, restart_reason = _restart_runtime_secret_slot(desired, profile, runtime_dir)
+        restart_ok, restart_reason = _unsafe_service_recreate_after_runtime_secret_set(desired, profile, runtime_dir)
         print(f"restart_status={'ok' if restart_ok else 'fail'}")
         print(f"restart_reason={restart_reason}")
         if not restart_ok:
@@ -300,7 +342,7 @@ def cmd_runtime_secret_set(args: argparse.Namespace) -> int:
         for check_ok, name, detail in _run_runtime_secret_container_checks_with_wait(
             desired,
             profile,
-            set(values),
+            values,
             timeout_seconds=_profile_startup_timeout_seconds(profile),
         ):
             _check_line(check_ok, name, detail)
@@ -312,7 +354,22 @@ def cmd_runtime_secret_set(args: argparse.Namespace) -> int:
             return 1
         if profile.metadata.get("family") == "hermes":
             print("phase=hermes_smoke")
-            print("hermes_smoke_status=covered_by_live_check")
+            container, lookup = _find_gateway_container(desired.route, profile)
+            smoke_checks: list[tuple[bool, str, str | None]]
+            if not container:
+                smoke_checks = [(False, "hermes_smoke_container_lookup", lookup)]
+            else:
+                provider_secret_changed = bool(set(values) & {"GOOGLE_API_KEY", "GEMINI_API_KEY"})
+                smoke_checks = _run_hermes_http_smoke(container, chat_smoke=provider_secret_changed)
+            smoke_failed = 0
+            for check_ok, name, detail in smoke_checks:
+                _check_line(check_ok, name, detail)
+                if not check_ok:
+                    smoke_failed += 1
+            if smoke_failed:
+                _append_action_log(state_root, "runtime_secret_set", desired.slot, desired.slot, "fail", f"hermes_smoke_failed={smoke_failed}")
+                print(f"runtime_secret_status=fail hermes_smoke_failed={smoke_failed}")
+                return 1
 
     _append_action_log(state_root, "runtime_secret_set", desired.slot, desired.slot, "ok", "keys=" + ",".join(sorted(values)))
     print(f"runtime_secret_status={'stored_checked' if args.check else 'stored'}")
