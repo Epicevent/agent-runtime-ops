@@ -162,6 +162,29 @@ class CliRuntimeSecretTests(unittest.TestCase):
         self.assertNotIn("raw-secret-value", joined)
         self.assertNotIn(stdin_text or "", joined)
         self.assertEqual(len(stdin_text or ""), 64)
+        script = argv[-1]
+        self.assertIn("command -v sha256sum", script)
+        self.assertIn("command -v node", script)
+        self.assertIn("command -v python3", script)
+        self.assertIn("hash_tool_missing", script)
+
+    def test_runtime_secret_value_match_fails_without_printing_secret_on_mismatch(self) -> None:
+        calls: list[tuple[list[str], str | None]] = []
+
+        def fake_run(argv, **kwargs):
+            calls.append((list(argv), kwargs.get("input")))
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
+
+        with patch("agent_runtime_ops.commands.runtime_secret.subprocess.run", side_effect=fake_run):
+            ok, name, detail = _secret_value_matches_container_env("container123", "API_SERVER_KEY", "raw-secret-value")
+
+        self.assertFalse(ok)
+        self.assertEqual(name, "runtime_secret_api_server_key_matches_intended_value")
+        self.assertEqual(detail, "secret_value_printed=no")
+        argv, stdin_text = calls[0]
+        joined = " ".join(argv)
+        self.assertNotIn("raw-secret-value", joined)
+        self.assertNotIn(stdin_text or "", joined)
 
     def test_sync_runtime_compose_env_uses_expanded_api_server_key(self) -> None:
         calls: list[tuple[Path, dict[str, str], int, int]] = []
@@ -238,6 +261,48 @@ class CliRuntimeSecretTests(unittest.TestCase):
         self.assertIn("phase=secret_check", text)
         self.assertIn("phase=hermes_smoke", text)
         self.assertIn("runtime_secret_status=stored_checked", text)
+
+    def test_runtime_secret_set_provider_key_enables_chat_smoke(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            with (
+                patch("agent_runtime_ops.commands.runtime_secret._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.runtime_secret._secret_values_from_args", return_value={"GEMINI_API_KEY": "secret"}),
+                patch(
+                    "agent_runtime_ops.commands.runtime_secret._upsert_runtime_secret_file",
+                    return_value=Path("/home/dev-hermess/.config/hermes/runtime.env"),
+                ),
+                patch("agent_runtime_ops.commands.runtime_secret._sync_runtime_compose_env_for_secret_values", return_value=[]),
+                patch("agent_runtime_ops.commands.runtime_secret.slot_runtime_dir", return_value=Path("/home/dev-hermess/openclaw")),
+                patch("agent_runtime_ops.commands.runtime_secret._apply_desired_slot", return_value=0),
+                patch(
+                    "agent_runtime_ops.commands.runtime_secret._run_runtime_secret_container_checks_with_wait",
+                    return_value=[(True, "runtime_secret_gemini_api_key_matches_intended_value", "secret_value_printed=no")],
+                ),
+                patch("agent_runtime_ops.commands.runtime_secret._find_gateway_container", return_value=("container123", "lookup_ok")),
+                patch(
+                    "agent_runtime_ops.commands.runtime_secret._run_hermes_http_smoke",
+                    return_value=[(True, "hermes_smoke_chat_ok", "status=200")],
+                ) as smoke,
+                patch("agent_runtime_ops.commands.runtime_secret._append_action_log"),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                rc = cmd_runtime_secret_set(
+                    argparse.Namespace(
+                        slot="dev-hermess",
+                        state_root=str(root),
+                        env_file=None,
+                        key="GEMINI_API_KEY",
+                        value_stdin=True,
+                        no_restart=False,
+                        check=True,
+                        unsafe_service_recreate=False,
+                    )
+                )
+
+        self.assertEqual(rc, 0)
+        smoke.assert_called_once_with("container123", chat_smoke=True)
 
     def test_runtime_secret_set_no_restart_still_syncs_runtime_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -27,9 +27,9 @@ class RuntimeConfigTests(unittest.TestCase):
         with (
             patch("agent_runtime_ops.commands.runtime_config.is_root", return_value=True),
             patch("agent_runtime_ops.commands.runtime_config._load_hermes_target", return_value=SimpleNamespace(slot="oc16")),
-            patch("agent_runtime_ops.commands.runtime_config._hermes_config_path", return_value=Path("/home/oc16/.hermes/config.yaml")),
-            patch("agent_runtime_ops.commands.runtime_config._read_config", return_value={}),
-            patch("agent_runtime_ops.commands.runtime_config._write_config", side_effect=lambda _slot, _path, config: written.update(config)),
+            patch("agent_runtime_ops.commands.runtime_config.hermes_config_path", return_value=Path("/home/oc16/.hermes/config.yaml")),
+            patch("agent_runtime_ops.commands.runtime_config.read_hermes_config", return_value={}),
+            patch("agent_runtime_ops.commands.runtime_config.write_hermes_config", side_effect=lambda _slot, _path, config: written.update(config)),
             patch("agent_runtime_ops.commands.runtime_config.append_action_log"),
             contextlib.redirect_stdout(output),
         ):
@@ -53,9 +53,9 @@ class RuntimeConfigTests(unittest.TestCase):
         with (
             patch("agent_runtime_ops.commands.runtime_config.is_root", return_value=True),
             patch("agent_runtime_ops.commands.runtime_config._load_hermes_target", return_value=SimpleNamespace(slot="oc16")),
-            patch("agent_runtime_ops.commands.runtime_config._hermes_config_path", return_value=Path("/home/oc16/.hermes/config.yaml")),
+            patch("agent_runtime_ops.commands.runtime_config.hermes_config_path", return_value=Path("/home/oc16/.hermes/config.yaml")),
             patch(
-                "agent_runtime_ops.commands.runtime_config._read_config",
+                "agent_runtime_ops.commands.runtime_config.read_hermes_config",
                 return_value={"provider": "google", "model": "gemini-3.1-pro-preview"},
             ),
             contextlib.redirect_stdout(output),
@@ -73,12 +73,12 @@ class RuntimeConfigTests(unittest.TestCase):
         with (
             patch("agent_runtime_ops.commands.runtime_config.is_root", return_value=True),
             patch("agent_runtime_ops.commands.runtime_config._load_hermes_target", return_value=SimpleNamespace(slot="oc16")),
-            patch("agent_runtime_ops.commands.runtime_config._hermes_config_path", return_value=Path("/home/oc16/.hermes/config.yaml")),
+            patch("agent_runtime_ops.commands.runtime_config.hermes_config_path", return_value=Path("/home/oc16/.hermes/config.yaml")),
             patch(
-                "agent_runtime_ops.commands.runtime_config._read_config",
+                "agent_runtime_ops.commands.runtime_config.read_hermes_config",
                 return_value={"providers": {"google": {"api_key": secret_value, "enabled": True}}},
             ),
-            patch("agent_runtime_ops.commands.runtime_config._write_config") as write_config,
+            patch("agent_runtime_ops.commands.runtime_config.write_hermes_config") as write_config,
             contextlib.redirect_stdout(output),
         ):
             rc = cmd_runtime_config_sanitize(
@@ -105,9 +105,9 @@ class RuntimeConfigTests(unittest.TestCase):
         with (
             patch("agent_runtime_ops.commands.runtime_config.is_root", return_value=True),
             patch("agent_runtime_ops.commands.runtime_config._load_hermes_target", return_value=SimpleNamespace(slot="oc16")),
-            patch("agent_runtime_ops.commands.runtime_config._hermes_config_path", return_value=Path("/home/oc16/.hermes/config.yaml")),
-            patch("agent_runtime_ops.commands.runtime_config._read_config", return_value=config),
-            patch("agent_runtime_ops.commands.runtime_config._write_config", side_effect=lambda _slot, _path, value: written.update(value)),
+            patch("agent_runtime_ops.commands.runtime_config.hermes_config_path", return_value=Path("/home/oc16/.hermes/config.yaml")),
+            patch("agent_runtime_ops.commands.runtime_config.read_hermes_config", return_value=config),
+            patch("agent_runtime_ops.commands.runtime_config.write_hermes_config", side_effect=lambda _slot, _path, value: written.update(value)),
             patch("agent_runtime_ops.commands.runtime_config.append_action_log"),
             contextlib.redirect_stdout(output),
         ):

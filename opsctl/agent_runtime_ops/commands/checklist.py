@@ -7,12 +7,12 @@ import sys
 from ..domain.common import check_line as _check_line
 from ..domain.common import is_root as _is_root
 from ..domain.hermes_smoke import run_hermes_http_smoke
+from ..domain.hermes_config import current_model, hermes_config_path, read_hermes_config, runtime_provider_id
 from ..domain.common import state_root as _state_root
 from ..domain.runtime_checks import run_live_slot_checks as _run_live_slot_checks
 from ..domain.runtime_targets import desired_from_live_image_truth as _desired_from_live_image_truth
 from ..domain.runtime_truth import find_gateway_container
 from ..runtime_secrets import parse_secret_env_text, primary_profile_secret_file
-from ..commands.runtime_config import _current_model, _hermes_config_path, _read_config, runtime_provider_id
 
 
 HERMES_RUNTIME_REQUIRED_CHECKS = {
@@ -36,9 +36,9 @@ HERMES_RUNTIME_REQUIRED_CHECKS = {
 def _provider_state_checks(desired, profile) -> list[tuple[bool, str, str | None]]:
     checks: list[tuple[bool, str, str | None]] = []
     try:
-        config_path = _hermes_config_path(desired.slot)
-        config = _read_config(config_path)
-        provider, model, source = _current_model(config)
+        config_path = hermes_config_path(desired.slot)
+        config = read_hermes_config(config_path)
+        provider, model, source = current_model(config)
         provider_runtime = runtime_provider_id(provider) if provider else ""
         checks.extend(
             [

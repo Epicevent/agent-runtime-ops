@@ -180,7 +180,17 @@ set -eu
 expected="$(cat)"
 actual="${{{key}:-}}"
 test -n "$actual"
-actual_hash="$(printf "%s" "$actual" | sha256sum | awk '{{print $1}}')"
+actual_hash=""
+if command -v sha256sum >/dev/null 2>&1; then
+  actual_hash="$(printf "%s" "$actual" | sha256sum | awk '{{print $1}}')"
+elif command -v node >/dev/null 2>&1; then
+  actual_hash="$(printf "%s" "$actual" | node -e 'const crypto=require("crypto"); const chunks=[]; process.stdin.on("data", c => chunks.push(c)); process.stdin.on("end", () => process.stdout.write(crypto.createHash("sha256").update(Buffer.concat(chunks)).digest("hex")));')"
+elif command -v python3 >/dev/null 2>&1; then
+  actual_hash="$(printf "%s" "$actual" | python3 -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
+else
+  echo "hash_tool_missing" >&2
+  exit 127
+fi
 test "$actual_hash" = "$expected"
 '''
     try:
