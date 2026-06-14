@@ -9,6 +9,7 @@ from .handlers import nas as nas_handlers
 from .handlers import recipe as recipe_handlers
 from .handlers import rollout as rollout_handlers
 from .handlers import routing as routing_handlers
+from .handlers import runtime_config as runtime_config_handlers
 from .handlers import secrets as secret_handlers
 
 ToolHandler = Callable[[Any, dict[str, Any]], dict[str, Any]]
@@ -28,6 +29,9 @@ HANDLERS: dict[str, ToolHandler] = {
     "runtime_truth": _bind(routing_handlers.runtime_truth),
     "document_tools_status": _bind(routing_handlers.document_tools_status),
     "target_check": _bind(routing_handlers.target_check),
+    "runtime_config_status": _bind(runtime_config_handlers.status),
+    "runtime_config_sanitize": _bind(runtime_config_handlers.sanitize),
+    "runtime_set_model": _bind(runtime_config_handlers.set_model),
     "deploy_update": _bind(deploy_handlers.deploy_update),
     "rollout_image_plan": _bind(rollout_handlers.image_plan),
     "rollout_image_dev_apply": _bind(rollout_handlers.image_dev_apply),

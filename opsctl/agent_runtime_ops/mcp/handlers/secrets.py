@@ -5,6 +5,8 @@ from typing import Any
 from ...runtime_secrets import RUNTIME_SECRET_KEYS
 from .. import validation as v
 
+MUTATING_RUNTIME_TIMEOUT = 900
+
 
 def status(server, args: dict[str, Any]) -> dict[str, Any]:
     v.reject_unknown(args, {"target", "targets", "runtime_class", "family"}, error_type=server.tool_error)
@@ -25,9 +27,9 @@ def set_from_file(server, args: dict[str, Any]) -> dict[str, Any]:
         raise server.tool_error(f"unsupported runtime secret key: {key}")
     value = v.read_allowed_secret_file(args.get("secret_file"), server.secret_roots, error_type=server.tool_error)
     argv = [server.sudo, server.opsctl, "runtime-secret", "set", slot, "--key", key, "--value-stdin"]
-    if bool(args.get("no_restart", False)):
+    if v.boolean_arg(args, "no_restart", default=False, error_type=server.tool_error):
         argv.append("--no-restart")
-    if bool(args.get("check", True)):
+    if v.boolean_arg(args, "check", default=True, error_type=server.tool_error):
         argv.append("--check")
-    runs = [server._run(argv, input_text=value, timeout=240)]
+    runs = [server._run(argv, input_text=value, timeout=MUTATING_RUNTIME_TIMEOUT)]
     return server._common_response(ok=runs[0]["returncode"] == 0, mutated=True, runs=runs)

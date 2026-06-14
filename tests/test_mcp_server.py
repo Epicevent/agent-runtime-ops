@@ -4,7 +4,9 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from agent_runtime_ops.mcp.registry import HANDLERS
 from agent_runtime_ops.mcp.runner import CommandResult
+from agent_runtime_ops.mcp.specs import list_tool_specs
 from agent_runtime_ops.mcp_server import McpServer
 
 
@@ -70,6 +72,9 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("apache_status", names)
         self.assertIn("apache_set_host", names)
         self.assertIn("runtime_truth", names)
+        self.assertIn("runtime_config_status", names)
+        self.assertIn("runtime_config_sanitize", names)
+        self.assertIn("runtime_set_model", names)
         self.assertIn("document_tools_status", names)
         self.assertIn("runtime_secret_set_from_file", names)
         self.assertIn("deploy_update", names)
@@ -123,6 +128,14 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("wrapper_image", image_plan_tool["inputSchema"]["properties"])
         document_tools_tool = next(item for item in tools["result"]["tools"] if item["name"] == "document_tools_status")
         self.assertIn("HWP/HWPX", document_tools_tool["description"])
+        sanitize_tool = next(item for item in tools["result"]["tools"] if item["name"] == "runtime_config_sanitize")
+        self.assertFalse(sanitize_tool["inputSchema"]["properties"]["apply"]["default"])
+
+    def test_mcp_specs_and_registry_stay_in_sync(self) -> None:
+        specs = list_tool_specs()
+        spec_names = {item["name"] for item in specs}
+        self.assertEqual(len(spec_names), len(specs))
+        self.assertEqual(spec_names, set(HANDLERS))
 
     def test_unknown_tool_and_malformed_json(self) -> None:
         server = McpServer(runner=FakeRunner(), opsctl="opsctl", sudo="sudo")
@@ -173,6 +186,69 @@ class McpServerTests(unittest.TestCase):
         payload = call_tool(server, "document_tools_status", {"all": True})
         self.assertTrue(payload["ok"])
         self.assertEqual(runner.calls[0]["argv"], ["sudo", "opsctl", "document-tools", "status", "--all"])
+
+    def test_runtime_config_status_uses_sudo_opsctl_argv(self) -> None:
+        runner = FakeRunner([(0, "runtime_config_status=ok\n", "")])
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        payload = call_tool(server, "runtime_config_status", {"target": "oc16"})
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["mutated"])
+        self.assertEqual(runner.calls[0]["argv"], ["sudo", "opsctl", "runtime", "config-status", "oc16"])
+
+    def test_runtime_config_sanitize_defaults_to_dry_run(self) -> None:
+        runner = FakeRunner([(0, "runtime_config_sanitize_status=dry_run\n", "")])
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        payload = call_tool(server, "runtime_config_sanitize", {"target": "oc16"})
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["mutated"])
+        self.assertEqual(
+            runner.calls[0]["argv"],
+            ["sudo", "opsctl", "runtime", "config-sanitize", "oc16", "--dry-run"],
+        )
+
+    def test_runtime_config_sanitize_apply_is_mutating(self) -> None:
+        runner = FakeRunner([(0, "runtime_config_sanitize_status=updated\n", "")])
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        payload = call_tool(server, "runtime_config_sanitize", {"target": "oc16", "apply": True})
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["mutated"])
+        self.assertEqual(
+            runner.calls[0]["argv"],
+            ["sudo", "opsctl", "runtime", "config-sanitize", "oc16", "--apply"],
+        )
+
+    def test_runtime_config_sanitize_rejects_string_apply_flag(self) -> None:
+        server = McpServer(runner=FakeRunner(), opsctl="opsctl", sudo="sudo")
+        result = call_tool_result(server, "runtime_config_sanitize", {"target": "oc16", "apply": "false"})
+        payload = result["structuredContent"]
+        self.assertFalse(payload["ok"])
+        self.assertTrue(result["isError"])
+        self.assertIn("apply must be a boolean", payload["next_action"])
+
+    def test_runtime_set_model_uses_sudo_opsctl_argv(self) -> None:
+        runner = FakeRunner([(0, "runtime_config_status=updated\n", "")])
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        payload = call_tool(
+            server,
+            "runtime_set_model",
+            {"target": "oc16", "provider": "google", "model": "gemini-3.1-pro-preview"},
+        )
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["mutated"])
+        self.assertEqual(
+            runner.calls[0]["argv"],
+            [
+                "sudo",
+                "opsctl",
+                "runtime",
+                "set-model",
+                "oc16",
+                "--provider",
+                "google",
+                "--model",
+                "gemini-3.1-pro-preview",
+            ],
+        )
 
     def test_rollout_image_plan_uses_digest_images_without_release_name(self) -> None:
         wrapper = "ghcr.io/epicevent/agent-runtime-openclaw@sha256:" + "a" * 64
@@ -423,6 +499,27 @@ class McpServerTests(unittest.TestCase):
             ],
         )
         self.assertNotIn(secret, str(payload))
+        self.assertEqual(runner.calls[0]["timeout"], 900)
+
+    def test_runtime_secret_set_rejects_string_no_restart_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gemini.txt"
+            path.write_text("AIza" + "C" * 32 + "\n", encoding="utf-8")
+            server = McpServer(runner=FakeRunner(), opsctl="opsctl", sudo="sudo", secret_roots=[Path(tmp)])
+            result = call_tool_result(
+                server,
+                "runtime_secret_set_from_file",
+                {
+                    "target": "dev-oc",
+                    "key": "GEMINI_API_KEY",
+                    "secret_file": str(path),
+                    "no_restart": "false",
+                },
+            )
+        payload = result["structuredContent"]
+        self.assertFalse(payload["ok"])
+        self.assertTrue(result["isError"])
+        self.assertIn("no_restart must be a boolean", payload["next_action"])
 
     def test_runtime_secret_status_accepts_multiple_targets(self) -> None:
         runner = FakeRunner(

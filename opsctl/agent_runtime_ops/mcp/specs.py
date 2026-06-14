@@ -75,6 +75,49 @@ def list_tool_specs() -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "runtime_config_status",
+            "title": "Runtime Config Status",
+            "description": "Inspect Hermes runtime provider/model config without printing secret values.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"target": {"type": "string", "description": "Linux account."}},
+                "required": ["target"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "runtime_config_sanitize",
+            "title": "Sanitize Runtime Config",
+            "description": (
+                "Dry-run by default. Remove stale provider key override paths from Hermes runtime config "
+                "only when apply=true; secret values are never printed."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string", "description": "Linux account."},
+                    "apply": {"type": "boolean", "default": False},
+                },
+                "required": ["target"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "runtime_set_model",
+            "title": "Set Runtime Model",
+            "description": "Set Hermes runtime provider/model config without accepting or printing provider secret values.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string", "description": "Linux account."},
+                    "provider": {"type": "string"},
+                    "model": {"type": "string"},
+                },
+                "required": ["target", "provider", "model"],
+                "additionalProperties": False,
+            },
+        },
+        {
             "name": "document_tools_status",
             "title": "Document Tools Status",
         "description": "Inspect the live target container for the baseline HWP/HWPX and document-tool commands.",

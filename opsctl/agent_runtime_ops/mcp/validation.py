@@ -113,6 +113,15 @@ def safe_text(value: Any, name: str, *, error_type: type[Exception]) -> str:
     return text
 
 
+def boolean_arg(args: dict[str, Any], name: str, *, default: bool, error_type: type[Exception]) -> bool:
+    if name not in args:
+        return default
+    value = args[name]
+    if not isinstance(value, bool):
+        raise error_type(f"{name} must be a boolean")
+    return value
+
+
 def path_text(value: Any, name: str, *, error_type: type[Exception]) -> str:
     text = safe_text(value, name, error_type=error_type)
     if not text.startswith("/"):
