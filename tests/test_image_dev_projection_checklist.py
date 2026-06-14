@@ -58,6 +58,7 @@ class ImageDevProjectionChecklistTests(unittest.TestCase):
                 patch("agent_runtime_ops.commands.admin._ensure_runtime_membership"),
                 patch("agent_runtime_ops.commands.admin._ensure_target_dirs_and_secrets", return_value=("present", "not_cloned", "not_cloned")),
                 patch("agent_runtime_ops.commands.admin._ensure_apache_route", return_value=(Path("/etc/apache2/openclaw/apache-subdomain-dev-hermes-img.conf"), "created")),
+                patch("agent_runtime_ops.commands.binding.os.chown"),
                 contextlib.redirect_stdout(output),
             ):
                 rc = cmd_admin_create_image_dev(args)

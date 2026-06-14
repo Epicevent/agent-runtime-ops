@@ -95,7 +95,10 @@ class CliNasTests(unittest.TestCase):
             root = Path(tmp)
             write_state(root)
             output = io.StringIO()
-            with contextlib.redirect_stdout(output):
+            with (
+                patch("agent_runtime_ops.commands.nas.request_dir", side_effect=lambda slot: root / "home" / slot / ".agent-runtime-nas" / "requests"),
+                contextlib.redirect_stdout(output),
+            ):
                 rc = cmd_nas_requests(argparse.Namespace(state_root=str(root)))
         self.assertEqual(rc, 0)
         self.assertIn("pending_request_count=0", output.getvalue())
@@ -105,7 +108,8 @@ class CliNasTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write_state(root)
-            result = _approve_auto_once(root)
+            with patch("agent_runtime_ops.commands.nas.request_dir", side_effect=lambda slot: root / "home" / slot / ".agent-runtime-nas" / "requests"):
+                result = _approve_auto_once(root)
         self.assertEqual(result, {"checked": 0, "approved": 0, "pending": 0, "rejected": 0, "failed": 0})
 
     def test_official_credential_status_ignores_legacy_paths(self) -> None:
