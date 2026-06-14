@@ -230,6 +230,7 @@ class CliRuntimeSecretTests(unittest.TestCase):
         apply.assert_called_once()
         self.assertEqual(apply.call_args.kwargs["action_name"], "runtime_secret_recreate")
         self.assertFalse(apply.call_args.kwargs["allow_first_apply"])
+        self.assertTrue(apply.call_args.kwargs["emit_progress"])
         smoke.assert_called_once_with("container123", chat_smoke=False)
         self.assertIn("phase=secret_write", text)
         self.assertIn("runtime_env_synced_keys=API_SERVER_KEY", text)

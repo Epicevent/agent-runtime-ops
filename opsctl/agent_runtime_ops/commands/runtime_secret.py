@@ -330,6 +330,7 @@ def cmd_runtime_secret_set(args: argparse.Namespace) -> int:
             state_root=state_root,
             allow_first_apply=False,
             action_name="runtime_secret_recreate",
+            emit_progress=True,
         )
         if apply_rc != 0:
             _append_action_log(state_root, "runtime_secret_set", desired.slot, desired.slot, "fail", f"full_recreate_failed rc={apply_rc}")

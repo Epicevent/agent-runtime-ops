@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import os
 from pathlib import Path
 import re
@@ -26,6 +27,16 @@ RUNTIME_PROVIDER_ALIASES = {
     "google_gemini": "gemini",
     "gemini": "gemini",
 }
+RUNTIME_CONFIG_SECRET_OVERRIDE_PATHS = (
+    ("providers", "google", "api_key"),
+    ("providers", "google", "apiKey"),
+    ("providers", "google", "key"),
+    ("providers", "gemini", "api_key"),
+    ("providers", "gemini", "apiKey"),
+    ("providers", "gemini", "key"),
+    ("auth", "google", "api_key"),
+    ("auth", "gemini", "api_key"),
+)
 
 
 def _assert_name(value: str, pattern: re.Pattern[str], label: str) -> str:
@@ -97,6 +108,21 @@ def _write_config(slot: str, path: Path, config: dict[str, object]) -> None:
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise
+
+
+def _remove_nested_config_key(config: dict[str, object], path: tuple[str, ...]) -> tuple[bool, bool]:
+    node: object = config
+    for part in path[:-1]:
+        if not isinstance(node, dict):
+            return False, False
+        node = node.get(part)
+    if not isinstance(node, dict):
+        return False, False
+    leaf = path[-1]
+    if leaf not in node:
+        return False, False
+    value = node.pop(leaf)
+    return True, bool(value)
 
 
 def _load_hermes_target(slot: str, args: argparse.Namespace):
@@ -187,4 +213,57 @@ def cmd_runtime_set_model(args: argparse.Namespace) -> int:
         "ok",
         f"{previous_provider_runtime or previous_provider or 'missing'}/{previous_model or 'missing'} -> {provider}/{model}",
     )
+    return 0
+
+
+def cmd_runtime_config_sanitize(args: argparse.Namespace) -> int:
+    if not is_root():
+        print("error: run as root/admin: sudo /usr/local/bin/opsctl runtime config-sanitize TARGET", file=sys.stderr)
+        return 2
+    target = str(args.slot)
+    try:
+        desired = _load_hermes_target(target, args)
+        config_path = _hermes_config_path(desired.slot)
+        config = _read_config(config_path)
+        sanitized = copy.deepcopy(config)
+        removed: list[tuple[tuple[str, ...], bool]] = []
+        for path in RUNTIME_CONFIG_SECRET_OVERRIDE_PATHS:
+            did_remove, value_present = _remove_nested_config_key(sanitized, path)
+            if did_remove:
+                removed.append((path, value_present))
+        apply_changes = bool(getattr(args, "apply", False))
+        if apply_changes and removed:
+            _write_config(desired.slot, config_path, sanitized)
+    except Exception as exc:
+        print(f"target={target}")
+        print("runtime_config_sanitize_status=fail")
+        print(f"reason={exc}")
+        try:
+            append_action_log(state_root(args), "runtime_config_sanitize", target, target, "fail", str(exc))
+        except Exception:
+            pass
+        return 1
+
+    mode = "apply" if bool(getattr(args, "apply", False)) else "dry_run"
+    print(f"target={desired.slot}")
+    print(f"config_file={config_path}")
+    print(f"runtime_config_sanitize_mode={mode}")
+    for path, value_present in removed:
+        print(
+            f"remove_path={'.'.join(path)} "
+            f"value_present={'yes' if value_present else 'no'} "
+            "secret_value_printed=no"
+        )
+    print(f"remove_count={len(removed)}")
+    print("secret_value_printed=no")
+    print(f"runtime_config_sanitize_status={'updated' if mode == 'apply' else 'dry_run'}")
+    if mode == "apply":
+        append_action_log(
+            state_root(args),
+            "runtime_config_sanitize",
+            desired.slot,
+            desired.slot,
+            "ok",
+            f"removed={len(removed)} secret_value_printed=no",
+        )
     return 0

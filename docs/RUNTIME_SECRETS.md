@@ -14,7 +14,7 @@ The supported path is repo-owned and explicit:
 root or svcops with restricted sudo
   -> opsctl runtime-secret set
   -> profile-declared secret file
-  -> optional gateway restart
+  -> full runtime recreate and live checks by default
 ```
 
 Secret values are never printed and are not written to `actions.log`.
@@ -99,6 +99,29 @@ openssl rand -hex 32 | sudo /usr/local/bin/opsctl runtime-secret set \
 `--check` verifies that both `API_SERVER_KEY` and the derived
 `HERMES_API_TOKEN` are present in the recreated container and match without
 printing either value.
+
+During a checked rotation, progress is emitted as explicit phases:
+`compose_config`, `compose_up`, `live_check`, `secret_check`, and
+`hermes_smoke`. `live_check_tick failed=...` shows the current failing live
+checks while waiting for startup.
+
+## Runtime Config Sanitize
+
+Provider keys must come from runtime secrets, not stale Hermes config override
+paths. Preview the paths that would be removed:
+
+```bash
+sudo /usr/local/bin/opsctl runtime config-sanitize oc16 --dry-run
+```
+
+Apply the cleanup only after reviewing the dry run:
+
+```bash
+sudo /usr/local/bin/opsctl runtime config-sanitize oc16 --apply
+```
+
+The command prints only paths and `value_present=yes|no`; it never prints
+secret values.
 
 ## Status
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 import json
 import re
 import shlex
@@ -704,7 +705,13 @@ def run_static_slot_checks(desired, profile, rendered=None) -> list[tuple[bool, 
     return checks
 
 
-def run_live_slot_checks_with_wait(desired, profile, state_root: Path, timeout_seconds: int = 90) -> list[tuple[bool, str, str | None]]:
+def run_live_slot_checks_with_wait(
+    desired,
+    profile,
+    state_root: Path,
+    timeout_seconds: int = 90,
+    progress: Callable[[list[tuple[bool, str, str | None]]], None] | None = None,
+) -> list[tuple[bool, str, str | None]]:
     deadline = time.monotonic() + timeout_seconds
     last_checks: list[tuple[bool, str, str | None]] = []
     wait_names = {
@@ -723,6 +730,8 @@ def run_live_slot_checks_with_wait(desired, profile, state_root: Path, timeout_s
         checks = run_live_slot_checks(desired, profile, state_root)
         last_checks = checks
         failed_names = {name for ok, name, _ in checks if not ok}
+        if progress is not None:
+            progress(checks)
         if not failed_names:
             return checks
         if not (failed_names & wait_names) and not any(name.startswith("live_internal_http_") for name in failed_names):

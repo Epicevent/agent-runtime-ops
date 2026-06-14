@@ -38,6 +38,11 @@ def print_process_result(prefix: str, proc: subprocess.CompletedProcess[str], li
         print(f"{prefix}={detail[:limit]}")
 
 
+def print_live_check_progress(checks: list[tuple[bool, str, str | None]]) -> None:
+    failed = sorted({name for ok, name, _ in checks if not ok})
+    print("live_check_tick failed=" + (",".join(failed) if failed else "none"))
+
+
 def write_failed_container_diagnostics(binding: RuntimeBinding, profile, backup_dir: Path) -> Path | None:
     try:
         container, lookup = find_gateway_container(binding, profile)
@@ -79,6 +84,7 @@ def apply_desired_slot(
     state_root: Path,
     allow_first_apply: bool,
     action_name: str = "apply",
+    emit_progress: bool = False,
 ) -> int:
     try:
         rendered = render_compose(profile, desired)
@@ -125,6 +131,8 @@ def apply_desired_slot(
     for key, value in guidance_result.items():
         print(f"{key}={value}")
 
+    if emit_progress:
+        print("phase=compose_config")
     config = run_text_cwd(docker_compose_command(desired.slot, compose_path, "config"), runtime_dir, timeout=60)
     if config.returncode != 0:
         ok, reason = restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
@@ -135,6 +143,8 @@ def apply_desired_slot(
         append_action_log(state_root, action_name, desired.slot, desired.slot, "fail", "compose_config_failed")
         return config.returncode or 1
 
+    if emit_progress:
+        print("phase=compose_up")
     up = run_text_cwd(
         docker_compose_command(desired.slot, compose_path, "up", "-d", "--force-recreate", "--remove-orphans"),
         runtime_dir,
@@ -150,11 +160,14 @@ def apply_desired_slot(
         return up.returncode or 1
 
     failed = 0
+    if emit_progress:
+        print("phase=live_check")
     for ok, name, detail in run_live_slot_checks_with_wait(
         desired,
         profile,
         state_root,
         timeout_seconds=profile_startup_timeout_seconds(profile),
+        progress=print_live_check_progress if emit_progress else None,
     ):
         check_line(ok, name, detail)
         if not ok:

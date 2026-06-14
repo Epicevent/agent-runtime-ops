@@ -51,7 +51,7 @@ from .commands.rollout import (
     cmd_rollout_status,
 )
 from .commands.runtime_secret import cmd_runtime_secret_set, cmd_runtime_secret_status
-from .commands.runtime_config import cmd_runtime_config_status, cmd_runtime_set_model
+from .commands.runtime_config import cmd_runtime_config_sanitize, cmd_runtime_config_status, cmd_runtime_set_model
 from .commands.runtime_truth import cmd_runtime_truth
 from .commands.status import cmd_plan, cmd_status
 from .commands.update import cmd_self_update, cmd_update_approve, cmd_update_status
@@ -117,6 +117,12 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_set_model.add_argument("--provider", required=True)
     runtime_set_model.add_argument("--model", required=True)
     runtime_set_model.set_defaults(func=cmd_runtime_set_model)
+    runtime_config_sanitize = runtime_sub.add_parser("config-sanitize")
+    runtime_config_sanitize.add_argument("slot", metavar="target")
+    sanitize_mode = runtime_config_sanitize.add_mutually_exclusive_group()
+    sanitize_mode.add_argument("--dry-run", action="store_true")
+    sanitize_mode.add_argument("--apply", action="store_true")
+    runtime_config_sanitize.set_defaults(func=cmd_runtime_config_sanitize)
 
     document_tools = sub.add_parser("document-tools")
     document_tools_sub = document_tools.add_subparsers(dest="document_tools_command", required=True)
