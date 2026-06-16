@@ -159,6 +159,19 @@ def apply_desired_slot(
         append_action_log(state_root, action_name, desired.slot, desired.slot, "fail", "compose_up_failed")
         return up.returncode or 1
 
+    try:
+        post_guidance_result = ensure_runtime_workspace_guidance(desired.slot, profile)
+    except Exception as exc:
+        ok, reason = restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
+        print("apply_status=fail")
+        print(f"reason=workspace_guidance_post_compose_failed:{exc}")
+        print(f"rollback_status={'ok' if ok else 'fail'}")
+        print(f"rollback_reason={reason}")
+        append_action_log(state_root, action_name, desired.slot, desired.slot, "fail", "workspace_guidance_post_compose_failed")
+        return 1
+    for key, value in post_guidance_result.items():
+        print(f"post_{key}={value}")
+
     failed = 0
     if emit_progress:
         print("phase=live_check")

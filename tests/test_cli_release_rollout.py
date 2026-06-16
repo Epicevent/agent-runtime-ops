@@ -537,7 +537,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
             with (
                 patch("agent_runtime_ops.commands.apply._is_root", return_value=True),
                 patch("agent_runtime_ops.domain.runtime_apply.slot_runtime_dir", return_value=runtime_dir),
-                patch("agent_runtime_ops.domain.runtime_apply.ensure_runtime_workspace_guidance", return_value={"workspace_guidance": "present"}),
+                patch("agent_runtime_ops.domain.runtime_apply.ensure_runtime_workspace_guidance", return_value={"workspace_guidance": "present"}) as guidance,
                 patch("agent_runtime_ops.domain.runtime_apply.run_text_cwd", side_effect=fake_run),
                 patch(
                     "agent_runtime_ops.domain.runtime_apply.run_live_slot_checks_with_wait",
@@ -549,6 +549,8 @@ class CliReleaseRolloutTests(unittest.TestCase):
 
             self.assertEqual(rc, 0, output.getvalue())
             self.assertIn("workspace_guidance=present", output.getvalue())
+            self.assertIn("post_workspace_guidance=present", output.getvalue())
+            self.assertEqual(guidance.call_count, 2)
             up_calls = [call for call in calls if "up" in call]
             self.assertEqual(len(up_calls), 1)
             self.assertIn("--force-recreate", up_calls[0])
