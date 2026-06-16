@@ -550,7 +550,8 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertEqual(rc, 0, output.getvalue())
             self.assertIn("workspace_guidance=present", output.getvalue())
             self.assertIn("post_workspace_guidance=present", output.getvalue())
-            self.assertEqual(guidance.call_count, 2)
+            self.assertIn("final_workspace_guidance=present", output.getvalue())
+            self.assertEqual(guidance.call_count, 3)
             up_calls = [call for call in calls if "up" in call]
             self.assertEqual(len(up_calls), 1)
             self.assertIn("--force-recreate", up_calls[0])

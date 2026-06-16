@@ -196,6 +196,19 @@ def apply_desired_slot(
         append_action_log(state_root, action_name, desired.slot, desired.slot, "fail", f"live_failed={failed}")
         return 1
 
+    try:
+        final_guidance_result = ensure_runtime_workspace_guidance(desired.slot, profile)
+    except Exception as exc:
+        ok, reason = restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
+        print("apply_status=fail")
+        print(f"reason=workspace_guidance_final_failed:{exc}")
+        print(f"rollback_status={'ok' if ok else 'fail'}")
+        print(f"rollback_reason={reason}")
+        append_action_log(state_root, action_name, desired.slot, desired.slot, "fail", "workspace_guidance_final_failed")
+        return 1
+    for key, value in final_guidance_result.items():
+        print(f"final_{key}={value}")
+
     applied_at = now_iso()
     try:
         write_slot_manifests(
