@@ -4,7 +4,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from ..host.account_files import ensure_not_symlink_chain, runtime_ids, slot_home
+from ..host.account_files import ensure_group_member, ensure_not_symlink_chain, runtime_ids, slot_home
 from ..paths import REPO_ROOT
 
 
@@ -99,10 +99,12 @@ def ensure_runtime_workspace_guidance(slot: str, profile) -> dict[str, str]:
     if family == "hermes":
         uid, _runtime_gid, data_gid = runtime_ids(slot)
         gid = data_gid
+        group_member_status = ensure_group_member(slot, f"{slot}_data")
         app_mode = 0o750
-        workspace_mode = 0o750
+        workspace_mode = 0o2750
     else:
         uid, gid, _data_gid = runtime_ids(slot)
+        group_member_status = "not_required"
         app_mode = 0o750
         workspace_mode = 0o750
 
@@ -125,6 +127,7 @@ def ensure_runtime_workspace_guidance(slot: str, profile) -> dict[str, str]:
     return {
         "workspace_guidance": "updated" if changed else "present",
         "workspace_guidance_family": family,
+        "workspace_data_group_member": group_member_status,
         "workspace_guidance_workspace": str(workspace),
         "workspace_guidance_files": ",".join(str(target) for target in targets),
     }

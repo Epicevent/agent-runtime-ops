@@ -118,6 +118,10 @@ def _ensure_runtime_membership(runtime_user: str, data_group: str) -> None:
     _run(["usermod", "-a", "-G", data_group, runtime_user])
 
 
+def _ensure_customer_data_membership(customer_user: str, data_group: str) -> None:
+    _run(["usermod", "-a", "-G", data_group, customer_user])
+
+
 def _write_owned_text(path: Path, text: str, mode: int, uid: int, gid: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
@@ -360,6 +364,7 @@ def cmd_admin_create_image_dev(args: argparse.Namespace) -> int:
             shell="/usr/sbin/nologin",
             system=True,
         )
+        _ensure_customer_data_membership(linux_account, data_group)
         _ensure_runtime_membership(runtime_group, data_group)
         secret_status, config_status, provider_secret_status = _ensure_target_dirs_and_secrets(
             linux_account,

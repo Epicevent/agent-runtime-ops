@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import subprocess
 import sys
 import tempfile
 
@@ -69,6 +70,20 @@ def runtime_ids(slot: str) -> tuple[int, int, int]:
     runtime = passwd_record(f"{slot}_rt")
     data_gid = group_gid(f"{slot}_data")
     return int(runtime.pw_uid), int(runtime.pw_gid), data_gid
+
+
+def ensure_group_member(user: str, group: str) -> str:
+    import grp
+
+    user_record = passwd_record(user)
+    group_record = grp.getgrnam(group)
+    if user_record.pw_gid == group_record.gr_gid or user in group_record.gr_mem:
+        return "present"
+    proc = subprocess.run(["usermod", "-a", "-G", group, user], text=True, capture_output=True, check=False)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip() or f"returncode={proc.returncode}"
+        raise RuntimeError(f"usermod failed: {detail[:240]}")
+    return "added"
 
 
 def ensure_not_symlink_chain(path: Path, stop_at: Path) -> None:

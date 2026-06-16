@@ -234,6 +234,7 @@ Hermes profile은 기존 Hermes 운영 env를 유지한다.
 
 ```text
 HERMES_HOME=/opt/data
+HERMES_HOME_MODE=0750
 HERMES_DATA_DIR=/opt/data
 HERMES_WORKSPACE_DIR=/workspace
 HERMES_DASHBOARD=1
@@ -259,6 +260,18 @@ Hermes mount 위치는 다음을 따른다.
 /home/ocN/nas_docs
   -> /workspace/nas_docs
 ```
+
+Host-side Hermes workspace permissions are part of the runtime contract:
+
+```text
+/home/ocN/.hermes           owner=ocN_rt group=ocN_data mode=0750
+/home/ocN/.hermes/workspace owner=ocN_rt group=ocN_data mode=2750
+ocN must be a member of ocN_data
+```
+
+The runtime user owns and writes the workspace. The customer Unix account reaches artifacts through
+the `ocN_data` group. Runtime secrets such as `.env` remain owner-only files and must not become
+group-readable.
 
 Hermes는 compose가 아니라 image init이 runtime user 정리를 책임진다. 이 차이를 OpenClaw와
 같이 단순화하면 slot이 `unhealthy`가 되고 PID가 0으로 떨어진다.

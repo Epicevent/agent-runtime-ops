@@ -10,6 +10,7 @@ services:
       - "{{ target_home }}/.hermes/.env"
     environment:
       HERMES_HOME: /opt/data
+      HERMES_HOME_MODE: "0750"
       HERMES_DATA_DIR: /opt/data
       HERMES_WORKSPACE_DIR: /workspace
       HERMES_API_URL: http://127.0.0.1:8642
