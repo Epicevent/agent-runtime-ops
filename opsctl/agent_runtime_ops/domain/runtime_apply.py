@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from pathlib import Path
 
 from ..redaction import redact
@@ -30,6 +31,9 @@ from .runtime_paths import (
 )
 from .runtime_truth import find_gateway_container
 from .workspace_guidance import ensure_runtime_workspace_guidance
+
+
+FINAL_WORKSPACE_GUIDANCE_STABILIZE_SECONDS = 10
 
 
 def print_process_result(prefix: str, proc: subprocess.CompletedProcess[str], limit: int = 2000) -> None:
@@ -196,6 +200,8 @@ def apply_desired_slot(
         append_action_log(state_root, action_name, desired.slot, desired.slot, "fail", f"live_failed={failed}")
         return 1
 
+    if FINAL_WORKSPACE_GUIDANCE_STABILIZE_SECONDS > 0:
+        time.sleep(FINAL_WORKSPACE_GUIDANCE_STABILIZE_SECONDS)
     try:
         final_guidance_result = ensure_runtime_workspace_guidance(desired.slot, profile)
     except Exception as exc:
