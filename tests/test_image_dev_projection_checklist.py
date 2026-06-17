@@ -9,7 +9,11 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-from agent_runtime_ops.commands.admin import _clone_provider_secret_values, cmd_admin_create_image_dev
+from agent_runtime_ops.commands.admin import (
+    _clone_provider_secret_values,
+    _ensure_openclaw_app_dirs,
+    cmd_admin_create_image_dev,
+)
 from agent_runtime_ops.commands.checklist import HERMES_RUNTIME_REQUIRED_CHECKS, cmd_checklist_pack
 from agent_runtime_ops.commands.rollout import cmd_rollout_image_canary, cmd_rollout_image_promote
 from agent_runtime_ops.profiles import load_profile
@@ -139,6 +143,51 @@ class ImageDevProjectionChecklistTests(unittest.TestCase):
             self.assertEqual(values["GEMINI_API_KEY"], "provider")
             self.assertEqual(values["HERMES_PASSWORD"], "workspace-auth")
             self.assertNotIn("API_SERVER_KEY", values)
+
+    def test_image_dev_secret_clone_can_exclude_workspace_auth(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            secret_path = root / "source.env"
+            secret_path.write_text(
+                "GEMINI_API_KEY='provider'\nHERMES_PASSWORD='workspace-auth'\n",
+                encoding="utf-8",
+            )
+            source = RuntimeTarget(
+                target="dev-oc",
+                family="openclaw",
+                runtime_class="dev",
+                image_name="direct-image",
+                image_spec={},
+                runtime_profile="openclaw-dev",
+                route=binding("dev-oc", "openclaw", "dev", 30789, 30790),
+            )
+            with (
+                patch("agent_runtime_ops.commands.admin.load_runtime_target", return_value=source),
+                patch("agent_runtime_ops.commands.admin.load_profile", return_value=load_profile("openclaw-dev")),
+                patch(
+                    "agent_runtime_ops.commands.admin.primary_profile_secret_file",
+                    return_value=argparse.Namespace(path=secret_path),
+                ),
+            ):
+                values = _clone_provider_secret_values("dev-oc", root, include_workspace_auth=False)
+
+            self.assertEqual(values["GEMINI_API_KEY"], "provider")
+            self.assertNotIn("HERMES_PASSWORD", values)
+
+    def test_openclaw_image_dev_dirs_match_openclaw_mounts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "dev-oc-img"
+            home.mkdir()
+            with patch("agent_runtime_ops.commands.admin.os.chown"):
+                state_dir = _ensure_openclaw_app_dirs(home, runtime_uid=1001, runtime_gid=1002, data_gid=1003)
+
+            self.assertEqual(state_dir, home / ".openclaw")
+            self.assertTrue((home / ".openclaw").is_dir())
+            self.assertTrue((home / ".openclaw" / "workspace").is_dir())
+            self.assertTrue((home / ".openclaw-auth-profile-secrets").is_dir())
+            self.assertEqual((home / ".openclaw").stat().st_mode & 0o777, 0o750)
+            self.assertEqual((home / ".openclaw" / "workspace").stat().st_mode & 0o777, 0o750)
+            self.assertEqual((home / ".openclaw-auth-profile-secrets").stat().st_mode & 0o777, 0o700)
 
     def test_rollout_image_canary_prepares_runtime_env_before_apply(self) -> None:
         route = binding("dev-hermes-img", "hermes", "customer", 30989, 30990)

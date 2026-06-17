@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import json
 import os
 from pathlib import Path
 import pwd
@@ -204,7 +205,7 @@ def _ensure_apache_route(binding: RuntimeBinding) -> tuple[Path, str]:
     return path, "created"
 
 
-def _read_config_from_slot(slot: str) -> dict[str, object]:
+def _read_hermes_config_from_slot(slot: str) -> dict[str, object]:
     source_home = Path(pwd.getpwnam(slot).pw_dir).resolve(strict=False)
     path = source_home / ".hermes" / "config.yaml"
     if not path.exists():
@@ -217,16 +218,62 @@ def _read_config_from_slot(slot: str) -> dict[str, object]:
     return dict(data)
 
 
-def _clone_provider_secret_values(source_slot: str, state_root: Path) -> dict[str, str]:
+def _read_openclaw_config_from_slot(slot: str) -> dict[str, object]:
+    source_home = Path(pwd.getpwnam(slot).pw_dir).resolve(strict=False)
+    path = source_home / ".openclaw" / "openclaw.json"
+    if not path.exists():
+        return {}
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"unsafe config source: {path}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"source config must be a mapping: {path}")
+    return dict(data)
+
+
+def _clone_provider_secret_values(source_slot: str, state_root: Path, *, include_workspace_auth: bool = True) -> dict[str, str]:
     source = load_runtime_target(source_slot, state_root)
     source_profile = load_profile(source.runtime_profile)
     source_file = primary_profile_secret_file(source_profile, source.slot)
     if source_file.path.is_symlink() or not source_file.path.is_file():
         raise ValueError(f"unsafe provider secret source: {source_file.path}")
     values = parse_secret_env_text(source_file.path.read_text(encoding="utf-8", errors="replace"), source=str(source_file.path))
-    cloned_secret_keys = PROVIDER_SECRET_KEYS | WORKSPACE_AUTH_SECRET_KEYS
+    cloned_secret_keys = PROVIDER_SECRET_KEYS | (WORKSPACE_AUTH_SECRET_KEYS if include_workspace_auth else set())
     cloned_values = {key: values[key] for key in sorted(cloned_secret_keys) if values.get(key)}
     return validate_runtime_secret_values(cloned_values) if cloned_values else {}
+
+
+def _ensure_owned_dir(path: Path, *, home: Path, uid: int, gid: int, mode: int) -> None:
+    ensure_not_symlink_chain(path, home)
+    path.mkdir(parents=True, exist_ok=True)
+    os.chown(path, uid, gid)
+    os.chmod(path, mode)
+
+
+def _ensure_hermes_app_dirs(home: Path, *, runtime_uid: int, data_gid: int) -> Path:
+    hermes_dir = home / ".hermes"
+    workspace_dir = hermes_dir / "workspace"
+    for path in (hermes_dir, workspace_dir):
+        _ensure_owned_dir(path, home=home, uid=runtime_uid, gid=data_gid, mode=0o750)
+    return hermes_dir
+
+
+def _ensure_openclaw_app_dirs(home: Path, *, runtime_uid: int, runtime_gid: int, data_gid: int) -> Path:
+    openclaw_state_dir = home / ".openclaw"
+    workspace_dir = openclaw_state_dir / "workspace"
+    auth_profile_dir = home / ".openclaw-auth-profile-secrets"
+    for path in (openclaw_state_dir, workspace_dir):
+        _ensure_owned_dir(path, home=home, uid=runtime_uid, gid=data_gid, mode=0o750)
+    _ensure_owned_dir(auth_profile_dir, home=home, uid=runtime_uid, gid=runtime_gid, mode=0o700)
+    return openclaw_state_dir
+
+
+def _empty_or_existing_env_text(path: Path) -> str:
+    if not path.exists():
+        return ""
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"unsafe runtime secret file: {path}")
+    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def _ensure_target_dirs_and_secrets(
@@ -240,7 +287,7 @@ def _ensure_target_dirs_and_secrets(
     state_root: Path,
 ) -> tuple[str, str, str]:
     slot_uid, slot_gid = slot_uid_gid(target)
-    runtime_uid, _runtime_gid, data_gid = runtime_ids(target)
+    runtime_uid, runtime_gid, data_gid = runtime_ids(target)
     home = Path("/home") / target
     ensure_not_symlink_chain(home, Path("/home"))
     home.mkdir(mode=0o750, exist_ok=True)
@@ -248,55 +295,87 @@ def _ensure_target_dirs_and_secrets(
     os.chmod(home, 0o750)
 
     runtime_dir = home / "openclaw"
-    hermes_dir = home / ".hermes"
-    workspace_dir = hermes_dir / "workspace"
     nas_docs_dir = home / "nas_docs"
-    ensure_not_symlink_chain(runtime_dir, home)
-    runtime_dir.mkdir(parents=True, exist_ok=True)
-    os.chown(runtime_dir, slot_uid, slot_gid)
-    os.chmod(runtime_dir, 0o750)
-    for path in (hermes_dir, workspace_dir):
-        ensure_not_symlink_chain(path, home)
-        path.mkdir(parents=True, exist_ok=True)
-        os.chown(path, runtime_uid, data_gid)
-        os.chmod(path, 0o750)
+    _ensure_owned_dir(runtime_dir, home=home, uid=slot_uid, gid=slot_gid, mode=0o750)
+    if family == "hermes":
+        hermes_dir = _ensure_hermes_app_dirs(home, runtime_uid=runtime_uid, data_gid=data_gid)
+        profile_secret_path = hermes_dir / ".env"
+    elif family == "openclaw":
+        openclaw_state_dir = _ensure_openclaw_app_dirs(home, runtime_uid=runtime_uid, runtime_gid=runtime_gid, data_gid=data_gid)
+        profile = load_profile("openclaw-customer")
+        profile_secret_path = primary_profile_secret_file(profile, target).path
+        ensure_not_symlink_chain(profile_secret_path.parent, home)
+        if profile_secret_path.parent != runtime_dir:
+            raise ValueError(f"unexpected OpenClaw secret path: {profile_secret_path}")
+    else:
+        raise ValueError(f"unsupported family: {family}")
     nas_docs_dir.mkdir(parents=True, exist_ok=True)
     os.chown(nas_docs_dir, 0, data_gid)
     os.chmod(nas_docs_dir, 0o750)
     ensure_customer_agent_dirs(target)
 
-    env_path = hermes_dir / ".env"
-    existing_text = env_path.read_text(encoding="utf-8", errors="replace") if env_path.exists() else ""
-    existing_values = parse_secret_env_text(existing_text, source=str(env_path)) if existing_text else {}
+    existing_text = _empty_or_existing_env_text(profile_secret_path)
+    existing_values = parse_secret_env_text(existing_text, source=str(profile_secret_path)) if existing_text else {}
     values: dict[str, str] = {}
     if clone_provider_secrets_from:
-        values.update(_clone_provider_secret_values(clone_provider_secrets_from, state_root))
-    api_server_key = existing_values.get("API_SERVER_KEY") or secrets.token_urlsafe(48)
-    if not existing_values.get("API_SERVER_KEY"):
-        values["API_SERVER_KEY"] = api_server_key
-    if values:
-        _write_owned_text(env_path, render_upserted_secret_env(existing_text, values), 0o600, runtime_uid, data_gid)
+        values.update(
+            _clone_provider_secret_values(
+                clone_provider_secrets_from,
+                state_root,
+                include_workspace_auth=(family == "hermes"),
+            )
+        )
+    api_server_key = ""
+    if family == "hermes":
+        api_server_key = existing_values.get("API_SERVER_KEY") or secrets.token_urlsafe(48)
+        if not existing_values.get("API_SERVER_KEY"):
+            values["API_SERVER_KEY"] = api_server_key
+    runtime_env_updates = {
+        "OPENCLAW_RUNTIME_FAMILY": family,
+        "OPENCLAW_GATEWAY_PORT": str(gateway_port),
+        "OPENCLAW_BRIDGE_PORT": str(bridge_port),
+    }
+    if api_server_key:
+        runtime_env_updates["API_SERVER_KEY"] = api_server_key
+    if family == "openclaw":
+        openclaw_env_updates = dict(values)
+        openclaw_env_updates.update(runtime_env_updates)
+        _write_owned_text(
+            profile_secret_path,
+            render_upserted_secret_env(existing_text, openclaw_env_updates),
+            0o600,
+            slot_uid,
+            slot_gid,
+        )
     else:
-        os.chown(env_path, runtime_uid, data_gid)
-        os.chmod(env_path, 0o600)
-    upsert_runtime_env_file(
-        runtime_dir / ".env",
-        {
-            "API_SERVER_KEY": api_server_key,
-            "OPENCLAW_RUNTIME_FAMILY": family,
-            "OPENCLAW_GATEWAY_PORT": str(gateway_port),
-            "OPENCLAW_BRIDGE_PORT": str(bridge_port),
-        },
-        slot_uid,
-        slot_gid,
-    )
+        if values:
+            _write_owned_text(
+                profile_secret_path,
+                render_upserted_secret_env(existing_text, values),
+                0o600,
+                runtime_uid,
+                data_gid,
+            )
+        elif not profile_secret_path.exists():
+            _write_owned_text(profile_secret_path, "", 0o600, runtime_uid, data_gid)
+        upsert_runtime_env_file(runtime_dir / ".env", runtime_env_updates, slot_uid, slot_gid)
 
     config_status = "not_cloned"
     if clone_config_from:
-        config = _read_config_from_slot(clone_config_from)
-        _write_owned_text(hermes_dir / "config.yaml", dump_yaml(config), 0o600, runtime_uid, data_gid)
+        if family == "hermes":
+            config = _read_hermes_config_from_slot(clone_config_from)
+            _write_owned_text(hermes_dir / "config.yaml", dump_yaml(config), 0o600, runtime_uid, data_gid)
+        else:
+            config = _read_openclaw_config_from_slot(clone_config_from)
+            _write_owned_text(
+                openclaw_state_dir / "openclaw.json",
+                json.dumps(config, ensure_ascii=False, indent=2) + "\n",
+                0o600,
+                runtime_uid,
+                data_gid,
+            )
         config_status = "cloned"
-    return ("present", config_status, "cloned" if clone_provider_secrets_from else "not_cloned")
+    return ("present" if api_server_key else "not_applicable", config_status, "cloned" if clone_provider_secrets_from else "not_cloned")
 
 
 def cmd_admin_create_image_dev(args: argparse.Namespace) -> int:
