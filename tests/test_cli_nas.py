@@ -254,7 +254,7 @@ class CliNasTests(unittest.TestCase):
                 patch("agent_runtime_ops.commands.nas.getpass.getuser", return_value="oc3"),
                 patch("agent_runtime_ops.commands.nas.check_nas_policy") as policy,
                 patch("agent_runtime_ops.commands.nas.ensure_customer_agent_dirs"),
-                patch("agent_runtime_ops.commands.nas.slot_uid_gid", return_value=(1003, 1003)),
+                patch("agent_runtime_ops.commands.nas.slot_uid_gid", return_value=(os.getuid(), os.getgid())),
                 patch("agent_runtime_ops.commands.nas.customer_credential_path", return_value=credential),
                 patch("agent_runtime_ops.commands.nas.write_credential_file") as write_credential,
                 patch("sys.stdin", io.StringIO(secret)),
@@ -288,7 +288,7 @@ class CliNasTests(unittest.TestCase):
                 patch("agent_runtime_ops.commands.nas.getpass.getuser", return_value="oc3"),
                 patch("agent_runtime_ops.commands.nas.check_nas_policy") as policy,
                 patch("agent_runtime_ops.commands.nas.ensure_customer_agent_dirs"),
-                patch("agent_runtime_ops.commands.nas.slot_uid_gid", return_value=(1003, 1003)),
+                patch("agent_runtime_ops.commands.nas.slot_uid_gid", return_value=(os.getuid(), os.getgid())),
                 patch("agent_runtime_ops.commands.nas.request_path", return_value=request_file),
                 contextlib.redirect_stdout(output),
             ):
