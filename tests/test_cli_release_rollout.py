@@ -38,6 +38,7 @@ from agent_runtime_ops.domain.image_specs import IMAGE_RECIPE_LABEL_PREFIX, imag
 from agent_runtime_ops.domain.runtime_checks import (
     contract_health_endpoints,
     run_live_slot_checks,
+    run_workspace_user_nas_docs_listing_check,
     workspace_hermes_config_api_checks,
 )
 from agent_runtime_ops.domain.runtime_truth import local_canonical_recipe_check_from_truth
@@ -1556,6 +1557,28 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 results["live_workspace_files_nas_docs_listing_ok"],
                 (True, "status=200 root=nas_docs entries_array=true error=none"),
             )
+
+    def test_compose_runtime_nas_listing_uses_docker_exec_user(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run_text(command, timeout=20):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with (
+            patch("agent_runtime_ops.domain.runtime_checks.runtime_ids", return_value=(995, 982, 1042)),
+            patch("agent_runtime_ops.domain.runtime_checks.run_text", side_effect=fake_run_text),
+        ):
+            result = run_workspace_user_nas_docs_listing_check(
+                "container-1",
+                "/home/node/nas_docs",
+                runtime_user_mode="compose",
+                slot="oc1",
+            )
+
+        self.assertEqual(result, (True, "live_workspace_user_nas_docs_listing_ok", "/home/node/nas_docs"))
+        self.assertEqual(calls[0][:5], ["docker", "exec", "--user", "995:982", "container-1"])
+        self.assertIn("/home/node/nas_docs", calls[0][-1])
 
     def test_workspace_hermes_config_api_reuses_existing_session_cookie(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

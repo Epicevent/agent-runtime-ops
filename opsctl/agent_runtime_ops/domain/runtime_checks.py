@@ -317,8 +317,27 @@ def run_container_nas_docs_listing_check(container: str, container_nas_root: str
     return False, "live_container_nas_docs_listing_ok", f"path={container_nas_root} error={detail[:160]}"
 
 
-def run_workspace_user_nas_docs_listing_check(container: str, container_nas_root: str) -> tuple[bool, str, str | None]:
+def run_workspace_user_nas_docs_listing_check(
+    container: str,
+    container_nas_root: str,
+    *,
+    runtime_user_mode: str = "image-managed",
+    slot: str = "",
+) -> tuple[bool, str, str | None]:
     quoted_root = shlex.quote(container_nas_root)
+    if runtime_user_mode == "compose":
+        try:
+            uid, gid, _ = runtime_ids(slot)
+        except Exception as exc:
+            return False, "live_workspace_user_nas_docs_listing_ok", f"slot={slot} runtime_ids_error={exc}"
+        script = f'root={quoted_root}; test -d "$root" && ls -la "$root" >/dev/null'
+        proc = run_text(["docker", "exec", "--user", f"{uid}:{gid}", container, "sh", "-lc", script], timeout=15)
+        if proc.returncode == 0:
+            return True, "live_workspace_user_nas_docs_listing_ok", container_nas_root
+        detail = (proc.stderr or proc.stdout).strip() or f"returncode={proc.returncode}"
+        return False, "live_workspace_user_nas_docs_listing_ok", f"path={container_nas_root} user={uid}:{gid} error={detail[:160]}"
+    if runtime_user_mode != "image-managed":
+        return False, "live_workspace_user_nas_docs_listing_ok", f"unsupported_runtime_user_mode={runtime_user_mode}"
     script = f'''
       root={quoted_root}
       if command -v s6-setuidgid >/dev/null 2>&1; then
@@ -565,7 +584,14 @@ def run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool,
         return checks
 
     checks.append(run_container_nas_docs_listing_check(container, container_nas_root))
-    checks.append(run_workspace_user_nas_docs_listing_check(container, container_nas_root))
+    checks.append(
+        run_workspace_user_nas_docs_listing_check(
+            container,
+            container_nas_root,
+            runtime_user_mode=runtime_user_mode,
+            slot=desired.slot,
+        )
+    )
 
     container_rc, container_error, container_mounts = _findmnt_tree(container_nas_root, container_pid=pid)
     checks.append(
