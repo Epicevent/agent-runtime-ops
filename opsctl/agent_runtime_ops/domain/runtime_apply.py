@@ -33,7 +33,7 @@ from .runtime_truth import find_gateway_container
 from .workspace_guidance import ensure_runtime_workspace_guidance
 
 
-FINAL_WORKSPACE_GUIDANCE_STABILIZE_SECONDS = 10
+FINAL_WORKSPACE_GUIDANCE_STABILIZE_DELAYS_SECONDS = [10, 30, 60]
 
 
 def print_process_result(prefix: str, proc: subprocess.CompletedProcess[str], limit: int = 2000) -> None:
@@ -200,8 +200,22 @@ def apply_desired_slot(
         append_action_log(state_root, action_name, desired.slot, desired.slot, "fail", f"live_failed={failed}")
         return 1
 
-    if FINAL_WORKSPACE_GUIDANCE_STABILIZE_SECONDS > 0:
-        time.sleep(FINAL_WORKSPACE_GUIDANCE_STABILIZE_SECONDS)
+    for index, delay_seconds in enumerate(FINAL_WORKSPACE_GUIDANCE_STABILIZE_DELAYS_SECONDS, start=1):
+        if delay_seconds > 0:
+            time.sleep(delay_seconds)
+        try:
+            stabilized_guidance_result = ensure_runtime_workspace_guidance(desired.slot, profile)
+        except Exception as exc:
+            ok, reason = restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
+            print("apply_status=fail")
+            print(f"reason=workspace_guidance_stabilize_failed:{exc}")
+            print(f"rollback_status={'ok' if ok else 'fail'}")
+            print(f"rollback_reason={reason}")
+            append_action_log(state_root, action_name, desired.slot, desired.slot, "fail", "workspace_guidance_stabilize_failed")
+            return 1
+        for key, value in stabilized_guidance_result.items():
+            print(f"stabilized_{index}_{key}={value}")
+
     try:
         final_guidance_result = ensure_runtime_workspace_guidance(desired.slot, profile)
     except Exception as exc:
