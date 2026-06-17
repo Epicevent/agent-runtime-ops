@@ -132,7 +132,7 @@ If value retrieval is explicitly authorized, use only the exact manual command p
 NAS requests and managed mounts:
 
 ```bash
-ssh svcops "/usr/local/bin/opsctl nas requests"
+ssh svcops "sudo /usr/local/bin/opsctl nas requests"
 ssh svcops "/usr/local/bin/opsctl nas mounted SLOT"
 ssh svcops "sudo /usr/local/bin/opsctl nas approve-auto"
 ssh svcops "sudo /usr/local/bin/opsctl nas mount SLOT //HOST/SHARE"

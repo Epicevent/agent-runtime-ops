@@ -35,14 +35,25 @@ def atomic_write_key_value(path: Path, data: dict[str, str], mode: int, uid: int
             for key, value in data.items():
                 handle.write(f"{key}={value}\n")
         os.chmod(tmp_path, mode)
-        if uid is not None and gid is not None and hasattr(os, "chown"):
-            os.chown(tmp_path, uid, gid)
+        ensure_owner_if_needed(tmp_path, uid, gid)
         os.replace(tmp_path, path)
     finally:
         try:
             tmp_path.unlink()
         except FileNotFoundError:
             pass
+
+
+def ensure_owner_if_needed(path: Path, uid: int | None, gid: int | None) -> None:
+    if uid is None or gid is None or not hasattr(os, "chown"):
+        return
+    current = path.stat()
+    if current.st_uid == uid and current.st_gid == gid:
+        return
+    if current.st_uid == uid:
+        os.chown(path, -1, gid)
+        return
+    os.chown(path, uid, gid)
 
 
 def passwd_record(name: str):
@@ -115,7 +126,7 @@ def ensure_customer_agent_dirs(slot: str) -> None:
         (history_dir(slot, "rejected"), 0o700),
     ]:
         path.mkdir(parents=True, exist_ok=True)
-        os.chown(path, uid, gid)
+        ensure_owner_if_needed(path, uid, gid)
         os.chmod(path, mode)
 
 
@@ -137,7 +148,7 @@ def write_credential_file(path: Path, username: str, password: str, domain: str 
         raise ValueError("password is required")
     ensure_not_symlink_chain(path.parent, path.parents[2] if len(path.parents) > 2 else path.parent)
     path.parent.mkdir(parents=True, exist_ok=True)
-    os.chown(path.parent, uid, gid)
+    ensure_owner_if_needed(path.parent, uid, gid)
     os.chmod(path.parent, 0o700)
     data = {"username": username, "password": password}
     if domain:

@@ -184,7 +184,7 @@ sudo /usr/local/bin/opsctl nas approve-auto --watch --interval 15
 대기 요청 확인:
 
 ```bash
-opsctl nas requests
+sudo /usr/local/bin/opsctl nas requests
 ```
 
 정책만 미리 확인:

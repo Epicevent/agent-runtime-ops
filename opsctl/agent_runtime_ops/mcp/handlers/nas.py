@@ -7,7 +7,7 @@ from .. import validation as v
 
 def status(server, args: dict[str, Any]) -> dict[str, Any]:
     v.reject_unknown(args, {"target"}, error_type=server.tool_error)
-    runs = [server._run([server.opsctl, "nas", "requests"], timeout=60)]
+    runs = [server._run([server.sudo, server.opsctl, "nas", "requests"], timeout=60)]
     slot_value = args.get("target")
     if slot_value:
         runs.append(server._run([server.opsctl, "nas", "mounted", v.target(slot_value, error_type=server.tool_error)], timeout=60))

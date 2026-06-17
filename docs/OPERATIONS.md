@@ -85,7 +85,7 @@ sudo /usr/local/bin/opsctl nas approve-auto --watch --interval 15
 상태 확인과 해제는 항상 `//HOST/SHARE` 기준으로 한다.
 
 ```bash
-opsctl nas requests
+sudo /usr/local/bin/opsctl nas requests
 opsctl nas mounted oc3
 sudo /usr/local/bin/opsctl nas unmount oc3 //192.168.0.222/hanpass
 ```

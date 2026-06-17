@@ -44,7 +44,7 @@ from ..nas import (
     request_path,
     root_credential_path,
 )
-from ..routing import get_runtime_binding, load_runtime_bindings
+from ..routing import load_runtime_bindings, validate_linux_account
 from ..state import load_runtime_target
 
 
@@ -203,29 +203,27 @@ def cmd_nas_policy_check(args: argparse.Namespace) -> int:
     return 0 if decision.allowed else 1
 
 
-def _caller_customer_slot(state_root: Path) -> str:
-    user = getpass.getuser()
-    binding = get_runtime_binding(user, state_root)
-    if binding.linux_account != user or binding.runtime_class != "customer":
+def _caller_customer_slot() -> str:
+    user = validate_linux_account(getpass.getuser())
+    if user in {"root", "svcops"}:
         raise ValueError(f"this command must be run by a customer linux_account, got {user}")
     return user
 
 
 def cmd_nas_request(args: argparse.Namespace) -> int:
     try:
-        slot = _caller_customer_slot(_state_root(args))
-        decision = check_nas_policy(slot, args.share, _state_root(args))
-        if not decision.allowed:
-            raise ValueError(f"policy denied: {decision.reason}")
+        slot = _caller_customer_slot()
+        share = parse_smb_share(args.share)
         ensure_customer_agent_dirs(slot)
-        path = request_path(slot, decision.share)
+        path = request_path(slot, share)
+        mountpoint = mountpoint_for_share(slot, share)
         uid, gid = slot_uid_gid(slot)
         atomic_write_key_value(
             path,
             {
                 "slot": slot,
-                "requested_share": decision.share.source,
-                "mountpoint": str(decision.mountpoint),
+                "requested_share": share.source,
+                "mountpoint": str(mountpoint),
                 "created_at": _now_iso(),
             },
             0o600,
@@ -237,9 +235,9 @@ def cmd_nas_request(args: argparse.Namespace) -> int:
         print(f"reason={exc}")
         return 1
     print(f"target={slot}")
-    print(f"requested_share={decision.share.source}")
+    print(f"requested_share={share.source}")
     print(f"request_file={path}")
-    print(f"mountpoint={decision.mountpoint}")
+    print(f"mountpoint={mountpoint}")
     print("request_status=pending")
     print("next_action=run opsctl nas credential set //HOST/SHARE --username NAS_USER --password-stdin")
     return 0
@@ -247,15 +245,11 @@ def cmd_nas_request(args: argparse.Namespace) -> int:
 
 def cmd_nas_credential_set(args: argparse.Namespace) -> int:
     try:
-        state_root = _state_root(args)
-        slot = _caller_customer_slot(state_root)
-        decision = check_nas_policy(slot, args.share, state_root)
-        if not decision.allowed:
-            raise ValueError(f"policy denied: {decision.reason}")
-        slot = decision.slot
+        slot = _caller_customer_slot()
+        share = parse_smb_share(args.share)
         password = read_password_from_stdin()
         ensure_customer_agent_dirs(slot)
-        credential_path = customer_credential_path(slot, decision.share)
+        credential_path = customer_credential_path(slot, share)
         uid, gid = slot_uid_gid(slot)
         write_credential_file(credential_path, args.username, password, args.domain, uid, gid)
     except Exception as exc:
@@ -263,7 +257,7 @@ def cmd_nas_credential_set(args: argparse.Namespace) -> int:
         print(f"reason={exc}")
         return 1
     print(f"target={slot}")
-    print(f"share={decision.share.source}")
+    print(f"share={share.source}")
     print(f"credential_file={credential_path}")
     print("credential_status=stored")
     print("secret_value_printed=no")
@@ -544,5 +538,4 @@ def cmd_nas_remove(args: argparse.Namespace) -> int:
     )
     _append_action_log(_state_root(args), "nas_remove", slot, share.source, "ok", detail)
     return 0
-
 

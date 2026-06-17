@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -16,9 +17,11 @@ from agent_runtime_ops.commands.nas import (
     cmd_nas_credential_status,
     cmd_nas_credential_set,
     cmd_nas_mount,
+    cmd_nas_request,
     cmd_nas_requests,
 )
 from agent_runtime_ops.domain.nas_credentials import delete_official_credentials, official_credential_status
+from agent_runtime_ops.host.account_files import write_credential_file
 from agent_runtime_ops.host.fstab import fstab_escape as _fstab_escape
 from agent_runtime_ops.host.fstab import managed_fstab_marker as _managed_fstab_marker
 from agent_runtime_ops.nas import parse_smb_share
@@ -245,13 +248,11 @@ class CliNasTests(unittest.TestCase):
         secret = "secret-password"
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            state_root = root / "state"
-            state_root.mkdir()
-            write_state(state_root)
             credential = root / "cred"
             output = io.StringIO()
             with (
                 patch("agent_runtime_ops.commands.nas.getpass.getuser", return_value="oc3"),
+                patch("agent_runtime_ops.commands.nas.check_nas_policy") as policy,
                 patch("agent_runtime_ops.commands.nas.ensure_customer_agent_dirs"),
                 patch("agent_runtime_ops.commands.nas.slot_uid_gid", return_value=(1003, 1003)),
                 patch("agent_runtime_ops.commands.nas.customer_credential_path", return_value=credential),
@@ -261,7 +262,7 @@ class CliNasTests(unittest.TestCase):
             ):
                 rc = cmd_nas_credential_set(
                     argparse.Namespace(
-                        state_root=str(state_root),
+                        state_root="/unreadable-private-state",
                         share=share,
                         username="nas-user",
                         password_stdin=True,
@@ -274,8 +275,40 @@ class CliNasTests(unittest.TestCase):
         self.assertIn("credential_status=stored", text)
         self.assertIn("secret_value_printed=no", text)
         self.assertNotIn(secret, text)
+        policy.assert_not_called()
         write_credential.assert_called_once()
         self.assertEqual(write_credential.call_args.args[:4], (credential, "nas-user", secret, None))
+
+    def test_nas_request_writes_customer_request_without_private_state(self) -> None:
+        share = "//192.168.0.222/hanpass"
+        with tempfile.TemporaryDirectory() as tmp:
+            request_file = Path(tmp) / "request.env"
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.commands.nas.getpass.getuser", return_value="oc3"),
+                patch("agent_runtime_ops.commands.nas.check_nas_policy") as policy,
+                patch("agent_runtime_ops.commands.nas.ensure_customer_agent_dirs"),
+                patch("agent_runtime_ops.commands.nas.slot_uid_gid", return_value=(1003, 1003)),
+                patch("agent_runtime_ops.commands.nas.request_path", return_value=request_file),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_nas_request(argparse.Namespace(state_root="/unreadable-private-state", share=share))
+            text = output.getvalue()
+            request_text = request_file.read_text(encoding="utf-8").replace("\\", "/")
+        self.assertEqual(rc, 0)
+        self.assertIn("target=oc3", text)
+        self.assertIn("request_status=pending", text)
+        self.assertIn("requested_share=//192.168.0.222/hanpass", request_text)
+        self.assertIn("mountpoint=/home/oc3/nas_docs/", request_text)
+        policy.assert_not_called()
+
+    def test_write_credential_file_skips_noop_chown_for_current_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            credential = Path(tmp) / "host" / "share.cred"
+            owner = Path(tmp).stat()
+            with patch("agent_runtime_ops.host.account_files.os.chown", side_effect=PermissionError("unexpected chown"), create=True) as chown:
+                write_credential_file(credential, "nas-user", "secret-password", None, owner.st_uid, owner.st_gid)
+        chown.assert_not_called()
 
     def test_nas_mount_canonicalizes_public_host_before_paths(self) -> None:
         share = parse_smb_share("//192.168.0.222/hanpass")

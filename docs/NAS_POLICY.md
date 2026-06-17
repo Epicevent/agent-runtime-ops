@@ -65,7 +65,7 @@ credential이 아직 없으면 request는 pending으로 남는다. grant가 맞�
 ## 조회와 해제
 
 ```bash
-opsctl nas requests
+sudo /usr/local/bin/opsctl nas requests
 opsctl nas policy-check oc3 //192.168.0.222/hanpass
 opsctl nas mounted oc3
 sudo /usr/local/bin/opsctl nas credential status oc3 //192.168.0.222/hanpass

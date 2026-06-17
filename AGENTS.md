@@ -234,7 +234,7 @@ Treat these as read-only unless the user is explicitly asking for an operation:
 /usr/local/bin/opsctl status TARGET
 sudo /usr/local/bin/opsctl runtime truth TARGET
 sudo /usr/local/bin/opsctl check --live TARGET
-/usr/local/bin/opsctl nas requests
+sudo /usr/local/bin/opsctl nas requests
 /usr/local/bin/opsctl nas mounted TARGET
 /usr/local/bin/opsctl nas policy-check TARGET //HOST/SHARE
 sudo /usr/local/bin/opsctl runtime-secret status TARGET
