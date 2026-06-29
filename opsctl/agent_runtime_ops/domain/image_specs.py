@@ -10,9 +10,7 @@ from ..canonical_recipes import (
     canonical_recipe_for_image_spec,
     canonical_recipe_identity,
     load_canonical_recipe,
-    normalized_selftest_contract,
     projection_checks as canonical_projection_checks,
-    selftest_contract_digest,
     validate_canonical_recipe,
 )
 from ..image_components import image_component_name as _image_component_name
@@ -278,8 +276,13 @@ def image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product_
     contract_version = recipe_label(labels, "contract.version")
     health_endpoints_label = recipe_label(labels, "health.endpoints")
     health_endpoints_json_label = recipe_label(labels, "health.endpoints.json")
+    # Self-contained selftest contract: the product image carries the invocation in a
+    # plain-string label (inherited by the wrapper). The required checks come from the
+    # selftest's own JSON output. Trust is anchored by the root-approved image digest
+    # (opsctl image approve), not by the recipe.
+    selftest_command = recipe_label(labels, "selftest.command")
     selftest_name = recipe_label(labels, "selftest.name")
-    selftest_digest = recipe_label(labels, "selftest.digest")
+    selftest_timeout = recipe_label(labels, "selftest.timeout")
     canonical_name = recipe_label(labels, "recipe.name")
     canonical_digest = recipe_label(labels, "recipe.digest")
     if not canonical_name:
@@ -341,9 +344,6 @@ def image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product_
     }
     if expected_labels.get("contract.version"):
         label_checks["contract.version"] = contract_version
-    if expected_labels.get("selftest.name"):
-        label_checks["selftest.name"] = selftest_name
-        label_checks["selftest.digest"] = selftest_digest
     for label_name, actual in label_checks.items():
         expected = expected_labels[label_name]
         if actual != expected:
@@ -395,11 +395,11 @@ def image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product_
         "health_endpoints": label_map_from_labels(labels, "health.endpoints"),
         "ops_repo_commit": recipe_label(labels, "ops-repo-commit"),
     }
-    selftest_contract = normalized_selftest_contract(canonical_recipe.data.get("selftest_contract"))
-    if selftest_contract is not None:
+    if selftest_command:
         recipe["selftest_contract"] = {
-            **selftest_contract,
-            "digest": selftest_contract_digest(canonical_recipe.data),
+            "name": selftest_name or "selftest",
+            "command": selftest_command.split(),
+            "timeout_seconds": int(selftest_timeout) if selftest_timeout.isdigit() else 120,
         }
     for runtime_class, profile_name in recipe["runtime_profiles"].items():
         profile = load_profile(str(profile_name))

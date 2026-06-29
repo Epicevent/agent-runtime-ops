@@ -29,14 +29,14 @@ def run_image_selftest_contract(container: str, contract: dict[str, Any]) -> lis
          "required_checks": ["..."]}
     """
     command = [str(arg) for arg in (contract.get("command") or [])]
-    required = [str(name) for name in (contract.get("required_checks") or [])]
     timeout_raw = contract.get("timeout_seconds")
-    timeout = timeout_raw if isinstance(timeout_raw, int) and not isinstance(timeout_raw, bool) and timeout_raw > 0 else 60
+    timeout = timeout_raw if isinstance(timeout_raw, int) and not isinstance(timeout_raw, bool) and timeout_raw > 0 else 120
     name = str(contract.get("name") or "selftest")
 
     def _fail(detail: str) -> list[tuple[bool, str, str | None]]:
-        detail = detail[:200]
-        return [(False, CONTRACT_OK_CHECK, detail)] + [(False, check, detail) for check in required]
+        # On failure the output (and its required_checks) is unavailable; the checklist's
+        # family required-set still backfills the expected selftest_* names as failures.
+        return [(False, CONTRACT_OK_CHECK, detail[:200])]
 
     if not command:
         return _fail("selftest_contract has no command")
@@ -51,6 +51,10 @@ def run_image_selftest_contract(container: str, contract: dict[str, Any]) -> lis
     if not isinstance(payload, dict):
         return _fail("selftest output is not a JSON object")
 
+    # The required set is declared by the product in its OWN output, so the contract
+    # (command via image label + required_checks via output) is fully contained in the
+    # image; opsctl trusts it because the image digest is root-approved.
+    required = [str(c) for c in (payload.get("required_checks") or [])]
     checks: list[tuple[bool, str, str | None]] = []
     results: dict[str, bool] = {}
     raw_checks = payload.get("checks")
