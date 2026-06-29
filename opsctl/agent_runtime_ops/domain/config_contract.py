@@ -18,6 +18,7 @@ Trust is anchored by the root-approved image digest (``opsctl image approve``).
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,21 @@ from .common import run_text
 
 CONTAINER_CONFIG_DIR = "/home/node/.openclaw"
 CONFIG_VALID_CHECK = "config_disk_valid_for_running_image_ok"
+
+
+def config_owner_run_as(host_config_dir: Path) -> str:
+    """Return ``uid:gid`` of the on-disk config so the product runs as its real owner.
+
+    The config tree is owned by the slot's *runtime* account (the uid the gateway
+    container runs as), not the slot login account, and the dir is mode 0700. Deriving
+    the user from the actual file ownership lets the product validate/migrate read the
+    dir and write the file with the same ownership it already has — no account-model
+    assumptions. Prefers the config file, falls back to the dir.
+    """
+    config_file = host_config_dir / "openclaw.json"
+    target = config_file if config_file.exists() else host_config_dir
+    st = os.stat(target)
+    return f"{st.st_uid}:{st.st_gid}"
 
 
 def _command(contract: dict[str, Any], key: str) -> list[str]:

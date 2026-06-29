@@ -6,13 +6,13 @@ import sys
 from ..domain.common import is_root as _is_root
 from ..domain.common import state_root as _state_root
 from ..domain.config_contract import (
+    config_owner_run_as,
     run_config_validate_in_image,
     run_config_migrate_in_image,
 )
 from ..domain.image_specs import config_contract_from_image_labels, image_spec_config_contract
 from ..domain.runtime_paths import slot_config_dir
 from ..domain.runtime_targets import desired_from_live_image_truth as _desired_from_live_image_truth
-from ..host.account_files import slot_uid_gid
 
 
 def _resolve(args: argparse.Namespace):
@@ -40,8 +40,8 @@ def _resolve(args: argparse.Namespace):
             )
     if not product_image:
         raise ValueError("could not resolve a product image for the target slot")
-    uid, gid = slot_uid_gid(args.slot)
-    return contract, slot_config_dir(args.slot), product_image, f"{uid}:{gid}"
+    host_config_dir = slot_config_dir(args.slot)
+    return contract, host_config_dir, product_image, config_owner_run_as(host_config_dir)
 
 
 def cmd_config_validate(args: argparse.Namespace) -> int:

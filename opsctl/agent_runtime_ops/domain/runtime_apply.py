@@ -15,9 +15,8 @@ from .runtime_checks import (
     run_live_slot_checks_with_wait,
     run_static_slot_checks,
 )
-from .config_contract import run_config_validate_in_image
+from .config_contract import config_owner_run_as, run_config_validate_in_image
 from .image_specs import image_spec_config_contract
-from ..host.account_files import slot_uid_gid
 from .runtime_backup import backup_agent_runtime_state, restore_backup
 from .runtime_manifest import write_slot_manifests
 from .docker_compose import (
@@ -124,9 +123,8 @@ def apply_desired_slot(
         if config_contract:
             host_config_dir = slot_config_dir(desired.slot)
             target_product_image = str(desired.image_spec.get("product_image") or "")
-            uid, gid = slot_uid_gid(desired.slot)
             valid, detail = run_config_validate_in_image(
-                target_product_image, host_config_dir, config_contract, run_as=f"{uid}:{gid}"
+                target_product_image, host_config_dir, config_contract, run_as=config_owner_run_as(host_config_dir)
             )
             if not valid:
                 raise ValueError(
