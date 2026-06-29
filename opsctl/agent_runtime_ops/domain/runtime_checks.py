@@ -28,12 +28,14 @@ from .image_specs import (
     allowed_image_ref,
     digest_from_image_ref,
     has_digest_ref,
+    image_spec_config_contract,
     image_spec_profile_contract_checks,
     image_spec_recipe,
     image_spec_selftest_contract,
 )
 from .runtime_truth import find_gateway_container, live_runtime_truth
 from .selftest_contract import run_image_selftest_contract
+from .config_contract import CONFIG_VALID_CHECK, run_config_validate_in_container
 from .image_approval_policy import approved_image_digest
 
 
@@ -628,6 +630,15 @@ def run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool,
         public_path = str(profile.metadata.get("public_route_probe_path") or "/readyz")
         public_ok, public_detail = run_public_route_probe(desired.slot, state_root, path=public_path)
         checks.append((public_ok, "live_public_route_readyz_ok", public_detail))
+
+    # Config drift detection: validate the on-disk config against the image this
+    # container is actually running. A config that has drifted out of schema for its own
+    # image is a latent crash-on-restart (the running process holds the old config in
+    # memory) — this surfaces it before any restart, not after. Gated on the contract.
+    config_contract = image_spec_config_contract(desired.image_spec)
+    if config_contract:
+        cfg_ok, cfg_detail = run_config_validate_in_container(container, config_contract)
+        checks.append((cfg_ok, CONFIG_VALID_CHECK, cfg_detail))
 
     host_rc, host_error, host_mounts = _findmnt_under(host_nas_root)
     checks.append((host_rc == 0, "live_host_nas_root_findmnt_ok", host_error if host_rc != 0 else host_nas_root))

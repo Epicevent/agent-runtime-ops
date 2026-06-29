@@ -15,6 +15,9 @@ from .runtime_checks import (
     run_live_slot_checks_with_wait,
     run_static_slot_checks,
 )
+from .config_contract import run_config_validate_in_image
+from .image_specs import image_spec_config_contract
+from ..host.account_files import slot_uid_gid
 from .runtime_backup import backup_agent_runtime_state, restore_backup
 from .runtime_manifest import write_slot_manifests
 from .docker_compose import (
@@ -26,6 +29,7 @@ from .runtime_paths import (
     agent_compose_path,
     agent_manifest_path,
     atomic_write,
+    slot_config_dir,
     slot_runtime_dir,
     state_manifest_path,
 )
@@ -111,6 +115,24 @@ def apply_desired_slot(
             raise ValueError("first agent-runtime apply requires --allow-first-apply")
         previous_manifest = state_manifest_file if state_manifest_file.exists() else manifest_path if manifest_path.exists() else None
         guidance_result = ensure_runtime_workspace_guidance(desired.slot, profile)
+        # Config preflight (zero-downtime gate): validate the on-disk config against the
+        # TARGET product image BEFORE anything is recreated. A config the target image
+        # would reject at boot (e.g. a removed/legacy key) is gated here, so the running
+        # container is never torn down into a crash loop. Migration is an explicit step
+        # (opsctl config migrate). Families/images without a config contract are exempt.
+        config_contract = image_spec_config_contract(desired.image_spec)
+        if config_contract:
+            host_config_dir = slot_config_dir(desired.slot)
+            target_product_image = str(desired.image_spec.get("product_image") or "")
+            uid, gid = slot_uid_gid(desired.slot)
+            valid, detail = run_config_validate_in_image(
+                target_product_image, host_config_dir, config_contract, run_as=f"{uid}:{gid}"
+            )
+            if not valid:
+                raise ValueError(
+                    f"config preflight failed: on-disk config is invalid for target image "
+                    f"({detail}); migrate first: sudo opsctl config migrate {desired.slot}"
+                )
         backup_dir = backup_agent_runtime_state(desired.slot, runtime_dir, state_root)
         atomic_write(compose_path, rendered.text, 0o644)
     except Exception as exc:

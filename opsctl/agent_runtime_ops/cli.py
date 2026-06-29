@@ -56,6 +56,7 @@ from .commands.runtime_truth import cmd_runtime_truth
 from .commands.status import cmd_plan, cmd_status
 from .commands.update import cmd_self_update, cmd_update_approve, cmd_update_status
 from .commands.image import cmd_image_approve, cmd_image_status
+from .commands.config import cmd_config_validate, cmd_config_migrate
 from .paths import DEFAULT_STATE_ROOT
 
 def build_parser() -> argparse.ArgumentParser:
@@ -84,6 +85,25 @@ def build_parser() -> argparse.ArgumentParser:
     image_approve.set_defaults(func=cmd_image_approve)
     image_status = image_sub.add_parser("status")
     image_status.set_defaults(func=cmd_image_status)
+
+    config = sub.add_parser("config")
+    config_sub = config.add_subparsers(dest="config_command", required=True)
+    config_validate = config_sub.add_parser(
+        "validate", help="validate a slot's on-disk config against its target product image (read-only)"
+    )
+    config_validate.add_argument("slot", metavar="target")
+    config_validate.add_argument(
+        "--product-image", dest="product_image", default="", help="override target product image (default: slot's current)"
+    )
+    config_validate.set_defaults(func=cmd_config_validate)
+    config_migrate = config_sub.add_parser(
+        "migrate", help="migrate a slot's on-disk config via the product's own doctor --fix (atomic, backed up)"
+    )
+    config_migrate.add_argument("slot", metavar="target")
+    config_migrate.add_argument(
+        "--product-image", dest="product_image", default="", help="override target product image (default: slot's current)"
+    )
+    config_migrate.set_defaults(func=cmd_config_migrate)
 
     profile = sub.add_parser("profile")
     profile_sub = profile.add_subparsers(dest="profile_command", required=True)

@@ -49,6 +49,7 @@ OPENCLAW_RUNTIME_REQUIRED_CHECKS = {
     "selftest_model_roundtrip_ok",
     "selftest_executor_nas_roundtrip_ok",
     "live_public_route_readyz_ok",
+    "config_disk_valid_for_running_image_ok",
 }
 
 # Map a --pack name to the family it gates. A pack used against the wrong family is a

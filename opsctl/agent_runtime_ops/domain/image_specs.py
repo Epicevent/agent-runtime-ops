@@ -283,6 +283,15 @@ def image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product_
     selftest_command = recipe_label(labels, "selftest.command")
     selftest_name = recipe_label(labels, "selftest.name")
     selftest_timeout = recipe_label(labels, "selftest.timeout")
+    # Self-contained config contract: the product image carries its own config
+    # validate/migrate invocations in plain-string labels (inherited by the wrapper).
+    # opsctl never reimplements the config schema; it runs the product's own commands
+    # to gate rollouts (validate before recreate) and migrate (doctor --fix) on demand.
+    config_validate_command = recipe_label(labels, "config-validate.command")
+    config_migrate_command = recipe_label(labels, "config-migrate.command")
+    config_name = recipe_label(labels, "config.name")
+    config_validate_timeout = recipe_label(labels, "config-validate.timeout")
+    config_migrate_timeout = recipe_label(labels, "config-migrate.timeout")
     canonical_name = recipe_label(labels, "recipe.name")
     canonical_digest = recipe_label(labels, "recipe.digest")
     if not canonical_name:
@@ -401,6 +410,14 @@ def image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product_
             "command": selftest_command.split(),
             "timeout_seconds": int(selftest_timeout) if selftest_timeout.isdigit() else 120,
         }
+    if config_validate_command:
+        recipe["config_contract"] = {
+            "name": config_name or "config",
+            "validate_command": config_validate_command.split(),
+            "migrate_command": config_migrate_command.split() if config_migrate_command else [],
+            "validate_timeout_seconds": int(config_validate_timeout) if config_validate_timeout.isdigit() else 120,
+            "migrate_timeout_seconds": int(config_migrate_timeout) if config_migrate_timeout.isdigit() else 180,
+        }
     for runtime_class, profile_name in recipe["runtime_profiles"].items():
         profile = load_profile(str(profile_name))
         if profile.metadata.get("family") != family:
@@ -481,6 +498,43 @@ def image_spec_selftest_contract(image_spec: dict) -> dict[str, object] | None:
     """
     contract = image_spec_recipe(image_spec).get("selftest_contract")
     return contract if isinstance(contract, dict) else None
+
+
+def image_spec_config_contract(image_spec: dict) -> dict[str, object] | None:
+    """Return the attested config_contract from a verified wrapper image, or None.
+
+    Carries the product's own ``config validate`` / ``doctor --fix`` invocations so
+    opsctl can gate a rollout on the on-disk config being valid for the target image
+    (before recreate) and migrate it on demand, without reimplementing the schema.
+    None for images/families that declare no config contract.
+    """
+    contract = image_spec_recipe(image_spec).get("config_contract")
+    return contract if isinstance(contract, dict) else None
+
+
+def config_contract_from_image_labels(image_ref: str) -> dict[str, object] | None:
+    """Read just the config contract directly from an image's labels (product or wrapper).
+
+    Unlike ``image_recipe_from_wrapper_image`` this does no full recipe validation — it is
+    the bootstrap path used to migrate a slot whose currently-running image predates the
+    contract, using the TARGET image's own validate/migrate commands. Returns None when the
+    image declares no config contract.
+    """
+    labels = image_recipe_labels_from_wrapper(image_ref)
+    validate_command = recipe_label(labels, "config-validate.command")
+    if not validate_command:
+        return None
+    migrate_command = recipe_label(labels, "config-migrate.command")
+    name = recipe_label(labels, "config.name")
+    validate_timeout = recipe_label(labels, "config-validate.timeout")
+    migrate_timeout = recipe_label(labels, "config-migrate.timeout")
+    return {
+        "name": name or "config",
+        "validate_command": validate_command.split(),
+        "migrate_command": migrate_command.split() if migrate_command else [],
+        "validate_timeout_seconds": int(validate_timeout) if validate_timeout.isdigit() else 120,
+        "migrate_timeout_seconds": int(migrate_timeout) if migrate_timeout.isdigit() else 180,
+    }
 
 
 def image_spec_runtime_profile_name(image_spec: dict, runtime_class: str, fallback: str | None = None) -> str:

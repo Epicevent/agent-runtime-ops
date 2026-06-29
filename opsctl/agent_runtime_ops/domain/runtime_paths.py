@@ -18,6 +18,24 @@ def slot_runtime_dir(slot: str) -> Path:
     return runtime_dir
 
 
+def slot_config_dir(slot: str) -> Path:
+    """Host path of the slot's on-disk gateway config dir (``/home/<slot>/.openclaw``).
+
+    This is the bind-mount source that the compose template maps to the container's
+    ``/home/node/.openclaw``. Used by the config preflight/migration to run the
+    product's own validate/doctor against the real on-disk config.
+    """
+    validate_linux_account(slot)
+    target_home = Path("/home") / slot
+    config_dir = target_home / ".openclaw"
+    for path in (target_home, config_dir):
+        if path.is_symlink():
+            raise ValueError(f"managed path must not be symlink: {path}")
+        if not path.is_dir():
+            raise FileNotFoundError(path)
+    return config_dir
+
+
 def agent_compose_path(runtime_dir: Path) -> Path:
     return runtime_dir / "docker-compose.agent-runtime.yml"
 
