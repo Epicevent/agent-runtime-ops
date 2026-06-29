@@ -62,9 +62,11 @@ def test_unapproved_and_missing_are_empty(tmp_path):
 # --------------------------------------------------------------------------- #
 
 def _desired_profile():
+    # customer-class slot: the gate only applies to these (oc* customers + dev-*-img).
     desired = SimpleNamespace(
         family="openclaw",
-        runtime_class="dev",
+        runtime_class="customer",
+        route=SimpleNamespace(runtime_class="customer"),
         image_spec={
             "family": "openclaw",
             "wrapper_image": WRAPPER,
@@ -72,7 +74,10 @@ def _desired_profile():
             "digest": digest_from_image_ref(WRAPPER),
         },
     )
-    profile = SimpleNamespace(name="openclaw-dev", metadata={"family": "openclaw", "slot_class": "dev", "mode": "image"})
+    profile = SimpleNamespace(
+        name="openclaw-customer",
+        metadata={"family": "openclaw", "slot_class": "customer", "mode": "image"},
+    )
     return desired, profile
 
 

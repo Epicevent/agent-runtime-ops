@@ -766,7 +766,10 @@ def run_static_slot_checks(
     # Root-approved-digest gate (commit-addressed image trust, like `update approve`).
     # Progressive: enforced for a family/role only once an approval exists for it, so
     # deploying this is non-breaking and you opt a family in by approving its digest.
-    if state_root is not None:
+    # Scoped to customer-class slots (oc* customers + dev-*-img image-mode validation),
+    # which run the one promoted/pinned digest; source-mode dev slots build from source
+    # and run a different base image, so a single approved digest does not apply to them.
+    if state_root is not None and runtime_class == "customer":
         for role, role_image in (("product", product_image), ("wrapper", wrapper_image)):
             approved = approved_image_digest(state_root, target_family, role)
             if approved:
