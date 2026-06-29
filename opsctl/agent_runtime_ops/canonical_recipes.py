@@ -90,6 +90,58 @@ def _label_map_json(value: Any) -> str:
     return json.dumps(result, sort_keys=True, separators=(",", ":"))
 
 
+def normalized_selftest_contract(value: Any) -> dict[str, Any] | None:
+    """Return a deterministic selftest_contract mapping, or None if malformed/absent.
+
+    A valid contract needs a name, a non-empty command argv list, a non-empty
+    required_checks list, and a positive integer timeout_seconds. The shape is the
+    family-agnostic unit the product image must attest to.
+    """
+    if not isinstance(value, dict):
+        return None
+    name = str(value.get("name") or "").strip()
+    command_raw = value.get("command")
+    command = [str(item) for item in command_raw] if isinstance(command_raw, list) else []
+    required_raw = value.get("required_checks")
+    required = [str(item) for item in required_raw] if isinstance(required_raw, list) else []
+    timeout_raw = value.get("timeout_seconds")
+    timeout = timeout_raw if isinstance(timeout_raw, int) and not isinstance(timeout_raw, bool) else 0
+    if not name or not command or not required or timeout <= 0:
+        return None
+    return {
+        "name": name,
+        "command": command,
+        "required_checks": required,
+        "timeout_seconds": timeout,
+    }
+
+
+def selftest_contract_digest(data: dict[str, Any]) -> str:
+    """Digest of just the normalized selftest_contract sub-block (empty if none).
+
+    Scoped to the contract so unrelated recipe edits do not churn the attested
+    selftest identity. Carried in the wrapper image as the ``selftest.digest`` label.
+    """
+    contract = normalized_selftest_contract(data.get("selftest_contract"))
+    if contract is None:
+        return ""
+    return "sha256:" + hashlib.sha256(_normalized_recipe_yaml(contract)).hexdigest()
+
+
+def _selftest_label_values(data: dict[str, Any]) -> dict[str, str]:
+    # Only name + digest are attested in the wrapper image. The digest cryptographically
+    # binds the full contract (command, required_checks, timeout), and opsctl reads those
+    # fields from the digest-verified on-disk canonical recipe -- so they do not need to be
+    # carried as labels (which also avoids putting JSON/quotes into Docker LABEL values).
+    contract = normalized_selftest_contract(data.get("selftest_contract"))
+    if contract is None:
+        return {"selftest.name": "", "selftest.digest": ""}
+    return {
+        "selftest.name": contract["name"],
+        "selftest.digest": selftest_contract_digest(data),
+    }
+
+
 def canonical_recipe_for_product(family: str, product_image: object) -> CanonicalRuntimeRecipe | None:
     product_repo = image_repo(product_image)
     for name in list_canonical_recipe_names():
@@ -121,7 +173,7 @@ def canonical_recipe_identity(recipe: CanonicalRuntimeRecipe | None) -> dict[str
 def canonical_label_values(recipe: CanonicalRuntimeRecipe) -> dict[str, str]:
     runtime_profiles = _string_map(recipe.data.get("runtime_profiles"))
     runtime_contracts = _string_map(recipe.data.get("runtime_contracts"))
-    return {
+    values = {
         "recipe.name": recipe.name,
         "recipe.digest": recipe.digest,
         "contract.version": str(recipe.data.get("runtime_contract_version") or ""),
@@ -144,6 +196,8 @@ def canonical_label_values(recipe: CanonicalRuntimeRecipe) -> dict[str, str]:
         "health.endpoints": _label_map(recipe.data.get("health_endpoints")),
         "health.endpoints.json": _label_map_json(recipe.data.get("health_endpoints")),
     }
+    values.update(_selftest_label_values(recipe.data))
+    return values
 
 
 def _metadata_list(value: Any) -> list[str]:
@@ -325,6 +379,26 @@ def validate_canonical_recipe(recipe: CanonicalRuntimeRecipe) -> list[tuple[bool
             f"mode={recipe.data.get('nas_child_mount_mode') or 'missing'}",
         ),
     ]
+    selftest_raw = recipe.data.get("selftest_contract")
+    if selftest_raw is not None:
+        contract = normalized_selftest_contract(selftest_raw)
+        checks.append(
+            (
+                contract is not None,
+                "canonical_selftest_contract_valid",
+                "ok"
+                if contract is not None
+                else "selftest_contract requires name, non-empty command list, required_checks list, positive timeout_seconds",
+            )
+        )
+        if contract is not None:
+            checks.append(
+                (
+                    bool(selftest_contract_digest(recipe.data)),
+                    "canonical_selftest_digest_computed",
+                    f"name={contract['name']}",
+                )
+            )
     checks.extend(projection_checks(recipe, "customer"))
     checks.extend(projection_checks(recipe, "dev"))
     return checks

@@ -22,6 +22,8 @@ ARG RUNTIME_NAS_PROPAGATION=""
 ARG RUNTIME_NAS_CHILD_MOUNT_MODE=""
 ARG CANONICAL_RECIPE_NAME=""
 ARG CANONICAL_RECIPE_DIGEST=""
+ARG SELFTEST_NAME=""
+ARG SELFTEST_DIGEST=""
 
 LABEL org.opencontainers.image.title="JI TECH OpenClaw runtime wrapper"
 LABEL org.opencontainers.image.description="OpenClaw product image wrapped with JI TECH runtime document tooling"
@@ -50,6 +52,8 @@ LABEL com.epicevent.agent-runtime.nas.read-only="${RUNTIME_NAS_READ_ONLY}"
 LABEL com.epicevent.agent-runtime.nas.propagation="${RUNTIME_NAS_PROPAGATION}"
 LABEL com.epicevent.agent-runtime.nas.child-mount-mode="${RUNTIME_NAS_CHILD_MOUNT_MODE}"
 LABEL com.epicevent.agent-runtime.ops-repo-commit="${OPS_REPO_COMMIT}"
+LABEL com.epicevent.agent-runtime.selftest.name="${SELFTEST_NAME}"
+LABEL com.epicevent.agent-runtime.selftest.digest="${SELFTEST_DIGEST}"
 
 USER root
 
@@ -86,6 +90,8 @@ RUN set -eu; \
       echo "nas_child_mount_mode=${RUNTIME_NAS_CHILD_MOUNT_MODE}"; \
       echo "canonical_recipe_name=${CANONICAL_RECIPE_NAME}"; \
       echo "canonical_recipe_digest=${CANONICAL_RECIPE_DIGEST}"; \
+      echo "selftest_name=${SELFTEST_NAME}"; \
+      echo "selftest_digest=${SELFTEST_DIGEST}"; \
       echo "ops_repo_commit=${OPS_REPO_COMMIT}"; \
     } > /usr/local/share/agent-runtime-ops/wrapper.manifest
 

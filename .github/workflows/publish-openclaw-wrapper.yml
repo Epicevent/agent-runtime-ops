@@ -69,6 +69,8 @@ jobs:
             --build-arg RUNTIME_NAS_CHILD_MOUNT_MODE="$RUNTIME_NAS_CHILD_MOUNT_MODE" \
             --build-arg CANONICAL_RECIPE_NAME="$CANONICAL_RECIPE_NAME" \
             --build-arg CANONICAL_RECIPE_DIGEST="$CANONICAL_RECIPE_DIGEST" \
+            --build-arg SELFTEST_NAME="$SELFTEST_NAME" \
+            --build-arg SELFTEST_DIGEST="$SELFTEST_DIGEST" \
             -t "$image_ref" \
             -f images/openclaw-wrapper/Dockerfile .
 
@@ -100,6 +102,15 @@ jobs:
           docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.nas.read-only" }}' | grep -Fx true
           docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.nas.propagation" }}' | grep -Fx rslave
           docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.nas.child-mount-mode" }}' | grep -Fx host-propagated-cifs
+          # Digest determinism gate: the baked recipe/selftest labels MUST equal exactly what
+          # `recipe validate-canonical --emit-build-args` produced for this commit, so the digest
+          # a dev slot validates is the same digest image-promote pins to the customer slots.
+          set -a
+          . ./recipe.env
+          set +a
+          docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.recipe.digest" }}' | grep -Fx "$CANONICAL_RECIPE_DIGEST"
+          docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.selftest.name" }}' | grep -Fx "$SELFTEST_NAME"
+          docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.selftest.digest" }}' | grep -Fx "$SELFTEST_DIGEST"
           docker run --rm --entrypoint /bin/sh "$image_ref" -lc '
             set -eu
             for command_name in file rg jq yq 7z 7zz libreoffice soffice pandoc pdftotext pdfinfo tesseract ocrmypdf xlsx2csv in2csv ssconvert antiword catdoc python3 node npm clawhub hwp5txt hwp5proc openclaw-hwp-text read-hwp hwp-read hwp2txt openclaw-document-tools; do

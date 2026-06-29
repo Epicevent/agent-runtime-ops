@@ -32,6 +32,39 @@ HERMES_RUNTIME_REQUIRED_CHECKS = {
     "live_workspace_files_nas_docs_listing_ok",
 }
 
+# OpenClaw uses the product-attested selftest contract for customer-truth depth, so
+# the required set is the generic container/NAS live checks plus the selftest contract
+# results (model + executor/NAS round-trips, gateway readiness) and the public-route
+# probe. These selftest_* names are produced by domain.selftest_contract from the
+# in-image selftest; live_public_route_readyz_ok is the external edge opsctl adds.
+OPENCLAW_RUNTIME_REQUIRED_CHECKS = {
+    "live_container_running",
+    "live_container_image_matches_spec",
+    "live_container_user_non_root",
+    "live_backend_http_smoke_ok",
+    "live_container_nas_docs_listing_ok",
+    "live_workspace_user_nas_docs_listing_ok",
+    "selftest_contract_ok",
+    "selftest_gateway_ready_ok",
+    "selftest_model_roundtrip_ok",
+    "selftest_executor_nas_roundtrip_ok",
+    "live_public_route_readyz_ok",
+}
+
+# Map a --pack name to the family it gates. A pack used against the wrong family is a
+# usage error. The actual depth comes from the live checks + selftest contract, not the
+# pack name; the name only selects which required set must be present.
+_PACK_FAMILY = {
+    "hermes-runtime": "hermes",
+    "openclaw-runtime": "openclaw",
+}
+
+
+def _require_pack_family(pack: str, family: str) -> None:
+    expected = _PACK_FAMILY.get(pack)
+    if expected is not None and expected != family:
+        raise ValueError(f"checklist pack {pack} requires family={expected}: target family={family}")
+
 
 def _provider_state_checks(desired, profile) -> list[tuple[bool, str, str | None]]:
     checks: list[tuple[bool, str, str | None]] = []
@@ -97,19 +130,28 @@ def cmd_checklist_pack(args: argparse.Namespace) -> int:
     state_root = _state_root(args)
     try:
         desired, profile = _desired_from_live_image_truth(args.slot, state_root)
-        if desired.family != "hermes":
-            raise ValueError(f"checklist pack is only supported for hermes targets: family={desired.family}")
+        family = desired.family
+        _require_pack_family(args.pack, family)
+        if family == "hermes":
+            required = HERMES_RUNTIME_REQUIRED_CHECKS
+        elif family == "openclaw":
+            required = OPENCLAW_RUNTIME_REQUIRED_CHECKS
+        else:
+            raise ValueError(f"checklist pack is not supported for family={family}")
         checks = list(_run_live_slot_checks(desired, profile, state_root))
         seen = {name for _ok, name, _detail in checks}
-        for name in sorted(HERMES_RUNTIME_REQUIRED_CHECKS - seen):
+        for name in sorted(required - seen):
             checks.append((False, name, "missing_from_live_check"))
-        checks.extend(
-            _hermes_runtime_pack_checks(
-                desired,
-                profile,
-                gemini_chat_smoke=bool(getattr(args, "gemini_chat_smoke", False)),
+        # Hermes uses an ops-side reach-in smoke; OpenClaw's customer-truth runs inside
+        # run_live_slot_checks via the product-attested selftest contract (no extra here).
+        if family == "hermes":
+            checks.extend(
+                _hermes_runtime_pack_checks(
+                    desired,
+                    profile,
+                    gemini_chat_smoke=bool(getattr(args, "gemini_chat_smoke", False)),
+                )
             )
-        )
     except Exception as exc:
         print(f"target={args.slot}")
         print("checklist_status=fail")

@@ -99,8 +99,8 @@ def projection_verify_target(server, args: dict[str, Any]) -> dict[str, Any]:
 def checklist_pack(server, args: dict[str, Any]) -> dict[str, Any]:
     v.reject_unknown(args, {"target", "pack", "gemini_chat_smoke"}, error_type=server.tool_error)
     pack = str(args.get("pack") or "")
-    if pack != "hermes-runtime":
-        raise server.tool_error("pack must be hermes-runtime")
+    if pack not in {"hermes-runtime", "openclaw-runtime"}:
+        raise server.tool_error("pack must be hermes-runtime or openclaw-runtime")
     argv = [
         server.sudo,
         server.opsctl,

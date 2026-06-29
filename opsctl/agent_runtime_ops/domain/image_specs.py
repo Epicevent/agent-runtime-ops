@@ -10,7 +10,9 @@ from ..canonical_recipes import (
     canonical_recipe_for_image_spec,
     canonical_recipe_identity,
     load_canonical_recipe,
+    normalized_selftest_contract,
     projection_checks as canonical_projection_checks,
+    selftest_contract_digest,
     validate_canonical_recipe,
 )
 from ..image_components import image_component_name as _image_component_name
@@ -276,6 +278,8 @@ def image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product_
     contract_version = recipe_label(labels, "contract.version")
     health_endpoints_label = recipe_label(labels, "health.endpoints")
     health_endpoints_json_label = recipe_label(labels, "health.endpoints.json")
+    selftest_name = recipe_label(labels, "selftest.name")
+    selftest_digest = recipe_label(labels, "selftest.digest")
     canonical_name = recipe_label(labels, "recipe.name")
     canonical_digest = recipe_label(labels, "recipe.digest")
     if not canonical_name:
@@ -337,6 +341,9 @@ def image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product_
     }
     if expected_labels.get("contract.version"):
         label_checks["contract.version"] = contract_version
+    if expected_labels.get("selftest.name"):
+        label_checks["selftest.name"] = selftest_name
+        label_checks["selftest.digest"] = selftest_digest
     for label_name, actual in label_checks.items():
         expected = expected_labels[label_name]
         if actual != expected:
@@ -388,6 +395,12 @@ def image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product_
         "health_endpoints": label_map_from_labels(labels, "health.endpoints"),
         "ops_repo_commit": recipe_label(labels, "ops-repo-commit"),
     }
+    selftest_contract = normalized_selftest_contract(canonical_recipe.data.get("selftest_contract"))
+    if selftest_contract is not None:
+        recipe["selftest_contract"] = {
+            **selftest_contract,
+            "digest": selftest_contract_digest(canonical_recipe.data),
+        }
     for runtime_class, profile_name in recipe["runtime_profiles"].items():
         profile = load_profile(str(profile_name))
         if profile.metadata.get("family") != family:
@@ -457,6 +470,17 @@ def image_spec_from_direct_images(wrapper_image: str, product_image: str) -> dic
 def image_spec_recipe(image_spec: dict) -> dict[str, object]:
     recipe = image_spec.get("image_recipe")
     return recipe if isinstance(recipe, dict) else {}
+
+
+def image_spec_selftest_contract(image_spec: dict) -> dict[str, object] | None:
+    """Return the attested selftest_contract from a verified wrapper image, or None.
+
+    Only populated by ``image_recipe_from_wrapper_image`` after the wrapper labels
+    pass the canonical-recipe digest checks, so callers can trust the command/digest
+    without re-verifying. None for images/families that declare no contract.
+    """
+    contract = image_spec_recipe(image_spec).get("selftest_contract")
+    return contract if isinstance(contract, dict) else None
 
 
 def image_spec_runtime_profile_name(image_spec: dict, runtime_class: str, fallback: str | None = None) -> str:

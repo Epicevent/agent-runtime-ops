@@ -87,6 +87,8 @@ def _build_arg_lines_for_canonical_recipe(name: str) -> list[str]:
     return [
         f"CANONICAL_RECIPE_NAME={recipe.name}",
         f"CANONICAL_RECIPE_DIGEST={recipe.digest}",
+        f"SELFTEST_NAME={labels['selftest.name']}",
+        f"SELFTEST_DIGEST={labels['selftest.digest']}",
         f"RUNTIME_FAMILY={labels['family']}",
         f"PRODUCT_COMPONENT={labels['product-component']}",
         f"WRAPPER_COMPONENT={labels['wrapper-component']}",

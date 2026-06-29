@@ -339,7 +339,7 @@ def build_parser() -> argparse.ArgumentParser:
     checklist_sub = checklist.add_subparsers(dest="checklist_command", required=True)
     checklist_pack = checklist_sub.add_parser("pack")
     checklist_pack.add_argument("slot", metavar="target")
-    checklist_pack.add_argument("--pack", default="hermes-runtime", choices=["hermes-runtime"])
+    checklist_pack.add_argument("--pack", default="hermes-runtime", choices=["hermes-runtime", "openclaw-runtime"])
     checklist_pack.add_argument("--gemini-chat-smoke", action="store_true")
     checklist_pack.set_defaults(func=cmd_checklist_pack)
 

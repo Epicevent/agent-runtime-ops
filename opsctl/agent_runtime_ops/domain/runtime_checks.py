@@ -30,8 +30,10 @@ from .image_specs import (
     has_digest_ref,
     image_spec_profile_contract_checks,
     image_spec_recipe,
+    image_spec_selftest_contract,
 )
 from .runtime_truth import find_gateway_container, live_runtime_truth
+from .selftest_contract import run_image_selftest_contract
 
 
 def http_backend_smoke(slot: str, path: str, state_root: Path) -> tuple[bool, str]:
@@ -53,6 +55,60 @@ def http_backend_smoke(slot: str, path: str, state_root: Path) -> tuple[bool, st
         return 200 <= status < 500, f"url={url} host={binding.public_host} status={status}"
     except Exception as exc:
         return False, f"url={url} host={binding.public_host} reason={exc}"
+
+
+def run_public_route_probe(slot: str, state_root: Path, *, path: str = "/readyz", port: int = 443) -> tuple[bool, str]:
+    """Probe the public customer route (Apache front -> gateway) the product cannot self-attest.
+
+    Connects to the local Apache TLS front over loopback with SNI/Host set to the
+    binding's public_host, so it exercises the real customer vhost and ProxyPass to the
+    gateway without depending on external DNS/egress. A 200 from the gateway readiness
+    path proves the public edge actually serves the customer. This is the one piece a
+    product self-test cannot attest, because the container cannot see Apache from inside.
+    """
+    import socket
+    import ssl
+
+    try:
+        binding = get_runtime_binding(slot, state_root)
+    except Exception as exc:
+        return False, f"binding_truth_missing reason={exc}"
+    host = binding.public_host
+    if not host:
+        return False, "public_host_missing"
+    probe_path = path if path.startswith("/") else f"/{path}"
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    try:
+        raw = socket.create_connection(("127.0.0.1", port), timeout=8)
+    except Exception as exc:
+        return False, f"connect_failed host={host} port={port} reason={exc}"
+    try:
+        with context.wrap_socket(raw, server_hostname=host) as tls:
+            request = (
+                f"GET {probe_path} HTTP/1.1\r\n"
+                f"Host: {host}\r\n"
+                "User-Agent: opsctl-selftest\r\n"
+                "Connection: close\r\n\r\n"
+            )
+            tls.sendall(request.encode("ascii"))
+            data = b""
+            while len(data) < 65536:
+                chunk = tls.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+    except Exception as exc:
+        try:
+            raw.close()
+        except Exception:
+            pass
+        return False, f"tls_request_failed host={host} reason={exc}"
+    status_line = data.split(b"\r\n", 1)[0].decode("latin1", "replace")
+    parts = status_line.split()
+    status = int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else 0
+    return status == 200, f"host={host} path={probe_path} status={status or 'none'}"
 
 
 def _slot_hermes_config(slot: str) -> tuple[str, str]:
@@ -560,6 +616,17 @@ def run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool,
         checks.extend(run_workspace_node_checks(container, desired.slot))
         checks.extend(run_workspace_api_smoke_checks(container))
         checks.extend(workspace_hermes_config_api_checks(desired.slot, state_root))
+
+    # Product-attested customer-truth: when the wrapper image declares a verified
+    # selftest contract, invoke the in-image selftest and gate on its required checks,
+    # then probe the public route the product cannot see from inside. Gated on the
+    # contract so families without one (today: hermes) are unaffected.
+    selftest_contract = image_spec_selftest_contract(desired.image_spec)
+    if selftest_contract:
+        checks.extend(run_image_selftest_contract(container, selftest_contract))
+        public_path = str(profile.metadata.get("public_route_probe_path") or "/readyz")
+        public_ok, public_detail = run_public_route_probe(desired.slot, state_root, path=public_path)
+        checks.append((public_ok, "live_public_route_readyz_ok", public_detail))
 
     host_rc, host_error, host_mounts = _findmnt_under(host_nas_root)
     checks.append((host_rc == 0, "live_host_nas_root_findmnt_ok", host_error if host_rc != 0 else host_nas_root))
