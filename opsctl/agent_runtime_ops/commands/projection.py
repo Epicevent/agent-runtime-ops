@@ -74,7 +74,7 @@ def _verify_static_projection(slot: str, wrapper_image: str, product_image: str,
     image_spec = image_spec_from_direct_images(wrapper_image, product_image)
     desired, profile = _desired_from_direct_images(slot, image_spec, state_root)
     rendered = render_compose(profile, desired)
-    checks = list(_run_static_slot_checks(desired, profile, rendered))
+    checks = list(_run_static_slot_checks(desired, profile, rendered, state_root=state_root))
     checks.append((bool(rendered.text.strip()), "projection_compose_rendered", rendered.sha256))
     checks.append(
         (

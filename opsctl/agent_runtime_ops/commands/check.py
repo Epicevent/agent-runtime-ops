@@ -41,7 +41,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     print(f"live_runtime_check={'enabled' if args.live else 'not_run'}")
 
     failed = 0
-    for ok, name, detail in _run_static_slot_checks(desired, profile, rendered):
+    for ok, name, detail in _run_static_slot_checks(desired, profile, rendered, state_root=state_root):
         _check_line(ok, name, detail)
         if not ok:
             failed += 1

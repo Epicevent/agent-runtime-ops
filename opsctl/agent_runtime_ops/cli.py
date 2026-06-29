@@ -55,6 +55,7 @@ from .commands.runtime_config import cmd_runtime_config_sanitize, cmd_runtime_co
 from .commands.runtime_truth import cmd_runtime_truth
 from .commands.status import cmd_plan, cmd_status
 from .commands.update import cmd_self_update, cmd_update_approve, cmd_update_status
+from .commands.image import cmd_image_approve, cmd_image_status
 from .paths import DEFAULT_STATE_ROOT
 
 def build_parser() -> argparse.ArgumentParser:
@@ -72,6 +73,17 @@ def build_parser() -> argparse.ArgumentParser:
     update_approve.set_defaults(func=cmd_update_approve)
     update_status = update_sub.add_parser("status")
     update_status.set_defaults(func=cmd_update_status)
+
+    image = sub.add_parser("image")
+    image_sub = image.add_subparsers(dest="image_command", required=True)
+    image_approve = image_sub.add_parser("approve", help="root-approve an exact product/wrapper image digest")
+    image_approve.add_argument("family", choices=["openclaw", "hermes"])
+    image_approve.add_argument("role", choices=["product", "wrapper"])
+    image_approve.add_argument("image", metavar="IMAGE@sha256:...", help="digest-pinned image reference")
+    image_approve.add_argument("--source-commit", dest="source_commit", default="", help="optional source commit for provenance")
+    image_approve.set_defaults(func=cmd_image_approve)
+    image_status = image_sub.add_parser("status")
+    image_status.set_defaults(func=cmd_image_status)
 
     profile = sub.add_parser("profile")
     profile_sub = profile.add_subparsers(dest="profile_command", required=True)

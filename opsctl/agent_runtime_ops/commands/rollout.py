@@ -111,7 +111,7 @@ def cmd_rollout_image_plan(args: argparse.Namespace) -> int:
             rendered = render_compose(profile, desired)
             checks = [
                 {"ok": ok, "name": name, "detail": detail}
-                for ok, name, detail in _run_static_slot_checks(desired, profile, rendered)
+                for ok, name, detail in _run_static_slot_checks(desired, profile, rendered, state_root=state_root)
             ]
             plans.append(
                 {
@@ -207,7 +207,7 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
         print("phase=projection_gate")
         rendered = render_compose(source_profile, source_desired)
         projection_failed = 0
-        for ok, name, detail in _run_static_slot_checks(source_desired, source_profile, rendered):
+        for ok, name, detail in _run_static_slot_checks(source_desired, source_profile, rendered, state_root=state_root):
             _check_line(ok, name, detail)
             if not ok:
                 projection_failed += 1

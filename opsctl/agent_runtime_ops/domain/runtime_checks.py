@@ -34,6 +34,7 @@ from .image_specs import (
 )
 from .runtime_truth import find_gateway_container, live_runtime_truth
 from .selftest_contract import run_image_selftest_contract
+from .image_approval_policy import approved_image_digest
 
 
 def http_backend_smoke(slot: str, path: str, state_root: Path) -> tuple[bool, str]:
@@ -710,7 +711,9 @@ def run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool,
     return checks
 
 
-def run_static_slot_checks(desired, profile, rendered=None) -> list[tuple[bool, str, str | None]]:
+def run_static_slot_checks(
+    desired, profile, rendered=None, *, state_root: Path | None = None
+) -> list[tuple[bool, str, str | None]]:
     target_family = desired.family
     runtime_class = desired.runtime_class
     profile_family = profile.metadata.get("family")
@@ -760,6 +763,21 @@ def run_static_slot_checks(desired, profile, rendered=None) -> list[tuple[bool, 
             str(product_image) if product_image else None,
         ),
     ]
+    # Root-approved-digest gate (commit-addressed image trust, like `update approve`).
+    # Progressive: enforced for a family/role only once an approval exists for it, so
+    # deploying this is non-breaking and you opt a family in by approving its digest.
+    if state_root is not None:
+        for role, role_image in (("product", product_image), ("wrapper", wrapper_image)):
+            approved = approved_image_digest(state_root, target_family, role)
+            if approved:
+                live_digest = digest_from_image_ref(role_image)
+                checks.append(
+                    (
+                        bool(live_digest) and live_digest == approved,
+                        f"{role}_image_digest_approved",
+                        f"live={live_digest or 'missing'} approved={approved}",
+                    )
+                )
     checks.extend(image_spec_profile_contract_checks(desired.image_spec, profile))
 
     if runtime_class == "customer":

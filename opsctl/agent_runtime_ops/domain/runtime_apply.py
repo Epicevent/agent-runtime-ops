@@ -93,7 +93,7 @@ def apply_desired_slot(
     try:
         rendered = render_compose(profile, desired)
         static_failures = [
-            name for ok, name, _ in run_static_slot_checks(desired, profile, rendered) if not ok
+            name for ok, name, _ in run_static_slot_checks(desired, profile, rendered, state_root=state_root) if not ok
         ]
         if static_failures:
             raise ValueError(f"static contract check failed: {','.join(static_failures)}")
