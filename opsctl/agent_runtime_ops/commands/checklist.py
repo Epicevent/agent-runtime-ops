@@ -32,11 +32,14 @@ HERMES_RUNTIME_REQUIRED_CHECKS = {
     "live_workspace_files_nas_docs_listing_ok",
 }
 
-# OpenClaw uses the product-attested selftest contract for customer-truth depth, so
-# the required set is the generic container/NAS live checks plus the selftest contract
-# results (model + executor/NAS round-trips, gateway readiness) and the public-route
-# probe. These selftest_* names are produced by domain.selftest_contract from the
-# in-image selftest; live_public_route_readyz_ok is the external edge opsctl adds.
+# The required set is opsctl's OWN infra/edge checks only. Customer-truth depth comes
+# from the product-attested selftest, represented here by the single aggregate
+# `selftest_contract_ok`: the product declares its own `required_checks` in the selftest
+# output and `run_image_selftest_contract` fails the aggregate if any of them fail. So a
+# NEW product selftest check (e.g. a new gateway RPC) is gated automatically by this
+# aggregate with NO edit here — opsctl never restates the product's check names. The
+# individual selftest_* checks still emit (and show) in the output; they just aren't
+# duplicated into this set. live_public_route_readyz_ok is the external edge opsctl adds.
 OPENCLAW_RUNTIME_REQUIRED_CHECKS = {
     "live_container_running",
     "live_container_image_matches_spec",
@@ -45,9 +48,6 @@ OPENCLAW_RUNTIME_REQUIRED_CHECKS = {
     "live_container_nas_docs_listing_ok",
     "live_workspace_user_nas_docs_listing_ok",
     "selftest_contract_ok",
-    "selftest_gateway_ready_ok",
-    "selftest_model_roundtrip_ok",
-    "selftest_nas_access_ok",
     "live_public_route_readyz_ok",
     "config_disk_valid_for_running_image_ok",
 }
