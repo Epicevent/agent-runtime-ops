@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from .handlers import config as config_handlers
 from .handlers import deploy as deploy_handlers
 from .handlers import handoff as handoff_handlers
 from .handlers import heartbeat as heartbeat_handlers
+from .handlers import image as image_handlers
 from .handlers import nas as nas_handlers
 from .handlers import recipe as recipe_handlers
 from .handlers import rollout as rollout_handlers
@@ -38,6 +40,9 @@ HANDLERS: dict[str, ToolHandler] = {
     "rollout_image_canary": _bind(rollout_handlers.image_canary),
     "rollout_image_promote": _bind(rollout_handlers.image_promote),
     "projection_verify_target": _bind(rollout_handlers.projection_verify_target),
+    "config_validate": _bind(config_handlers.validate),
+    "config_migrate": _bind(config_handlers.migrate),
+    "image_status": _bind(image_handlers.status),
     "checklist_pack": _bind(rollout_handlers.checklist_pack),
     "canonical_recipe_validate": _bind(recipe_handlers.canonical_validate),
     "dev_recipe_status": _bind(recipe_handlers.dev_status),

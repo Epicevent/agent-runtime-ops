@@ -305,6 +305,80 @@ ssh svcops "sudo /usr/local/bin/opsctl rollout image-promote --from-target oc20 
 
 After promotion, verify each target with `runtime truth` and `check --live`.
 
+## OpenClaw Image Rollout: Trust Gate, Config Preflight, Selftest
+
+OpenClaw rollout uses the same digest-pinned image flow as Hermes, plus three OpenClaw-specific
+gates. Slot roles:
+
+```text
+dev-oc        source mode; UI is source-mounted, the server is the image; never a promote source/target
+dev-oc-img    image mode using runtime_class=customer; pure-image dev canary; never a promote source/target
+oc14          customer canary; valid promote source after checks pass
+oc1..oc13     customer targets; reached only by image-promote
+```
+
+### 1. Image trust gate (root-approved digest)
+
+Trust is a root approval of the exact digest, not where it was built. Once a family/role is
+approved, opsctl refuses any other digest for customer slots.
+
+```bash
+# root login (NOT svcops sudo), like `update approve`:
+sudo /usr/local/bin/opsctl image approve openclaw product PROD@sha256:... --source-commit <40-sha>
+sudo /usr/local/bin/opsctl image approve openclaw wrapper WRAP@sha256:...
+# read-only status (svcops, or MCP image_status):
+ssh svcops "/usr/local/bin/opsctl image status"
+```
+
+`image approve` is root-only and is NOT an MCP tool. `image status` is read-only.
+
+### 2. Config preflight and migration
+
+Before recreating a container, the apply gate validates the slot's on-disk config against the
+TARGET image by running the product's own `config validate`, read-only. If the config would not
+boot the target image it REFUSES before touching the running container (zero downtime):
+`config preflight failed: ...; migrate first: sudo opsctl config migrate <slot>`.
+
+Never hand-edit `openclaw.json`. Migrate with the product's own `doctor --fix` (atomic, writes a
+timestamped `.bak`), then re-validate:
+
+```bash
+ssh svcops "sudo /usr/local/bin/opsctl config validate SLOT [--product-image PROD@sha256:...]"   # read-only
+ssh svcops "sudo /usr/local/bin/opsctl config migrate  SLOT [--product-image PROD@sha256:...]"   # doctor --fix + re-validate
+```
+
+A migrated config must stay valid for the slot's CURRENT image too (so a restart can't crash it);
+when migrating customers still on an old image, confirm with `config validate` against the running
+image. MCP tools: `config_validate`, `config_migrate`.
+
+### 3. Canary and the openclaw-runtime selftest checklist
+
+```bash
+ssh svcops "sudo /usr/local/bin/opsctl rollout image-canary --target dev-oc-img --wrapper-image WRAP@sha256:... --product-image PROD@sha256:..."
+ssh svcops "sudo /usr/local/bin/opsctl checklist pack dev-oc-img --pack openclaw-runtime"   # require checklist_status=pass
+# then repeat for oc14, then: image-promote --from-target oc14 --targets oc1,...,oc13
+```
+
+The `openclaw-runtime` pack gates on the product-attested selftest via the single aggregate
+`selftest_contract_ok`: the product declares its OWN `required_checks` (gateway readiness, a real
+model completion, NAS access) in the selftest output, plus opsctl's own infra/edge checks (config
+drift `config_disk_valid_for_running_image_ok`, public route, container identity). A NEW product
+selftest check flows into both the apply gate and this pack automatically — do not restate product
+check names in opsctl.
+
+### OpenClaw model config (product command, not opsctl)
+
+`opsctl runtime set-model` is Hermes-only. Set an OpenClaw slot's default model with the product's
+own command (hot-reloaded; no restart needed). It uses the slot's already-injected provider key.
+
+```bash
+docker exec <openclaw-gateway-container> node dist/index.js models set google/gemini-2.5-flash
+docker exec <openclaw-gateway-container> node dist/index.js infer model run --local --prompt "Reply with exactly: OK" --json   # verify a real completion
+```
+
+Most config (including `agents.defaults.model.primary`) hot-reloads live;
+`gateway.controlUi.allowedOrigins` requires a gateway restart to apply.
+
 ## Dev Recipe
 
 Dev source mode means the container sees an external source/output path. It does not mean customer

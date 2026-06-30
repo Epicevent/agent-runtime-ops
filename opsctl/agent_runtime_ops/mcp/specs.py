@@ -240,15 +240,73 @@ def list_tool_specs() -> list[dict[str, Any]]:
         {
             "name": "checklist_pack",
             "title": "Run Checklist Pack",
-            "description": "Run an existing opsctl checklist pack such as hermes-runtime, including optional Gemini chat smoke.",
+            "description": (
+                "Run an opsctl checklist pack (hermes-runtime or openclaw-runtime). The openclaw-runtime "
+                "pack gates on the product-attested selftest contract (selftest_contract_ok), config drift, "
+                "and the public route. Gemini chat smoke is optional."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "target": {"type": "string"},
-                    "pack": {"type": "string", "enum": ["hermes-runtime"]},
+                    "pack": {"type": "string", "enum": ["hermes-runtime", "openclaw-runtime"]},
                     "gemini_chat_smoke": {"type": "boolean", "default": False},
                 },
                 "required": ["target", "pack"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "config_validate",
+            "title": "Validate Slot Config",
+            "description": (
+                "Validate a slot's on-disk config against its target product image, read-only, by running "
+                "the product's own `config validate`. Use to see why the apply preflight gate would refuse."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string", "description": "Linux account."},
+                    "product_image": {
+                        "type": "string",
+                        "description": "Optional repo@sha256:... to validate against; defaults to the slot's current image.",
+                    },
+                },
+                "required": ["target"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "config_migrate",
+            "title": "Migrate Slot Config",
+            "description": (
+                "Bring a slot's on-disk config into compliance with its target image by running the product's "
+                "own doctor --fix (atomic write, timestamped .bak). Use when the apply preflight refuses with "
+                "config preflight failed. Never hand-edit the config."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string", "description": "Linux account."},
+                    "product_image": {
+                        "type": "string",
+                        "description": "Optional repo@sha256:... whose doctor to run; defaults to the slot's current image.",
+                    },
+                },
+                "required": ["target"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "image_status",
+            "title": "Image Approval Status",
+            "description": (
+                "List the root-approved image digests (the image trust gate state). Read-only. The "
+                "`image approve` action itself is root-only and is not an MCP tool, like `update approve`."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
                 "additionalProperties": False,
             },
         },
