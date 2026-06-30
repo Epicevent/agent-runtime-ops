@@ -47,7 +47,7 @@ OPENCLAW_RUNTIME_REQUIRED_CHECKS = {
     "selftest_contract_ok",
     "selftest_gateway_ready_ok",
     "selftest_model_roundtrip_ok",
-    "selftest_executor_nas_roundtrip_ok",
+    "selftest_nas_access_ok",
     "live_public_route_readyz_ok",
     "config_disk_valid_for_running_image_ok",
 }
