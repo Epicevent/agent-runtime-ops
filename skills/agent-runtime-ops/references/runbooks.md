@@ -311,16 +311,23 @@ OpenClaw rollout uses the same digest-pinned image flow as Hermes, plus three Op
 gates. Slot roles:
 
 ```text
-dev-oc        source mode; UI is source-mounted, the server is the image; never a promote source/target
-dev-oc-img    image mode using runtime_class=customer; pure-image dev canary; never a promote source/target
-oc14          customer canary; valid promote source after checks pass
-oc1..oc13     customer targets; reached only by image-promote
+dev-oc        source mode; UI is source-mounted, the server is the image; dev-owned; never a promote source/target
+dev-oc-img    image mode (runtime_class=customer) but dev-OWNED; pure-image dev canary; NOT approval-gated; never a promote source/target
+oc14          production customer canary; valid promote source after checks pass
+oc1..oc13     production customer targets; reached only by image-promote
 ```
 
-### 1. Image trust gate (root-approved digest)
+Two axes, not one: `runtime_class` is the **mode** (source/image); the **environment**
+(dev/production) is the `dev-*` account-name boundary (same one `image-promote` uses). The
+root-approval gate and self-deploy rules key on **environment**, not on `runtime_class`. So
+`dev-oc-img` is image-mode (fidelity) yet dev-owned (no production gate).
+
+### 1. Image trust gate (root-approved digest) — PRODUCTION customer slots only
 
 Trust is a root approval of the exact digest, not where it was built. Once a family/role is
-approved, opsctl refuses any other digest for customer slots.
+approved, opsctl refuses any other digest for **production** customer slots (`oc*`). Dev-owned
+slots (`dev-*`, including `dev-oc-img`) are NOT gated: a developer validates a fresh build on
+`dev-oc-img` BEFORE approval (build -> validate -> approve -> promote).
 
 ```bash
 # root login (NOT svcops sudo), like `update approve`:
@@ -331,6 +338,11 @@ ssh svcops "/usr/local/bin/opsctl image status"
 ```
 
 `image approve` is root-only and is NOT an MCP tool. `image status` is read-only.
+
+**Developer self-deploy:** a developer account (e.g. `openclawdev`) may deploy to its own
+`dev-*` slots (`rollout image-dev-apply dev-oc`, `rollout image-canary dev-oc-img`) via a scoped
+sudoers grant — no root approval or svcops handoff. opsctl refuses any non-`dev-*` target for a
+developer account (production stays operator/root-only). Approve at the production boundary only.
 
 ### 2. Config preflight and migration
 

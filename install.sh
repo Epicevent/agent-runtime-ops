@@ -8,6 +8,10 @@ CURRENT_LINK="$INSTALL_ROOT/current"
 STATE_ROOT="${AGENT_RUNTIME_STATE_ROOT:-/srv/openclaw-ops}"
 OPS_USER="${AGENT_RUNTIME_OPS_USER:-svcops}"
 OPS_GROUP="${AGENT_RUNTIME_OPS_GROUP:-svcops}"
+# Developer accounts that may self-deploy to their OWN dev-* slots (space-separated).
+# They get a least-privilege sudoers grant (image-dev-apply / image-canary only); opsctl
+# further refuses any non-dev-* target for these accounts. Inert if the account is absent.
+DEV_USERS="${AGENT_RUNTIME_DEV_USERS:-openclawdev}"
 OPS_HOME="${AGENT_RUNTIME_OPS_HOME:-/home/$OPS_USER}"
 CODEX_HOME="${AGENT_RUNTIME_CODEX_HOME:-$OPS_HOME/.codex}"
 CODEX_SKILL_NAME="agent-runtime-ops"
@@ -315,6 +319,14 @@ install_ops_sudoers() {
     printf '%s ALL=(root) NOPASSWD: %s nas remove *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s nas credential status *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s nas approve-auto *\n' "$OPS_USER" "$BIN_LINK"
+    # Developer self-deploy to own dev-* slots: least-privilege (dev-apply / canary only).
+    # opsctl refuses any non-dev-* target for these accounts (see _authorize_deploy_target).
+    for dev_user in $DEV_USERS; do
+      [ -n "$dev_user" ] || continue
+      printf 'Defaults:%s env_reset, !setenv, use_pty\n' "$dev_user"
+      printf '%s ALL=(root) NOPASSWD: %s rollout image-dev-apply *\n' "$dev_user" "$BIN_LINK"
+      printf '%s ALL=(root) NOPASSWD: %s rollout image-canary *\n' "$dev_user" "$BIN_LINK"
+    done
   } >"$tmp"
   chmod 0440 "$tmp"
   visudo -cf "$tmp" >/dev/null

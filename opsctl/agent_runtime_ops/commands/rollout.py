@@ -8,7 +8,10 @@ from ..canonical_recipes import canonical_recipe_for_image_spec, canonical_recip
 from ..domain.actions import append_action_log as _append_action_log
 from ..domain.common import check_line as _check_line
 from ..domain.common import apache_public_host as _apache_public_host
+from ..domain.common import is_dev_slot as _is_dev_slot
 from ..domain.common import is_root as _is_root
+from ..domain.common import sudo_user as _sudo_user
+from ..domain.common import OPERATOR_ACCOUNTS as _OPERATOR_ACCOUNTS
 from ..domain.common import state_root as _state_root
 from ..domain.image_specs import (
     IMAGE_ROLLOUT_IMAGE_NAME,
@@ -33,7 +36,24 @@ from ..runtime_secrets import parse_secret_env_text, primary_profile_secret_file
 
 
 def _is_dev_named_target(slot: str) -> bool:
-    return str(slot).startswith("dev-")
+    return _is_dev_slot(slot)
+
+
+def _authorize_deploy_target(action_name: str, slot: str) -> str | None:
+    """Scope a developer's deploy to their own dev-* slots.
+
+    sudoers cannot scope by `--target` value, so the boundary is enforced here: an
+    operator account (root/svcops) may deploy any slot; any other account that reached
+    this command (via a scoped dev sudoers grant) may only deploy dev-* slots. Returns an
+    error message when the deploy must be refused, else None.
+    """
+    invoker = _sudo_user()
+    if invoker and invoker not in _OPERATOR_ACCOUNTS and not _is_dev_slot(slot):
+        return (
+            f"{action_name}: account {invoker} may only deploy dev-* slots, not {slot} "
+            f"(production deploys are operator/root-only)"
+        )
+    return None
 
 
 def cmd_rollout_status(args: argparse.Namespace) -> int:
@@ -150,6 +170,10 @@ def _cmd_rollout_image_apply_slot(args: argparse.Namespace, *, required_runtime_
         return 2
     state_root = _state_root(args)
     slot = str(args.slot)
+    denial = _authorize_deploy_target(action_name, slot)
+    if denial:
+        print(f"error: {denial}", file=sys.stderr)
+        return 2
     try:
         image_spec = _direct_image_spec_from_args(args)
         desired, profile = _desired_from_direct_images(slot, image_spec, state_root)

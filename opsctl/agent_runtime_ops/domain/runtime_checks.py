@@ -23,7 +23,7 @@ from ..nas import check_nas_policy
 from ..routing import get_runtime_binding
 from ..runtime_secrets import parse_secret_env_text
 from ..yamlio import load_yaml
-from .common import is_root, run_text
+from .common import is_dev_slot, is_root, run_text
 from .image_specs import (
     allowed_image_ref,
     digest_from_image_ref,
@@ -777,10 +777,12 @@ def run_static_slot_checks(
     # Root-approved-digest gate (commit-addressed image trust, like `update approve`).
     # Progressive: enforced for a family/role only once an approval exists for it, so
     # deploying this is non-breaking and you opt a family in by approving its digest.
-    # Scoped to customer-class slots (oc* customers + dev-*-img image-mode validation),
-    # which run the one promoted/pinned digest; source-mode dev slots build from source
-    # and run a different base image, so a single approved digest does not apply to them.
-    if state_root is not None and runtime_class == "customer":
+    # Scoped to PRODUCTION customer slots only: customer-class AND not a dev-* account.
+    # Root approval protects real customers; a dev-owned image-mode canary (dev-*-img) is
+    # the developer's own validation slot, so it must be deployable/validated BEFORE root
+    # approval (build -> validate on dev-*-img -> approve -> promote). dev-* is the same
+    # production boundary `image-promote` already trusts (`_is_dev_named_target`).
+    if state_root is not None and runtime_class == "customer" and not is_dev_slot(desired.slot):
         for role, role_image in (("product", product_image), ("wrapper", wrapper_image)):
             approved = approved_image_digest(state_root, target_family, role)
             if approved:

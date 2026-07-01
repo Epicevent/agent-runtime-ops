@@ -61,9 +61,11 @@ def test_unapproved_and_missing_are_empty(tmp_path):
 # rollout static gate: progressive enforcement
 # --------------------------------------------------------------------------- #
 
-def _desired_profile():
-    # customer-class slot: the gate only applies to these (oc* customers + dev-*-img).
+def _desired_profile(slot="oc3"):
+    # customer-class slot. The gate applies to PRODUCTION customer slots (oc*), NOT to
+    # dev-owned image-mode canaries (dev-*-img) which the developer validates pre-approval.
     desired = SimpleNamespace(
+        slot=slot,
         family="openclaw",
         runtime_class="customer",
         route=SimpleNamespace(runtime_class="customer"),
@@ -118,3 +120,18 @@ def test_gate_skipped_when_no_state_root(tmp_path, monkeypatch):
     desired, profile = _desired_profile()
     checks = runtime_checks.run_static_slot_checks(desired, profile, None)  # no state_root
     assert _gate(checks, "product_image_digest_approved") is None
+
+
+def test_gate_skipped_for_dev_owned_image_canary(tmp_path, monkeypatch):
+    # dev-*-img is customer-class (image-mode fidelity) but dev-OWNED: the production
+    # approval gate must NOT apply, so a developer can validate a new build BEFORE root
+    # approval (restoring build -> validate -> approve -> promote).
+    monkeypatch.setattr(runtime_checks, "image_spec_profile_contract_checks", lambda *a, **k: [])
+    ia.write_image_approval(tmp_path, "openclaw", "product", PRODUCT)
+    ia.write_image_approval(tmp_path, "openclaw", "wrapper", WRAPPER)
+    desired, profile = _desired_profile(slot="dev-oc-img")
+    # even an unapproved (mismatched) digest emits no gate check for a dev-owned slot
+    desired.image_spec["product_image"] = OTHER
+    checks = runtime_checks.run_static_slot_checks(desired, profile, None, state_root=tmp_path)
+    assert _gate(checks, "product_image_digest_approved") is None
+    assert _gate(checks, "wrapper_image_digest_approved") is None

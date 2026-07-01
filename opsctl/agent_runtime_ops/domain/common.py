@@ -20,6 +20,31 @@ def is_root() -> bool:
     return geteuid() == 0
 
 
+# Accounts allowed to operate on production (customer) slots. Everyone else with a
+# deploy grant is a developer and is scoped to their own dev-* slots (see invoking_user).
+OPERATOR_ACCOUNTS = frozenset({"root", "svcops"})
+
+
+def is_dev_slot(name: object) -> bool:
+    """A dev-owned (non-production) slot: identified by the `dev-` account-name prefix.
+
+    This is the production/environment boundary the rollout layer already trusts for
+    `image-promote` (`_is_dev_named_target`). `dev-oc` (source) and `dev-oc-img`
+    (image-mode validation) are both dev-owned; real customer slots (`oc1`..) are not.
+    """
+    return str(name or "").startswith("dev-")
+
+
+def sudo_user() -> str:
+    """The account that ran `sudo opsctl ...`, or empty when not invoked via sudo.
+
+    Only `SUDO_USER` is trusted (set by sudo itself after env_reset); there is no `USER`
+    fallback on purpose. This is used for AUTHORIZATION and runs after the `is_root()`
+    check, so an empty result means a real root shell (an operator), not an unknown user.
+    """
+    return os.environ.get("SUDO_USER", "")
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
