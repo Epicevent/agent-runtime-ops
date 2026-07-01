@@ -361,16 +361,22 @@ boot the target image it REFUSES before touching the running container (zero dow
 `config preflight failed: ...; migrate first: sudo opsctl config migrate <slot>`.
 
 Never hand-edit `openclaw.json`. Migrate with the product's own `doctor --fix` (atomic, writes a
-timestamped `.bak`), then re-validate:
+timestamped `.bak`). The operator does NOT need to understand the config: migration is **reviewable**,
+not a black box. `config migrate` prints a `diff …` of exactly what changed (secret values redacted),
+so the operator sees the change instead of trusting doctor. Prefer `--dry-run` first — it previews the
+change on a throwaway copy and shows the diff, writing nothing:
 
 ```bash
 ssh svcops "sudo /usr/local/bin/opsctl config validate SLOT [--product-image PROD@sha256:...]"   # read-only
-ssh svcops "sudo /usr/local/bin/opsctl config migrate  SLOT [--product-image PROD@sha256:...]"   # doctor --fix + re-validate
+ssh svcops "sudo /usr/local/bin/opsctl config migrate  SLOT --dry-run"   # preview: show diff, write nothing
+ssh svcops "sudo /usr/local/bin/opsctl config migrate  SLOT [--product-image PROD@sha256:...]"   # apply: doctor --fix, print diff, re-validate
 ```
 
-A migrated config must stay valid for the slot's CURRENT image too (so a restart can't crash it);
-when migrating customers still on an old image, confirm with `config validate` against the running
-image. MCP tools: `config_validate`, `config_migrate`.
+Review the `diff` lines: a valid-but-wrong migration (e.g. a key removed with no replacement set)
+shows here, and validation passing is NOT proof of correctness — check the diff, and if unexpected,
+restore the `.bak`. A migrated config must stay valid for the slot's CURRENT image too (so a restart
+can't crash it); when migrating customers still on an old image, confirm with `config validate`
+against the running image. MCP tools: `config_validate`, `config_migrate` (accepts `dry_run: true`).
 
 ### 3. Canary and the openclaw-runtime selftest checklist
 

@@ -103,6 +103,12 @@ def build_parser() -> argparse.ArgumentParser:
     config_migrate.add_argument(
         "--product-image", dest="product_image", default="", help="override target product image (default: slot's current)"
     )
+    config_migrate.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help="preview the change on a throwaway copy and show a diff; write nothing",
+    )
     config_migrate.set_defaults(func=cmd_config_migrate)
 
     profile = sub.add_parser("profile")

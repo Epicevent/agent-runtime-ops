@@ -282,7 +282,8 @@ def list_tool_specs() -> list[dict[str, Any]]:
             "description": (
                 "Bring a slot's on-disk config into compliance with its target image by running the product's "
                 "own doctor --fix (atomic write, timestamped .bak). Use when the apply preflight refuses with "
-                "config preflight failed. Never hand-edit the config."
+                "config preflight failed. Prints a diff of exactly what changed. Never hand-edit the config. "
+                "Prefer dry_run:true first to review the change before applying."
             ),
             "inputSchema": {
                 "type": "object",
@@ -291,6 +292,11 @@ def list_tool_specs() -> list[dict[str, Any]]:
                     "product_image": {
                         "type": "string",
                         "description": "Optional repo@sha256:... whose doctor to run; defaults to the slot's current image.",
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "Preview on a throwaway copy and return a diff; write nothing. Review before applying.",
+                        "default": False,
                     },
                 },
                 "required": ["target"],

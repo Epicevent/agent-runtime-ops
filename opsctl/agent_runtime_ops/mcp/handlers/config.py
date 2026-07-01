@@ -27,7 +27,15 @@ def validate(server, args: dict[str, Any]) -> dict[str, Any]:
 
 
 def migrate(server, args: dict[str, Any]) -> dict[str, Any]:
-    """Migrate a slot's on-disk config via the product's own doctor --fix (atomic, backed up)."""
-    v.reject_unknown(args, {"target", "product_image"}, error_type=server.tool_error)
-    runs = [server._run(_argv(server, args, "migrate"), timeout=300)]
-    return server._common_response(ok=runs[0]["returncode"] == 0, mutated=True, runs=runs)
+    """Migrate a slot's on-disk config via the product's own doctor --fix (atomic, backed up).
+
+    With ``dry_run: true`` it previews the change on a throwaway copy and returns a diff,
+    writing nothing — so an operator can review exactly what will change before applying.
+    """
+    v.reject_unknown(args, {"target", "product_image", "dry_run"}, error_type=server.tool_error)
+    argv = _argv(server, args, "migrate")
+    dry_run = bool(args.get("dry_run"))
+    if dry_run:
+        argv.append("--dry-run")
+    runs = [server._run(argv, timeout=300)]
+    return server._common_response(ok=runs[0]["returncode"] == 0, mutated=not dry_run, runs=runs)
