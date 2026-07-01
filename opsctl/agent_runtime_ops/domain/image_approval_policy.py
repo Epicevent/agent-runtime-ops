@@ -18,7 +18,13 @@ from pathlib import Path
 import tempfile
 
 from ..yamlio import dump_yaml, load_yaml
-from .image_specs import DIGEST_RE, allowed_image_ref, digest_from_image_ref, validate_image_digest_ref
+from .image_specs import (
+    DIGEST_RE,
+    OCI_REVISION_LABEL,
+    allowed_image_ref,
+    digest_from_image_ref,
+    validate_image_digest_ref,
+)
 
 
 IMAGE_APPROVAL_POLICY_NAME = "image-approved.yaml"
@@ -49,6 +55,26 @@ def validate_image_approval_target(family: str, role: str, image_ref: str) -> st
     if not allowed_image_ref(family, role, image_ref):
         raise ValueError(f"image repository is not allowed for {family} {role}: {image_ref}")
     return digest
+
+
+def verify_source_commit(source_commit: str, image_revision: str) -> None:
+    """Provenance gate: a claimed --source-commit must equal the image's own revision label.
+
+    This binds an approved digest mechanically to the commit it was built from. Trust does
+    not rest on reproducibility (two builds of one commit differ); it rests on approving the
+    exact artifact whose provenance is verified here. Empty source_commit = no claim to check.
+    """
+    if not source_commit:
+        return
+    if not image_revision:
+        raise ValueError(
+            f"image has no {OCI_REVISION_LABEL} label; cannot verify --source-commit {source_commit}"
+        )
+    if source_commit != image_revision:
+        raise ValueError(
+            f"--source-commit {source_commit} does not match image {OCI_REVISION_LABEL} "
+            f"{image_revision} (approving a digest whose provenance does not match the claim)"
+        )
 
 
 def load_image_approvals(state_root: Path) -> dict:
@@ -83,8 +109,13 @@ def write_image_approval(
     image_ref: str,
     *,
     source_commit: str = "",
+    revision: str = "",
 ) -> Path:
-    """Record root approval for an exact image digest (merges; does not clobber others)."""
+    """Record root approval for an exact image digest (merges; does not clobber others).
+
+    `revision` is the image's own org.opencontainers.image.revision label (the verified
+    provenance), recorded so `image status` shows the exact commit each digest was built from.
+    """
     digest = validate_image_approval_target(family, role, image_ref)
     if not state_root.is_dir():
         raise FileNotFoundError(state_root)
@@ -96,6 +127,7 @@ def write_image_approval(
         "approved_ref": image_ref,
         "approved_digest": digest,
         "source_commit": source_commit,
+        "image_revision": revision,
         "approved_at": _now_iso(),
         "approved_by": os.environ.get("SUDO_USER") or os.environ.get("USER") or "",
     }

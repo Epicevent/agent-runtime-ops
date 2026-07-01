@@ -8,8 +8,10 @@ from ..domain.common import state_root as _state_root
 from ..domain.image_approval_policy import (
     IMAGE_APPROVAL_POLICY_NAME,
     load_image_approvals,
+    verify_source_commit,
     write_image_approval,
 )
+from ..domain.image_specs import image_oci_revision
 
 
 def cmd_image_approve(args: argparse.Namespace) -> int:
@@ -19,13 +21,18 @@ def cmd_image_approve(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    source_commit = str(getattr(args, "source_commit", "") or "")
     try:
+        # Provenance gate: read the image's own revision label and bind it to the claim.
+        revision = image_oci_revision(args.image)
+        verify_source_commit(source_commit, revision)
         policy_path = write_image_approval(
             _state_root(args),
             args.family,
             args.role,
             args.image,
-            source_commit=str(getattr(args, "source_commit", "") or ""),
+            source_commit=source_commit,
+            revision=revision,
         )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -33,6 +40,7 @@ def cmd_image_approve(args: argparse.Namespace) -> int:
     print(f"approved_family={args.family}")
     print(f"approved_role={args.role}")
     print(f"approved_image={args.image}")
+    print(f"image_revision={revision or 'none'}")
     print(f"policy_file={policy_path}")
     return 0
 
@@ -49,10 +57,12 @@ def cmd_image_status(args: argparse.Namespace) -> int:
         digest = str(item.get("approved_digest") or "")
         ref = str(item.get("approved_ref") or "")
         source_commit = str(item.get("source_commit") or "")
+        image_revision = str(item.get("image_revision") or "")
         approved_at = str(item.get("approved_at") or "")
         approved_by = str(item.get("approved_by") or "")
         print(
             f"image {key} digest={digest} ref={ref} "
-            f"source_commit={source_commit or 'none'} approved_at={approved_at} approved_by={approved_by}"
+            f"source_commit={source_commit or 'none'} image_revision={image_revision or 'none'} "
+            f"approved_at={approved_at} approved_by={approved_by}"
         )
     return 0

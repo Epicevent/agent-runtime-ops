@@ -50,6 +50,32 @@ def test_write_merges_and_lookup(tmp_path):
     assert item["source_commit"] == "deadbeef"
 
 
+COMMIT = "9eaf9fb5a46259c76dc5856c6d8847891f5b700e"
+
+
+def test_verify_source_commit_matches_and_empty_skips():
+    ia.verify_source_commit(COMMIT, COMMIT)  # match -> ok
+    ia.verify_source_commit("", "anything")  # no claim -> ok
+    ia.verify_source_commit("", "")  # no claim -> ok
+
+
+def test_verify_source_commit_mismatch_raises():
+    with pytest.raises(ValueError):
+        ia.verify_source_commit(COMMIT, "0" * 40)  # claim != image revision
+
+
+def test_verify_source_commit_missing_label_raises():
+    with pytest.raises(ValueError):
+        ia.verify_source_commit(COMMIT, "")  # claimed a commit but image has no revision label
+
+
+def test_write_records_image_revision(tmp_path):
+    ia.write_image_approval(tmp_path, "openclaw", "product", PRODUCT, source_commit=COMMIT, revision=COMMIT)
+    item = ia.load_image_approvals(tmp_path)["openclaw:product"]
+    assert item["image_revision"] == COMMIT
+    assert item["source_commit"] == COMMIT
+
+
 def test_unapproved_and_missing_are_empty(tmp_path):
     assert ia.approved_image_digest(tmp_path, "openclaw", "product") == ""  # missing policy file
     ia.write_image_approval(tmp_path, "openclaw", "product", PRODUCT)

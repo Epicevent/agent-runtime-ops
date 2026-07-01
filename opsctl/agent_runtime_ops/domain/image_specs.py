@@ -246,6 +246,21 @@ def recipe_label(labels: dict[str, str], name: str) -> str:
     return str(labels.get(IMAGE_RECIPE_LABEL_PREFIX + name) or "")
 
 
+# Standard OCI provenance label: the exact source commit an image was built from.
+# The product image carries the openclaw-jitech commit; the wrapper carries the ops commit.
+OCI_REVISION_LABEL = "org.opencontainers.image.revision"
+
+
+def image_oci_revision(image_ref: str) -> str:
+    """Read an image's source-commit provenance (org.opencontainers.image.revision).
+
+    Works for product and wrapper images alike (both carry the OCI revision label).
+    Requires docker; pulls the image if it is not present locally.
+    """
+    labels = image_recipe_labels_from_wrapper(image_ref)
+    return str(labels.get(OCI_REVISION_LABEL) or "")
+
+
 def image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product_image: str) -> dict[str, object]:
     labels = image_recipe_labels_from_wrapper(wrapper_image)
     schema = recipe_label(labels, "recipe.schema")

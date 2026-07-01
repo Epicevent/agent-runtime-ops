@@ -329,15 +329,24 @@ approved, opsctl refuses any other digest for **production** customer slots (`oc
 slots (`dev-*`, including `dev-oc-img`) are NOT gated: a developer validates a fresh build on
 `dev-oc-img` BEFORE approval (build -> validate -> approve -> promote).
 
+Trust does NOT rest on build reproducibility (two builds of one commit produce different digests
+— unpinned apt/pip + layer timestamps). It rests on approving the **exact artifact** you
+validated and carrying that one digest unchanged (approve pins it, promote applies it verbatim).
+`image approve` therefore reads the image's own `org.opencontainers.image.revision` label and,
+when `--source-commit` is given, **refuses if it does not match** — binding the approved digest
+to the commit it was built from. The verified revision is recorded and shown in `image status`.
+
 ```bash
 # root login (NOT svcops sudo), like `update approve`:
+#   product's revision = the openclaw-jitech source commit; wrapper's = the ops-repo commit.
 sudo /usr/local/bin/opsctl image approve openclaw product PROD@sha256:... --source-commit <40-sha>
 sudo /usr/local/bin/opsctl image approve openclaw wrapper WRAP@sha256:...
 # read-only status (svcops, or MCP image_status):
-ssh svcops "/usr/local/bin/opsctl image status"
+ssh svcops "/usr/local/bin/opsctl image status"   # shows image_revision per approval
 ```
 
 `image approve` is root-only and is NOT an MCP tool. `image status` is read-only.
+`image approve` now needs docker (to read the image's revision label) — fine on a root login.
 
 **Developer self-deploy:** a developer account (e.g. `openclawdev`) may deploy to its own
 `dev-*` slots (`rollout image-dev-apply dev-oc`, `rollout image-canary dev-oc-img`) via a scoped
