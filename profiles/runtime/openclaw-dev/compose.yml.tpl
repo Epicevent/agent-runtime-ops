@@ -43,7 +43,7 @@ services:
       - "{{ target_home }}/.openclaw:/home/node/.openclaw"
       - "{{ target_home }}/.openclaw/workspace:/home/node/.openclaw/workspace"
       - "{{ target_home }}/.openclaw-auth-profile-secrets:/home/node/.config/openclaw"
-      - "{{ source_output }}:/app/dist/control-ui:ro"
+      - "{{ source_output }}:/app/dist:ro"
       - type: bind
         source: "{{ target_home }}/nas_docs"
         target: /home/node/nas_docs

@@ -74,6 +74,22 @@ def _volume_contains_source_output(volume: Any) -> bool:
     return "${SOURCE_OUTPUT}" in str(volume)
 
 
+def _mount_covers_target(mount_target: str, output_target: str) -> bool:
+    """A dev source mount is valid if it maps the host build output into the container AT, or at a
+    PARENT of, the recipe's ``source_output_target``.
+
+    Mounting only ``/app/dist/control-ui`` gives a live frontend but a baked server. Mounting the
+    whole ``/app/dist`` (a parent that contains ``control-ui``) gives full-stack live dev — server
+    (``dist/index.js``) and UI both from source — and still satisfies the contract, so we do not
+    have to change the ``source_output_target`` label (which is baked into wrapper images).
+    """
+    if not mount_target:
+        return False
+    if mount_target == output_target:
+        return True
+    return output_target.startswith(mount_target.rstrip("/") + "/")
+
+
 def _propagation_matches(actual: str, required: str) -> bool:
     if not required:
         return True
@@ -335,7 +351,8 @@ def validate_compose_contract(profile: Any, desired: Any, rendered_text: str) ->
         target = str(profile.metadata.get("source_output_target") or "")
         checks.append(
             ComposeContractCheck(
-                bool(source_mounts) and (not target or any(_volume_target(volume) == target for volume in source_mounts)),
+                bool(source_mounts)
+                and (not target or any(_mount_covers_target(_volume_target(volume), target) for volume in source_mounts)),
                 "compose_dev_source_mount_present",
                 f"target={target or 'any'} count={len(source_mounts)}",
             )
