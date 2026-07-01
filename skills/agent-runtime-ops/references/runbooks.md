@@ -311,7 +311,7 @@ OpenClaw rollout uses the same digest-pinned image flow as Hermes, plus three Op
 gates. Slot roles:
 
 ```text
-dev-oc        source mode; UI is source-mounted, the server is the image; dev-owned; never a promote source/target
+dev-oc        source mode; the built dist/ (server dist/index.js + UI) is source-mounted at /app/dist; dev-owned; never a promote source/target
 dev-oc-img    image mode (runtime_class=customer) but dev-OWNED; pure-image dev canary; NOT approval-gated; never a promote source/target
 oc14          production customer canary; valid promote source after checks pass
 oc1..oc13     production customer targets; reached only by image-promote
@@ -410,6 +410,16 @@ Most config (including `agents.defaults.model.primary`) hot-reloads live;
 
 Dev source mode means the container sees an external source/output path. It does not mean customer
 targets should use source mounts.
+
+`dev-oc` mounts `--source-output` over the whole `/app/dist` (not just `dist/control-ui`), so both
+the server (`dist/index.js`) and the UI run from source — a full-stack live loop. The path you pass
+to `--source-output` must therefore be a **complete** build output with the same layout the image
+ships (`index.js` plus `control-ui/`), i.e. the result of the product's full build
+(`pnpm build:docker && pnpm ui:build`). Passing a partial tree (e.g. only `control-ui`) overlays an
+incomplete `/app/dist` and the container's server will fail to start; the apply health check then
+auto-rolls-back. The compose contract accepts a source mount at `/app/dist` or at the recipe's
+`source_output_target` (`/app/dist/control-ui`); the label itself is unchanged (baked into wrapper
+images), so no wrapper rebuild is needed.
 
 Inspect:
 
