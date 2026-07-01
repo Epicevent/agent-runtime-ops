@@ -115,6 +115,27 @@ def test_failed_required_from_output_fails_contract(monkeypatch):
     assert _find(results, "selftest_model_roundtrip_ok")[0] is False
 
 
+def test_nonzero_exit_with_json_surfaces_per_check_reason(monkeypatch):
+    # The product exits non-zero when ok:false, but still prints its JSON verdict on stdout.
+    # opsctl must parse it so the FAILING check + reason are visible (not a truncated blob).
+    payload = {
+        "ok": False,
+        "required_checks": REQUIRED,
+        "checks": [
+            {"name": "selftest_gateway_ready_ok", "ok": True, "detail": "ready"},
+            {"name": "selftest_model_roundtrip_ok", "ok": False, "detail": "empty completion: model returned no text"},
+            {"name": "selftest_executor_nas_roundtrip_ok", "ok": True, "detail": "ok"},
+        ],
+    }
+    _patch(monkeypatch, _Proc(1, json.dumps(payload)))
+    results = run_image_selftest_contract("cid", CONTRACT)
+    model = _find(results, "selftest_model_roundtrip_ok")
+    assert model is not None and model[0] is False
+    assert "empty completion" in model[1]  # the reason survives for diagnosis
+    assert _find(results, "selftest_gateway_ready_ok")[0] is True
+    assert _find(results, "selftest_contract_ok")[0] is False
+
+
 def test_missing_required_from_output_backfilled(monkeypatch):
     payload = {"required_checks": REQUIRED, "checks": [{"name": "selftest_gateway_ready_ok", "ok": True}]}
     _patch(monkeypatch, _Proc(0, json.dumps(payload)))
