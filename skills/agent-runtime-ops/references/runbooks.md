@@ -393,18 +393,31 @@ drift `config_disk_valid_for_running_image_ok`, public route, container identity
 selftest check flows into both the apply gate and this pack automatically — do not restate product
 check names in opsctl.
 
-### OpenClaw model config (product command, not opsctl)
+### Runtime model config (Hermes and OpenClaw)
 
-`opsctl runtime set-model` is Hermes-only. Set an OpenClaw slot's default model with the product's
-own command (hot-reloaded; no restart needed). It uses the slot's already-injected provider key.
+`opsctl runtime set-model` / `runtime config-status` support BOTH families (each is root-only /
+svcops NOPASSWD). They dispatch on the slot's family:
+- **Hermes**: read/write `.hermes/config.yaml` `agents.defaults.model.default` directly.
+- **OpenClaw**: `config-status` reads `.openclaw/openclaw.json` `agents.defaults.model`
+  (`provider/model` ref). `set-model` runs the product's OWN `models set` **inside the live gateway
+  container** (`docker exec`) — preserving the canonical `agents.defaults.models` entry,
+  provider-plugin repair, and load-time validation that a raw JSON write would skip — then prints a
+  before/after config diff (`config_diff …`). It requires a **running** gateway container.
+
+OpenClaw's provider is embedded in the model ref, so `--provider google --model gemini-3.5-flash`
+composes to `google/gemini-3.5-flash`. The slot's already-injected provider key is reused (a
+same-provider bump needs no new key). Verify with a REAL turn, not just config validity:
 
 ```bash
-docker exec <openclaw-gateway-container> node dist/index.js models set google/gemini-2.5-flash
-docker exec <openclaw-gateway-container> node dist/index.js infer model run --local --prompt "Reply with exactly: OK" --json   # verify a real completion
+ssh svcops "sudo /usr/local/bin/opsctl runtime config-status oc1"                              # current provider/model
+ssh svcops "sudo /usr/local/bin/opsctl runtime set-model oc1 --provider google --model gemini-3.5-flash"
+ssh svcops "sudo /usr/local/bin/opsctl checklist pack oc1 --pack openclaw-runtime --gemini-chat-smoke"   # real completion
+# hermes uses the same command shape (checklist pack ... --pack hermes-runtime --gemini-chat-smoke)
 ```
 
 Most config (including `agents.defaults.model.primary`) hot-reloads live;
-`gateway.controlUi.allowedOrigins` requires a gateway restart to apply.
+`gateway.controlUi.allowedOrigins` requires a gateway restart to apply. Rollback = set-model back to
+the previous ref (recorded as `previous_model_ref` and in the action log).
 
 ## Dev Recipe
 

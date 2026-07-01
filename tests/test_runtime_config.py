@@ -26,7 +26,7 @@ class RuntimeConfigTests(unittest.TestCase):
         output = io.StringIO()
         with (
             patch("agent_runtime_ops.commands.runtime_config.is_root", return_value=True),
-            patch("agent_runtime_ops.commands.runtime_config._load_hermes_target", return_value=SimpleNamespace(slot="oc16")),
+            patch("agent_runtime_ops.commands.runtime_config._load_config_target", return_value=SimpleNamespace(slot="oc16", family="hermes")),
             patch("agent_runtime_ops.commands.runtime_config.hermes_config_path", return_value=Path("/home/oc16/.hermes/config.yaml")),
             patch("agent_runtime_ops.commands.runtime_config.read_hermes_config", return_value={}),
             patch("agent_runtime_ops.commands.runtime_config.write_hermes_config", side_effect=lambda _slot, _path, config: written.update(config)),
@@ -47,12 +47,13 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(written["model"], "gemini-3.1-pro-preview")
         self.assertIn("provider_raw=google", text)
         self.assertIn("provider_runtime=gemini", text)
+        self.assertIn("family=hermes", text)
 
     def test_runtime_config_status_prints_raw_and_runtime_provider(self) -> None:
         output = io.StringIO()
         with (
             patch("agent_runtime_ops.commands.runtime_config.is_root", return_value=True),
-            patch("agent_runtime_ops.commands.runtime_config._load_hermes_target", return_value=SimpleNamespace(slot="oc16")),
+            patch("agent_runtime_ops.commands.runtime_config._load_config_target", return_value=SimpleNamespace(slot="oc16", family="hermes")),
             patch("agent_runtime_ops.commands.runtime_config.hermes_config_path", return_value=Path("/home/oc16/.hermes/config.yaml")),
             patch(
                 "agent_runtime_ops.commands.runtime_config.read_hermes_config",
@@ -66,6 +67,7 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertIn("provider=gemini", text)
         self.assertIn("provider_raw=google", text)
         self.assertIn("provider_runtime=gemini", text)
+        self.assertIn("family=hermes", text)
 
     def test_runtime_config_sanitize_dry_run_reports_paths_without_writing_values(self) -> None:
         secret_value = "do-not-print-this-secret"
@@ -124,6 +126,127 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertNotIn("google-secret", text)
         self.assertNotIn("gemini-secret", text)
         self.assertNotIn("auth-secret", text)
+
+
+class OpenClawSetModelTests(unittest.TestCase):
+    """openclaw set-model applies the change with the product's OWN `models set` inside the live
+    container (docker exec), then shows a before/after diff of the on-disk config."""
+
+    def _run(self, *, initial, models_set, container=("c123", "instance_label"), provider="google", model="gemini-3.5-flash"):
+        store = {"cfg": initial}
+        calls: list[tuple[str, str]] = []
+        output = io.StringIO()
+
+        def _read(_path):
+            import copy as _copy
+
+            return _copy.deepcopy(store["cfg"])
+
+        def _models_set(container_id, ref, **_kw):
+            calls.append((container_id, ref))
+            return models_set(store, container_id, ref)
+
+        with (
+            patch("agent_runtime_ops.commands.runtime_config.is_root", return_value=True),
+            patch(
+                "agent_runtime_ops.commands.runtime_config._load_config_target",
+                return_value=SimpleNamespace(slot="oc1", family="openclaw", route=object(), runtime_profile="openclaw-customer"),
+            ),
+            patch("agent_runtime_ops.commands.runtime_config.load_profile", return_value=object()),
+            patch("agent_runtime_ops.commands.runtime_config.find_gateway_container", return_value=container),
+            patch("agent_runtime_ops.commands.runtime_config.openclaw_config_path", return_value=Path("/home/oc1/.openclaw/openclaw.json")),
+            patch("agent_runtime_ops.commands.runtime_config.read_openclaw_config", side_effect=_read),
+            patch("agent_runtime_ops.commands.runtime_config.run_openclaw_models_set", side_effect=_models_set),
+            patch("agent_runtime_ops.commands.runtime_config.append_action_log"),
+            contextlib.redirect_stdout(output),
+        ):
+            rc = cmd_runtime_set_model(
+                argparse.Namespace(slot="oc1", provider=provider, model=model, state_root="/srv/openclaw-ops")
+            )
+        return rc, output.getvalue(), store["cfg"], calls
+
+    def test_calls_product_models_set_and_diffs(self) -> None:
+        def apply(store, _container, ref):
+            store["cfg"] = {"agents": {"defaults": {"model": ref}}}
+            return True, "exit=0"
+
+        rc, text, cfg, calls = self._run(
+            initial={"agents": {"defaults": {"model": "google/gemini-2.5-flash"}}}, models_set=apply
+        )
+        self.assertEqual(rc, 0, text)
+        # the product command was invoked with the composed provider/model ref
+        self.assertEqual(calls, [("c123", "google/gemini-3.5-flash")])
+        self.assertEqual(cfg["agents"]["defaults"]["model"], "google/gemini-3.5-flash")
+        self.assertIn("family=openclaw", text)
+        self.assertIn("exec_container=c123:instance_label", text)
+        self.assertIn("model_ref=google/gemini-3.5-flash", text)
+        self.assertIn("previous_model_ref=google/gemini-2.5-flash", text)
+        self.assertIn("~ agents.defaults.model: google/gemini-2.5-flash -> google/gemini-3.5-flash", text)
+        self.assertIn("runtime_config_status=updated", text)
+
+    def test_no_running_container_fails(self) -> None:
+        rc, text, _cfg, calls = self._run(
+            initial={"agents": {"defaults": {"model": "google/gemini-2.5-flash"}}},
+            models_set=lambda *_a: (True, "exit=0"),
+            container=(None, "no_match"),
+        )
+        self.assertEqual(rc, 1, text)
+        self.assertEqual(calls, [])  # product command never runs without a container
+        self.assertIn("no running gateway container", text)
+        self.assertIn("runtime_config_status=fail", text)
+
+    def test_product_command_failure_reports(self) -> None:
+        rc, text, _cfg, _calls = self._run(
+            initial={"agents": {"defaults": {"model": "google/gemini-2.5-flash"}}},
+            models_set=lambda *_a: (False, "boom: bad model"),
+        )
+        self.assertEqual(rc, 1, text)
+        self.assertIn("product models set failed", text)
+        self.assertIn("runtime_config_status=fail", text)
+
+    def test_openclaw_config_status_reports_ref(self) -> None:
+        output = io.StringIO()
+        with (
+            patch("agent_runtime_ops.commands.runtime_config.is_root", return_value=True),
+            patch(
+                "agent_runtime_ops.commands.runtime_config._load_config_target",
+                return_value=SimpleNamespace(slot="oc1", family="openclaw"),
+            ),
+            patch("agent_runtime_ops.commands.runtime_config.openclaw_config_path", return_value=Path("/home/oc1/.openclaw/openclaw.json")),
+            patch(
+                "agent_runtime_ops.commands.runtime_config.read_openclaw_config",
+                return_value={"agents": {"defaults": {"model": "google/gemini-2.5-flash"}}},
+            ),
+            contextlib.redirect_stdout(output),
+        ):
+            rc = cmd_runtime_config_status(argparse.Namespace(slot="oc1", state_root="/srv/openclaw-ops"))
+        text = output.getvalue()
+        self.assertEqual(rc, 0, text)
+        self.assertIn("family=openclaw", text)
+        self.assertIn("provider=google", text)
+        self.assertIn("model=gemini-2.5-flash", text)
+        self.assertIn("model_ref=google/gemini-2.5-flash", text)
+
+
+class OpenClawConfigDomainTests(unittest.TestCase):
+    def test_current_model_string_object_missing(self) -> None:
+        from agent_runtime_ops.domain.openclaw_config import current_openclaw_model
+
+        self.assertEqual(
+            current_openclaw_model({"agents": {"defaults": {"model": "google/gemini-2.5-flash"}}}),
+            ("google", "gemini-2.5-flash", "google/gemini-2.5-flash", "string"),
+        )
+        self.assertEqual(
+            current_openclaw_model({"agents": {"defaults": {"model": {"primary": "google/gemini-3.5-flash"}}}}),
+            ("google", "gemini-3.5-flash", "google/gemini-3.5-flash", "object"),
+        )
+        self.assertEqual(current_openclaw_model({}), ("", "", "", "missing"))
+
+    def test_build_ref_composes_provider_and_model(self) -> None:
+        from agent_runtime_ops.domain.openclaw_config import build_model_ref
+
+        self.assertEqual(build_model_ref("google", "gemini-3.5-flash"), "google/gemini-3.5-flash")
+        self.assertEqual(build_model_ref("", "gemini-3.5-flash"), "gemini-3.5-flash")  # bare model, no provider
 
 
 if __name__ == "__main__":

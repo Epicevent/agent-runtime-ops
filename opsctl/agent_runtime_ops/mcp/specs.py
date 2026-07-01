@@ -77,7 +77,7 @@ def list_tool_specs() -> list[dict[str, Any]]:
         {
             "name": "runtime_config_status",
             "title": "Runtime Config Status",
-            "description": "Inspect Hermes runtime provider/model config without printing secret values.",
+            "description": "Inspect Hermes or OpenClaw runtime provider/model config without printing secret values.",
             "inputSchema": {
                 "type": "object",
                 "properties": {"target": {"type": "string", "description": "Linux account."}},
@@ -105,7 +105,12 @@ def list_tool_specs() -> list[dict[str, Any]]:
         {
             "name": "runtime_set_model",
             "title": "Set Runtime Model",
-            "description": "Set Hermes runtime provider/model config without accepting or printing provider secret values.",
+            "description": (
+                "Set Hermes or OpenClaw runtime provider/model config without accepting or printing provider "
+                "secret values. For OpenClaw, provider+model compose into the agents.defaults.model ref "
+                "'provider/model' (e.g. provider=google model=gemini-3.5-flash -> google/gemini-3.5-flash); "
+                "a shape-preserving diff is printed."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
