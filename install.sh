@@ -319,6 +319,7 @@ install_ops_sudoers() {
     printf '%s ALL=(root) NOPASSWD: %s nas remove *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s nas credential status *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s nas approve-auto *\n' "$OPS_USER" "$BIN_LINK"
+    printf '%s ALL=(root) NOPASSWD: %s nas view *\n' "$OPS_USER" "$BIN_LINK"
     # Developer self-deploy to own dev-* slots: least-privilege (dev-apply / canary only).
     # opsctl refuses any non-dev-* target for these accounts (see _authorize_deploy_target).
     for dev_user in $DEV_USERS; do
