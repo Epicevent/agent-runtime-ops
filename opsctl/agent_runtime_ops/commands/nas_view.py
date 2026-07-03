@@ -82,7 +82,8 @@ def _apply_binds(plan: ViewPlan) -> tuple[bool, str, int]:
         if not ok:
             return False, f"room_bind:{target.name}:{reason}", bound_rooms
         bound_rooms += 1
-    ok, reason = bind_ro(plan.view, plan.entry)
+    # --rbind: the package/media submounts under view must follow into the entry.
+    ok, reason = bind_ro(plan.view, plan.entry, recursive=True)
     if not ok:
         return False, f"entry_bind:{reason}", bound_rooms
     return True, "ok", bound_rooms
