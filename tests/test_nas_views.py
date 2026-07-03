@@ -143,9 +143,9 @@ class NasViewDomainTests(unittest.TestCase):
 
 
 class NasViewCliTests(unittest.TestCase):
-    def _assign(self, root: Path, master: Path, binds: list[tuple[Path, Path]]) -> tuple[int, str]:
-        def fake_bind_ro(source: Path, target: Path) -> tuple[bool, str]:
-            binds.append((source, target))
+    def _assign(self, root: Path, master: Path, binds: list[tuple[Path, Path, bool]]) -> tuple[int, str]:
+        def fake_bind_ro(source: Path, target: Path, *, recursive: bool = False) -> tuple[bool, str]:
+            binds.append((source, target, recursive))
             return True, "ok"
 
         credential = root / "cred" / "share.cred"
@@ -185,7 +185,7 @@ class NasViewCliTests(unittest.TestCase):
             write_state(root)
             master = Path(tmp) / "master"
             write_master(master)
-            binds: list[tuple[Path, Path]] = []
+            binds: list[tuple[Path, Path, bool]] = []
             rc, out = self._assign(root, master, binds)
             self.assertEqual(rc, 0, out)
             self.assertIn("view_assign_status=ok", out)
@@ -196,6 +196,8 @@ class NasViewCliTests(unittest.TestCase):
             # binds: package + 1 room + entry
             self.assertEqual(len(binds), 3)
             self.assertEqual(binds[-1][1], Path("/home/oc3/nas_docs/kw"))
+            # only the entry bind is recursive (--rbind pulls the submounts along)
+            self.assertEqual([recursive for _, _, recursive in binds], [False, False, True])
 
     def test_assign_refuses_double_assign(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -204,7 +206,7 @@ class NasViewCliTests(unittest.TestCase):
             write_state(root)
             master = Path(tmp) / "master"
             write_master(master)
-            binds: list[tuple[Path, Path]] = []
+            binds: list[tuple[Path, Path, bool]] = []
             rc, _ = self._assign(root, master, binds)
             self.assertEqual(rc, 0)
             rc, out = self._assign(root, master, binds)
@@ -252,6 +254,78 @@ class NasViewCliTests(unittest.TestCase):
             self.assertEqual(rc, 0, output.getvalue())
             self.assertIn("view_1_target=oc3", output.getvalue())
             self.assertIn("view_1_healthy=yes", output.getvalue())
+
+
+class FakeProc:
+    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+class BindRoTests(unittest.TestCase):
+    def _ro_row(self) -> list[dict[str, str]]:
+        return [{"target": "t", "source": "s", "fstype": "none", "options": "ro,bind"}]
+
+    def test_bind_ro_uses_rbind_when_recursive(self) -> None:
+        from agent_runtime_ops.host import bind_mounts
+
+        commands: list[list[str]] = []
+
+        def fake_run(command: list[str], timeout: int = 20) -> FakeProc:
+            commands.append(command)
+            return FakeProc()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "src"
+            source.mkdir()
+            target = Path(tmp) / "dst"
+            with (
+                patch.object(bind_mounts, "_run_text", side_effect=fake_run),
+                patch.object(bind_mounts, "findmnt_one", side_effect=[(1, "", []), (0, "", self._ro_row())]),
+            ):
+                ok, reason = bind_mounts.bind_ro(source, target, recursive=True)
+        self.assertTrue(ok, reason)
+        self.assertEqual(commands[0][:2], ["mount", "--rbind"])
+
+    def test_bind_ro_rebuilds_stale_existing_mount(self) -> None:
+        from agent_runtime_ops.host import bind_mounts
+
+        commands: list[list[str]] = []
+
+        def fake_run(command: list[str], timeout: int = 20) -> FakeProc:
+            commands.append(command)
+            return FakeProc()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "src"
+            source.mkdir()
+            target = Path(tmp) / "dst"
+            with (
+                patch.object(bind_mounts, "_run_text", side_effect=fake_run),
+                # first findmnt: a stale mount exists; second: post-bind verify
+                patch.object(bind_mounts, "findmnt_one", side_effect=[(0, "", self._ro_row()), (0, "", self._ro_row())]),
+                patch.object(bind_mounts, "unmount_tree", return_value=(0, [])) as fake_unmount,
+            ):
+                ok, reason = bind_mounts.bind_ro(source, target)
+        self.assertTrue(ok, reason)
+        fake_unmount.assert_called_once_with(target)
+        self.assertEqual(commands[0][:2], ["mount", "--bind"])
+
+    def test_bind_ro_fails_when_stale_unmount_fails(self) -> None:
+        from agent_runtime_ops.host import bind_mounts
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "src"
+            source.mkdir()
+            target = Path(tmp) / "dst"
+            with (
+                patch.object(bind_mounts, "findmnt_one", return_value=(0, "", self._ro_row())),
+                patch.object(bind_mounts, "unmount_tree", return_value=(1, ["busy"])),
+            ):
+                ok, reason = bind_mounts.bind_ro(source, target)
+        self.assertFalse(ok)
+        self.assertIn("stale_mount_unmount_failed", reason)
 
 
 if __name__ == "__main__":
