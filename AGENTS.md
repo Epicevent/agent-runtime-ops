@@ -116,22 +116,49 @@ evidence, not the source of truth.
 
 For wrapped product images, the wrapper OCI labels must include the canonical recipe name/digest and
 must match `recipes/runtime/*.yaml`. Do not treat a sidecar file, release-import argument, copied
-release state, or install-time repair as runtime truth. Prefer the image-based rollout commands:
+release state, or install-time repair as runtime truth. The image-based rollout commands operate on
+built image artifacts (`@sha256:...`), never on a source tree:
 
 ```bash
 sudo /usr/local/bin/opsctl rollout image-plan --wrapper-image WRAP@sha256:... --product-image PROD@sha256:...
-sudo /usr/local/bin/opsctl rollout image-dev-apply --target dev-oc --wrapper-image WRAP@sha256:... --product-image PROD@sha256:...
+# dev image-artifact validation (dev-oc-img is runtime_class=customer -> image-canary):
+sudo /usr/local/bin/opsctl rollout image-canary --target dev-oc-img --wrapper-image WRAP@sha256:... --product-image PROD@sha256:...
+# production canary, then promote:
 sudo /usr/local/bin/opsctl rollout image-canary --target oc3 --wrapper-image WRAP@sha256:... --product-image PROD@sha256:...
 sudo /usr/local/bin/opsctl rollout image-promote --from-target oc3 --targets oc1,oc2,oc4
 ```
+
+`image-dev-apply` requires `runtime_class=dev` and `image-canary` requires `runtime_class=customer`
+(`opsctl/agent_runtime_ops/commands/rollout.py`, `required_runtime_class`); `image-promote` refuses
+any `dev-*` account as source or target. Do NOT target the source-mode preview slot `dev-oc` with any
+`image-*` command — to preview a code change there you sync source with `recipe apply-dev` (below),
+you do not build an image.
 
 The older `release import` and `rollout --release` commands are retained as legacy compatibility
 surfaces. Do not use them for new OpenClaw/Hermes image rollouts unless the image-based path is
 missing a required capability and the exception is reported.
 
-Product source provenance is a separate layer. `opsctl recipe apply-dev` may record git metadata for
-a dev source tree, but that proves source lineage, not runtime shape. Do not use source provenance to
-explain away a runtime recipe/profile mismatch.
+**Dev preview layers.** There are two dev sites at different layers; pick by what you are checking.
+
+- `dev-oc` is the SOURCE-mode preview site (`https://dev-oc.ji-tech.co.kr`), `runtime_class=dev`,
+  `mode=source`. To *see* a code change you do NOT build an image: build the product dist
+  (server `dist/index.js` + UI `dist/control-ui`, i.e. `pnpm build:docker && pnpm ui:build`) and sync
+  it with `sudo /usr/local/bin/opsctl recipe apply-dev dev-oc --sync-from <dist>`. Its
+  `{{ source_output }}:/app/dist:ro` compose mount is where the running code comes from. `recipe
+  apply-dev` is an `svcops` (operator) command; a developer account cannot run it directly, so
+  coordinate the sync with `svcops`.
+- `dev-oc-img` is the IMAGE-artifact validation site (`https://dev-oc-img.ji-tech.co.kr`),
+  `runtime_class=customer`, `mode=image`, no source mount. It boots a built image (`@sha256:...`) via
+  `image-canary` to separate source-mode failures from image-boot failures before shipping. It is not
+  a quick-preview surface.
+
+So: code-change preview = `dev-oc` (source, `recipe apply-dev --sync-from`); image-artifact validation
+= `dev-oc-img` (`image-canary`); customer ship = `image approve` (root) -> `image-promote`. Never
+target `dev-oc` with `image-*`; it is source-mode.
+
+Product source provenance is a separate concern layered on that path: `opsctl recipe apply-dev` records
+git metadata for the synced dev source tree, which proves source *lineage*, not runtime *shape*. Do not
+use source provenance to explain away a runtime recipe/profile mismatch.
 
 Image-mode dev validation uses a `dev-*` Linux account with the customer runtime
 profile, for example `dev-hermes-img` / `dev-oc-img`. That target exists to separate
