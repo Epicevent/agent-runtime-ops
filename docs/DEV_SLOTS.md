@@ -8,7 +8,7 @@ the source site; to validate a built image artifact use the image site.
 
 ```text
 dev-oc       -> openclaw-dev   https://dev-oc.ji-tech.co.kr
-dev-hermess  -> hermes-dev     https://dev-hermess.ji-tech.co.kr
+dev-hermess  -> hermes-dev     (hermes dev URL: verify before documenting)
 ```
 
 `runtime_class=dev`, `mode=source`. The running code comes from a source mount, not from the image:
@@ -20,9 +20,17 @@ build the product dist (server `dist/index.js` + UI `dist/control-ui`, i.e.
 sudo /usr/local/bin/opsctl recipe apply-dev dev-oc --sync-from /ABS/PATH/TO/dist
 ```
 
-`recipe apply-dev` is an `svcops` (operator) command; developer accounts cannot run it directly, so
-coordinate the sync with `svcops`. Source mode is for browser-visible development checks before
-publishing an image release. Customer slots must not receive source mounts.
+> ⚠️ Ensure `pnpm` resolves on PATH first: the build sub-scripts call bare `pnpm`, so on a
+> corepack-only build host run `corepack enable pnpm` (or add a shim) — otherwise `ui:build` fails
+> silently and you get a UI-less `dist/index.js`-only tree while the exit code still looks OK. Before
+> syncing, verify BOTH `dist/index.js` and `dist/control-ui` exist. `--sync-from` takes the WHOLE
+> `dist/` (server + UI); the mount covers all of `/app/dist` even though `source_output_target` names
+> the `control-ui` subpath, so never sync only `control-ui`.
+
+`recipe apply-dev` is an `svcops` (operator) command; developer accounts cannot run it directly (a
+developer account CAN self-run `image-canary` to `dev-oc-img`), so coordinate the source sync with
+`svcops` rather than defaulting to the self-serve image path. Source mode is for browser-visible
+development checks before publishing an image release. Customer slots must not receive source mounts.
 
 ## Image-mode validation (validate a built image artifact)
 
@@ -43,6 +51,11 @@ sudo /usr/local/bin/opsctl rollout image-canary --target dev-oc-img --wrapper-im
 
 They exist to separate source-mode failures from image-boot failures — artifact validation only, not
 a quick-preview surface. They must not be used as an `image-promote` source or target.
+
+`image-dev-apply` (`runtime_class=dev`) is therefore not the openclaw path: the only openclaw
+`runtime_class=dev` slot is the source-mode `dev-oc`, which uses `recipe apply-dev`, never `image-*`.
+So even though a sudoers grant may still list `rollout image-dev-apply *`, do not run it against
+`dev-oc` (or any `dev-*`) for openclaw.
 
 ## Two axes: mode vs environment
 

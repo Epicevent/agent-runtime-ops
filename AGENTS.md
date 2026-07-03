@@ -132,7 +132,10 @@ sudo /usr/local/bin/opsctl rollout image-promote --from-target oc3 --targets oc1
 (`opsctl/agent_runtime_ops/commands/rollout.py`, `required_runtime_class`); `image-promote` refuses
 any `dev-*` account as source or target. Do NOT target the source-mode preview slot `dev-oc` with any
 `image-*` command — to preview a code change there you sync source with `recipe apply-dev` (below),
-you do not build an image.
+you do not build an image. `image-dev-apply` (`runtime_class=dev`) is NOT the openclaw dev-preview
+path and has no valid openclaw target today: the only openclaw `runtime_class=dev` slot is the
+source-mode `dev-oc`, which must use `recipe apply-dev`. The `openclawdev` sudoers may still list
+`rollout image-dev-apply *`, but never run it against `dev-oc` (or any `dev-*`) for openclaw.
 
 The older `release import` and `rollout --release` commands are retained as legacy compatibility
 surfaces. Do not use them for new OpenClaw/Hermes image rollouts unless the image-based path is
@@ -144,9 +147,16 @@ missing a required capability and the exception is reported.
   `mode=source`. To *see* a code change you do NOT build an image: build the product dist
   (server `dist/index.js` + UI `dist/control-ui`, i.e. `pnpm build:docker && pnpm ui:build`) and sync
   it with `sudo /usr/local/bin/opsctl recipe apply-dev dev-oc --sync-from <dist>`. Its
-  `{{ source_output }}:/app/dist:ro` compose mount is where the running code comes from. `recipe
-  apply-dev` is an `svcops` (operator) command; a developer account cannot run it directly, so
-  coordinate the sync with `svcops`.
+  `{{ source_output }}:/app/dist:ro` compose mount is where the running code comes from.
+  - Ensure `pnpm` resolves on PATH before building: the build sub-scripts call bare `pnpm`, so on a
+    corepack-only build host run `corepack enable pnpm` (or add a shim) first — otherwise `ui:build`
+    fails silently and yields a UI-less `dist/index.js`-only tree while the exit code still looks OK.
+    Before syncing, verify BOTH `dist/index.js` (server) and `dist/control-ui` (UI) exist.
+  - `--sync-from` takes the WHOLE `dist/` (server + UI): the mount covers all of `/app/dist` even
+    though `source_output_target` names the `control-ui` subpath — never sync only `control-ui`.
+  - `recipe apply-dev` is an `svcops` (operator) command; a developer account cannot run it directly
+    (it CAN self-run `image-canary` to `dev-oc-img`). That permission asymmetry pulls toward the
+    self-serve image path — resist it and coordinate the source sync with `svcops` for a preview.
 - `dev-oc-img` is the IMAGE-artifact validation site (`https://dev-oc-img.ji-tech.co.kr`),
   `runtime_class=customer`, `mode=image`, no source mount. It boots a built image (`@sha256:...`) via
   `image-canary` to separate source-mode failures from image-boot failures before shipping. It is not
