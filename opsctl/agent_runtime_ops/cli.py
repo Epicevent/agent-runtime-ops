@@ -22,6 +22,12 @@ from .commands.handoff import (
     cmd_handoff_value_command,
 )
 from .commands.heartbeat import cmd_heartbeat_disable, cmd_heartbeat_status
+from .commands.nas_view import (
+    cmd_nas_view_assign,
+    cmd_nas_view_detach,
+    cmd_nas_view_restore,
+    cmd_nas_view_status,
+)
 from .commands.nas import (
     cmd_nas_approve_auto,
     cmd_nas_credential_set,
@@ -338,6 +344,24 @@ def build_parser() -> argparse.ArgumentParser:
     nas_remove.add_argument("--lazy", action="store_true")
     nas_remove.add_argument("--delete-empty-dir", action="store_true")
     nas_remove.set_defaults(func=cmd_nas_remove)
+    nas_view = nas_sub.add_parser("view")
+    nas_view_sub = nas_view.add_subparsers(dest="view_command", required=True)
+    nas_view_assign = nas_view_sub.add_parser("assign")
+    nas_view_assign.add_argument("slot", metavar="target")
+    nas_view_assign.add_argument("user_id")
+    nas_view_assign.add_argument("--share", required=True)
+    nas_view_assign.add_argument("--username")
+    nas_view_assign.add_argument("--password-stdin", action="store_true")
+    nas_view_assign.add_argument("--domain")
+    nas_view_assign.set_defaults(func=cmd_nas_view_assign)
+    nas_view_detach = nas_view_sub.add_parser("detach")
+    nas_view_detach.add_argument("slot", metavar="target")
+    nas_view_detach.add_argument("--share")
+    nas_view_detach.set_defaults(func=cmd_nas_view_detach)
+    nas_view_status = nas_view_sub.add_parser("status")
+    nas_view_status.set_defaults(func=cmd_nas_view_status)
+    nas_view_restore = nas_view_sub.add_parser("restore")
+    nas_view_restore.set_defaults(func=cmd_nas_view_restore)
 
     admin = sub.add_parser("admin")
     admin_sub = admin.add_subparsers(dest="admin_command", required=True)

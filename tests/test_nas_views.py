@@ -1,0 +1,258 @@
+from __future__ import annotations
+
+import argparse
+import contextlib
+import io
+import json
+from pathlib import Path
+import tempfile
+import unittest
+import uuid
+from unittest.mock import patch
+
+from agent_runtime_ops.commands.nas_view import (
+    cmd_nas_view_assign,
+    cmd_nas_view_detach,
+    cmd_nas_view_status,
+)
+from agent_runtime_ops.domain.nas_views import (
+    build_view_plan,
+    find_user_package,
+    load_membership_rooms,
+    load_views_state,
+    save_views_state,
+    validate_room_id,
+    validate_user_id,
+)
+from agent_runtime_ops.routing import RuntimeBinding, dump_runtime_bindings
+from agent_runtime_ops.yamlio import dump_yaml
+
+
+def binding(account: str, runtime_class: str, gateway: int, bridge: int) -> RuntimeBinding:
+    return RuntimeBinding(
+        instance_id=str(uuid.uuid5(uuid.NAMESPACE_DNS, account)),
+        linux_account=account,
+        public_host=f"{account}.ji-tech.co.kr",
+        family="openclaw",
+        runtime_class=runtime_class,
+        gateway_port=gateway,
+        bridge_port=bridge,
+    )
+
+
+def write_state(root: Path) -> None:
+    (root / "runtime-bindings.json").write_text(
+        dump_runtime_bindings([binding("oc3", "customer", 28989, 28990), binding("dev-oc", "dev", 30789, 30790)]),
+        encoding="utf-8",
+    )
+    (root / "nas-policy.yaml").write_text(
+        dump_yaml(
+            {
+                "defaults": {"auto_approve": False},
+                "accounts": {
+                    "oc3": {
+                        "auto_approve": True,
+                        "grants": [{"allow": "//192.168.0.222/*"}],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def write_master(master: Path, *, user_id: str = "7521796", rooms: list[str] | None = None) -> Path:
+    rooms = rooms if rooms is not None else ["r1", "r2"]
+    package = master / "users" / f"홍길동_대리_{user_id}"
+    package.mkdir(parents=True)
+    (package / "membership.json").write_text(
+        json.dumps({"user_id": user_id, "conversation_ids": rooms}),
+        encoding="utf-8",
+    )
+    for room in rooms[:-1]:  # last room deliberately has no media dir
+        (master / "media" / room).mkdir(parents=True)
+    return package
+
+
+class NasViewDomainTests(unittest.TestCase):
+    def test_validate_user_id_rejects_traversal(self) -> None:
+        for bad in ("../x", "a/b", "", "a" * 65, ".."):
+            with self.assertRaises(ValueError):
+                validate_user_id(bad)
+        self.assertEqual(validate_user_id(" 7521796 "), "7521796")
+
+    def test_validate_room_id_rejects_separator(self) -> None:
+        with self.assertRaises(ValueError):
+            validate_room_id("rooms/../../etc")
+        self.assertEqual(validate_room_id("abc-123"), "abc-123")
+
+    def test_find_user_package_matches_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            master = Path(tmp)
+            package = write_master(master, user_id="42")
+            self.assertEqual(find_user_package(master, "42"), package)
+
+    def test_find_user_package_rejects_missing_and_ambiguous(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            master = Path(tmp)
+            write_master(master, user_id="42")
+            with self.assertRaises(FileNotFoundError):
+                find_user_package(master, "43")
+            (master / "users" / "김철수_과장_42").mkdir()
+            with self.assertRaises(ValueError):
+                find_user_package(master, "42")
+
+    def test_load_membership_rooms_validates_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            master = Path(tmp)
+            package = write_master(master, rooms=["ok1", "../bad"])
+            with self.assertRaises(ValueError):
+                load_membership_rooms(package)
+
+    def test_build_view_plan_binds_only_rooms_with_media(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "state"
+            root.mkdir()
+            write_state(root)
+            master = Path(tmp) / "master"
+            write_master(master, rooms=["r1", "r2", "r3"])
+            with patch("agent_runtime_ops.domain.nas_views.hidden_master", return_value=master):
+                plan = build_view_plan("oc3", "7521796", "//192.168.0.222/kakao-work", root)
+        self.assertEqual(plan.slot, "oc3")
+        self.assertEqual([source.name for source, _ in plan.room_binds], ["r1", "r2"])
+        self.assertEqual(plan.missing_rooms, ["r3"])
+        self.assertEqual(plan.entry, Path("/home/oc3/nas_docs/kw"))
+
+    def test_build_view_plan_denies_non_customer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            with self.assertRaises(ValueError):
+                build_view_plan("dev-oc", "1", "//192.168.0.222/kakao-work", root)
+
+    def test_views_state_roundtrip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data = load_views_state(root)
+            self.assertEqual(data["views"], {})
+            data["views"]["oc3"] = {"user_id": "42", "share": "//h/s"}
+            save_views_state(root, data)
+            again = load_views_state(root)
+            self.assertEqual(again["views"]["oc3"]["user_id"], "42")
+            self.assertEqual(again["meta"]["schema_version"], 1)
+
+
+class NasViewCliTests(unittest.TestCase):
+    def _assign(self, root: Path, master: Path, binds: list[tuple[Path, Path]]) -> tuple[int, str]:
+        def fake_bind_ro(source: Path, target: Path) -> tuple[bool, str]:
+            binds.append((source, target))
+            return True, "ok"
+
+        credential = root / "cred" / "share.cred"
+        credential.parent.mkdir(parents=True, exist_ok=True)
+        credential.write_text("username=x\npassword=y\n", encoding="utf-8")
+        output = io.StringIO()
+        with (
+            patch("agent_runtime_ops.commands.nas_view._is_root", return_value=True),
+            patch("agent_runtime_ops.commands.nas_view._ensure_hidden_dirs"),
+            patch("agent_runtime_ops.commands.nas_view.hidden_master", return_value=master),
+            patch("agent_runtime_ops.domain.nas_views.hidden_master", return_value=master),
+            patch("agent_runtime_ops.commands.nas_view.root_credential_path", return_value=credential),
+            patch("agent_runtime_ops.commands.nas_view._write_managed_fstab_entry"),
+            patch("agent_runtime_ops.commands.nas_view._mount_master", return_value=(True, "ok")),
+            patch("agent_runtime_ops.commands.nas_view._findmnt_one", return_value=(1, "", [])),
+            patch("agent_runtime_ops.commands.nas_view.bind_ro", side_effect=fake_bind_ro),
+            patch("agent_runtime_ops.commands.nas_view._append_action_log"),
+            contextlib.redirect_stdout(output),
+        ):
+            rc = cmd_nas_view_assign(
+                argparse.Namespace(
+                    state_root=str(root),
+                    slot="oc3",
+                    user_id="7521796",
+                    share="//192.168.0.222/kakao-work",
+                    username=None,
+                    password_stdin=False,
+                    domain=None,
+                )
+            )
+        return rc, output.getvalue()
+
+    def test_assign_records_view_and_binds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "state"
+            root.mkdir()
+            write_state(root)
+            master = Path(tmp) / "master"
+            write_master(master)
+            binds: list[tuple[Path, Path]] = []
+            rc, out = self._assign(root, master, binds)
+            self.assertEqual(rc, 0, out)
+            self.assertIn("view_assign_status=ok", out)
+            self.assertIn("rooms_bound=1", out)
+            self.assertIn("rooms_missing_media=1", out)
+            state = load_views_state(root)
+            self.assertEqual(state["views"]["oc3"]["user_id"], "7521796")
+            # binds: package + 1 room + entry
+            self.assertEqual(len(binds), 3)
+            self.assertEqual(binds[-1][1], Path("/home/oc3/nas_docs/kw"))
+
+    def test_assign_refuses_double_assign(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "state"
+            root.mkdir()
+            write_state(root)
+            master = Path(tmp) / "master"
+            write_master(master)
+            binds: list[tuple[Path, Path]] = []
+            rc, _ = self._assign(root, master, binds)
+            self.assertEqual(rc, 0)
+            rc, out = self._assign(root, master, binds)
+            self.assertEqual(rc, 1)
+            self.assertIn("view_assign_status=fail", out)
+            self.assertIn("detach", out)
+
+    def test_detach_removes_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "state"
+            root.mkdir()
+            write_state(root)
+            data = load_views_state(root)
+            data["views"]["oc3"] = {"user_id": "42", "share": "//192.168.0.222/kakao-work"}
+            save_views_state(root, data)
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.commands.nas_view._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.nas_view.unmount_tree", return_value=(0, [])),
+                patch("agent_runtime_ops.commands.nas_view._remove_managed_fstab_entry", return_value=True),
+                patch("agent_runtime_ops.commands.nas_view._append_action_log"),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_nas_view_detach(argparse.Namespace(state_root=str(root), slot="oc3", share=None))
+            self.assertEqual(rc, 0, output.getvalue())
+            self.assertIn("view_detach_status=ok", output.getvalue())
+            self.assertEqual(load_views_state(root)["views"], {})
+
+    def test_status_reports_views(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "state"
+            root.mkdir()
+            data = load_views_state(root)
+            data["views"]["oc3"] = {"user_id": "42", "share": "//h/s", "package": "p_42"}
+            save_views_state(root, data)
+            output = io.StringIO()
+            with (
+                patch(
+                    "agent_runtime_ops.commands.nas_view._findmnt_one",
+                    return_value=(0, "", [{"target": "x", "source": "y", "fstype": "cifs", "options": "ro"}]),
+                ),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_nas_view_status(argparse.Namespace(state_root=str(root)))
+            self.assertEqual(rc, 0, output.getvalue())
+            self.assertIn("view_1_target=oc3", output.getvalue())
+            self.assertIn("view_1_healthy=yes", output.getvalue())
+
+
+if __name__ == "__main__":
+    unittest.main()
