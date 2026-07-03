@@ -82,7 +82,6 @@ def _apply_binds(plan: ViewPlan) -> tuple[bool, str, int]:
         if not ok:
             return False, f"room_bind:{target.name}:{reason}", bound_rooms
         bound_rooms += 1
-    plan.entry.parent.mkdir(parents=True, exist_ok=True)
     ok, reason = bind_ro(plan.view, plan.entry)
     if not ok:
         return False, f"entry_bind:{reason}", bound_rooms
