@@ -56,12 +56,15 @@ def mountinfo_propagation(optional_fields: list[str]) -> str:
 
 def mountinfo_under(container_pid: int, path: str) -> tuple[int, str, list[dict[str, str]]]:
     mountinfo_path = Path("/proc") / str(container_pid) / "mountinfo"
-    root = path.rstrip("/") or "/"
     try:
         lines = mountinfo_path.read_text(encoding="utf-8").splitlines()
     except OSError as exc:
         return 1, str(exc), []
+    return 0, "", parse_mountinfo_lines(lines, path)
 
+
+def parse_mountinfo_lines(lines: list[str], path: str) -> list[dict[str, str]]:
+    root = path.rstrip("/") or "/"
     rows: list[dict[str, str]] = []
     for line in lines:
         fields = line.split()
@@ -78,6 +81,13 @@ def mountinfo_under(container_pid: int, path: str) -> tuple[int, str, list[dict[
         optional = fields[6:separator]
         fstype = fields[separator + 1]
         source = decode_mountinfo_field(fields[separator + 2])
+        # Field 3 is the mount's root within its filesystem. findmnt serializes a
+        # non-"/" root as SOURCE[/root] — the notation subtree binds (kw-NAS views)
+        # carry. These rows are compared against host-side findmnt rows, so they
+        # must serialize identically or every view slot fails the comparison.
+        fs_root = decode_mountinfo_field(fields[3])
+        if fs_root != "/":
+            source = f"{source}[{fs_root}]"
         super_options = fields[separator + 3]
         options = ",".join(part for part in (mount_options, super_options) if part)
         rows.append(
@@ -89,7 +99,7 @@ def mountinfo_under(container_pid: int, path: str) -> tuple[int, str, list[dict[
                 "propagation": mountinfo_propagation(optional),
             }
         )
-    return 0, "", rows
+    return rows
 
 
 def findmnt_tree(path: str, container_pid: int | None = None) -> tuple[int, str, list[dict[str, str]]]:
