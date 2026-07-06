@@ -502,7 +502,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
 
         self.assertEqual(
             set(rollout_choices),
-            {"status", "image-plan", "image-dev-apply", "image-canary", "image-promote"},
+            {"status", "image-plan", "image-dev-apply", "image-canary", "image-promote", "verify"},
         )
         self.assertNotIn("release", next(action for action in parser._actions if action.dest == "command").choices)
         for name in (
