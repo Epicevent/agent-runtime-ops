@@ -56,6 +56,7 @@ from .commands.rollout import (
     cmd_rollout_image_promote,
     cmd_rollout_status,
 )
+from .commands.rollout_verify import cmd_rollout_verify
 from .commands.runtime_secret import cmd_runtime_secret_set, cmd_runtime_secret_status
 from .commands.runtime_config import cmd_runtime_config_sanitize, cmd_runtime_config_status, cmd_runtime_set_model
 from .commands.runtime_truth import cmd_runtime_truth
@@ -226,6 +227,15 @@ def build_parser() -> argparse.ArgumentParser:
     rollout_image_promote.add_argument("--from-target", dest="from_slot", required=True)
     rollout_image_promote.add_argument("--targets", dest="slots", required=True, help="comma-separated customer targets to apply")
     rollout_image_promote.set_defaults(func=cmd_rollout_image_promote)
+    rollout_verify = rollout_sub.add_parser(
+        "verify", help="post-apply verification: live truth + approved-digest gate + runtime checklist pack"
+    )
+    rollout_verify.add_argument("slot", metavar="target")
+    rollout_verify.add_argument(
+        "--pack", default=None, choices=["hermes-runtime", "openclaw-runtime"], help="override the family-derived pack"
+    )
+    rollout_verify.add_argument("--gemini-chat-smoke", action="store_true")
+    rollout_verify.set_defaults(func=cmd_rollout_verify)
 
     recipe = sub.add_parser("recipe")
     recipe_sub = recipe.add_subparsers(dest="recipe_command", required=True)
