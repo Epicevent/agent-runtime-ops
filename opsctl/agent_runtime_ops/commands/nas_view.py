@@ -13,6 +13,8 @@ from ..domain.nas_mounts import write_managed_fstab_entry as _write_managed_fsta
 from ..domain.nas_views import (
     ViewPlan,
     build_view_plan,
+    crontab_has_reboot_restore,
+    fstab_boot_entry_present,
     hidden_master,
     load_views_state,
     save_views_state,
@@ -234,8 +236,37 @@ def cmd_nas_view_status(args: argparse.Namespace) -> int:
         print(f"{prefix}_healthy={'yes' if healthy else 'no'}")
         if not healthy:
             exit_code = 1
+
+    # Boot persistence: a healthy view that will not survive a reboot is a
+    # latent outage — the master needs its managed fstab pair, and the binds
+    # need the @reboot `nas view restore` crontab line (root crontab, so this
+    # half is only decidable when run via sudo).
+    if records:
+        fstab_text = _read_fstab()
+        missing = [slot for slot, record in sorted(records.items()) if not fstab_boot_entry_present(slot, record.get("share", ""), fstab_text)]
+        print(f"boot_fstab_entries={len(records) - len(missing)}/{len(records)}")
+        if missing:
+            print(f"boot_fstab_missing={','.join(missing)}")
+            exit_code = 1
+        if _is_root():
+            proc = _run_text(["crontab", "-l"], timeout=10)
+            # `crontab -l` exits non-zero when root has no crontab — that is
+            # a definite "no", not an error.
+            has_cron = proc.returncode == 0 and crontab_has_reboot_restore(proc.stdout)
+            print(f"boot_restore_cron={'yes' if has_cron else 'no'}")
+            if not has_cron:
+                exit_code = 1
+        else:
+            print("boot_restore_cron=unknown_requires_root")
     print("view_status=ok")
     return exit_code
+
+
+def _read_fstab() -> str:
+    try:
+        return Path("/etc/fstab").read_text(encoding="utf-8")
+    except OSError:
+        return ""
 
 
 def cmd_nas_view_restore(args: argparse.Namespace) -> int:

@@ -243,17 +243,22 @@ class NasViewCliTests(unittest.TestCase):
             data["views"]["oc3"] = {"user_id": "42", "share": "//h/s", "package": "p_42"}
             save_views_state(root, data)
             output = io.StringIO()
+            fstab = "# agent-runtime-ops nas slot=oc3 source=//h/s\n//h/s /srv/kw-nas/slots/oc3/master cifs ro,nofail 0 0\n"
             with (
                 patch(
                     "agent_runtime_ops.commands.nas_view._findmnt_one",
                     return_value=(0, "", [{"target": "x", "source": "y", "fstype": "cifs", "options": "ro"}]),
                 ),
+                patch("agent_runtime_ops.commands.nas_view._read_fstab", return_value=fstab),
+                patch("agent_runtime_ops.commands.nas_view._is_root", return_value=False),
                 contextlib.redirect_stdout(output),
             ):
                 rc = cmd_nas_view_status(argparse.Namespace(state_root=str(root)))
             self.assertEqual(rc, 0, output.getvalue())
             self.assertIn("view_1_target=oc3", output.getvalue())
             self.assertIn("view_1_healthy=yes", output.getvalue())
+            self.assertIn("boot_fstab_entries=1/1", output.getvalue())
+            self.assertIn("boot_restore_cron=unknown_requires_root", output.getvalue())
 
 
 class FakeProc:
