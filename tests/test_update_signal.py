@@ -121,6 +121,12 @@ class WriteUpdateSignalsTest(unittest.TestCase):
         self.assertEqual(leftovers, [])
 
 
+LABELS = {
+    "org.opencontainers.image.revision": "a" * 40,
+    "org.opencontainers.image.source": "https://github.com/Epicevent/openclaw-jitech",
+}
+
+
 class ApproveAnnounceTest(unittest.TestCase):
     def _args(self) -> argparse.Namespace:
         return argparse.Namespace(
@@ -136,7 +142,8 @@ class ApproveAnnounceTest(unittest.TestCase):
 
         with (
             patch.object(image_cmd, "_is_root", return_value=True),
-            patch.object(image_cmd, "image_oci_revision", return_value="a" * 40),
+            patch.object(image_cmd, "image_recipe_labels_from_wrapper", return_value=dict(LABELS)),
+            patch.object(image_cmd, "verify_commit_on_default_branch", return_value="main"),
             patch.object(image_cmd, "verify_source_commit"),
             patch.object(image_cmd, "write_image_approval", return_value=Path("/tmp/policy.yaml")),
             patch.object(image_cmd, "probe_image_version", return_value="2026.7.6"),
@@ -162,7 +169,8 @@ class ApproveAnnounceTest(unittest.TestCase):
         args.role = "wrapper"
         with (
             patch.object(image_cmd, "_is_root", return_value=True),
-            patch.object(image_cmd, "image_oci_revision", return_value="a" * 40),
+            patch.object(image_cmd, "image_recipe_labels_from_wrapper", return_value=dict(LABELS)),
+            patch.object(image_cmd, "verify_commit_on_default_branch", return_value="main"),
             patch.object(image_cmd, "verify_source_commit"),
             patch.object(image_cmd, "write_image_approval", return_value=Path("/tmp/policy.yaml")),
             patch.object(image_cmd, "probe_image_version") as probe,
@@ -179,7 +187,8 @@ class ApproveAnnounceTest(unittest.TestCase):
 
         with (
             patch.object(image_cmd, "_is_root", return_value=True),
-            patch.object(image_cmd, "image_oci_revision", return_value="a" * 40),
+            patch.object(image_cmd, "image_recipe_labels_from_wrapper", return_value=dict(LABELS)),
+            patch.object(image_cmd, "verify_commit_on_default_branch", return_value="main"),
             patch.object(image_cmd, "verify_source_commit"),
             patch.object(image_cmd, "write_image_approval", return_value=Path("/tmp/policy.yaml")),
             patch.object(image_cmd, "probe_image_version", side_effect=ValueError("no docker")),
