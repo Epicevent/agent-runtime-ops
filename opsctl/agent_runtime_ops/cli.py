@@ -89,6 +89,11 @@ def build_parser() -> argparse.ArgumentParser:
     image_approve.add_argument("role", choices=["product", "wrapper"])
     image_approve.add_argument("image", metavar="IMAGE@sha256:...", help="digest-pinned image reference")
     image_approve.add_argument("--source-commit", dest="source_commit", default="", help="optional source commit for provenance")
+    image_approve.add_argument(
+        "--allow-unmerged-source",
+        action="store_true",
+        help="audited emergency override: approve a source commit not merged to the default branch",
+    )
     image_approve.set_defaults(func=cmd_image_approve)
     image_status = image_sub.add_parser("status")
     image_status.set_defaults(func=cmd_image_status)

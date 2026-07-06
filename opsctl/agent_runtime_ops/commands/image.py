@@ -11,7 +11,8 @@ from ..domain.image_approval_policy import (
     verify_source_commit,
     write_image_approval,
 )
-from ..domain.image_specs import image_oci_revision
+from ..domain.image_specs import OCI_REVISION_LABEL, image_recipe_labels_from_wrapper
+from ..domain.source_provenance import OCI_SOURCE_LABEL, verify_commit_on_default_branch
 from ..domain.update_signal import probe_image_version, write_update_signals
 
 
@@ -51,8 +52,24 @@ def cmd_image_approve(args: argparse.Namespace) -> int:
     source_commit = str(getattr(args, "source_commit", "") or "")
     try:
         # Provenance gate: read the image's own revision label and bind it to the claim.
-        revision = image_oci_revision(args.image)
+        labels = image_recipe_labels_from_wrapper(args.image)
+        revision = str(labels.get(OCI_REVISION_LABEL) or "")
         verify_source_commit(source_commit, revision)
+        # Ancestry gate: a claimed source commit must be merged to the default branch
+        # of the repo the image itself names (OCI source label). Unmerged approvals made
+        # main lie once; --allow-unmerged-source is the audited emergency override.
+        if source_commit:
+            source_repo = str(labels.get(OCI_SOURCE_LABEL) or "")
+            if getattr(args, "allow_unmerged_source", False):
+                print("source_ancestry=skipped reason=allow-unmerged-source")
+            elif not source_repo:
+                raise ValueError(
+                    f"image carries no {OCI_SOURCE_LABEL} label; cannot verify source-commit "
+                    "ancestry (rebuild with the current build script, or use --allow-unmerged-source)"
+                )
+            else:
+                branch = verify_commit_on_default_branch(source_repo, source_commit)
+                print(f"source_ancestry=merged branch={branch}")
         policy_path = write_image_approval(
             _state_root(args),
             args.family,
