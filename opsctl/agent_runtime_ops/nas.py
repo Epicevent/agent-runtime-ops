@@ -41,6 +41,28 @@ def parse_smb_share(source: str) -> SmbShare:
     return SmbShare(source=f"//{host}/{share}", host=host.lower(), share=share)
 
 
+_VIEW_SOURCE_RE = re.compile(r"^(?P<base>//[^\[\]]+?)\[(?P<subpath>/[^\[\]]*)\]$")
+
+
+def parse_cifs_mount_source(source: str) -> tuple[SmbShare, str | None]:
+    """Parse a findmnt CIFS SOURCE: //HOST/SHARE or //HOST/SHARE[/subpath].
+
+    The bracket form is the kernel's notation for a bind mount of a subtree —
+    the kw-NAS per-view binds appear this way in the live mount inventory.
+    Policy is decided on the underlying share; the subpath must stay inside it
+    (no empty or dot components), so a view can never widen a grant.
+    """
+    text = source.strip()
+    match = _VIEW_SOURCE_RE.match(text)
+    if not match:
+        return parse_smb_share(text), None
+    subpath = match.group("subpath")
+    parts = subpath.split("/")[1:]
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        raise ValueError(f"view subpath escapes the share: {subpath}")
+    return parse_smb_share(match.group("base")), subpath
+
+
 def host_component(host: str) -> str:
     return "host-" + hashlib.sha256(host.lower().encode("utf-8")).hexdigest()[:12]
 
@@ -122,11 +144,14 @@ def _source_matches(pattern: str, share: SmbShare) -> bool:
 
 def check_nas_policy(slot: str, source: str, state_root: Path) -> NasPolicyDecision:
     binding = get_runtime_binding(slot, state_root)
+    # A view (bind mount of a share subtree) is policed as its underlying share:
+    # the grant that allows //HOST/SHARE allows every view inside it, and the
+    # subpath validation above guarantees a view cannot reach outside the share.
+    share, view_subpath = parse_cifs_mount_source(source)
+    view_suffix = "_view" if view_subpath else ""
     if binding.runtime_class != "customer":
-        share = parse_smb_share(source)
         return NasPolicyDecision(binding.linux_account, share, False, f"runtime_class_not_customer:{binding.runtime_class}", None, None, Path(""))
 
-    share = parse_smb_share(source)
     mountpoint = mountpoint_for_share(binding.linux_account, share)
     policy = load_yaml(state_path(state_root, "nas-policy.yaml"))
     auto_approve, grants, max_mounts = _grant_patterns(policy, binding.linux_account)
@@ -134,5 +159,5 @@ def check_nas_policy(slot: str, source: str, state_root: Path) -> NasPolicyDecis
         return NasPolicyDecision(slot, share, False, "auto_approve_disabled", None, max_mounts, mountpoint)
     for pattern in grants:
         if _source_matches(pattern, share):
-            return NasPolicyDecision(binding.linux_account, share, True, "grant_matched", pattern, max_mounts, mountpoint)
-    return NasPolicyDecision(binding.linux_account, share, False, "grant_not_matched", None, max_mounts, mountpoint)
+            return NasPolicyDecision(binding.linux_account, share, True, f"grant_matched{view_suffix}", pattern, max_mounts, mountpoint)
+    return NasPolicyDecision(binding.linux_account, share, False, f"grant_not_matched{view_suffix}", None, max_mounts, mountpoint)
