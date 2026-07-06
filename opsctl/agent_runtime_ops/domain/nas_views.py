@@ -22,6 +22,7 @@ import json
 import re
 from pathlib import Path
 
+from ..host.fstab import managed_fstab_marker
 from ..nas import SmbShare, check_nas_policy
 from ..paths import state_path
 from ..routing import validate_linux_account
@@ -45,6 +46,35 @@ def validate_room_id(room_id: str) -> str:
     if not SAFE_ROOM_ID_RE.match(value) or value in {".", ".."}:
         raise ValueError(f"unsafe conversation_id: {room_id!r}")
     return value
+
+
+def fstab_boot_entry_present(slot: str, share: str, fstab_text: str) -> bool:
+    """True when the managed fstab pair (marker + cifs entry) survives for this view.
+
+    write_managed_fstab_entry always writes the marker comment immediately
+    followed by the entry line — a marker with anything else after it means the
+    entry was hand-edited away and the master will not mount at boot."""
+    marker = managed_fstab_marker(slot, share)
+    lines = fstab_text.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != marker:
+            continue
+        if index + 1 >= len(lines):
+            return False
+        entry = lines[index + 1].strip()
+        return bool(entry) and not entry.startswith("#") and " cifs " in f" {entry} "
+    return False
+
+
+def crontab_has_reboot_restore(crontab_text: str) -> bool:
+    """True when an active @reboot line runs `nas view restore`."""
+    for line in crontab_text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("@reboot") and "nas view restore" in stripped:
+            return True
+    return False
 
 
 def slot_views_root(slot: str) -> Path:
