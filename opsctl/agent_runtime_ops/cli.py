@@ -57,6 +57,12 @@ from .commands.rollout import (
     cmd_rollout_status,
 )
 from .commands.rollout_verify import cmd_rollout_verify
+from .commands.mitigation import (
+    cmd_mitigation_add,
+    cmd_mitigation_check,
+    cmd_mitigation_list,
+    cmd_mitigation_remove,
+)
 from .commands.runtime_secret import cmd_runtime_secret_set, cmd_runtime_secret_status
 from .commands.runtime_config import cmd_runtime_config_sanitize, cmd_runtime_config_status, cmd_runtime_set_model
 from .commands.runtime_truth import cmd_runtime_truth
@@ -411,6 +417,31 @@ def build_parser() -> argparse.ArgumentParser:
     projection_verify.add_argument("--product-image", required=True)
     projection_verify.add_argument("--live", action="store_true")
     projection_verify.set_defaults(func=cmd_projection_verify_target)
+
+    mitigation = sub.add_parser("mitigation", help="register of temporary workarounds with machine-checked expiry")
+    mitigation_sub = mitigation.add_subparsers(dest="mitigation_command", required=True)
+    mitigation_add = mitigation_sub.add_parser("add", help="record a temporary mitigation with its removal condition")
+    mitigation_add.add_argument("mitigation_id", metavar="id")
+    mitigation_add.add_argument("--slot", dest="slots", action="append", required=True, help="repeatable")
+    mitigation_add.add_argument("--kind", choices=["env"], default="env")
+    mitigation_add.add_argument("--env-key", required=True, help="env var name (presence-only; values are never read)")
+    mitigation_add.add_argument("--reason", required=True)
+    mitigation_add.add_argument(
+        "--expires-product-version",
+        required=True,
+        help="the mitigation is obsolete once the slot runs at least this product version",
+    )
+    mitigation_add.set_defaults(func=cmd_mitigation_add)
+    mitigation_list = mitigation_sub.add_parser("list")
+    mitigation_list.set_defaults(func=cmd_mitigation_list)
+    mitigation_check = mitigation_sub.add_parser(
+        "check", help="probe live slots: active / cleared / expired-but-still-present"
+    )
+    mitigation_check.add_argument("--target", dest="slot", default=None)
+    mitigation_check.set_defaults(func=cmd_mitigation_check)
+    mitigation_remove = mitigation_sub.add_parser("remove", help="retire a cleared register entry")
+    mitigation_remove.add_argument("mitigation_id", metavar="id")
+    mitigation_remove.set_defaults(func=cmd_mitigation_remove)
 
     checklist = sub.add_parser("checklist")
     checklist_sub = checklist.add_subparsers(dest="checklist_command", required=True)
