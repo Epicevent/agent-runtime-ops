@@ -40,6 +40,11 @@ from .commands.nas import (
     cmd_nas_requests,
     cmd_nas_unmount,
 )
+from .commands.nas_legacy import (
+    cmd_nas_legacy_adopt,
+    cmd_nas_legacy_retire,
+    cmd_nas_legacy_status,
+)
 from .commands.profile import cmd_profile_list
 from .commands.projection import cmd_projection_compare, cmd_projection_describe, cmd_projection_verify_target
 from .commands.recipe import (
@@ -341,6 +346,19 @@ def build_parser() -> argparse.ArgumentParser:
     nas_mounted = nas_sub.add_parser("mounted")
     nas_mounted.add_argument("slot", metavar="target")
     nas_mounted.set_defaults(func=cmd_nas_mounted)
+    nas_legacy = nas_sub.add_parser("legacy")
+    nas_legacy_sub = nas_legacy.add_subparsers(dest="legacy_command", required=True)
+    nas_legacy_status = nas_legacy_sub.add_parser("status")
+    nas_legacy_status.set_defaults(func=cmd_nas_legacy_status)
+    nas_legacy_adopt = nas_legacy_sub.add_parser("adopt")
+    nas_legacy_adopt.add_argument("slot", metavar="target")
+    nas_legacy_adopt.add_argument("share")
+    nas_legacy_adopt.set_defaults(func=cmd_nas_legacy_adopt)
+    nas_legacy_retire = nas_legacy_sub.add_parser("retire")
+    nas_legacy_retire.add_argument("slot", metavar="target")
+    nas_legacy_retire.add_argument("share")
+    nas_legacy_retire.add_argument("--delete-credential", action="store_true")
+    nas_legacy_retire.set_defaults(func=cmd_nas_legacy_retire)
     nas_policy = nas_sub.add_parser("policy-check")
     nas_policy.add_argument("slot", metavar="target")
     nas_policy.add_argument("share")
