@@ -100,27 +100,31 @@ class FailedCifsMountUnitsTest(unittest.TestCase):
         self.assertEqual(error, "boom")
 
 
+def _run_restore(*, readiness: dict, mount_all_rc: int = 0, nas_wait_seconds: float = 42.0):
+    records = {"views": {"oc1": {"user_id": "7362168", "share": "//192.168.0.222/kakao-work", "package": "p"}}}
+    stdout = io.StringIO()
+    with (
+        patch("agent_runtime_ops.commands.nas_view._is_root", return_value=True),
+        patch("agent_runtime_ops.commands.nas_view.load_views_state", return_value=records),
+        patch("agent_runtime_ops.commands.nas_view.wait_for_nas_ready", return_value=readiness) as wait,
+        patch(
+            "agent_runtime_ops.commands.nas_view._run_text",
+            return_value=SimpleNamespace(returncode=mount_all_rc, stdout="", stderr=""),
+        ) as run_text,
+        patch("agent_runtime_ops.commands.nas_view._ensure_hidden_dirs"),
+        patch("agent_runtime_ops.commands.nas_view._mount_master", return_value=(True, "ok")),
+        patch("agent_runtime_ops.commands.nas_view.build_view_plan", return_value=SimpleNamespace(user_id="7362168")),
+        patch("agent_runtime_ops.commands.nas_view._apply_binds", return_value=(True, "ok", 13)),
+        patch("agent_runtime_ops.commands.nas_view._append_action_log"),
+        contextlib.redirect_stdout(stdout),
+    ):
+        rc = cmd_nas_view_restore(SimpleNamespace(state_root="/unused", nas_wait_seconds=nas_wait_seconds))
+    return rc, stdout.getvalue(), wait, run_text
+
+
 class RestoreWaitsForNasTest(unittest.TestCase):
     def test_restore_probes_nas_and_remounts_fstab(self) -> None:
-        records = {"views": {"oc1": {"user_id": "7362168", "share": "//192.168.0.222/kakao-work", "package": "p"}}}
-        stdout = io.StringIO()
-        with (
-            patch("agent_runtime_ops.commands.nas_view._is_root", return_value=True),
-            patch("agent_runtime_ops.commands.nas_view.load_views_state", return_value=records),
-            patch("agent_runtime_ops.commands.nas_view.wait_for_nas_ready", return_value={"192.168.0.222": True}) as wait,
-            patch(
-                "agent_runtime_ops.commands.nas_view._run_text",
-                return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
-            ) as run_text,
-            patch("agent_runtime_ops.commands.nas_view._ensure_hidden_dirs"),
-            patch("agent_runtime_ops.commands.nas_view._mount_master", return_value=(True, "ok")),
-            patch("agent_runtime_ops.commands.nas_view.build_view_plan", return_value=SimpleNamespace(user_id="7362168")),
-            patch("agent_runtime_ops.commands.nas_view._apply_binds", return_value=(True, "ok", 13)),
-            patch("agent_runtime_ops.commands.nas_view._append_action_log"),
-            contextlib.redirect_stdout(stdout),
-        ):
-            rc = cmd_nas_view_restore(SimpleNamespace(state_root="/unused", nas_wait_seconds=42.0))
-        output = stdout.getvalue()
+        rc, output, wait, run_text = _run_restore(readiness={"192.168.0.222": True})
         self.assertEqual(rc, 0, output)
         self.assertEqual(wait.call_args.kwargs["total_seconds"], 42.0)
         self.assertEqual(wait.call_args.args[0], ["192.168.0.222"])
@@ -128,6 +132,18 @@ class RestoreWaitsForNasTest(unittest.TestCase):
         self.assertIn("cifs_mount_all=ok", output)
         self.assertEqual(run_text.call_args.args[0], ["mount", "-a", "-t", "cifs"])
         self.assertIn("view_restore_status=ok", output)
+
+    def test_nas_timeout_fails_loudly(self) -> None:
+        rc, output, _, _ = _run_restore(readiness={"192.168.0.222": False})
+        self.assertEqual(rc, 1, output)
+        self.assertIn("nas_ready host=192.168.0.222 ready=timeout", output)
+        self.assertIn("view_restore_status=fail", output)
+
+    def test_mount_all_failure_fails_loudly(self) -> None:
+        rc, output, _, _ = _run_restore(readiness={"192.168.0.222": True}, mount_all_rc=32)
+        self.assertEqual(rc, 1, output)
+        self.assertIn("cifs_mount_all=rc=32", output)
+        self.assertIn("view_restore_status=fail", output)
 
 
 if __name__ == "__main__":

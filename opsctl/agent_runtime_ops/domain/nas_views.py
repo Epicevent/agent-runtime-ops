@@ -66,6 +66,32 @@ def fstab_boot_entry_present(slot: str, share: str, fstab_text: str) -> bool:
     return False
 
 
+_MANAGED_MARKER_RE = re.compile(r"^# agent-runtime-ops nas slot=(?P<slot>\S+) source=(?P<share>\S+)$")
+
+
+def _fstab_unescape(value: str) -> str:
+    return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), value)
+
+
+def managed_fstab_mount_targets(fstab_text: str) -> list[tuple[str, str, str]]:
+    """(slot, share, mount target) for every managed fstab pair in the file.
+
+    Registration is not boot success: after the 2026-07-07 power cut every
+    managed pair existed while none of the mounts did (boot race + nofail
+    silence). Callers compare these declared targets against live mounts."""
+    entries: list[tuple[str, str, str]] = []
+    lines = fstab_text.splitlines()
+    for index, line in enumerate(lines):
+        match = _MANAGED_MARKER_RE.match(line.strip())
+        if not match or index + 1 >= len(lines):
+            continue
+        entry = lines[index + 1]
+        fields = entry.split()
+        if len(fields) >= 3 and not entry.lstrip().startswith("#") and fields[2] == "cifs":
+            entries.append((match.group("slot"), match.group("share"), _fstab_unescape(fields[1])))
+    return entries
+
+
 def crontab_has_reboot_restore(crontab_text: str) -> bool:
     """True when an active @reboot line runs `nas view restore`."""
     for line in crontab_text.splitlines():
