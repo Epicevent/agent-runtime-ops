@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from ..domain.nas_views import (
     fstab_boot_entry_present,
     hidden_master,
     load_views_state,
+    managed_fstab_mount_targets,
     save_views_state,
     slot_entry,
     slot_views_root,
@@ -25,6 +27,7 @@ from ..domain.nas_views import (
 )
 from ..host.account_files import read_password_from_stdin, write_credential_file
 from ..host.bind_mounts import bind_ro, unmount_tree
+from ..host.nas_ready import failed_cifs_mount_units, wait_for_nas_ready
 from ..host.fstab import remove_managed_fstab_entry as _remove_managed_fstab_entry
 from ..host.mounts import findmnt_one as _findmnt_one
 from ..host.mounts import is_readonly_mount as _is_readonly_mount
@@ -241,8 +244,8 @@ def cmd_nas_view_status(args: argparse.Namespace) -> int:
     # latent outage — the master needs its managed fstab pair, and the binds
     # need the @reboot `nas view restore` crontab line (root crontab, so this
     # half is only decidable when run via sudo).
+    fstab_text = _read_fstab()
     if records:
-        fstab_text = _read_fstab()
         missing = [slot for slot, record in sorted(records.items()) if not fstab_boot_entry_present(slot, record.get("share", ""), fstab_text)]
         print(f"boot_fstab_entries={len(records) - len(missing)}/{len(records)}")
         if missing:
@@ -258,6 +261,32 @@ def cmd_nas_view_status(args: argparse.Namespace) -> int:
                 exit_code = 1
         else:
             print("boot_restore_cron=unknown_requires_root")
+
+    # nofail keeps a lost boot race silent (mounts absent, boot "fine") —
+    # surface failed CIFS mount units so the first status line after an
+    # outage is loud instead.
+    failed_units, failed_error = failed_cifs_mount_units()
+    if failed_error is not None:
+        print(f"failed_cifs_mount_units=unknown reason={failed_error}")
+    else:
+        print(f"failed_cifs_mount_units={len(failed_units)}")
+        if failed_units:
+            print("failed_cifs_mount_unit_names=" + ",".join(failed_units))
+            exit_code = 1
+
+    # Registration is not boot success (2026-07-07: every managed pair present,
+    # zero mounted) — judge every managed fstab entry against live mounts,
+    # covering slot shares beyond this command's own view records.
+    declared = managed_fstab_mount_targets(fstab_text)
+    unmounted = []
+    for _, _, target in declared:
+        rc, _, rows = _findmnt_one(Path(target))
+        if rc != 0 or not rows:
+            unmounted.append(target)
+    print(f"managed_fstab_mounted={len(declared) - len(unmounted)}/{len(declared)}")
+    if unmounted:
+        print("managed_fstab_unmounted=" + ",".join(unmounted))
+        exit_code = 1
     print("view_status=ok")
     return exit_code
 
@@ -269,6 +298,31 @@ def _read_fstab() -> str:
         return ""
 
 
+@contextlib.contextmanager
+def _restore_lock(lock_path: Path = Path("/run/agent-runtime-ops-nas-restore.lock")):
+    """Serialize concurrent restores — the boot unit and a legacy @reboot cron
+    line may fire together, and two restores rebuilding the same entry binds
+    would tear each other down mid-flight. Degrades to unserialized where
+    flock is unavailable (non-Linux test runs)."""
+    try:
+        import fcntl
+    except ImportError:
+        yield
+        return
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.touch(exist_ok=True)
+        handle = lock_path.open("r+")
+    except OSError:
+        yield
+        return
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        handle.close()
+
+
 def cmd_nas_view_restore(args: argparse.Namespace) -> int:
     if not _require_root("restore"):
         return 2
@@ -276,6 +330,35 @@ def cmd_nas_view_restore(args: argparse.Namespace) -> int:
     views = load_views_state(state_root)
     records = views.get("views", {})
     print(f"view_count={len(records)}")
+    boot_failed = 0
+    with _restore_lock():
+        if records:
+            # After a power cut the server usually boots before the NAS answers —
+            # wait for SMB, then remount every fstab CIFS entry that lost the boot
+            # race (mount -a is idempotent: already-mounted entries are skipped).
+            hosts = []
+            for record in records.values():
+                try:
+                    hosts.append(parse_smb_share(record.get("share", "")).host)
+                except ValueError:
+                    continue
+            wait_seconds = float(getattr(args, "nas_wait_seconds", 600.0))
+            readiness = wait_for_nas_ready(hosts, total_seconds=wait_seconds)
+            for host, ready in readiness.items():
+                print(f"nas_ready host={host} ready={'yes' if ready else 'timeout'}")
+                if not ready:
+                    boot_failed += 1
+            proc = _run_text(["mount", "-a", "-t", "cifs"], timeout=300)
+            if proc.returncode != 0:
+                boot_failed += 1
+            print(f"cifs_mount_all={'ok' if proc.returncode == 0 else 'rc=' + str(proc.returncode)}")
+        failed = _restore_views(state_root, records)
+    ok = failed == 0 and boot_failed == 0
+    print(f"view_restore_status={'ok' if ok else 'fail'}")
+    return 0 if ok else 1
+
+
+def _restore_views(state_root: Path, records: dict) -> int:
     failed = 0
     for slot, record in sorted(records.items()):
         share_source = record.get("share", "")
@@ -295,5 +378,4 @@ def cmd_nas_view_restore(args: argparse.Namespace) -> int:
             failed += 1
             print(f"restore_failed target={slot} reason={exc}")
             _append_action_log(state_root, "nas_view_restore", slot, share_source, "fail", str(exc))
-    print(f"view_restore_status={'ok' if failed == 0 else 'fail'}")
-    return 0 if failed == 0 else 1
+    return failed

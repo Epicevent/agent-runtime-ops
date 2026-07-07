@@ -382,6 +382,12 @@ def build_parser() -> argparse.ArgumentParser:
     nas_view_status = nas_view_sub.add_parser("status")
     nas_view_status.set_defaults(func=cmd_nas_view_status)
     nas_view_restore = nas_view_sub.add_parser("restore")
+    nas_view_restore.add_argument(
+        "--nas-wait-seconds",
+        type=float,
+        default=600.0,
+        help="bounded wait for the NAS to answer SMB before restoring (0 = single probe, no wait)",
+    )
     nas_view_restore.set_defaults(func=cmd_nas_view_restore)
 
     admin = sub.add_parser("admin")
