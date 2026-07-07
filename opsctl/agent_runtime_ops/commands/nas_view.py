@@ -25,6 +25,7 @@ from ..domain.nas_views import (
 )
 from ..host.account_files import read_password_from_stdin, write_credential_file
 from ..host.bind_mounts import bind_ro, unmount_tree
+from ..host.nas_ready import failed_cifs_mount_units, wait_for_nas_ready
 from ..host.fstab import remove_managed_fstab_entry as _remove_managed_fstab_entry
 from ..host.mounts import findmnt_one as _findmnt_one
 from ..host.mounts import is_readonly_mount as _is_readonly_mount
@@ -258,6 +259,18 @@ def cmd_nas_view_status(args: argparse.Namespace) -> int:
                 exit_code = 1
         else:
             print("boot_restore_cron=unknown_requires_root")
+
+    # nofail keeps a lost boot race silent (mounts absent, boot "fine") —
+    # surface failed CIFS mount units so the first status line after an
+    # outage is loud instead.
+    failed_units, failed_error = failed_cifs_mount_units()
+    if failed_error is not None:
+        print(f"failed_cifs_mount_units=unknown reason={failed_error}")
+    else:
+        print(f"failed_cifs_mount_units={len(failed_units)}")
+        if failed_units:
+            print("failed_cifs_mount_unit_names=" + ",".join(failed_units))
+            exit_code = 1
     print("view_status=ok")
     return exit_code
 
@@ -276,6 +289,22 @@ def cmd_nas_view_restore(args: argparse.Namespace) -> int:
     views = load_views_state(state_root)
     records = views.get("views", {})
     print(f"view_count={len(records)}")
+    if records:
+        # After a power cut the server usually boots before the NAS answers —
+        # wait for SMB, then remount every fstab CIFS entry that lost the boot
+        # race (mount -a is idempotent: already-mounted entries are skipped).
+        hosts = []
+        for record in records.values():
+            try:
+                hosts.append(parse_smb_share(record.get("share", "")).host)
+            except ValueError:
+                continue
+        wait_seconds = float(getattr(args, "nas_wait_seconds", 600.0))
+        readiness = wait_for_nas_ready(hosts, total_seconds=wait_seconds)
+        for host, ready in readiness.items():
+            print(f"nas_ready host={host} ready={'yes' if ready else 'timeout'}")
+        proc = _run_text(["mount", "-a", "-t", "cifs"], timeout=300)
+        print(f"cifs_mount_all={'ok' if proc.returncode == 0 else 'rc=' + str(proc.returncode)}")
     failed = 0
     for slot, record in sorted(records.items()):
         share_source = record.get("share", "")
