@@ -4,13 +4,40 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import sys
 
 from ..domain.common import is_root as _is_root
+from ..domain.common import run_text
+from ..domain.common import state_root as _state_root
 from ..domain.runtime_paths import agent_backup_root, slot_runtime_dir
+from ..domain.runtime_truth import find_gateway_container_by_binding
 from ..redaction import redact
-from ..routing import validate_linux_account
+from ..routing import get_runtime_binding, validate_linux_account
 from ..yamlio import load_yaml
+
+# Relative age accepted by `docker logs --since`, e.g. 10m, 2h, 1d. Kept strict so
+# an operator typo fails cleanly here instead of surfacing a raw docker error.
+_SINCE_RE = re.compile(r"^\d+[smhd]$")
+
+# Log signatures of the embedded-agent session-save concurrency wedge
+# (openclaw-jitech#35): concurrent lanes / auto-compaction rewrite a session
+# `.jsonl` under an in-flight run, then the error path reopens it O_EXCL and
+# every prompt fails before reply. These strings, plus a zero-byte session
+# tombstone, are the observable symptoms an ops probe can catch — a synthetic
+# round-trip cannot, because a single-writer probe session never reproduces the
+# concurrent-writer trigger.
+_SESSION_WEDGE_SIGNATURES = (
+    "EmbeddedAttemptSessionTakeoverError",
+    "failed to persist prompt error entry",
+    "failed before reply",
+    "EEXIST",
+)
+
+# Session transcripts live at <root>/<agent>/sessions/*.jsonl inside the
+# container. The bug leaves zero-byte tombstones here; a healthy in-use session
+# is non-empty.
+_CONTAINER_SESSIONS_ROOT = "/home/node/.openclaw/agents"
 
 
 def _is_under_path(path: Path, root: Path) -> bool:
@@ -106,6 +133,139 @@ def _print_inspect_summary(diag_dir: Path) -> None:
     print(f"container_entrypoint={_format_command_list(config.get('Entrypoint'))}")
     print(f"container_cmd={_format_command_list(config.get('Cmd'))}")
     print(f"container_working_dir={config.get('WorkingDir') or ''}")
+
+
+def cmd_diagnostics_logs(args: argparse.Namespace) -> int:
+    """On-demand tail of a live gateway container's logs.
+
+    `diagnostics show` only reads snapshots captured during a failed/rolled-back
+    apply, so a container that stays up while only its model calls fail (see
+    agent-runtime-ops#16) has nothing to show. This tails the running container
+    directly, redacting secrets, so an operator can see provider errors without a
+    prior failure snapshot.
+    """
+    if not _is_root():
+        print(
+            "error: run as root/admin: sudo /usr/local/bin/opsctl diagnostics logs TARGET",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        slot = str(args.slot)
+        validate_linux_account(slot)
+        tail_lines = max(1, min(int(getattr(args, "tail", 200)), 2000))
+        since = getattr(args, "since", None) or None
+        if since is not None:
+            since = str(since)
+            if not _SINCE_RE.match(since):
+                raise ValueError("--since must be a relative age like 10m, 2h, 1d")
+        binding = get_runtime_binding(slot, _state_root(args))
+    except Exception as exc:
+        print("diagnostics_logs_status=fail")
+        print(f"reason={exc}")
+        return 1
+
+    container, lookup = find_gateway_container_by_binding(binding)
+    if not container:
+        print("diagnostics_logs_status=fail")
+        print(f"target={slot}")
+        print(f"reason=container_not_found lookup={lookup}")
+        return 1
+
+    command = ["docker", "logs", "--tail", str(tail_lines)]
+    if since:
+        command += ["--since", since]
+    command.append(container)
+    result = run_text(command, timeout=30)
+
+    print("diagnostics_logs_status=ok")
+    print(f"target={slot}")
+    print(f"container={container[:12]}")
+    print(f"lookup={lookup}")
+    print("secret_value_printed=no")
+    print(f"logs_returncode={result.returncode}")
+    text = "\n".join(part for part in (result.stdout or "", result.stderr or "") if part)
+    _print_block("logs_tail", _redacted_tail(text, lines=tail_lines, chars=60000))
+    return 0
+
+
+def cmd_diagnostics_session_health(args: argparse.Namespace) -> int:
+    """Detect the embedded-agent session-save wedge (openclaw-jitech#35) on a slot.
+
+    Read-only symptom detector: counts zero-byte session tombstones inside the
+    running container and scans recent logs for the wedge signatures. Catches an
+    outage that leaves gateway/model/`check --live` all green while every customer
+    prompt fails before reply. No synthetic prompt, no paid model call, no
+    customer-session mutation.
+    """
+    if not _is_root():
+        print(
+            "error: run as root/admin: sudo /usr/local/bin/opsctl diagnostics session-health TARGET",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        slot = str(args.slot)
+        validate_linux_account(slot)
+        since = str(getattr(args, "since", None) or "6h")
+        if not _SINCE_RE.match(since):
+            raise ValueError("--since must be a relative age like 10m, 2h, 1d")
+        binding = get_runtime_binding(slot, _state_root(args))
+    except Exception as exc:
+        print("session_health_status=fail")
+        print(f"reason={exc}")
+        return 1
+
+    container, lookup = find_gateway_container_by_binding(binding)
+    if not container:
+        print("session_health_status=fail")
+        print(f"target={slot}")
+        print(f"reason=container_not_found lookup={lookup}")
+        return 1
+
+    # 1) Zero-byte session tombstones (the "history disappeared" symptom).
+    find_script = (
+        f"find {_CONTAINER_SESSIONS_ROOT} "
+        "-path '*/sessions/*.jsonl' -type f -printf '%s\\t%p\\n' 2>/dev/null"
+    )
+    exec_result = run_text(["docker", "exec", container, "sh", "-c", find_script], timeout=30)
+    exec_ok = exec_result.returncode == 0
+    total_sessions = 0
+    tombstones: list[str] = []
+    if exec_ok:
+        for line in exec_result.stdout.splitlines():
+            if "\t" not in line:
+                continue
+            size_str, path = line.split("\t", 1)
+            try:
+                size = int(size_str)
+            except ValueError:
+                continue
+            total_sessions += 1
+            if size == 0:
+                tombstones.append(path.rsplit("/", 1)[-1])
+
+    # 2) Wedge log signatures within the window.
+    logs_result = run_text(["docker", "logs", "--since", since, container], timeout=30)
+    log_text = "\n".join(part for part in (logs_result.stdout or "", logs_result.stderr or "") if part)
+    signature_hits = {sig: log_text.count(sig) for sig in _SESSION_WEDGE_SIGNATURES}
+    total_hits = sum(signature_hits.values())
+
+    degraded = bool(tombstones) or total_hits > 0
+    print(f"session_health_status={'degraded' if degraded else 'ok'}")
+    print(f"target={slot}")
+    print(f"container={container[:12]}")
+    print(f"lookup={lookup}")
+    print(f"session_scan_ok={'yes' if exec_ok else 'no'}")
+    print(f"session_total={total_sessions}")
+    print(f"zero_byte_tombstones={len(tombstones)}")
+    for name in tombstones[:20]:
+        print(f"tombstone={name}")
+    print(f"log_window={since}")
+    for sig in _SESSION_WEDGE_SIGNATURES:
+        print(f"log_signature[{sig}]={signature_hits[sig]}")
+    print(f"log_signature_total={total_hits}")
+    return 0
 
 
 def cmd_diagnostics_show(args: argparse.Namespace) -> int:
