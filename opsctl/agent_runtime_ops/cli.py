@@ -14,7 +14,7 @@ from .commands.binding import (
 from .commands.blocked import cmd_blocked_mutation
 from .commands.check import cmd_check
 from .commands.checklist import cmd_checklist_pack
-from .commands.diagnostics import cmd_diagnostics_show
+from .commands.diagnostics import cmd_diagnostics_logs, cmd_diagnostics_show
 from .commands.document_tools import cmd_document_tools_status
 from .commands.handoff import (
     cmd_handoff_print,
@@ -215,6 +215,11 @@ def build_parser() -> argparse.ArgumentParser:
     diagnostics_show.add_argument("--dir", help="absolute backup dir or failed-container dir to show")
     diagnostics_show.add_argument("--tail", type=int, default=120)
     diagnostics_show.set_defaults(func=cmd_diagnostics_show)
+    diagnostics_logs = diagnostics_sub.add_parser("logs")
+    diagnostics_logs.add_argument("slot", metavar="target")
+    diagnostics_logs.add_argument("--tail", type=int, default=200)
+    diagnostics_logs.add_argument("--since", help="relative age like 10m, 2h, 1d")
+    diagnostics_logs.set_defaults(func=cmd_diagnostics_logs)
 
     rollout = sub.add_parser("rollout", description="Inspect runtime manifests and apply digest-pinned wrapper/product images.")
     rollout_sub = rollout.add_subparsers(dest="rollout_command", required=True)

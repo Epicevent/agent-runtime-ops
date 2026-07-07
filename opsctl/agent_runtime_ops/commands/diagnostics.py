@@ -4,13 +4,21 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import sys
 
 from ..domain.common import is_root as _is_root
+from ..domain.common import run_text
+from ..domain.common import state_root as _state_root
 from ..domain.runtime_paths import agent_backup_root, slot_runtime_dir
+from ..domain.runtime_truth import find_gateway_container_by_binding
 from ..redaction import redact
-from ..routing import validate_linux_account
+from ..routing import get_runtime_binding, validate_linux_account
 from ..yamlio import load_yaml
+
+# Relative age accepted by `docker logs --since`, e.g. 10m, 2h, 1d. Kept strict so
+# an operator typo fails cleanly here instead of surfacing a raw docker error.
+_SINCE_RE = re.compile(r"^\d+[smhd]$")
 
 
 def _is_under_path(path: Path, root: Path) -> bool:
@@ -106,6 +114,60 @@ def _print_inspect_summary(diag_dir: Path) -> None:
     print(f"container_entrypoint={_format_command_list(config.get('Entrypoint'))}")
     print(f"container_cmd={_format_command_list(config.get('Cmd'))}")
     print(f"container_working_dir={config.get('WorkingDir') or ''}")
+
+
+def cmd_diagnostics_logs(args: argparse.Namespace) -> int:
+    """On-demand tail of a live gateway container's logs.
+
+    `diagnostics show` only reads snapshots captured during a failed/rolled-back
+    apply, so a container that stays up while only its model calls fail (see
+    agent-runtime-ops#16) has nothing to show. This tails the running container
+    directly, redacting secrets, so an operator can see provider errors without a
+    prior failure snapshot.
+    """
+    if not _is_root():
+        print(
+            "error: run as root/admin: sudo /usr/local/bin/opsctl diagnostics logs TARGET",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        slot = str(args.slot)
+        validate_linux_account(slot)
+        tail_lines = max(1, min(int(getattr(args, "tail", 200)), 2000))
+        since = getattr(args, "since", None) or None
+        if since is not None:
+            since = str(since)
+            if not _SINCE_RE.match(since):
+                raise ValueError("--since must be a relative age like 10m, 2h, 1d")
+        binding = get_runtime_binding(slot, _state_root(args))
+    except Exception as exc:
+        print("diagnostics_logs_status=fail")
+        print(f"reason={exc}")
+        return 1
+
+    container, lookup = find_gateway_container_by_binding(binding)
+    if not container:
+        print("diagnostics_logs_status=fail")
+        print(f"target={slot}")
+        print(f"reason=container_not_found lookup={lookup}")
+        return 1
+
+    command = ["docker", "logs", "--tail", str(tail_lines)]
+    if since:
+        command += ["--since", since]
+    command.append(container)
+    result = run_text(command, timeout=30)
+
+    print("diagnostics_logs_status=ok")
+    print(f"target={slot}")
+    print(f"container={container[:12]}")
+    print(f"lookup={lookup}")
+    print("secret_value_printed=no")
+    print(f"logs_returncode={result.returncode}")
+    text = "\n".join(part for part in (result.stdout or "", result.stderr or "") if part)
+    _print_block("logs_tail", _redacted_tail(text, lines=tail_lines, chars=60000))
+    return 0
 
 
 def cmd_diagnostics_show(args: argparse.Namespace) -> int:
