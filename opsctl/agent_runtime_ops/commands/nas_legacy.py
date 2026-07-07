@@ -96,7 +96,7 @@ def cmd_nas_legacy_adopt(args: argparse.Namespace) -> int:
             shutil.copyfile(source_path, destination)
             os.chmod(destination, 0o600)
             os.chmod(destination.parent, 0o700)
-            if hasattr(os, "chown"):
+            if hasattr(os, "chown") and hasattr(os, "geteuid") and os.geteuid() == 0:
                 os.chown(destination, 0, 0)
             promotion = "promoted"
     except Exception as exc:
