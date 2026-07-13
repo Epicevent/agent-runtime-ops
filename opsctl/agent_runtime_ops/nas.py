@@ -41,6 +41,16 @@ def parse_smb_share(source: str) -> SmbShare:
     return SmbShare(source=f"//{host}/{share}", host=host.lower(), share=share)
 
 
+_WRITABLE_SHARE_RE = re.compile(r"OC\d+", re.IGNORECASE)
+
+
+def share_is_writable(share: SmbShare) -> bool:
+    """OCn shares hold agent-generated artifacts and mount read-write.
+    Customer-data shares (kakao-work, hanpass_groupware, …) stay ro-enforced
+    at the operating-tool level by design — this is the only writable class."""
+    return _WRITABLE_SHARE_RE.fullmatch(share.share) is not None
+
+
 _VIEW_SOURCE_RE = re.compile(r"^(?P<base>//[^\[\]]+?)\[(?P<subpath>/[^\[\]]*)\]$")
 
 

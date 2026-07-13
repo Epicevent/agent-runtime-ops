@@ -174,11 +174,15 @@ def mounted_child_cifs_count(slot: str) -> int:
     return len([row for row in rows if row.get("fstype") == "cifs" and row.get("target", "").startswith(str(root) + "/")])
 
 
-def mount_prepared_share(decision) -> tuple[bool, str]:
+def _mode_matches(row: dict[str, str], expect_readwrite: bool) -> bool:
+    return is_readonly_mount(row) != expect_readwrite
+
+
+def mount_prepared_share(decision, expect_readwrite: bool = False) -> tuple[bool, str]:
     rc, _, rows = findmnt_one(decision.mountpoint)
     if rc == 0 and rows:
         row = rows[0]
-        ok = row.get("source") == decision.share.source and row.get("fstype") == "cifs" and is_readonly_mount(row)
+        ok = row.get("source") == decision.share.source and row.get("fstype") == "cifs" and _mode_matches(row, expect_readwrite)
         return ok, "already_mounted" if ok else "mountpoint_has_unexpected_existing_mount"
 
     proc = _run_text(["mount", str(decision.mountpoint)], timeout=60)
@@ -191,6 +195,7 @@ def mount_prepared_share(decision) -> tuple[bool, str]:
         and bool(rows)
         and rows[0].get("source") == decision.share.source
         and rows[0].get("fstype") == "cifs"
-        and is_readonly_mount(rows[0])
+        and _mode_matches(rows[0], expect_readwrite)
     )
-    return ok, "ok" if ok else (error or "mounted_state_did_not_match_expected_cifs_ro")
+    expected = "rw" if expect_readwrite else "ro"
+    return ok, "ok" if ok else (error or f"mounted_state_did_not_match_expected_cifs_{expected}")

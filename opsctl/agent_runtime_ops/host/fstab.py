@@ -67,6 +67,7 @@ def write_managed_fstab_entry(
     slot_uid_gid: Callable[[str], tuple[int, int]],
     runtime_ids: Callable[[str], tuple[int, int, int]],
     claim_existing_same_source: bool = False,
+    read_write: bool = False,
     fstab_path: Path = Path("/etc/fstab"),
     lock_path: Path = Path("/run/agent-runtime-ops-fstab.lock"),
 ) -> None:
@@ -74,10 +75,13 @@ def write_managed_fstab_entry(
     _, _, data_gid = runtime_ids(slot)
     escaped_target = fstab_escape(str(mountpoint))
     escaped_source = fstab_escape(share)
+    access = "rw" if read_write else "ro"
+    file_mode = "0640" if read_write else "0440"
+    dir_mode = "0750" if read_write else "0550"
     options = ",".join(
         [
             f"credentials={fstab_escape(str(credential_path))}",
-            "ro",
+            access,
             "nosuid",
             "nodev",
             "vers=3.1.1",
@@ -87,8 +91,8 @@ def write_managed_fstab_entry(
             "forceuid",
             f"gid={data_gid}",
             "forcegid",
-            "file_mode=0440",
-            "dir_mode=0550",
+            f"file_mode={file_mode}",
+            f"dir_mode={dir_mode}",
             "soft",
             "nofail",
             "_netdev",

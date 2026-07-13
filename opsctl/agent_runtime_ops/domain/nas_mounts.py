@@ -5,7 +5,7 @@ from pathlib import Path
 from ..host.account_files import credential_file_is_safe_for_slot, runtime_ids, slot_uid_gid
 from ..host.fstab import write_managed_fstab_entry as host_write_managed_fstab_entry
 from ..host.mounts import findmnt_one, mounted_child_cifs_count, safe_mountpoint_path
-from ..nas import check_nas_policy
+from ..nas import check_nas_policy, parse_smb_share, share_is_writable
 
 
 def write_managed_fstab_entry(
@@ -15,9 +15,12 @@ def write_managed_fstab_entry(
     credential_path: Path,
     *,
     claim_existing_same_source: bool = False,
+    read_write: bool | None = None,
     fstab_path: Path = Path("/etc/fstab"),
     lock_path: Path = Path("/run/agent-runtime-ops-fstab.lock"),
 ) -> None:
+    if read_write is None:
+        read_write = share_is_writable(parse_smb_share(share))
     host_write_managed_fstab_entry(
         slot,
         share,
@@ -26,6 +29,7 @@ def write_managed_fstab_entry(
         slot_uid_gid=slot_uid_gid,
         runtime_ids=runtime_ids,
         claim_existing_same_source=claim_existing_same_source,
+        read_write=read_write,
         fstab_path=fstab_path,
         lock_path=lock_path,
     )
