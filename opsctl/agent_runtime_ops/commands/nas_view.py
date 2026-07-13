@@ -26,9 +26,7 @@ from ..domain.nas_views import (
     view_root,
 )
 from ..host.account_files import (
-    ensure_customer_agent_dirs,
     read_password_from_stdin,
-    slot_uid_gid,
     write_credential_file,
 )
 from ..host.bind_mounts import bind_ro, unmount_tree
@@ -124,17 +122,16 @@ def cmd_nas_view_assign(args: argparse.Namespace) -> int:
             if not args.username or not args.password_stdin:
                 raise ValueError("--username and --password-stdin must be used together")
             password = read_password_from_stdin()
-            # Same contract as `nas mount` (#23): credentials live in the
-            # customer account (slot-owned, 0600), never the root vault.
-            ensure_customer_agent_dirs(slot)
-            uid, gid = slot_uid_gid(slot)
-            credential_path = customer_credential_path(slot, decision.share)
-            write_credential_file(credential_path, args.username, password, args.domain, uid, gid)
+            # Corpus master reads a SHARED corpus via an infra read account.
+            # Unlike `nas mount` (own-folder self-service, slot-owned cred),
+            # the customer must NOT be able to read this key — store root-owned.
+            credential_path = root_credential_path(slot, decision.share)
+            write_credential_file(credential_path, args.username, password, args.domain, 0, 0)
         else:
-            credential_path = customer_credential_path(slot, decision.share)
+            credential_path = root_credential_path(slot, decision.share)
             if not credential_path.exists():
-                # transition-only read fallback; the vault is being emptied
-                credential_path = root_credential_path(slot, decision.share)
+                # transition-only read fallback: pre-fix slot-home creds
+                credential_path = customer_credential_path(slot, decision.share)
             if not credential_path.exists():
                 raise ValueError("credential_missing: pass --username USER --password-stdin or create an official credential")
 
