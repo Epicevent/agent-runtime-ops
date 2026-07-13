@@ -66,5 +66,39 @@ class ChildCifsModeTest(unittest.TestCase):
         self.assertFalse(_child_cifs_mode_ok([_row("garbage", ro=False)])[0])
 
 
+class ContainerCeilingModeTest(unittest.TestCase):
+    """Container side (#28): ro is always acceptable — the container's
+    nas_docs bind is deliberately read-only — but rw is allowed only for
+    writable-class (OCn) shares."""
+
+    def test_ocn_seen_ro_in_container_passes(self) -> None:
+        # The #28 incident line: host=rw, container=ro must be a normal combo.
+        ok, detail = _child_cifs_mode_ok([OC14_RO], ro_always_ok=True)
+        self.assertTrue(ok, detail)
+        self.assertIn("ro=1", detail)
+
+    def test_ocn_seen_rw_in_container_also_passes(self) -> None:
+        ok, _ = _child_cifs_mode_ok([OC14_RW], ro_always_ok=True)
+        self.assertTrue(ok)
+
+    def test_customer_share_rw_in_container_is_still_a_violation(self) -> None:
+        # The ceiling: the container must never see more writability than
+        # the share class grants.
+        ok, detail = _child_cifs_mode_ok([KAKAO_RW], ro_always_ok=True)
+        self.assertFalse(ok)
+        self.assertIn("//192.168.0.222/kakao-work:rw!=ro", detail)
+
+    def test_customer_share_ro_passes(self) -> None:
+        self.assertTrue(_child_cifs_mode_ok([KAKAO_RO, KAKAO_VIEW_RO], ro_always_ok=True)[0])
+
+    def test_mixed_incident_shape(self) -> None:
+        # oc14 during migration: OCn ro (host rw not propagated), views ro.
+        ok, detail = _child_cifs_mode_ok([OC14_RO, KAKAO_VIEW_RO], ro_always_ok=True)
+        self.assertTrue(ok, detail)
+
+    def test_unparseable_rw_source_is_still_rejected(self) -> None:
+        self.assertFalse(_child_cifs_mode_ok([_row("garbage", ro=False)], ro_always_ok=True)[0])
+
+
 if __name__ == "__main__":
     unittest.main()
