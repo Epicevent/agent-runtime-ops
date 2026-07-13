@@ -19,7 +19,7 @@ from ..host.mounts import (
     propagation_satisfies as _propagation_satisfies,
 )
 from ..host.account_files import runtime_ids
-from ..nas import check_nas_policy
+from ..nas import check_nas_policy, parse_cifs_mount_source, share_is_writable
 from ..routing import get_runtime_binding
 from ..runtime_secrets import parse_secret_env_text
 from ..yamlio import load_yaml
@@ -514,6 +514,39 @@ function parseJson(label, response) {
     return checks
 
 
+def _child_cifs_mode_ok(rows: list[dict[str, str]]) -> tuple[bool, str]:
+    """Each child CIFS mount must be in the mode its share class dictates.
+
+    OCn artifact shares mount read-write (``share_is_writable`` — the single
+    rule shared with fstab/mount emission in #22); every other customer-data
+    share (kakao-work, hanpass_groupware, kakao views, …) stays ro-enforced.
+    Keying on the share name makes this host-agnostic, so the same OCn share
+    is writable on the old NAS and the new one during the migration. An
+    unparseable source falls back to ro-required (safe default). Returns
+    ``(ok, detail)`` — ``detail`` names any mount whose live mode contradicts
+    its class so a mismatch is legible in the one check line.
+    """
+    mismatches: list[str] = []
+    ro = rw = 0
+    for row in rows:
+        source = row.get("source") or ""
+        try:
+            share, _subpath = parse_cifs_mount_source(source)
+            want_rw = share_is_writable(share)
+        except ValueError:
+            want_rw = False
+        is_ro = _is_readonly_mount(row)
+        if is_ro:
+            ro += 1
+        else:
+            rw += 1
+        if is_ro == want_rw:
+            mismatches.append(f"{source}:{'ro' if is_ro else 'rw'}!={'rw' if want_rw else 'ro'}")
+    if mismatches:
+        return False, f"count={len(rows)} mismatch={','.join(mismatches)}"
+    return True, f"count={len(rows)} ro={ro} rw={rw}"
+
+
 def run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool, str, str | None]]:
     checks: list[tuple[bool, str, str | None]] = []
     if not is_root():
@@ -655,8 +688,8 @@ def run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool,
         elif source.startswith("//"):
             checks.append((True, "live_host_child_cifs_policy_not_required_for_dev", f"source={source}"))
     if required_read_only_nas and host_cifs:
-        host_ro = all(_is_readonly_mount(row) for row in host_cifs)
-        checks.append((bool(host_cifs) and host_ro, "live_host_child_cifs_readonly", f"count={len(host_cifs)}"))
+        host_mode_ok, host_mode_detail = _child_cifs_mode_ok(host_cifs)
+        checks.append((host_mode_ok, "live_host_child_cifs_readonly", host_mode_detail))
 
     if not container_nas_root:
         checks.append((False, "live_container_nas_root_configured", None))
@@ -704,8 +737,8 @@ def run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool,
     ]
     checks.append((True, "live_container_child_cifs_count", f"count={len(container_cifs)}"))
     if required_read_only_nas and container_cifs:
-        container_ro = all(_is_readonly_mount(row) for row in container_cifs)
-        checks.append((bool(container_cifs) and container_ro, "live_container_child_cifs_readonly", f"count={len(container_cifs)}"))
+        container_mode_ok, container_mode_detail = _child_cifs_mode_ok(container_cifs)
+        checks.append((container_mode_ok, "live_container_child_cifs_readonly", container_mode_detail))
 
     host_sources = {row.get("source") for row in host_cifs if row.get("source")}
     container_sources = {row.get("source") for row in container_cifs if row.get("source")}
