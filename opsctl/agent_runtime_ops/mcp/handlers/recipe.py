@@ -32,6 +32,7 @@ def dev_apply(server, args: dict[str, Any]) -> dict[str, Any]:
             "build_command",
             "allow_first_apply",
             "no_apply",
+            "runtime_only",
         },
         error_type=server.tool_error,
     )
@@ -56,6 +57,10 @@ def dev_apply(server, args: dict[str, Any]) -> dict[str, Any]:
     build_command = v.safe_text(args.get("build_command"), "build_command", error_type=server.tool_error)
     if build_command:
         argv.extend(["--build-command", build_command])
+    if bool(args.get("runtime_only", False)):
+        if not has_sync_from:
+            raise server.tool_error("runtime_only is only supported with sync_from")
+        argv.append("--runtime-only")
     if bool(args.get("allow_first_apply", False)):
         argv.append("--allow-first-apply")
     if bool(args.get("no_apply", False)):

@@ -360,6 +360,7 @@ def list_tool_specs() -> list[dict[str, Any]]:
                     "build_command": {"type": "string"},
                     "allow_first_apply": {"type": "boolean", "default": False},
                     "no_apply": {"type": "boolean", "default": False},
+                    "runtime_only": {"type": "boolean", "default": False},
                 },
                 "required": ["target"],
                 "oneOf": [{"required": ["source_output"]}, {"required": ["sync_from"]}],
