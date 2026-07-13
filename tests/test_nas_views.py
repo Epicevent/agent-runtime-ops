@@ -24,6 +24,7 @@ from agent_runtime_ops.domain.nas_views import (
     validate_room_id,
     validate_user_id,
 )
+from agent_runtime_ops.nas import parse_smb_share
 from agent_runtime_ops.routing import RuntimeBinding, dump_runtime_bindings
 from agent_runtime_ops.yamlio import dump_yaml
 
@@ -213,6 +214,65 @@ class NasViewCliTests(unittest.TestCase):
             self.assertEqual(rc, 1)
             self.assertIn("view_assign_status=fail", out)
             self.assertIn("detach", out)
+
+    def test_assign_rejects_own_folder_share(self) -> None:
+        # nas view is corpus-only; an OCn own-folder share must be refused before
+        # any credential is touched (its slot-owned cred is legitimate, not corpus).
+        decision = type(
+            "Decision",
+            (),
+            {"slot": "oc3", "share": parse_smb_share("//10.10.10.2/OC3"), "allowed": True, "reason": "grant_matched"},
+        )()
+        with tempfile.TemporaryDirectory() as tmp:
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.commands.nas_view._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.nas_view.check_nas_policy", return_value=decision),
+                patch("agent_runtime_ops.commands.nas_view.migrate_customer_credential_to_root") as migrate,
+                patch("agent_runtime_ops.commands.nas_view._mount_master") as mount_master,
+                patch("agent_runtime_ops.commands.nas_view._append_action_log"),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_nas_view_assign(
+                    argparse.Namespace(
+                        state_root=str(Path(tmp)),
+                        slot="oc3",
+                        user_id="7",
+                        share="//10.10.10.2/OC3",
+                        username=None,
+                        password_stdin=False,
+                        domain=None,
+                    )
+                )
+        self.assertEqual(rc, 1)
+        self.assertIn("view_assign_status=fail", output.getvalue())
+        self.assertIn("nas mount", output.getvalue())
+        migrate.assert_not_called()
+        mount_master.assert_not_called()
+
+    def test_detach_rejects_own_folder_share_before_side_effects(self) -> None:
+        # detach must reject an OCn own-folder --share before unmounting anything or
+        # deleting a cred that is legitimately slot-owned.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "state"
+            root.mkdir()
+            write_state(root)
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.commands.nas_view._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.nas_view.unmount_tree", return_value=(0, [])) as unmount,
+                patch("agent_runtime_ops.commands.nas_view._remove_managed_fstab_entry") as remove_fstab,
+                patch("agent_runtime_ops.commands.nas_view._append_action_log"),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_nas_view_detach(
+                    argparse.Namespace(state_root=str(root), slot="oc3", share="//10.10.10.2/OC3")
+                )
+        self.assertEqual(rc, 1)
+        self.assertIn("view_detach_status=fail", output.getvalue())
+        self.assertIn("nas unmount", output.getvalue())
+        unmount.assert_not_called()
+        remove_fstab.assert_not_called()
 
     def test_detach_removes_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

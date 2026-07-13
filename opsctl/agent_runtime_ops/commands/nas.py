@@ -12,6 +12,7 @@ from ..domain.common import run_text as _run_text
 from ..domain.common import state_root as _state_root
 from ..domain.nas_credentials import (
     delete_official_credentials,
+    migrate_customer_credential_to_root,
     official_credential_status,
     validate_official_credentials_for_delete,
 )
@@ -89,13 +90,22 @@ def _approve_auto_once(state_root: Path) -> dict[str, int]:
                     _append_action_log(state_root, "nas_approve_auto", slot, share_source, "rejected", decision.reason)
                     result["rejected"] += 1
                     continue
-                credential_path = customer_credential_path(slot, decision.share)
+                corpus = not _share_is_writable(decision.share)
+                if corpus:
+                    # Corpus is operator-provisioned (nas view assign), never a
+                    # customer self-service mount — resolve from the root vault only,
+                    # migrating any stale slot-home copy out of customer reach.
+                    migrate_customer_credential_to_root(slot, decision.share)
+                    credential_path = root_credential_path(slot, decision.share)
+                    cred_uid = 0
+                else:
+                    credential_path = customer_credential_path(slot, decision.share)
+                    cred_uid, _ = slot_uid_gid(slot)
                 if not credential_path.exists():
                     print(f"pending target={slot} share={decision.share.source} reason=credential_missing")
                     result["pending"] += 1
                     continue
-                slot_uid, _ = slot_uid_gid(slot)
-                credential_file_is_safe_for_slot(slot, credential_path, uid=slot_uid)
+                credential_file_is_safe_for_slot(slot, credential_path, uid=cred_uid)
                 decision, _ = _prepare_mount_entry(slot, decision.share.source, credential_path, state_root)
                 ok, reason = _host_mount_prepared_share(decision, _share_is_writable(decision.share))
                 if ok:
@@ -337,18 +347,40 @@ def cmd_nas_mount(args: argparse.Namespace) -> int:
         state_root = _state_root(args)
         decision = check_nas_policy(args.slot, args.share, state_root)
         slot = decision.slot
+        corpus = not _share_is_writable(decision.share)
         if args.username or args.password_stdin:
             if not args.username or not args.password_stdin:
                 raise ValueError("--username and --password-stdin must be used together")
             password = read_password_from_stdin()
-            # Credentials live in the customer account (slot-owned, 0600) so the
-            # slot's own fstab entry mounts from them and nobody re-enters the
-            # password. The root vault is not written to (owner decision 7/13).
-            ensure_customer_agent_dirs(slot)
-            uid, gid = slot_uid_gid(slot)
-            credential_path = customer_credential_path(slot, decision.share)
-            write_credential_file(credential_path, args.username, password, args.domain, uid, gid)
+            if corpus:
+                # Shared corpus (kakao-work, groupware, whatsapp) read via an infra
+                # account. If the slot could read this key, a container-escape or
+                # ssh-as-slot could self-mount the whole corpus — so it lives in the
+                # root vault, root:root 0600, never slot-readable.
+                credential_path = root_credential_path(slot, decision.share)
+                write_credential_file(credential_path, args.username, password, args.domain, 0, 0)
+                # Drop any pre-fix customer-readable copy of the same corpus secret.
+                customer_copy = customer_credential_path(slot, decision.share)
+                if customer_copy.exists():
+                    customer_copy.unlink()
+            else:
+                # Own-folder OCn share: the slot owns its data. Self-service cred is
+                # slot-owned 0600 so the slot's own fstab entry mounts it and nobody
+                # re-enters the password (owner decision 7/13).
+                ensure_customer_agent_dirs(slot)
+                uid, gid = slot_uid_gid(slot)
+                credential_path = customer_credential_path(slot, decision.share)
+                write_credential_file(credential_path, args.username, password, args.domain, uid, gid)
             credential_source = "stdin"
+        elif corpus:
+            # Corpus reuse: only the root vault is a safe source. Migrate any pre-fix
+            # slot-home copy into the vault (same secret, no re-entry) and fail closed
+            # rather than mount off a customer-readable corpus cred.
+            migrated = migrate_customer_credential_to_root(slot, decision.share)
+            credential_path = root_credential_path(slot, decision.share)
+            if not credential_path.exists():
+                raise ValueError("credential_missing: pass --username USER --password-stdin or create an official credential")
+            credential_source = "migrated_root" if migrated else "official_root"
         else:
             credential_path = customer_credential_path(slot, decision.share)
             if credential_path.exists():
