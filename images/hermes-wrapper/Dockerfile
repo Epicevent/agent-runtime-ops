@@ -30,6 +30,10 @@ LABEL org.opencontainers.image.description="Hermes product image wrapped with JI
 LABEL org.opencontainers.image.family="hermes"
 LABEL org.opencontainers.image.base.name="${BASE_IMAGE}"
 LABEL org.opencontainers.image.product.image="${PRODUCT_IMAGE}"
+# Override the base (product) image source label: this wrapper is built FROM the
+# product image and would otherwise inherit its source repo, making the approve
+# gate check the ops commit against the wrong repository.
+LABEL org.opencontainers.image.source="https://github.com/Epicevent/agent-runtime-ops"
 LABEL org.opencontainers.image.revision="${OPS_REPO_COMMIT}"
 LABEL com.epicevent.agent-runtime.recipe.schema="v1"
 LABEL com.epicevent.agent-runtime.recipe.name="${CANONICAL_RECIPE_NAME}"
