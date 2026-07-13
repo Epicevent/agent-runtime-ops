@@ -341,17 +341,23 @@ def cmd_nas_mount(args: argparse.Namespace) -> int:
             if not args.username or not args.password_stdin:
                 raise ValueError("--username and --password-stdin must be used together")
             password = read_password_from_stdin()
-            credential_path = root_credential_path(slot, decision.share)
-            write_credential_file(credential_path, args.username, password, args.domain, 0, 0)
+            # Credentials live in the customer account (slot-owned, 0600) so the
+            # slot's own fstab entry mounts from them and nobody re-enters the
+            # password. The root vault is not written to (owner decision 7/13).
+            ensure_customer_agent_dirs(slot)
+            uid, gid = slot_uid_gid(slot)
+            credential_path = customer_credential_path(slot, decision.share)
+            write_credential_file(credential_path, args.username, password, args.domain, uid, gid)
             credential_source = "stdin"
         else:
-            credential_path = root_credential_path(slot, decision.share)
+            credential_path = customer_credential_path(slot, decision.share)
             if credential_path.exists():
-                credential_source = "official_root"
+                credential_source = "official_customer"
             else:
-                credential_path = customer_credential_path(slot, decision.share)
+                # transition-only read fallback; the vault is being emptied
+                credential_path = root_credential_path(slot, decision.share)
                 if credential_path.exists():
-                    credential_source = "official_customer"
+                    credential_source = "official_root"
                 else:
                     raise ValueError("credential_missing: pass --username USER --password-stdin or create an official credential")
         decision, _ = _prepare_mount_entry(
