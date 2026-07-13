@@ -514,17 +514,28 @@ function parseJson(label, response) {
     return checks
 
 
-def _child_cifs_mode_ok(rows: list[dict[str, str]]) -> tuple[bool, str]:
-    """Each child CIFS mount must be in the mode its share class dictates.
+def _child_cifs_mode_ok(rows: list[dict[str, str]], *, ro_always_ok: bool = False) -> tuple[bool, str]:
+    """Each child CIFS mount must respect the mode its share class dictates.
 
     OCn artifact shares mount read-write (``share_is_writable`` — the single
     rule shared with fstab/mount emission in #22); every other customer-data
     share (kakao-work, hanpass_groupware, kakao views, …) stays ro-enforced.
     Keying on the share name makes this host-agnostic, so the same OCn share
     is writable on the old NAS and the new one during the migration. An
-    unparseable source falls back to ro-required (safe default). Returns
-    ``(ok, detail)`` — ``detail`` names any mount whose live mode contradicts
-    its class so a mismatch is legible in the one check line.
+    unparseable source falls back to ro-required (safe default).
+
+    Two judgments share this code (#28):
+    - host side (``ro_always_ok=False``): exact match — the host mount must be
+      in its class's mode, so OCn-as-ro and customer-as-rw both read unhealthy.
+    - container side (``ro_always_ok=True``): ceiling match — the container's
+      nas_docs bind is deliberately read-only (its own gate,
+      live_container_nas_root_readonly), so host=rw ↔ container=ro is a normal
+      combination and ro is always acceptable. What must never happen is the
+      container seeing MORE writability than the share class grants: rw is a
+      violation unless the class is writable.
+
+    Returns ``(ok, detail)`` — ``detail`` names any offending mount so the
+    verdict is legible in the one check line.
     """
     mismatches: list[str] = []
     ro = rw = 0
@@ -540,6 +551,8 @@ def _child_cifs_mode_ok(rows: list[dict[str, str]]) -> tuple[bool, str]:
             ro += 1
         else:
             rw += 1
+        if is_ro and ro_always_ok:
+            continue
         if is_ro == want_rw:
             mismatches.append(f"{source}:{'ro' if is_ro else 'rw'}!={'rw' if want_rw else 'ro'}")
     if mismatches:
@@ -737,7 +750,7 @@ def run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool,
     ]
     checks.append((True, "live_container_child_cifs_count", f"count={len(container_cifs)}"))
     if required_read_only_nas and container_cifs:
-        container_mode_ok, container_mode_detail = _child_cifs_mode_ok(container_cifs)
+        container_mode_ok, container_mode_detail = _child_cifs_mode_ok(container_cifs, ro_always_ok=True)
         checks.append((container_mode_ok, "live_container_child_cifs_readonly", container_mode_detail))
 
     host_sources = {row.get("source") for row in host_cifs if row.get("source")}
