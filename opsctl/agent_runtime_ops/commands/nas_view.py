@@ -25,7 +25,12 @@ from ..domain.nas_views import (
     validate_user_id,
     view_root,
 )
-from ..host.account_files import read_password_from_stdin, write_credential_file
+from ..host.account_files import (
+    ensure_customer_agent_dirs,
+    read_password_from_stdin,
+    slot_uid_gid,
+    write_credential_file,
+)
 from ..host.bind_mounts import bind_ro, unmount_tree
 from ..host.nas_ready import failed_cifs_mount_units, wait_for_nas_ready
 from ..host.fstab import remove_managed_fstab_entry as _remove_managed_fstab_entry
@@ -119,12 +124,17 @@ def cmd_nas_view_assign(args: argparse.Namespace) -> int:
             if not args.username or not args.password_stdin:
                 raise ValueError("--username and --password-stdin must be used together")
             password = read_password_from_stdin()
-            credential_path = root_credential_path(slot, decision.share)
-            write_credential_file(credential_path, args.username, password, args.domain, 0, 0)
+            # Same contract as `nas mount` (#23): credentials live in the
+            # customer account (slot-owned, 0600), never the root vault.
+            ensure_customer_agent_dirs(slot)
+            uid, gid = slot_uid_gid(slot)
+            credential_path = customer_credential_path(slot, decision.share)
+            write_credential_file(credential_path, args.username, password, args.domain, uid, gid)
         else:
-            credential_path = root_credential_path(slot, decision.share)
+            credential_path = customer_credential_path(slot, decision.share)
             if not credential_path.exists():
-                credential_path = customer_credential_path(slot, decision.share)
+                # transition-only read fallback; the vault is being emptied
+                credential_path = root_credential_path(slot, decision.share)
             if not credential_path.exists():
                 raise ValueError("credential_missing: pass --username USER --password-stdin or create an official credential")
 
