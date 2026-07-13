@@ -289,6 +289,11 @@ def build_parser() -> argparse.ArgumentParser:
     recipe_apply_dev.add_argument("--build-command")
     recipe_apply_dev.add_argument("--allow-first-apply", action="store_true")
     recipe_apply_dev.add_argument("--no-apply", action="store_true")
+    recipe_apply_dev.add_argument(
+        "--runtime-only",
+        action="store_true",
+        help="sync a runtime-half dist (no control-ui) while keeping the slot's current control-ui",
+    )
     recipe_apply_dev.set_defaults(func=cmd_recipe_dev_apply)
     recipe_capture_dev = recipe_sub.add_parser("capture-dev")
     recipe_capture_dev.add_argument("slot", metavar="target")
