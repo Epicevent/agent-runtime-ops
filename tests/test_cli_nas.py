@@ -20,7 +20,11 @@ from agent_runtime_ops.commands.nas import (
     cmd_nas_request,
     cmd_nas_requests,
 )
-from agent_runtime_ops.domain.nas_credentials import delete_official_credentials, official_credential_status
+from agent_runtime_ops.domain.nas_credentials import (
+    delete_official_credentials,
+    migrate_customer_credential_to_root,
+    official_credential_status,
+)
 from agent_runtime_ops.host.account_files import write_credential_file
 from agent_runtime_ops.host.fstab import fstab_escape as _fstab_escape
 from agent_runtime_ops.host.fstab import managed_fstab_marker as _managed_fstab_marker
@@ -152,6 +156,47 @@ class CliNasTests(unittest.TestCase):
             self.assertTrue(legacy_path.exists())
         self.assertEqual(removed["root_credential_removed"], "yes")
         self.assertEqual(removed["customer_credential_removed"], "yes")
+
+    def test_migrate_customer_credential_to_root_moves_and_deletes_slot_copy(self) -> None:
+        share = parse_smb_share("//10.10.10.2/kakao-work")
+        with tempfile.TemporaryDirectory() as tmp:
+            root_path = Path(tmp) / "vault" / "kakao-work.cred"
+            customer_path = Path(tmp) / "slot" / "kakao-work.cred"
+            customer_path.parent.mkdir(parents=True)
+            customer_path.write_text("username=ro_kakao\npassword=secret\n", encoding="utf-8")
+            with (
+                patch("agent_runtime_ops.domain.nas_credentials.root_credential_path", return_value=root_path),
+                patch("agent_runtime_ops.domain.nas_credentials.customer_credential_path", return_value=customer_path),
+            ):
+                migrated = migrate_customer_credential_to_root("oc3", share)
+                # secret moved into the vault, slot-home (customer-readable) copy gone
+                self.assertTrue(migrated)
+                self.assertTrue(root_path.exists())
+                self.assertFalse(customer_path.exists())
+                vault_text = root_path.read_text(encoding="utf-8")
+                self.assertIn("username=ro_kakao", vault_text)
+                self.assertIn("password=secret", vault_text)
+                # idempotent: nothing left to migrate
+                self.assertFalse(migrate_customer_credential_to_root("oc3", share))
+
+    def test_migrate_customer_credential_to_root_clears_redundant_copy_when_vault_present(self) -> None:
+        share = parse_smb_share("//10.10.10.2/kakao-work")
+        with tempfile.TemporaryDirectory() as tmp:
+            root_path = Path(tmp) / "vault" / "kakao-work.cred"
+            customer_path = Path(tmp) / "slot" / "kakao-work.cred"
+            root_path.parent.mkdir(parents=True)
+            customer_path.parent.mkdir(parents=True)
+            root_path.write_text("username=ro_kakao\npassword=vault\n", encoding="utf-8")
+            customer_path.write_text("username=ro_kakao\npassword=slot\n", encoding="utf-8")
+            with (
+                patch("agent_runtime_ops.domain.nas_credentials.root_credential_path", return_value=root_path),
+                patch("agent_runtime_ops.domain.nas_credentials.customer_credential_path", return_value=customer_path),
+            ):
+                migrated = migrate_customer_credential_to_root("oc3", share)
+            # vault is authoritative: not overwritten, migrated=False, but the exposed slot copy is removed
+            self.assertFalse(migrated)
+            self.assertEqual(root_path.read_text(encoding="utf-8"), "username=ro_kakao\npassword=vault\n")
+            self.assertFalse(customer_path.exists())
 
     def test_remove_managed_fstab_entry_removes_marker_and_entry(self) -> None:
         share = "//192.168.0.222/hanpass"
@@ -334,8 +379,8 @@ class CliNasTests(unittest.TestCase):
                 patch("agent_runtime_ops.commands.nas.check_nas_policy", return_value=decision) as policy,
                 patch("agent_runtime_ops.commands.nas.ensure_customer_agent_dirs") as ensure_dirs,
                 patch("agent_runtime_ops.commands.nas.slot_uid_gid", return_value=(1006, 1006)),
-                patch("agent_runtime_ops.commands.nas.customer_credential_path", return_value=credential) as customer_path,
-                patch("agent_runtime_ops.commands.nas.root_credential_path") as root_path,
+                patch("agent_runtime_ops.commands.nas.customer_credential_path") as customer_path,
+                patch("agent_runtime_ops.commands.nas.root_credential_path", return_value=credential) as root_path,
                 patch("agent_runtime_ops.commands.nas.write_credential_file"),
                 patch("agent_runtime_ops.commands.nas._prepare_mount_entry", return_value=(decision, decision.mountpoint)) as prepare,
                 patch("agent_runtime_ops.commands.nas._findmnt_one", side_effect=[(1, "", []), (0, "", [])]),
@@ -357,10 +402,11 @@ class CliNasTests(unittest.TestCase):
                 )
         self.assertEqual(rc, 0)
         policy.assert_called_once_with("oc3.ji-tech.co.kr", share.source, root)
-        # stdin registration writes to the customer account, never the root vault
+        # corpus share (not OCn): stdin registration writes to the root vault, never the customer account
+        root_path.assert_called_once_with("oc3", share)
+        # ...and clears any stale customer-readable copy of the same corpus secret
         customer_path.assert_called_once_with("oc3", share)
-        root_path.assert_not_called()
-        ensure_dirs.assert_called_once_with("oc3")
+        ensure_dirs.assert_not_called()
         self.assertEqual(prepare.call_args.args[:4], ("oc3", share.source, credential, root))
         self.assertIn("target=oc3", output.getvalue())
 

@@ -10,6 +10,7 @@ from ..domain.common import is_root as _is_root
 from ..domain.common import now_iso as _now_iso
 from ..domain.common import run_text as _run_text
 from ..domain.common import state_root as _state_root
+from ..domain.nas_credentials import migrate_customer_credential_to_root
 from ..domain.nas_mounts import write_managed_fstab_entry as _write_managed_fstab_entry
 from ..domain.nas_views import (
     ViewPlan,
@@ -40,6 +41,7 @@ from ..nas import (
     mountpoint_for_share,
     parse_smb_share,
     root_credential_path,
+    share_is_writable,
 )
 
 
@@ -106,6 +108,8 @@ def cmd_nas_view_assign(args: argparse.Namespace) -> int:
         if not decision.allowed:
             raise ValueError(f"policy denied: {decision.reason}")
         slot = decision.slot
+        if share_is_writable(decision.share):
+            raise ValueError("nas view is for shared corpus (kakao/groupware/whatsapp); OCn own-folder shares use `nas mount`")
         user_id = validate_user_id(args.user_id)
 
         views = load_views_state(state_root)
@@ -127,11 +131,16 @@ def cmd_nas_view_assign(args: argparse.Namespace) -> int:
             # the customer must NOT be able to read this key — store root-owned.
             credential_path = root_credential_path(slot, decision.share)
             write_credential_file(credential_path, args.username, password, args.domain, 0, 0)
+            # Drop any pre-fix customer-readable copy of the same corpus secret.
+            customer_copy = customer_credential_path(slot, decision.share)
+            if customer_copy.exists():
+                customer_copy.unlink()
         else:
+            # Corpus reuse: the root vault is the only safe source. Migrate any
+            # pre-fix slot-home copy into the vault (same secret, no re-entry),
+            # then fail closed rather than mount off a customer-readable cred.
+            migrate_customer_credential_to_root(slot, decision.share)
             credential_path = root_credential_path(slot, decision.share)
-            if not credential_path.exists():
-                # transition-only read fallback: pre-fix slot-home creds
-                credential_path = customer_credential_path(slot, decision.share)
             if not credential_path.exists():
                 raise ValueError("credential_missing: pass --username USER --password-stdin or create an official credential")
 
@@ -188,6 +197,9 @@ def cmd_nas_view_detach(args: argparse.Namespace) -> int:
         share_source = (record or {}).get("share") or args.share
         if not share_source:
             raise ValueError("view not recorded and no --share given — cannot resolve fstab entry")
+        share = parse_smb_share(share_source)
+        if share_is_writable(share):
+            raise ValueError("nas view detach is for shared corpus; OCn own-folder shares use `nas unmount`")
 
         entry_failed, entry_errors = unmount_tree(slot_entry(slot))
         view_failed, view_errors = unmount_tree(view_root(slot))
@@ -196,6 +208,13 @@ def cmd_nas_view_detach(args: argparse.Namespace) -> int:
         if entry_failed or view_failed or master_failed:
             raise ValueError("umount_failed: " + "; ".join(failures))
         fstab_removed = _remove_managed_fstab_entry(slot, share_source)
+        # Corpus creds live root-owned in the vault (root:root 0600 — root-only,
+        # safe) and are kept so re-attach needs no password re-entry. Only a
+        # customer-readable copy (a pre-fix artifact) is a real exposure; remove it.
+        customer_cred = customer_credential_path(slot, share)
+        customer_cred_removed = customer_cred.exists()
+        if customer_cred_removed:
+            customer_cred.unlink()
     except Exception as exc:
         print(f"target={args.slot}")
         print("view_detach_status=fail")
@@ -211,7 +230,8 @@ def cmd_nas_view_detach(args: argparse.Namespace) -> int:
     print(f"share={share_source}")
     print(f"fstab_entry_removed={'yes' if fstab_removed else 'no'}")
     print(f"state_record_removed={'yes' if had_record else 'no'}")
-    print("credential_removed=no")
+    print(f"customer_credential_removed={'yes' if customer_cred_removed else 'no'}")
+    print("root_credential_removed=no")
     print("view_detach_status=ok")
     _append_action_log(state_root, "nas_view_detach", slot, share_source, "ok")
     return 0
