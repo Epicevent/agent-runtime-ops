@@ -200,13 +200,19 @@ def cmd_recipe_dev_apply(args: argparse.Namespace) -> int:
         source_output_arg = str(args.source_output or "").strip()
         if bool(sync_from) == bool(source_output_arg):
             raise ValueError("provide exactly one of --sync-from or --source-output")
+        runtime_only = bool(getattr(args, "runtime_only", False))
+        control_ui_in_dist = control_ui_preserved = None
         if sync_from:
             source = _safe_existing_directory(sync_from, "--sync-from")
-            source_output = _sync_dev_source_output(slot, recipe_name, source)
+            source_output, control_ui_in_dist, control_ui_preserved = _sync_dev_source_output(
+                slot, recipe_name, source, runtime_only=runtime_only
+            )
             sync_from_value = str(source)
             if getattr(args, "git_ref", None):
                 raise ValueError("--git-ref is only supported with --source-output")
         else:
+            if runtime_only:
+                raise ValueError("--runtime-only is only supported with --sync-from")
             source_output = _safe_existing_directory(source_output_arg, "--source-output")
             _refresh_git_source_output(source_output, str(getattr(args, "git_ref", "") or ""))
             sync_from_value = ""
@@ -251,6 +257,9 @@ def cmd_recipe_dev_apply(args: argparse.Namespace) -> int:
     print(f"source_output={source_output}")
     if sync_from_value:
         print(f"sync_from={sync_from_value}")
+        print(f"dist_control_ui={'present' if control_ui_in_dist else 'absent-from-dist'}")
+        if runtime_only:
+            print(f"control_ui_preserved={'yes' if control_ui_preserved else 'no'}")
     if backup_path:
         print(f"backup={backup_path}")
     print("recipe_apply_dev_status=prepared")

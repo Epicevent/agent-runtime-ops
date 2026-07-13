@@ -75,8 +75,61 @@ def chmod_source_tree(root: Path, uid: int, gid: int) -> None:
             os.chmod(path, file_mode)
 
 
-def sync_dev_source_output(slot: str, recipe_name: str, source: Path) -> Path:
+# The dev dist is two halves built by two commands: the runtime half
+# (`pnpm build:docker` → dist/index.js and backend chunks) and the dashboard
+# half (`pnpm -C ui build` → dist/control-ui/). The gateway hard-requires
+# dist/control-ui/index.html (product src/infra/control-ui-assets.ts), so a
+# wholesale sync of a runtime-only dist silently destroys the dashboard —
+# the issue #26 incident. These are the representative artifacts we probe.
+RUNTIME_ENTRY_RELPATH = "index.js"
+CONTROL_UI_INDEX_RELPATH = "control-ui/index.html"
+
+
+def dist_halves(source: Path) -> tuple[bool, bool]:
+    """Return (runtime_present, control_ui_present) for a dist directory."""
+    runtime_present = (source / RUNTIME_ENTRY_RELPATH).is_file()
+    control_ui_present = (source / CONTROL_UI_INDEX_RELPATH).is_file()
+    return runtime_present, control_ui_present
+
+
+def preflight_dev_dist(source: Path, *, runtime_only: bool) -> bool:
+    """Refuse half-built dists before anything is copied.
+
+    Returns whether the dist carries the control-ui half. The runtime half is
+    always required; the dashboard half is required unless the caller opted
+    into --runtime-only (in which case the slot's current control-ui is
+    preserved by merge_preserved_control_ui)."""
+    runtime_present, control_ui_present = dist_halves(source)
+    if not runtime_present:
+        raise ValueError(f"--sync-from is not a built runtime dist (missing {RUNTIME_ENTRY_RELPATH}): {source}")
+    if not control_ui_present and not runtime_only:
+        raise ValueError(
+            f"control-ui assets missing from dist ({CONTROL_UI_INDEX_RELPATH}) — a wholesale sync would"
+            " destroy the slot's dashboard. Build the UI half (`pnpm -C ui build`) and re-sync the full"
+            " dist, or pass --runtime-only to update the runtime half while keeping the current control-ui"
+        )
+    return control_ui_present
+
+
+def merge_preserved_control_ui(tmp: Path, dest: Path) -> bool:
+    """Carry the slot's current control-ui into the staged tree when the
+    incoming dist lacks it. Returns True when something was preserved."""
+    if (tmp / CONTROL_UI_INDEX_RELPATH).is_file():
+        return False
+    current = dest / "control-ui"
+    if not (current / "index.html").is_file():
+        return False
+    staged = tmp / "control-ui"
+    if staged.exists():
+        shutil.rmtree(staged)
+    shutil.copytree(current, staged, symlinks=False)
+    return True
+
+
+def sync_dev_source_output(slot: str, recipe_name: str, source: Path, *, runtime_only: bool = False) -> tuple[Path, bool, bool]:
+    """Stage a dist into the slot. Returns (dest, control_ui_in_dist, control_ui_preserved)."""
     reject_tree_symlinks(source)
+    control_ui_in_dist = preflight_dev_dist(source, runtime_only=runtime_only)
     runtime_uid, _, data_gid = runtime_ids(slot)
     home = Path("/home") / slot
     stage_root = home / DEV_RECIPE_STAGE_ROOT
@@ -95,6 +148,11 @@ def sync_dev_source_output(slot: str, recipe_name: str, source: Path) -> Path:
     if backup.exists():
         shutil.rmtree(backup)
     shutil.copytree(source, tmp, symlinks=False)
+    control_ui_preserved = False
+    if runtime_only and dest.exists() and not dest.is_symlink():
+        # Before the swap, so the preserved subtree goes through the same
+        # ownership normalization as the rest of the staged tree.
+        control_ui_preserved = merge_preserved_control_ui(tmp, dest)
     chmod_source_tree(tmp, runtime_uid, data_gid)
     if dest.exists():
         if dest.is_symlink():
@@ -103,7 +161,7 @@ def sync_dev_source_output(slot: str, recipe_name: str, source: Path) -> Path:
     os.replace(tmp, dest)
     if backup.exists():
         shutil.rmtree(backup)
-    return dest
+    return dest, control_ui_in_dist, control_ui_preserved
 
 
 def upsert_runtime_env_file(path: Path, updates: dict[str, str], uid: int, gid: int) -> None:
