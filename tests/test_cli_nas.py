@@ -332,7 +332,10 @@ class CliNasTests(unittest.TestCase):
             with (
                 patch("agent_runtime_ops.commands.nas._is_root", return_value=True),
                 patch("agent_runtime_ops.commands.nas.check_nas_policy", return_value=decision) as policy,
-                patch("agent_runtime_ops.commands.nas.root_credential_path", return_value=credential) as root_path,
+                patch("agent_runtime_ops.commands.nas.ensure_customer_agent_dirs") as ensure_dirs,
+                patch("agent_runtime_ops.commands.nas.slot_uid_gid", return_value=(1006, 1006)),
+                patch("agent_runtime_ops.commands.nas.customer_credential_path", return_value=credential) as customer_path,
+                patch("agent_runtime_ops.commands.nas.root_credential_path") as root_path,
                 patch("agent_runtime_ops.commands.nas.write_credential_file"),
                 patch("agent_runtime_ops.commands.nas._prepare_mount_entry", return_value=(decision, decision.mountpoint)) as prepare,
                 patch("agent_runtime_ops.commands.nas._findmnt_one", side_effect=[(1, "", []), (0, "", [])]),
@@ -354,7 +357,10 @@ class CliNasTests(unittest.TestCase):
                 )
         self.assertEqual(rc, 0)
         policy.assert_called_once_with("oc3.ji-tech.co.kr", share.source, root)
-        root_path.assert_called_once_with("oc3", share)
+        # stdin registration writes to the customer account, never the root vault
+        customer_path.assert_called_once_with("oc3", share)
+        root_path.assert_not_called()
+        ensure_dirs.assert_called_once_with("oc3")
         self.assertEqual(prepare.call_args.args[:4], ("oc3", share.source, credential, root))
         self.assertIn("target=oc3", output.getvalue())
 
