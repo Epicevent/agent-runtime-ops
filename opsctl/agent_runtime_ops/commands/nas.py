@@ -43,6 +43,7 @@ from ..nas import (
     request_dir,
     request_path,
     root_credential_path,
+    share_is_writable as _share_is_writable,
 )
 from ..routing import load_runtime_bindings, validate_linux_account
 from ..state import load_runtime_target
@@ -96,7 +97,7 @@ def _approve_auto_once(state_root: Path) -> dict[str, int]:
                 slot_uid, _ = slot_uid_gid(slot)
                 credential_file_is_safe_for_slot(slot, credential_path, uid=slot_uid)
                 decision, _ = _prepare_mount_entry(slot, decision.share.source, credential_path, state_root)
-                ok, reason = _host_mount_prepared_share(decision)
+                ok, reason = _host_mount_prepared_share(decision, _share_is_writable(decision.share))
                 if ok:
                     move_request(path, slot, "approved")
                     _append_action_log(state_root, "nas_approve_auto", slot, decision.share.source, "approved", reason)
@@ -367,6 +368,7 @@ def cmd_nas_mount(args: argparse.Namespace) -> int:
         print(f"reason={exc}")
         return 1
 
+    expect_rw = _share_is_writable(decision.share)
     rc, _, rows = _findmnt_one(decision.mountpoint)
     if rc == 0 and rows:
         row = rows[0]
@@ -375,25 +377,26 @@ def cmd_nas_mount(args: argparse.Namespace) -> int:
         print(f"credential_source={credential_source or 'unknown'}")
         print("secret_value_printed=no")
         _print_mount_row("existing_mount", row)
-        ok = row.get("source") == decision.share.source and row.get("fstype") == "cifs" and _is_readonly_mount(row)
+        ok = row.get("source") == decision.share.source and row.get("fstype") == "cifs" and _is_readonly_mount(row) != expect_rw
         print(f"mount_status={'already_mounted' if ok else 'fail'}")
         if not ok:
             print("reason=mountpoint_has_unexpected_existing_mount")
         _append_action_log(_state_root(args), "nas_mount", decision.slot, decision.share.source, "already_mounted" if ok else "fail")
         return 0 if ok else 1
 
-    ok, reason = _host_mount_prepared_share(decision)
+    ok, reason = _host_mount_prepared_share(decision, expect_rw)
     rc, error, rows = _findmnt_one(decision.mountpoint)
     print(f"target={decision.slot}")
     print(f"share={decision.share.source}")
     print(f"mountpoint={decision.mountpoint}")
     print(f"credential_source={credential_source or 'unknown'}")
+    print(f"mount_access={'rw' if expect_rw else 'ro'}")
     print("secret_value_printed=no")
     if rows:
         _print_mount_row("mounted", rows[0])
     print(f"mount_status={'ok' if ok else 'fail'}")
     if not ok:
-        print(f"reason={reason or error or 'mounted_state_did_not_match_expected_cifs_ro'}")
+        print(f"reason={reason or error or 'mounted_state_did_not_match_expected'}")
         rollback = _rollback_fstab_after_mount_failure(args, decision.slot, decision.share.source)
         print(f"fstab_entry_rollback={rollback}")
     _append_action_log(_state_root(args), "nas_mount", decision.slot, decision.share.source, "ok" if ok else "fail", reason)
