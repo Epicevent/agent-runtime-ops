@@ -266,6 +266,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--pack", default=None, choices=["hermes-runtime", "openclaw-runtime"], help="override the family-derived pack"
     )
     rollout_verify.add_argument("--gemini-chat-smoke", action="store_true")
+    rollout_verify.add_argument(
+        "--skip-model-probe",
+        action="store_true",
+        help="skip the hermes customer model round-trip (hermes -z); by default verify proves the model answers",
+    )
+    rollout_verify.add_argument("--model-probe-timeout", type=int, default=90, help="seconds for the model round-trip probe (default 90)")
     rollout_verify.set_defaults(func=cmd_rollout_verify)
 
     recipe = sub.add_parser("recipe")
