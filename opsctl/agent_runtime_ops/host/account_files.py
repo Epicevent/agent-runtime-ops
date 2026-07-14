@@ -47,6 +47,11 @@ def atomic_write_key_value(path: Path, data: dict[str, str], mode: int, uid: int
 def ensure_owner_if_needed(path: Path, uid: int | None, gid: int | None) -> None:
     if uid is None or gid is None or not hasattr(os, "chown"):
         return
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        # Ownership changes need root. Every production caller is root-gated
+        # (sudo opsctl); the only unprivileged executions are unit tests, where
+        # a chown to another uid would EPERM (broke main at daae4ea9).
+        return
     current = path.stat()
     if current.st_uid == uid and current.st_gid == gid:
         return
