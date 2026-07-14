@@ -34,7 +34,12 @@ cid="$(docker run -d --rm \
   "$image_ref")"
 trap 'docker logs "$cid" || true; docker rm -f "$cid" >/dev/null 2>&1 || true; sudo rm -rf "$workspace_dir" "$data_dir"' EXIT
 
-for _ in {1..120}; do
+# Readiness window: the gateway's cold start on GHA arm runners moved from ~7s
+# (runner image 20260607.22.1) to ~160-235s (20260706.52.2) — measured 2026-07-14
+# across four runs of the SAME product digest, where a 240s window turned green
+# into a coin flip (2 fail / 2 pass, one pass at 236s). 480s keeps every
+# assertion intact and takes the window off the knife's edge.
+for _ in {1..240}; do
   if ! docker inspect "$cid" --format '{{ .State.Running }}' | grep -Fx true >/dev/null; then
     docker logs "$cid" || true
     echo "smoke_status=fail reason=container_exited" >&2
