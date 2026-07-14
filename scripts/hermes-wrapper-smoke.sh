@@ -141,6 +141,21 @@ NODE
   sleep 2
 done
 
+# ---- debug instrumentation (temporary; branch debug/hermes-smoke-instrument) ----
+echo "===== docker version ====="
+docker version || true
+echo "===== container logs ====="
 docker logs "$cid" || true
+echo "===== ps aux ====="
+docker exec "$cid" ps aux || true
+echo "===== s6 service states ====="
+docker exec "$cid" sh -lc 'for d in /etc/s6-overlay/s6-rc.d/*/; do echo "--- $d"; done; s6-rc -a list 2>/dev/null || true; ls /run/service 2>/dev/null || true; for s in /run/service/*; do s6-svstat "$s" 2>/dev/null || true; done' || true
+echo "===== recent log files ====="
+docker exec "$cid" sh -lc 'find /opt/data /var/log /tmp -name "*.log" -mmin -15 2>/dev/null | head -10 | while read -r f; do echo "--- $f"; tail -40 "$f"; done' || true
+echo "===== listening sockets ====="
+docker exec "$cid" sh -lc 'cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | awk "{print \$2}" | grep -iE ":(0BB8|21C2|239F|1F90)" || echo none' || true
+echo "===== /opt/data ====="
+docker exec "$cid" sh -lc 'ls -la /opt/data; id hermes' || true
+# ---- end debug instrumentation ----
 echo "smoke_status=fail reason=endpoints_not_ready" >&2
 exit 1
