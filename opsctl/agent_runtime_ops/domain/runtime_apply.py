@@ -5,6 +5,9 @@ import subprocess
 import time
 from pathlib import Path
 
+import os
+
+from ..host.account_files import ensure_not_symlink_chain, runtime_ids
 from ..redaction import redact
 from ..renderer import render_compose
 from ..routing import RuntimeBinding
@@ -37,6 +40,27 @@ from .workspace_guidance import ensure_runtime_workspace_guidance
 
 
 FINAL_WORKSPACE_GUIDANCE_STABILIZE_DELAYS_SECONDS = [10, 30, 60]
+
+
+def ensure_nas_workspace_dir(slot: str) -> Path:
+    """Guarantee the OCn workspace bind source exists before compose up.
+
+    The compose templates bind {home}/workspace (the slot's writable OCn tree).
+    Slot CREATION provisions it (admin), but every slot created before the
+    split lacks it — and a long-form bind with a missing source fails compose
+    up. apply must guarantee its own compose's prerequisites, for every slot
+    it touches, not just newly created ones. Idempotent; same ownership shape
+    as nas_docs (root:data_gid 0750 — rw arrives with the CIFS mount, an
+    unmounted dir stays non-writable so nothing lands on local disk silently).
+    """
+    home = Path("/home") / slot
+    workspace_dir = home / "workspace"
+    ensure_not_symlink_chain(workspace_dir, home)
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    _, _, data_gid = runtime_ids(slot)
+    os.chown(workspace_dir, 0, data_gid)
+    os.chmod(workspace_dir, 0o750)
+    return workspace_dir
 
 
 def print_process_result(prefix: str, proc: subprocess.CompletedProcess[str], limit: int = 2000) -> None:
@@ -113,6 +137,7 @@ def apply_desired_slot(
         if not manifest_path.exists() and not state_manifest_file.exists() and not allow_first_apply:
             raise ValueError("first agent-runtime apply requires --allow-first-apply")
         previous_manifest = state_manifest_file if state_manifest_file.exists() else manifest_path if manifest_path.exists() else None
+        nas_workspace_dir = ensure_nas_workspace_dir(desired.slot)
         guidance_result = ensure_runtime_workspace_guidance(desired.slot, profile)
         # Config preflight (zero-downtime gate): validate the on-disk config against the
         # TARGET product image BEFORE anything is recreated. A config the target image
@@ -152,6 +177,7 @@ def apply_desired_slot(
     print(f"runtime_profile={profile.name}")
     print(f"runtime_profile_digest={profile.digest}")
     print(f"compose_sha256={rendered.sha256}")
+    print(f"nas_workspace_dir={nas_workspace_dir}")
     for key, value in guidance_result.items():
         print(f"{key}={value}")
 

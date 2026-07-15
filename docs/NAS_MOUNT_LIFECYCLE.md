@@ -73,8 +73,12 @@ runtime profile이 두 바인드를 고정한다: corpus 트리는 `read_only: t
 OCn workspace 트리는 모드 없이 + `rslave`. corpus 바인드의 `read_only`는 권위(Q1)가 아니라
 **방어 심층 두 번째 자물쇠**이고, Q5로 트리가 단일 의도가 됐기 때문에야 안전하다(얼릴 쓰기
 자식이 없다). rslave 덕에 호스트에서 나중에 선 마운트도 재생성 없이 흘러든다.
-근거: `profiles/runtime/*/compose.yml.tpl`, workspace 디렉토리 프로비전은
-`commands/admin.py`.
+근거: `profiles/runtime/*/compose.yml.tpl`. workspace 디렉토리는 slot 생성 시
+(`commands/admin.py`)와 **매 apply마다**(`domain/runtime_apply.py`
+`ensure_nas_workspace_dir`) 보장된다 — apply는 자기 컴포즈가 요구하는 바인드
+소스를 스스로 보장해야 하며, 분리 이전에 만들어진 slot에 그 디렉토리가 없다는
+이유로 compose up이 실패해선 안 된다(Q4와 같은 부류: 새 코드의 요구는 옛 코드가
+만든 세계에 저절로 적용되지 않는다).
 
 ## Q7. 세우는 손이 마운트도 — 미완 (실행자 갭)
 
