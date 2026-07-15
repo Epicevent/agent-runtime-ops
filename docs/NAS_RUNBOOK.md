@@ -368,6 +368,20 @@ opsctl nas mounted oc2                          # workspace mount가 readonly=no
 sudo /usr/local/bin/opsctl check --live oc2
 ```
 
+**불변식: OCn을 host에서 재마운트(unmount+mount)하면 반드시 `apply`(container 재생성)까지
+한 세트다.** workspace bind는 CIFS mount 자체를 루트로 무는 flat bind라, host에서 그 mount를
+갈아끼워도 rslave 전파가 container의 bind 루트를 교체해주지 않는다(전파는 bind *아래에* 새로
+서는 mount에만 적용된다 — nas_docs 밑 corpus 자식들과 다른 점). 재생성 없이 두면 container는
+옛 mount의 클론이나 빈 디렉토리를 물고 있고, 에이전트 쓰기는 Permission denied로 죽는다
+(2026-07-15 oc2에서 실측).
+
+최종 확인은 container 안 쓰기 실증까지다 (기본 유저 = runtime 계정으로):
+
+```bash
+docker exec $(docker ps -qf label=agent-runtime.slot=oc2) sh -lc \
+  'touch /home/node/workspace/.rw_probe && rm /home/node/workspace/.rw_probe && echo AGENT_WRITE_OK'
+```
+
 ## 기록 위치
 
 NAS 작업 결과는 action log에 남는다.
