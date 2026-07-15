@@ -44,9 +44,21 @@ services:
       - "{{ target_home }}/.openclaw/workspace:/home/node/.openclaw/workspace"
       - "{{ target_home }}/.openclaw-auth-profile-secrets:/home/node/.config/openclaw"
       - "{{ source_output }}:/app/dist:ro"
+      # corpus (read-only knowledge): single-intent tree. read_only here is a
+      # defense-in-depth second lock — the source mount / ro account is the
+      # primary authority. Safe to stamp because nothing writable lives under it.
       - type: bind
         source: "{{ target_home }}/nas_docs"
         target: /home/node/nas_docs
         read_only: true
+        bind:
+          propagation: rslave
+      # workspace (OCN): the agent's OWN writable area — a different KIND than
+      # corpus, so a separate top-level mount, never under the read-only tree.
+      # No read_only; mode is rw, inherited from its source. Requires OCN to be
+      # mounted host-side at {{ target_home }}/workspace (out of nas_docs).
+      - type: bind
+        source: "{{ target_home }}/workspace"
+        target: /home/node/workspace
         bind:
           propagation: rslave

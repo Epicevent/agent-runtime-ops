@@ -55,9 +55,14 @@ def prepare_mount_entry(
     decision = check_nas_policy(slot, share_source, state_root)
     if not decision.allowed:
         raise ValueError(f"policy denied: {decision.reason}")
-    safe_mountpoint_path(decision.mountpoint)
+    # Bound the mountpoint to the slot's own home. The default (parents[1])
+    # assumes the 2-level nas_docs shape; the flat {home}/workspace OCN mount
+    # would otherwise fall back to /home containment — too loose for a WRITABLE
+    # mount. /home/{slot} is the correct trust boundary for both shapes.
+    slot_home = Path("/home") / decision.slot
+    safe_mountpoint_path(decision.mountpoint, root=slot_home)
     decision.mountpoint.mkdir(parents=True, exist_ok=True)
-    safe_mountpoint_path(decision.mountpoint)
+    safe_mountpoint_path(decision.mountpoint, root=slot_home)
     credential_file_is_safe_for_slot(slot, credential_path)
     current_count = mounted_child_cifs_count(decision.slot)
     existing_rc, _, existing_rows = findmnt_one(decision.mountpoint)

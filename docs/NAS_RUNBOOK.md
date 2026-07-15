@@ -6,10 +6,11 @@
 
 ```text
 1. Linux host 층위
-   /home/ocN/nas_docs 아래에 실제 CIFS child mount가 있는가
+   corpus: /home/ocN/nas_docs 아래에 실제 CIFS child mount가 있는가
+   OCn:    /home/ocN/workspace 자체가 CIFS mount인가 (flat — 디렉토리가 곧 마운트)
 
 2. Container 층위
-   OpenClaw/Hermes container 안에서 그 child mount가 보이는가
+   OpenClaw/Hermes container 안에서 그 mount가 보이는가
 ```
 
 Host에 mount가 있어도 container에서 안 보이면 runtime profile의 NAS root bind 또는
@@ -21,12 +22,15 @@ propagation 문제다. Container NAS root가 보여도 child CIFS가 0이면 실
 NAS share 추가와 제거는 compose 변경이 아니다.
 
 ```text
-compose가 고정하는 것:
-  OpenClaw: /home/ocN/nas_docs -> /home/node/nas_docs
-  Hermes:   /home/ocN/nas_docs -> /workspace/nas_docs
+compose가 고정하는 것 (의도별 두 트리):
+  OpenClaw: /home/ocN/nas_docs  -> /home/node/nas_docs   (corpus, read_only)
+            /home/ocN/workspace -> /home/node/workspace  (OCn, rw)
+  Hermes:   /home/ocN/nas_docs  -> /workspace/nas_docs   (corpus, read_only)
+            /home/ocN/workspace -> /workspace/ocn        (OCn, rw)
 
 NAS 명령이 바꾸는 것:
-  /home/ocN/nas_docs/host-<hosthash>/<share>
+  corpus(읽기 공유):  /home/ocN/nas_docs/host-<hosthash>/<share>
+  OCn(쓰기 자기폴더): /home/ocN/workspace
 ```
 
 따라서 NAS를 붙이거나 뗄 때 다음을 하지 않는다.
@@ -72,6 +76,7 @@ mount_1_readonly=yes
 ```
 
 `mounted_child_cifs_count=0`이면 Linux host 기준으로 실제 NAS share가 붙어 있지 않다.
+count는 nas_docs 아래 corpus mount와 `/home/ocN/workspace`의 OCn mount를 합해서 센다.
 
 ### 2. Container visibility 확인
 
@@ -139,6 +144,13 @@ mountpoint=/home/oc3/nas_docs/host-<hosthash>/한패스
 mounted_fstype=cifs
 mounted_readonly=yes
 mount_status=ok
+```
+
+OCn share(쓰기 자기폴더)를 붙이면 mountpoint와 모드가 다르다:
+
+```text
+mountpoint=/home/oc3/workspace
+mounted_readonly=no
 ```
 
 확인:
@@ -323,11 +335,37 @@ host count=1, container count=0:
 host count=0, container count=1:
   비정상. stale namespace 또는 관측 오류 가능성. 즉시 조사
 
-readonly=no:
+readonly=no (corpus share):
   비정상. NAS mount 옵션 또는 root bind 설정 문제
+
+readonly=yes (OCn share):
+  비정상. OCn은 에이전트 자기 workspace라 rw여야 한다.
+  container 안에서만 ro라면 nas_docs 아래 옛 자리에 마운트된 잔재가
+  recursive read_only 도장을 맞은 것이다 — workspace로 이주한다
+  (아래 "OCn workspace 이주", 원리는 docs/NAS_MOUNT_LIFECYCLE.md)
 
 source가 요청한 //HOST/SHARE와 다름:
   비정상. 잘못된 share를 건드릴 수 있으므로 unmount 중단
+```
+
+## OCn workspace 이주 (2026-07 트리 분리 이후, slot당 1회)
+
+OCn own-folder는 nas_docs 아래가 아니라 `/home/ocN/workspace`에 flat으로 선다. 분리 이전에
+세워진 slot은 옛 자리(fstab 박제 + 라이브 mount)가 남아 있으므로 slot마다 한 번 이주한다.
+
+```bash
+# 1) fstab 박제 이주 + workspace에 mount
+#    (fstab 키는 (slot,source)라 기존 줄이 새 mountpoint로 교체된다 — 좀비 없음)
+sudo /usr/local/bin/opsctl nas mount oc2 '//10.10.10.2/OC2'
+
+# 2) 옛 자리에 살아 있는 mount만 직접 umount
+#    (도구는 이제 OCn mountpoint를 workspace로 계산하므로 옛 경로는 직접 지정)
+sudo umount /home/oc2/nas_docs/host-*/OC2
+
+# 3) container 재생성 후 확인
+sudo /usr/local/bin/opsctl apply oc2
+opsctl nas mounted oc2                          # workspace mount가 readonly=no로 보여야 한다
+sudo /usr/local/bin/opsctl check --live oc2
 ```
 
 ## 기록 위치

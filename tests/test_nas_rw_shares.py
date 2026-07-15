@@ -4,7 +4,14 @@ import unittest
 from pathlib import Path
 
 from agent_runtime_ops.host.fstab import write_managed_fstab_entry
-from agent_runtime_ops.nas import parse_smb_share, share_is_writable
+from agent_runtime_ops.nas import (
+    host_component,
+    mountpoint_for_share,
+    nas_root,
+    parse_smb_share,
+    share_is_writable,
+    workspace_root,
+)
 
 
 class ShareIsWritableTest(unittest.TestCase):
@@ -15,6 +22,30 @@ class ShareIsWritableTest(unittest.TestCase):
     def test_customer_shares_are_readonly(self) -> None:
         for name in ["kakao-work", "hanpass_groupware", "OCEAN", "OC", "OC1x", "xOC1"]:
             self.assertFalse(share_is_writable(parse_smb_share(f"//10.10.10.2/{name}")), name)
+
+
+class MountpointPlacementTest(unittest.TestCase):
+    """One tree per intent: writable OCn mounts flat at {home}/workspace,
+    outside the read-only nas_docs tree, so the container's recursive
+    read_only can never stamp it ro (the 2026-07 oc2 freeze)."""
+
+    def test_ocn_mounts_flat_at_workspace(self) -> None:
+        mountpoint = mountpoint_for_share("oc1", parse_smb_share("//10.10.10.2/OC1"))
+        self.assertEqual(mountpoint, workspace_root("oc1"))
+        self.assertEqual(mountpoint, Path("/home/oc1/workspace"))
+
+    def test_ocn_is_not_under_nas_docs(self) -> None:
+        mountpoint = mountpoint_for_share("oc1", parse_smb_share("//10.10.10.2/OC1"))
+        self.assertNotIn(nas_root("oc1"), mountpoint.parents)
+
+    def test_corpus_stays_nested_under_nas_docs(self) -> None:
+        share = parse_smb_share("//10.10.10.2/kakao-work")
+        mountpoint = mountpoint_for_share("oc1", share)
+        self.assertEqual(
+            mountpoint,
+            nas_root("oc1") / host_component("10.10.10.2") / "kakao-work",
+        )
+        self.assertIn(nas_root("oc1"), mountpoint.parents)
 
 
 class FstabModeTest(unittest.TestCase):

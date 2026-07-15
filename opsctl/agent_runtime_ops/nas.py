@@ -87,7 +87,19 @@ def nas_root(slot: str) -> Path:
     return Path("/home") / validate_linux_account(slot) / "nas_docs"
 
 
+def workspace_root(slot: str) -> Path:
+    # OCN own-folder (the agent's writable workspace) lives OUTSIDE the
+    # read-only nas_docs tree, at its own top-level dir. This is precisely
+    # why the container's recursive read_only on nas_docs no longer freezes it.
+    return Path("/home") / validate_linux_account(slot) / "workspace"
+
+
 def mountpoint_for_share(slot: str, share: SmbShare) -> Path:
+    if share_is_writable(share):
+        # Writable OCN: a FLAT mount — {home}/workspace IS the share root, so
+        # the compose bind of {target_home}/workspace exposes its content
+        # directly. Corpus (read-only) stays nested under nas_docs, below.
+        return workspace_root(slot)
     root = nas_root(slot)
     mountpoint = root / host_component(share.host) / share_component(share.share)
     resolved_root = root.resolve(strict=False)
