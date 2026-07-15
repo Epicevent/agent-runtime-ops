@@ -76,8 +76,13 @@ def write_managed_fstab_entry(
     escaped_target = fstab_escape(str(mountpoint))
     escaped_source = fstab_escape(share)
     access = "rw" if read_write else "ro"
-    file_mode = "0640" if read_write else "0440"
-    dir_mode = "0750" if read_write else "0550"
+    # rw (OCn own-folder): the WRITER is the container runtime user, which is a
+    # member of {slot}_data (compose group_add) — not the slot owner uid. So the
+    # group needs write, or the agent can only read its own workspace (measured
+    # on oc2: runtime uid=994 got EACCES under 0750/0640 while owner and root
+    # wrote fine). ro (corpus) stays group-read-only.
+    file_mode = "0660" if read_write else "0440"
+    dir_mode = "0770" if read_write else "0550"
     options = ",".join(
         [
             f"credentials={fstab_escape(str(credential_path))}",
