@@ -318,12 +318,25 @@ def cmd_nas_mounted(args: argparse.Namespace) -> int:
     rc, error, rows = _findmnt_under(str(root))
     print(f"target={desired.slot}")
     print(f"nas_root={root}")
+    ws_root = Path("/home") / desired.slot / "workspace"
+    print(f"workspace_root={ws_root}")
     print("mutates=false")
     if rc != 0:
         print("mounted_status=fail")
         print(f"reason={error or 'findmnt_failed'}")
         return 1
     child_rows = [row for row in rows if row.get("fstype") == "cifs" and row.get("target", "").startswith(str(root) + "/")]
+    # OCN own-folder is a flat cifs mount AT {home}/workspace (the dir itself is
+    # the mount) — outside nas_docs, so it must be enumerated separately or the
+    # slot's writable share becomes invisible to operators after the split.
+    ws_rc, _, ws_rows = _findmnt_under(str(ws_root))
+    if ws_rc == 0:
+        child_rows += [
+            row
+            for row in ws_rows
+            if row.get("fstype") == "cifs"
+            and (row.get("target") == str(ws_root) or row.get("target", "").startswith(str(ws_root) + "/"))
+        ]
     print(f"mounted_child_cifs_count={len(child_rows)}")
     for index, row in enumerate(child_rows, start=1):
         prefix = f"mount_{index}"
@@ -450,7 +463,7 @@ def cmd_nas_unmount(args: argparse.Namespace) -> int:
         slot = desired.slot
         share = parse_smb_share(args.share)
         mountpoint = mountpoint_for_share(slot, share)
-        _safe_mountpoint_path(mountpoint)
+        _safe_mountpoint_path(mountpoint, root=Path("/home") / slot)
         credential_status = official_credential_status(slot, share)
     except Exception as exc:
         print(f"target={args.slot}")
@@ -510,7 +523,7 @@ def cmd_nas_remove(args: argparse.Namespace) -> int:
         slot = desired.slot
         share = parse_smb_share(args.share)
         mountpoint = mountpoint_for_share(slot, share)
-        _safe_mountpoint_path(mountpoint)
+        _safe_mountpoint_path(mountpoint, root=Path("/home") / slot)
         before_status = official_credential_status(slot, share)
         # Validate credentials before mutating mount or fstab state.
         validate_official_credentials_for_delete(slot, share)

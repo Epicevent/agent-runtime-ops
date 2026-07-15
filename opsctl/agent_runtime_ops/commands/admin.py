@@ -312,6 +312,15 @@ def _ensure_target_dirs_and_secrets(
     nas_docs_dir.mkdir(parents=True, exist_ok=True)
     os.chown(nas_docs_dir, 0, data_gid)
     os.chmod(nas_docs_dir, 0o750)
+    # OCN workspace: the agent's own writable NAS folder mounts here, OUTSIDE
+    # nas_docs, so the container's recursive read_only on nas_docs cannot freeze
+    # it. Same root:data_gid 0750 as nas_docs — the rw comes from the CIFS mount
+    # (forceuid=runtime); an absent mount leaves the local dir non-writable
+    # (fail-loud) rather than silently swallowing writes.
+    workspace_dir = home / "workspace"
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    os.chown(workspace_dir, 0, data_gid)
+    os.chmod(workspace_dir, 0o750)
     ensure_customer_agent_dirs(target)
 
     existing_text = _empty_or_existing_env_text(profile_secret_path)

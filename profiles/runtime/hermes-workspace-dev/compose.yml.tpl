@@ -46,10 +46,23 @@ services:
       - "{{ target_home }}/.hermes:/opt/data"
       - "{{ target_home }}/.hermes/workspace:/workspace"
       - "{{ source_output }}:/opt/hermes-workspace:ro"
+      # corpus (read-only knowledge): single-intent tree. read_only here is a
+      # defense-in-depth second lock — the source mount / ro account is the
+      # primary authority. Safe to stamp because nothing writable lives under it.
       - type: bind
         source: "{{ target_home }}/nas_docs"
         target: /workspace/nas_docs
         read_only: true
+        bind:
+          propagation: rslave
+      # workspace (OCN): the agent's OWN writable area — a different KIND than
+      # corpus, so a separate mount, never under the read-only tree. No
+      # read_only; mode is rw from its source. Requires OCN mounted host-side at
+      # {{ target_home }}/workspace (out of nas_docs). Container path /workspace/ocn
+      # is provisional (Hermes /workspace is the local workspace) — confirm.
+      - type: bind
+        source: "{{ target_home }}/workspace"
+        target: /workspace/ocn
         bind:
           propagation: rslave
     working_dir: /app

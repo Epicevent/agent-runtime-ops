@@ -302,8 +302,22 @@ sudo /usr/local/bin/opsctl nas approve-auto
 ```
 
 Use `opsctl`; do not directly edit rendered Docker compose files. `opsctl apply` renders from the
-runtime profiles in this repo. NAS changes are child CIFS mounts under `/home/ocN/nas_docs`; do not
-turn NAS shares into compose volumes.
+runtime profiles in this repo. NAS changes are CIFS mounts in one of two intent-pure trees: corpus
+(read-only shares) as child mounts under `/home/ocN/nas_docs`, and the slot's own writable OCn
+share as a flat mount at `/home/ocN/workspace`. Do not turn NAS shares into compose volumes, and
+never mount a writable share under the read-only `nas_docs` tree (the container's recursive
+`read_only` would freeze it).
+
+## NAS Mount Lifecycle
+
+Before changing any code that derives NAS mount paths or names (`nas.py` mountpoint derivation,
+`host/fstab.py`, `host/mounts.py`, `domain/nas_mounts.py`, or the runtime profiles' NAS binds),
+read `docs/NAS_MOUNT_LIFECYCLE.md` first.
+
+Any change to a path/name *derivation* must answer one question before it ships: **what durable
+state did the old code stamp (managed fstab entries, credential paths, state files), and how does
+that state migrate?** Stamped state does not follow code changes by itself; a derivation change
+without a migration step leaves boot-time state recreating the old world.
 
 ## No External Operating Path
 
