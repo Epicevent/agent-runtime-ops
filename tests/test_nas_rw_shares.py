@@ -71,8 +71,10 @@ class FstabModeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             text = self._write(Path(d), "//10.10.10.2/OC1", read_write=True)
         self.assertIn(",rw,", text)
-        self.assertIn("file_mode=0640", text)
-        self.assertIn("dir_mode=0750", text)
+        # group (slot_data) must be able to write: the container runtime user
+        # writes OCn via group membership, not as the owner uid.
+        self.assertIn("file_mode=0660", text)
+        self.assertIn("dir_mode=0770", text)
         self.assertNotIn(",ro,", text)
 
     def test_customer_entry_is_ro(self) -> None:
