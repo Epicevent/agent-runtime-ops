@@ -19,7 +19,14 @@ from ..host.mounts import (
     propagation_satisfies as _propagation_satisfies,
 )
 from ..host.account_files import runtime_ids
-from ..nas import check_nas_policy, parse_cifs_mount_source, share_is_writable
+from ..host.fstab import read_managed_fstab_entries
+from ..nas import (
+    check_nas_policy,
+    mountpoint_for_share,
+    parse_cifs_mount_source,
+    parse_smb_share,
+    share_is_writable,
+)
 from ..routing import get_runtime_binding
 from ..runtime_secrets import parse_secret_env_text
 from ..yamlio import load_yaml
@@ -560,6 +567,56 @@ def _child_cifs_mode_ok(rows: list[dict[str, str]], *, ro_always_ok: bool = Fals
     return True, f"count={len(rows)} ro={ro} rw={rw}"
 
 
+def _fstab_stamp_drift_ok(entries: list[dict[str, str]], slot: str) -> tuple[bool, str]:
+    """The Q4 invariant, mechanized: a managed fstab entry is a STAMP of what
+    the derivation code output when it was written. If the derivation changes
+    and nobody migrates the stamps, boot recreates the old world (the OCn
+    freeze zombie). This compares every stamp for the slot against what the
+    tool would write TODAY, so a derivation change turns red on its own
+    instead of living in someone's memory.
+
+    Hard failures:
+    - unparseable marker source (a stamp we cannot interpret is drift)
+    - writable class (OCn): stamped mountpoint != today's derivation, or ro
+    - ro class (corpus): stamped rw, or credential under /home/ (the
+      customer-readable vault violation)
+    Reported but NOT failed: ro-class placement differing from the canonical
+    derivation — ro stamps from other lanes may legitimately live elsewhere;
+    an unmeasured red is worse than a named note.
+    """
+    drift: list[str] = []
+    notes: list[str] = []
+    mine = [entry for entry in entries if entry.get("slot") == slot]
+    for entry in mine:
+        source = entry.get("source") or ""
+        try:
+            share = parse_smb_share(source)
+        except ValueError:
+            drift.append(f"{source}:unparseable_source")
+            continue
+        expected = mountpoint_for_share(slot, share).as_posix()
+        stamped = entry.get("mountpoint") or ""
+        if share_is_writable(share):
+            if stamped != expected:
+                drift.append(f"{source}:mountpoint={stamped}!={expected}")
+            if entry.get("access") != "rw":
+                drift.append(f"{source}:access={entry.get('access')}!=rw")
+        else:
+            if entry.get("access") != "ro":
+                drift.append(f"{source}:access={entry.get('access')}!=ro")
+            credentials = entry.get("credentials") or ""
+            if credentials.startswith("/home/"):
+                drift.append(f"{source}:credentials_under_home={credentials}")
+            if stamped != expected:
+                notes.append(f"{source}:placement={stamped}")
+    if drift:
+        return False, f"entries={len(mine)} drift={','.join(drift)}"
+    detail = f"entries={len(mine)}"
+    if notes:
+        detail += f" placement_notes={','.join(notes)}"
+    return True, detail
+
+
 def _workspace_cifs_floor_ok(
     host_rows: list[dict[str, str]],
     container_rows: list[dict[str, str]] | None,
@@ -810,6 +867,15 @@ def run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool,
     if ws_host_cifs and not container_workspace_root:
         ws_detail = "missing_container_workspace_root"
     checks.append((ws_ok, "live_workspace_cifs_floor_ok", ws_detail))
+
+    # Stamp-vs-derivation drift: boot replays /etc/fstab, so a stamped entry
+    # that today's derivation would write differently is a zombie waiting for
+    # the next reboot. Always emitted; entries=0 slots pass vacuously.
+    try:
+        drift_ok, drift_detail = _fstab_stamp_drift_ok(read_managed_fstab_entries(), desired.slot)
+    except Exception as exc:
+        drift_ok, drift_detail = False, f"fstab_read_failed={exc}"
+    checks.append((drift_ok, "live_fstab_stamp_matches_derivation", drift_detail))
 
     host_sources = {row.get("source") for row in host_cifs if row.get("source")}
     container_sources = {row.get("source") for row in container_cifs if row.get("source")}
