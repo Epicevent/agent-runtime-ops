@@ -4,11 +4,75 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 import os
 from pathlib import Path
+import re
 import shutil
 
 
 def fstab_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace(" ", "\\040").replace("\t", "\\011").replace("\n", "")
+
+
+def fstab_unescape(value: str) -> str:
+    out: list[str] = []
+    i = 0
+    while i < len(value):
+        if value[i] == "\\" and i + 3 < len(value) + 1:
+            chunk = value[i + 1 : i + 4]
+            if chunk == "040":
+                out.append(" ")
+                i += 4
+                continue
+            if chunk == "011":
+                out.append("\t")
+                i += 4
+                continue
+            if value[i : i + 2] == "\\\\":
+                out.append("\\")
+                i += 2
+                continue
+        out.append(value[i])
+        i += 1
+    return "".join(out)
+
+
+_MARKER_RE = re.compile(r"^# agent-runtime-ops nas slot=(?P<slot>\S+) source=(?P<source>.+)$")
+
+
+def read_managed_fstab_entries(fstab_path: Path = Path("/etc/fstab")) -> list[dict[str, str]]:
+    """Parse the managed (marker + entry) pairs this tool stamped into fstab.
+
+    Returns one dict per entry: slot, source (from the marker — the ledger
+    key), mountpoint, access ("rw"/"ro" from the options), credentials path
+    (empty if absent). The marker is the key; the entry line is the stamped
+    value — exactly the pair the drift check compares against today's
+    derivation.
+    """
+    if not fstab_path.exists():
+        return []
+    lines = fstab_path.read_text(encoding="utf-8").splitlines()
+    entries: list[dict[str, str]] = []
+    for index, line in enumerate(lines):
+        match = _MARKER_RE.match(line)
+        if not match or index + 1 >= len(lines):
+            continue
+        columns = lines[index + 1].split()
+        if len(columns) < 4:
+            continue
+        options = columns[3].split(",")
+        credentials = ""
+        for part in options:
+            if part.startswith("credentials="):
+                credentials = fstab_unescape(part.split("=", 1)[1])
+        entries.append(
+            {
+                "slot": match.group("slot"),
+                "source": match.group("source"),
+                "mountpoint": fstab_unescape(columns[1]),
+                "access": "rw" if "rw" in options else "ro",
+                "credentials": credentials,
+            }
+        )
+    return entries
 
 
 def managed_fstab_marker(slot: str, share: str) -> str:
