@@ -30,6 +30,7 @@ HERMES_RUNTIME_REQUIRED_CHECKS = {
     "live_workspace_api_status_ok",
     "live_workspace_files_root_listing_ok",
     "live_workspace_files_nas_docs_listing_ok",
+    "live_workspace_cifs_floor_ok",
 }
 
 # The required set is opsctl's OWN infra/edge checks only. Customer-truth depth comes
@@ -50,6 +51,7 @@ OPENCLAW_RUNTIME_REQUIRED_CHECKS = {
     "selftest_contract_ok",
     "live_public_route_readyz_ok",
     "config_disk_valid_for_running_image_ok",
+    "live_workspace_cifs_floor_ok",
 }
 
 # Map a --pack name to the family it gates. A pack used against the wrong family is a

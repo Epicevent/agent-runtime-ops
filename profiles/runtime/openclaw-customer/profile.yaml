@@ -16,3 +16,4 @@ runtime_user_mode: compose
 http_smoke_path: /healthz
 required_http_container_port: 18789
 startup_timeout_seconds: 90
+container_workspace_root: /home/node/workspace
