@@ -306,6 +306,51 @@ def read_managed_workspace_binds(fstab_path: Path = Path("/etc/fstab")) -> list[
     return binds
 
 
+def update_managed_fstab_credentials(
+    slot: str,
+    share: str,
+    new_credential_path: Path,
+    *,
+    fstab_path: Path = Path("/etc/fstab"),
+    lock_path: Path = Path("/run/agent-runtime-ops-fstab.lock"),
+) -> bool:
+    """Repoint ONLY the credentials= option of an existing managed entry.
+
+    Used when a credential file moves (slot home -> root vault) but the mount
+    itself must stay exactly where it is — e.g. oc1's kakao-work line serves
+    the kw view stack at a non-derived mountpoint, so rewriting the whole
+    entry would break that machinery at boot. Everything except credentials=
+    is preserved byte for byte. Returns False when no managed entry matches.
+    """
+    marker = managed_fstab_marker(slot, share)
+    escaped_new = fstab_escape(str(new_credential_path))
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.touch(exist_ok=True)
+    with lock_path.open("r+") as lock_handle:
+        _lock_exclusive(lock_handle)
+        lines = fstab_path.read_text(encoding="utf-8").splitlines() if fstab_path.exists() else []
+        updated = False
+        for index, line in enumerate(lines):
+            if line != marker or index + 1 >= len(lines):
+                continue
+            columns = lines[index + 1].split()
+            if len(columns) < 4:
+                continue
+            options = columns[3].split(",")
+            for opt_index, part in enumerate(options):
+                if part.startswith("credentials="):
+                    options[opt_index] = f"credentials={escaped_new}"
+                    columns[3] = ",".join(options)
+                    lines[index + 1] = " ".join(columns)
+                    updated = True
+            break
+        if not updated:
+            return False
+        _backup_fstab(fstab_path)
+        _replace_fstab(fstab_path, "\n".join(lines) + "\n")
+        return True
+
+
 def remove_managed_fstab_entry(
     slot: str,
     share: str,

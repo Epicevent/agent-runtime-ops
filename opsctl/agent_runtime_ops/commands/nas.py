@@ -33,6 +33,7 @@ from ..host.account_files import (
     write_credential_file,
 )
 from ..host.fstab import remove_managed_fstab_entry as _remove_managed_fstab_entry
+from ..host.fstab import update_managed_fstab_credentials as _update_managed_fstab_credentials
 from ..host.mounts import (
     findmnt_one as _findmnt_one,
     findmnt_under as _findmnt_under,
@@ -468,6 +469,62 @@ def cmd_nas_mount(args: argparse.Namespace) -> int:
         print(f"workspace_bind={'ok' if bind_ok else 'fail'} {bind_detail}")
     _append_action_log(_state_root(args), "nas_mount", decision.slot, decision.share.source, "ok" if ok else "fail", reason)
     return 0 if ok else 1
+
+
+def cmd_nas_credential_migrate_root(args: argparse.Namespace) -> int:
+    """Move a corpus credential file out of the slot home into the root vault
+    and repoint the existing fstab line's credentials= at the new place.
+
+    The mount itself is not touched — mountpoint, mode, everything else stays
+    byte for byte (oc1's kakao-work line serves the kw view stack at its own
+    mountpoint, which a full rewrite would break at boot).
+    """
+    if not _is_root():
+        print("error: run as root/admin: sudo /usr/local/bin/opsctl nas credential migrate-to-root TARGET //HOST/SHARE", file=sys.stderr)
+        return 2
+    try:
+        desired = load_runtime_target(args.slot, _state_root(args))
+        slot = desired.slot
+        share = parse_smb_share(args.share)
+        if _share_is_writable(share):
+            raise ValueError("writable (OCn) credentials are legitimately slot-owned; migrate-to-root is for corpus shares")
+    except Exception as exc:
+        print(f"target={args.slot}")
+        print(f"share={args.share}")
+        print("credential_migrate_status=fail")
+        print(f"reason={exc}")
+        return 1
+
+    try:
+        moved = migrate_customer_credential_to_root(slot, share)
+        vault_path = root_credential_path(slot, share)
+        if not vault_path.exists():
+            raise ValueError("no credential to migrate: neither slot home nor root vault has one")
+        fstab_updated = _update_managed_fstab_credentials(slot, share.source, vault_path)
+    except Exception as exc:
+        print(f"target={slot}")
+        print(f"share={share.source}")
+        print("credential_migrate_status=fail")
+        print(f"reason={exc}")
+        _append_action_log(_state_root(args), "nas_credential_migrate_root", slot, share.source, "fail", str(exc))
+        return 1
+
+    print(f"target={slot}")
+    print(f"share={share.source}")
+    print(f"vault_path={vault_path}")
+    print(f"customer_copy_moved={'yes' if moved else 'no_already_vault_or_absent'}")
+    print(f"fstab_credentials_updated={'yes' if fstab_updated else 'no_managed_entry'}")
+    print("secret_value_printed=no")
+    print("credential_migrate_status=ok")
+    _append_action_log(
+        _state_root(args),
+        "nas_credential_migrate_root",
+        slot,
+        share.source,
+        "ok",
+        f"moved={'yes' if moved else 'no'} fstab_updated={'yes' if fstab_updated else 'no'}",
+    )
+    return 0
 
 
 def cmd_nas_workspace_assign(args: argparse.Namespace) -> int:
