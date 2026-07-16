@@ -25,3 +25,4 @@ required_working_dir: /opt/data/home
 http_smoke_path: /
 required_http_container_port: 3000
 startup_timeout_seconds: 240
+container_workspace_root: /workspace/ocn

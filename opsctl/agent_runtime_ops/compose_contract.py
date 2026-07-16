@@ -338,6 +338,47 @@ def validate_compose_contract(profile: Any, desired: Any, rendered_text: str) ->
             )
         )
 
+    # Workspace bind (OCn own-folder): the writable twin of the nas_docs tree.
+    # Must exist, must NOT be read_only (a read_only here is the freeze bug in
+    # template form), and must source the slot's own {home}/workspace.
+    container_workspace_root = str(profile.metadata.get("container_workspace_root") or "")
+    if container_workspace_root:
+        workspace_volumes = [volume for volume in volumes if _volume_target(volume) == container_workspace_root]
+        checks.append(
+            ComposeContractCheck(
+                bool(workspace_volumes),
+                "compose_workspace_bind_present",
+                container_workspace_root,
+            )
+        )
+        if workspace_volumes:
+            workspace_volume = workspace_volumes[0]
+            checks.append(
+                ComposeContractCheck(
+                    not _volume_is_read_only(workspace_volume),
+                    "compose_workspace_writable",
+                    f"target={container_workspace_root}",
+                )
+            )
+            workspace_home = f"/home/{desired.slot}"
+            checks.append(
+                ComposeContractCheck(
+                    _volume_source(workspace_volume) == f"{workspace_home}/workspace",
+                    "compose_workspace_source_slot_scoped",
+                    f"source={_volume_source(workspace_volume)}",
+                )
+            )
+            workspace_propagation = str(profile.metadata.get("required_mount_propagation") or "")
+            if workspace_propagation:
+                actual_ws_propagation = _volume_propagation(workspace_volume)
+                checks.append(
+                    ComposeContractCheck(
+                        _propagation_matches(actual_ws_propagation, workspace_propagation),
+                        "compose_workspace_propagation",
+                        f"required={workspace_propagation} actual={actual_ws_propagation or 'missing'}",
+                    )
+                )
+
     source_mounts = [volume for volume in volumes if _volume_contains_source_output(volume)]
     if profile.metadata.get("allow_source_mount") is False:
         checks.append(

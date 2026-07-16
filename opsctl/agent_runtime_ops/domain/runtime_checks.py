@@ -560,6 +560,41 @@ def _child_cifs_mode_ok(rows: list[dict[str, str]], *, ro_always_ok: bool = Fals
     return True, f"count={len(rows)} ro={ro} rw={rw}"
 
 
+def _workspace_cifs_floor_ok(
+    host_rows: list[dict[str, str]],
+    container_rows: list[dict[str, str]] | None,
+) -> tuple[bool, str]:
+    """The workspace FLOOR: when the slot's OCn is mounted on the host, the
+    container must see it AND be able to write it (per-mount rw).
+
+    The ceiling judgment (``_child_cifs_mode_ok(ro_always_ok=True)``) can only
+    say "never MORE writable than the class" — it tolerates a frozen (ro) OCn
+    forever, which is how 17 slots sat frozen behind green checks (2026-07).
+    This is the other half: never LESS writable than the intent.
+
+    States (evaluated over cifs rows at/under the workspace root):
+    - host absent                  -> ok (vacuous: slots without an OCn — oc1, dev)
+    - host has any ro row          -> fail (rw is the class; host misconfig)
+    - host rw, container unreadable-> fail (cannot prove the floor)
+    - host rw, container absent    -> fail (bind missing / stale container)
+    - host rw, container has ro    -> fail (the freeze class)
+    - host rw, container rw        -> ok
+    """
+    if not host_rows:
+        return True, "host=absent"
+    host_ro = [row for row in host_rows if _is_readonly_mount(row)]
+    if host_ro:
+        return False, f"host_ro={','.join(row.get('target') or '?' for row in host_ro)}"
+    if container_rows is None:
+        return False, "host=rw container=unreadable"
+    if not container_rows:
+        return False, "host=rw container=absent"
+    container_ro = [row for row in container_rows if _is_readonly_mount(row)]
+    if container_ro:
+        return False, f"host=rw container_ro={','.join(row.get('target') or '?' for row in container_ro)}"
+    return True, f"host=rw container=rw count={len(container_rows)}"
+
+
 def run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool, str, str | None]]:
     checks: list[tuple[bool, str, str | None]] = []
     if not is_root():
@@ -752,6 +787,29 @@ def run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool,
     if required_read_only_nas and container_cifs:
         container_mode_ok, container_mode_detail = _child_cifs_mode_ok(container_cifs, ro_always_ok=True)
         checks.append((container_mode_ok, "live_container_child_cifs_readonly", container_mode_detail))
+
+    # Workspace floor: the OCn own-folder mounts OUTSIDE nas_docs (flat at
+    # {home}/workspace), so none of the nas_docs checks above ever see it.
+    # Always emitted under one name so it can sit in the required sets: vacuous
+    # pass when the host has no OCn (oc1, dev slots), hard floor once it does.
+    host_workspace_root = f"{target_home}/workspace"
+    container_workspace_root = str(profile.metadata.get("container_workspace_root") or "")
+    ws_host_rc, _, ws_host_rows = _findmnt_under(host_workspace_root)
+    ws_host_cifs = [row for row in ws_host_rows if row.get("fstype") == "cifs"] if ws_host_rc == 0 else []
+    ws_container_cifs: list[dict[str, str]] | None
+    if not ws_host_cifs:
+        ws_container_cifs = []
+    elif not container_workspace_root:
+        ws_container_cifs = None  # cannot locate it in the container -> floor fails loud
+    else:
+        ws_rc, _, ws_container_mounts = _findmnt_tree(container_workspace_root, container_pid=pid)
+        ws_container_cifs = (
+            [row for row in ws_container_mounts if row.get("fstype") == "cifs"] if ws_rc == 0 else None
+        )
+    ws_ok, ws_detail = _workspace_cifs_floor_ok(ws_host_cifs, ws_container_cifs)
+    if ws_host_cifs and not container_workspace_root:
+        ws_detail = "missing_container_workspace_root"
+    checks.append((ws_ok, "live_workspace_cifs_floor_ok", ws_detail))
 
     host_sources = {row.get("source") for row in host_cifs if row.get("source")}
     container_sources = {row.get("source") for row in container_cifs if row.get("source")}
