@@ -167,31 +167,35 @@ def safe_mountpoint_path(mountpoint: Path, root: Path | None = None) -> None:
 
 
 def mounted_child_cifs_count(slot: str) -> int:
+    # Real cifs mounts only: corpus under nas_docs plus writable shares under
+    # nas_rw. The workspace bind is a VIEW of one of the nas_rw mounts, not a
+    # second mount — counting it would double-charge the root-owned max_mounts
+    # budget for the same share.
     home = Path("/home") / slot
     count = 0
-    # corpus: read-only cifs nested under nas_docs
-    nas_root = home / "nas_docs"
-    rc, _, rows = findmnt_under(str(nas_root))
-    if rc == 0:
-        count += sum(
-            1
-            for row in rows
-            if row.get("fstype") == "cifs" and row.get("target", "").startswith(str(nas_root) + "/")
-        )
-    # OCN own-folder: a single flat cifs mount AT {home}/workspace (the mount is
-    # the dir itself). Counted so max_mounts keeps its pre-split "total mounts"
-    # meaning — the budget stays a root-owned nas-policy value with no code-side
-    # exemption for OCN.
-    ws_root = home / "workspace"
-    rc_ws, _, rows_ws = findmnt_under(str(ws_root))
-    if rc_ws == 0:
-        count += sum(
-            1
-            for row in rows_ws
-            if row.get("fstype") == "cifs"
-            and (row.get("target") == str(ws_root) or row.get("target", "").startswith(str(ws_root) + "/"))
-        )
+    for root in (home / "nas_docs", home / "nas_rw"):
+        rc, _, rows = findmnt_under(str(root))
+        if rc == 0:
+            count += sum(
+                1
+                for row in rows
+                if row.get("fstype") == "cifs" and row.get("target", "").startswith(str(root) + "/")
+            )
     return count
+
+
+def bind_mount(source: Path, target: Path) -> tuple[bool, str]:
+    proc = _run_text(["mount", "--bind", str(source), str(target)], timeout=30)
+    if proc.returncode != 0:
+        return False, (proc.stderr or proc.stdout).strip()
+    return True, "ok"
+
+
+def simple_umount(target: Path) -> tuple[bool, str]:
+    proc = _run_text(["umount", str(target)], timeout=30)
+    if proc.returncode != 0:
+        return False, (proc.stderr or proc.stdout).strip()
+    return True, "ok"
 
 
 def _mode_matches(row: dict[str, str], expect_readwrite: bool) -> bool:

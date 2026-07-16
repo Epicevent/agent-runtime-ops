@@ -17,6 +17,10 @@ from ..domain.nas_credentials import (
     validate_official_credentials_for_delete,
 )
 from ..domain.nas_mounts import prepare_mount_entry as _prepare_mount_entry
+from ..domain.workspace_bind import (
+    assign_workspace_bind as _assign_workspace_bind,
+    reconcile_workspace_bind as _reconcile_workspace_bind,
+)
 from ..domain.nas_mounts import write_managed_fstab_entry as _write_managed_fstab_entry
 from ..domain.nas_requests import move_request, safe_request_file
 from ..host.account_files import (
@@ -47,6 +51,8 @@ from ..nas import (
     share_is_writable as _share_is_writable,
 )
 from ..routing import load_runtime_bindings, validate_linux_account
+from ..domain.runtime_apply import apply_desired_slot as _apply_desired_slot
+from ..profiles import load_profile as _load_profile
 from ..state import load_runtime_target
 
 
@@ -108,6 +114,8 @@ def _approve_auto_once(state_root: Path) -> dict[str, int]:
                 credential_file_is_safe_for_slot(slot, credential_path, uid=cred_uid)
                 decision, _ = _prepare_mount_entry(slot, decision.share.source, credential_path, state_root)
                 ok, reason = _host_mount_prepared_share(decision, _share_is_writable(decision.share))
+                if ok and _share_is_writable(decision.share):
+                    _reconcile_workspace_bind(slot)
                 if ok:
                     move_request(path, slot, "approved")
                     _append_action_log(state_root, "nas_approve_auto", slot, decision.share.source, "approved", reason)
@@ -326,18 +334,23 @@ def cmd_nas_mounted(args: argparse.Namespace) -> int:
         print(f"reason={error or 'findmnt_failed'}")
         return 1
     child_rows = [row for row in rows if row.get("fstype") == "cifs" and row.get("target", "").startswith(str(root) + "/")]
-    # OCN own-folder is a flat cifs mount AT {home}/workspace (the dir itself is
-    # the mount) — outside nas_docs, so it must be enumerated separately or the
-    # slot's writable share becomes invisible to operators after the split.
-    ws_rc, _, ws_rows = _findmnt_under(str(ws_root))
-    if ws_rc == 0:
+    # Writable (OCn) shares mount under nas_rw, one spot per source — count and
+    # list them alongside corpus so the writable shares stay visible.
+    rw_root = Path("/home") / desired.slot / "nas_rw"
+    rw_rc, _, rw_rows = _findmnt_under(str(rw_root))
+    if rw_rc == 0:
         child_rows += [
             row
-            for row in ws_rows
-            if row.get("fstype") == "cifs"
-            and (row.get("target") == str(ws_root) or row.get("target", "").startswith(str(ws_root) + "/"))
+            for row in rw_rows
+            if row.get("fstype") == "cifs" and row.get("target", "").startswith(str(rw_root) + "/")
         ]
     print(f"mounted_child_cifs_count={len(child_rows)}")
+    # The workspace is a VIEW (bind) of one nas_rw mount — shown, not counted.
+    ws_bind_rc, _, ws_bind_rows = _findmnt_one(ws_root)
+    if ws_bind_rc == 0 and ws_bind_rows:
+        print(f"workspace_bound_to={ws_bind_rows[0].get('source') or 'unknown'}")
+    else:
+        print("workspace_bound_to=none")
     for index, row in enumerate(child_rows, start=1):
         prefix = f"mount_{index}"
         _print_mount_row(prefix, row)
@@ -450,8 +463,60 @@ def cmd_nas_mount(args: argparse.Namespace) -> int:
         print(f"reason={reason or error or 'mounted_state_did_not_match_expected'}")
         rollback = _rollback_fstab_after_mount_failure(args, decision.slot, decision.share.source)
         print(f"fstab_entry_rollback={rollback}")
+    if ok and expect_rw:
+        bind_ok, bind_detail = _reconcile_workspace_bind(decision.slot)
+        print(f"workspace_bind={'ok' if bind_ok else 'fail'} {bind_detail}")
     _append_action_log(_state_root(args), "nas_mount", decision.slot, decision.share.source, "ok" if ok else "fail", reason)
     return 0 if ok else 1
+
+
+def cmd_nas_workspace_assign(args: argparse.Namespace) -> int:
+    """Point the slot's workspace at one of its writable mounts.
+
+    With one writable mount the tool auto-binds on mount/unmount and this
+    command is unnecessary; with several this is the explicit choice — the
+    entry point the slot-assignment web drives. The running container keeps
+    the OLD view until recreated (bind roots do not propagate), so assign
+    runs apply as one set unless --no-apply is given.
+    """
+    if not _is_root():
+        print("error: run as root/admin: sudo /usr/local/bin/opsctl nas workspace-assign TARGET //HOST/SHARE", file=sys.stderr)
+        return 2
+    try:
+        desired = load_runtime_target(args.slot, _state_root(args))
+        slot = desired.slot
+        share = parse_smb_share(args.share)
+        if not _share_is_writable(share):
+            raise ValueError("workspace-assign is for writable (OCn) shares; corpus shares stay under nas_docs")
+        mountpoint = mountpoint_for_share(slot, share)
+    except Exception as exc:
+        print(f"target={args.slot}")
+        print(f"share={args.share}")
+        print("workspace_assign_status=fail")
+        print(f"reason={exc}")
+        _append_action_log(_state_root(args), "nas_workspace_assign", args.slot, args.share, "fail", str(exc))
+        return 1
+
+    ok, detail = _assign_workspace_bind(slot, mountpoint)
+    print(f"target={slot}")
+    print(f"share={share.source}")
+    print(f"mountpoint={mountpoint}")
+    print(f"workspace_assign_status={'ok' if ok else 'fail'}")
+    print(f"detail={detail}")
+    _append_action_log(_state_root(args), "nas_workspace_assign", slot, share.source, "ok" if ok else "fail", detail)
+    if not ok:
+        return 1
+    if getattr(args, "no_apply", False):
+        print(f"apply_status=skipped next=sudo /usr/local/bin/opsctl apply {slot}")
+        return 0
+    profile = _load_profile(desired.runtime_profile)
+    return _apply_desired_slot(
+        desired=desired,
+        profile=profile,
+        state_root=_state_root(args),
+        allow_first_apply=False,
+        action_name="nas_workspace_assign",
+    )
 
 
 def cmd_nas_unmount(args: argparse.Namespace) -> int:
@@ -510,6 +575,12 @@ def cmd_nas_unmount(args: argparse.Namespace) -> int:
     _print_official_credential_status("", credential_status)
     print("credential_removed=no")
     print("unmount_status=ok")
+    if _share_is_writable(share):
+        # The rw set changed: rebind the workspace to the remaining mount, or
+        # clear the (now dangling) bind — a lingering bind would keep the
+        # unmounted share's filesystem alive through the workspace.
+        bind_ok, bind_detail = _reconcile_workspace_bind(slot)
+        print(f"workspace_bind={'ok' if bind_ok else 'fail'} {bind_detail}")
     _append_action_log(_state_root(args), "nas_unmount", slot, share.source, "ok", "credential_removed=no")
     return 0
 
@@ -573,6 +644,9 @@ def cmd_nas_remove(args: argparse.Namespace) -> int:
         except OSError:
             print("empty_dir_removed=no")
     after_status = official_credential_status(slot, share)
+    if _share_is_writable(share):
+        bind_ok, bind_detail = _reconcile_workspace_bind(slot)
+        print(f"workspace_bind={'ok' if bind_ok else 'fail'} {bind_detail}")
     print(f"target={slot}")
     print(f"share={share.source}")
     print(f"mountpoint={mountpoint}")

@@ -19,13 +19,15 @@ from ..host.mounts import (
     propagation_satisfies as _propagation_satisfies,
 )
 from ..host.account_files import runtime_ids
-from ..host.fstab import read_managed_fstab_entries
+from ..host.fstab import read_managed_fstab_entries, read_managed_workspace_binds
 from ..nas import (
     check_nas_policy,
     mountpoint_for_share,
+    nas_rw_root,
     parse_cifs_mount_source,
     parse_smb_share,
     share_is_writable,
+    workspace_root,
 )
 from ..routing import get_runtime_binding
 from ..runtime_secrets import parse_secret_env_text
@@ -567,6 +569,25 @@ def _child_cifs_mode_ok(rows: list[dict[str, str]], *, ro_always_ok: bool = Fals
     return True, f"count={len(rows)} ro={ro} rw={rw}"
 
 
+def _workspace_bind_stamp_ok(binds: list[dict[str, str]], slot: str) -> tuple[bool, str]:
+    """The stamped workspace bind must point FROM a nas_rw mount TO the
+    workspace — anything else recreates a wrong view at boot."""
+    drift: list[str] = []
+    mine = [bind for bind in binds if bind.get("slot") == slot]
+    expected_target = workspace_root(slot).as_posix()
+    rw_prefix = nas_rw_root(slot).as_posix() + "/"
+    for bind in mine:
+        target = bind.get("target") or ""
+        source = bind.get("source") or ""
+        if target != expected_target:
+            drift.append(f"bind_target={target}!={expected_target}")
+        if not source.startswith(rw_prefix):
+            drift.append(f"bind_source_outside_nas_rw={source}")
+    if drift:
+        return False, f"binds={len(mine)} drift={','.join(drift)}"
+    return True, f"binds={len(mine)}"
+
+
 def _fstab_stamp_drift_ok(entries: list[dict[str, str]], slot: str) -> tuple[bool, str]:
     """The Q4 invariant, mechanized: a managed fstab entry is a STAMP of what
     the derivation code output when it was written. If the derivation changes
@@ -873,6 +894,9 @@ def run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool,
     # the next reboot. Always emitted; entries=0 slots pass vacuously.
     try:
         drift_ok, drift_detail = _fstab_stamp_drift_ok(read_managed_fstab_entries(), desired.slot)
+        bind_ok, bind_detail = _workspace_bind_stamp_ok(read_managed_workspace_binds(), desired.slot)
+        drift_ok = drift_ok and bind_ok
+        drift_detail = f"{drift_detail} {bind_detail}"
     except Exception as exc:
         drift_ok, drift_detail = False, f"fstab_read_failed={exc}"
     checks.append((drift_ok, "live_fstab_stamp_matches_derivation", drift_detail))
