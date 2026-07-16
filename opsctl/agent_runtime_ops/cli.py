@@ -34,6 +34,7 @@ from .commands.nas_view import (
 )
 from .commands.nas import (
     cmd_nas_approve_auto,
+    cmd_nas_credential_migrate_root,
     cmd_nas_credential_set,
     cmd_nas_credential_status,
     cmd_nas_mount,
@@ -370,6 +371,12 @@ def build_parser() -> argparse.ArgumentParser:
     nas_credential_status.add_argument("slot", metavar="target")
     nas_credential_status.add_argument("share")
     nas_credential_status.set_defaults(func=cmd_nas_credential_status)
+    nas_credential_migrate = nas_credential_sub.add_parser(
+        "migrate-to-root", help="move a corpus credential from the slot home into the root vault; fstab line keeps its mountpoint"
+    )
+    nas_credential_migrate.add_argument("slot", metavar="target")
+    nas_credential_migrate.add_argument("share")
+    nas_credential_migrate.set_defaults(func=cmd_nas_credential_migrate_root)
     nas_mounted = nas_sub.add_parser("mounted")
     nas_mounted.add_argument("slot", metavar="target")
     nas_mounted.set_defaults(func=cmd_nas_mounted)

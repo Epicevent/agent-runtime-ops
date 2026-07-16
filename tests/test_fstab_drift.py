@@ -8,6 +8,7 @@ from agent_runtime_ops.host.fstab import (
     fstab_escape,
     fstab_unescape,
     read_managed_fstab_entries,
+    update_managed_fstab_credentials,
     write_managed_fstab_entry,
 )
 from agent_runtime_ops.domain.runtime_checks import _fstab_stamp_drift_ok
@@ -48,6 +49,63 @@ class FstabRoundTripTest(unittest.TestCase):
         self.assertEqual(entry["access"], "rw")
         # Non-managed lines are not entries.
         self.assertNotIn("//other/x", [e["source"] for e in entries])
+
+
+class UpdateCredentialsInPlaceTest(unittest.TestCase):
+    """Moving a credential file must repoint ONLY credentials= — the mount
+    line (mountpoint, mode, every other option) stays byte for byte, because
+    lines like oc1's kakao-work serve the kw view stack at a non-derived
+    mountpoint that a full rewrite would break at boot."""
+
+    def _fstab_with_entry(self, d: Path) -> Path:
+        fstab = d / "fstab"
+        fstab.write_text("# base\n", encoding="utf-8")
+        write_managed_fstab_entry(
+            "oc1",
+            "//10.10.10.2/kakao-work",
+            PurePosixPath("/srv/kw-nas/slots/oc1/master"),
+            PurePosixPath("/home/oc1/.agent-runtime-nas/credentials/host-x/kakao-work.cred"),
+            slot_uid_gid=lambda _s: (1006, 1006),
+            runtime_ids=lambda _s: (1006, 1006, 1028),
+            read_write=False,
+            fstab_path=fstab,
+            lock_path=d / "lock",
+        )
+        return fstab
+
+    def test_only_credentials_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            fstab = self._fstab_with_entry(d)
+            before = read_managed_fstab_entries(fstab)[0]
+            updated = update_managed_fstab_credentials(
+                "oc1",
+                "//10.10.10.2/kakao-work",
+                PurePosixPath("/root/agent-runtime-ops/nas-credentials/oc1/host-x/kakao-work.cred"),
+                fstab_path=fstab,
+                lock_path=d / "lock",
+            )
+            self.assertTrue(updated)
+            after = read_managed_fstab_entries(fstab)[0]
+        self.assertEqual(after["credentials"], "/root/agent-runtime-ops/nas-credentials/oc1/host-x/kakao-work.cred")
+        # Everything else untouched.
+        self.assertEqual(after["mountpoint"], before["mountpoint"])
+        self.assertEqual(after["access"], before["access"])
+        self.assertEqual(after["slot"], before["slot"])
+        self.assertEqual(after["source"], before["source"])
+
+    def test_no_matching_entry_returns_false(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            fstab = self._fstab_with_entry(d)
+            updated = update_managed_fstab_credentials(
+                "oc2",
+                "//10.10.10.2/kakao-work",
+                PurePosixPath("/root/x.cred"),
+                fstab_path=fstab,
+                lock_path=d / "lock",
+            )
+        self.assertFalse(updated)
 
 
 class FstabStampDriftTest(unittest.TestCase):
