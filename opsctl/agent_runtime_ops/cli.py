@@ -38,6 +38,7 @@ from .commands.nas import (
     cmd_nas_credential_status,
     cmd_nas_mount,
     cmd_nas_mounted,
+    cmd_nas_workspace_assign,
     cmd_nas_policy_check,
     cmd_nas_remove,
     cmd_nas_request,
@@ -397,6 +398,13 @@ def build_parser() -> argparse.ArgumentParser:
     nas_mount.add_argument("--domain")
     nas_mount.add_argument("--keep-fstab-on-failure", action="store_true")
     nas_mount.set_defaults(func=cmd_nas_mount)
+    nas_workspace_assign = nas_sub.add_parser(
+        "workspace-assign", help="point the slot workspace at one writable mount (runs apply unless --no-apply)"
+    )
+    nas_workspace_assign.add_argument("slot", metavar="target")
+    nas_workspace_assign.add_argument("share")
+    nas_workspace_assign.add_argument("--no-apply", action="store_true")
+    nas_workspace_assign.set_defaults(func=cmd_nas_workspace_assign)
     nas_unmount = nas_sub.add_parser("unmount")
     nas_unmount.add_argument("slot", metavar="target")
     nas_unmount.add_argument("share")

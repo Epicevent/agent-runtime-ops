@@ -8,6 +8,7 @@ from agent_runtime_ops.nas import (
     host_component,
     mountpoint_for_share,
     nas_root,
+    nas_rw_root,
     parse_smb_share,
     share_is_writable,
     workspace_root,
@@ -25,18 +26,29 @@ class ShareIsWritableTest(unittest.TestCase):
 
 
 class MountpointPlacementTest(unittest.TestCase):
-    """One tree per intent: writable OCn mounts flat at {home}/workspace,
-    outside the read-only nas_docs tree, so the container's recursive
-    read_only can never stamp it ro (the 2026-07 oc2 freeze)."""
+    """One tree per intent, one spot per source: writable OCn mounts nested
+    under {home}/nas_rw (outside the read-only nas_docs tree, so recursive
+    read_only can never stamp it ro), keyed by host so the same share name on
+    two NAS hosts never collides (the old-NAS/new-NAS remove refusal). The
+    workspace is a bind onto ONE of these, never a direct mount target."""
 
-    def test_ocn_mounts_flat_at_workspace(self) -> None:
+    def test_ocn_mounts_per_source_under_nas_rw(self) -> None:
         mountpoint = mountpoint_for_share("oc1", parse_smb_share("//10.10.10.2/OC1"))
-        self.assertEqual(mountpoint, workspace_root("oc1"))
-        self.assertEqual(mountpoint, Path("/home/oc1/workspace"))
+        self.assertEqual(
+            mountpoint,
+            nas_rw_root("oc1") / host_component("10.10.10.2") / "OC1",
+        )
 
-    def test_ocn_is_not_under_nas_docs(self) -> None:
+    def test_same_share_name_on_two_hosts_gets_two_spots(self) -> None:
+        new_nas = mountpoint_for_share("oc5", parse_smb_share("//10.10.10.2/OC5"))
+        old_nas = mountpoint_for_share("oc5", parse_smb_share("//192.168.0.222/OC5"))
+        self.assertNotEqual(new_nas, old_nas)
+
+    def test_ocn_is_not_under_nas_docs_and_not_the_workspace(self) -> None:
         mountpoint = mountpoint_for_share("oc1", parse_smb_share("//10.10.10.2/OC1"))
         self.assertNotIn(nas_root("oc1"), mountpoint.parents)
+        self.assertNotEqual(mountpoint, workspace_root("oc1"))
+        self.assertNotIn(workspace_root("oc1"), mountpoint.parents)
 
     def test_corpus_stays_nested_under_nas_docs(self) -> None:
         share = parse_smb_share("//10.10.10.2/kakao-work")

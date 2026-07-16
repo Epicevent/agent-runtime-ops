@@ -7,7 +7,8 @@
 ```text
 1. Linux host 층위
    corpus: /home/ocN/nas_docs 아래에 실제 CIFS child mount가 있는가
-   OCn:    /home/ocN/workspace 자체가 CIFS mount인가 (flat — 디렉토리가 곧 마운트)
+   OCn:    /home/ocN/nas_rw/host-<hosthash>/<share> 에 CIFS mount가 있고,
+           /home/ocN/workspace 가 그중 하나에 bind로 연결돼 있는가
 
 2. Container 층위
    OpenClaw/Hermes container 안에서 그 mount가 보이는가
@@ -30,8 +31,21 @@ compose가 고정하는 것 (의도별 두 트리):
 
 NAS 명령이 바꾸는 것:
   corpus(읽기 공유):  /home/ocN/nas_docs/host-<hosthash>/<share>
-  OCn(쓰기 자기폴더): /home/ocN/workspace
+  OCn(쓰기 자기폴더): /home/ocN/nas_rw/host-<hosthash>/<share>
+                      + /home/ocN/workspace (bind, 도구가 자동 관리)
 ```
+
+쓰기 공유는 나스 주소별로 자기 자리를 갖는다. 그래서 이사 중에 구나스 OC5와 신나스
+OC5를 동시에 마운트할 수 있다. container가 보는 자리는 언제나 /home/ocN/workspace
+하나이고, 도구가 거기에 bind를 건다: 쓰기 mount가 하나면 자동으로 그걸 걸고, 둘
+이상이면 자동으로 걸지 않으므로 고른다:
+
+```bash
+sudo /usr/local/bin/opsctl nas workspace-assign oc5 '//10.10.10.2/OC5'
+```
+
+이 명령은 bind를 바꾼 뒤 apply(container 재생성)까지 이어서 한다 — 떠 있는
+container는 옛 bind를 계속 보기 때문이다. bind만 바꾸려면 `--no-apply`.
 
 따라서 NAS를 붙이거나 뗄 때 다음을 하지 않는다.
 
@@ -146,11 +160,13 @@ mounted_readonly=yes
 mount_status=ok
 ```
 
-OCn share(쓰기 자기폴더)를 붙이면 mountpoint와 모드가 다르다:
+OCn share(쓰기 자기폴더)를 붙이면 mountpoint와 모드가 다르고, workspace bind
+결과가 한 줄 더 나온다:
 
 ```text
-mountpoint=/home/oc3/workspace
+mountpoint=/home/oc3/nas_rw/host-<hosthash>/OC3
 mounted_readonly=no
+workspace_bind=ok auto_assign bound source=//10.10.10.2/OC3 ...
 ```
 
 확인:
@@ -348,23 +364,24 @@ source가 요청한 //HOST/SHARE와 다름:
   비정상. 잘못된 share를 건드릴 수 있으므로 unmount 중단
 ```
 
-## OCn workspace 이주 (2026-07 트리 분리 이후, slot당 1회)
+## OCn workspace 이주 (자리 규칙이 바뀔 때, slot당 1회)
 
-OCn own-folder는 nas_docs 아래가 아니라 `/home/ocN/workspace`에 flat으로 선다. 분리 이전에
-세워진 slot은 옛 자리(fstab 박제 + 라이브 mount)가 남아 있으므로 slot마다 한 번 이주한다.
+OCn의 자리 규칙이 바뀌면(2026-07: nas_docs 아래 → flat workspace → nas_rw+bind) 옛
+자리의 fstab 줄과 살아 있는 mount가 남는다. `live_fstab_stamp_matches_derivation`이
+옛 줄을 전부 빨갛게 띄우므로 그 목록이 곧 할 일 목록이다. slot마다:
 
 ```bash
-# 1) fstab 박제 이주 + workspace에 mount
-#    (fstab 키는 (slot,source)라 기존 줄이 새 mountpoint로 교체된다 — 좀비 없음)
-sudo /usr/local/bin/opsctl nas mount oc2 '//10.10.10.2/OC2'
+# 1) 옛 자리에 살아 있는 mount를 직접 umount (도구는 새 자리만 계산하므로 경로 직접 지정)
+sudo umount /home/oc2/workspace            # flat 시절 자리면 이 줄
+sudo umount /home/oc2/nas_docs/host-*/OC2  # 분리 이전 자리면 이 줄
 
-# 2) 옛 자리에 살아 있는 mount만 직접 umount
-#    (도구는 이제 OCn mountpoint를 workspace로 계산하므로 옛 경로는 직접 지정)
-sudo umount /home/oc2/nas_docs/host-*/OC2
+# 2) 새 자리에 mount — fstab 줄은 (slot,source) 키라 자동 교체되고,
+#    쓰기 mount가 하나뿐이라 workspace bind도 자동으로 걸린다
+sudo /usr/local/bin/opsctl nas mount oc2 '//10.10.10.2/OC2'
 
 # 3) container 재생성 후 확인
 sudo /usr/local/bin/opsctl apply oc2
-opsctl nas mounted oc2                          # workspace mount가 readonly=no로 보여야 한다
+opsctl nas mounted oc2                     # workspace_bound_to=//10.10.10.2/OC2 이어야 한다
 sudo /usr/local/bin/opsctl check --live oc2
 ```
 

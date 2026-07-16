@@ -56,16 +56,25 @@ Docker의 `read_only` 바인드는 **recursive read-only**다: 컨테이너 crea
 언젠가 얼어붙는다** — 2026-07 oc2 동결의 기전이다(생성 시점에 이미 마운트돼 있던 OC2는 ro
 도장, 생성 후 마운트된 oc6는 rw — 타이밍이 갈랐다).
 
-따라서 자리 규칙은 취향이 아니라 필연이다: **한 트리에는 한 의도만.**
+따라서 자리 규칙은 취향이 아니라 필연이다: **한 트리에는 한 의도만, 한 소스에는 한
+자리씩.**
 
 ```text
-쓰기 클래스(OCn):  /home/{slot}/workspace          (flat — 디렉토리 자체가 마운트)
+쓰기 클래스(OCn):  /home/{slot}/nas_rw/host-<hosthash>/<share>   (소스별 자리)
 ro 클래스(corpus): /home/{slot}/nas_docs/host-<hosthash>/<share>
+container가 보는 자리: /home/{slot}/workspace — nas_rw 중 하나에 bind로 연결
 ```
 
-근거: `nas.py` `mountpoint_for_share`/`workspace_root`. 이 함수 하나가 등록·마운트·해제
-전부의 경로 원천이다. 탈출 가드는 slot 홈을 경계로 한다(`domain/nas_mounts.py`,
-`commands/nas.py`).
+자리를 소스별로 나누는 이유: 구나스 OC5와 신나스 OC5처럼 share 이름이 같은 두 소스가
+한 자리를 놓고 부딪히면 remove/unmount가 남의 mount를 지울까 봐 거부하게 된다(2026-07
+실측). container 경로를 하나로 유지하는 건 bind가 맡는다 — 쓰기 mount가 하나면 도구가
+자동으로 걸고, 둘 이상이면 `nas workspace-assign`으로 고른다(slot 배정 웹이 부를 자리).
+bind도 fstab에 적혀 재부팅을 살아남고, 갈아탈 때는 apply(재생성)까지가 한 세트다(bind
+뿌리는 전파로 안 갈린다 — Q6).
+
+근거: `nas.py` `mountpoint_for_share`/`nas_rw_root`/`workspace_root`,
+`domain/workspace_bind.py`. 이 함수들이 등록·마운트·해제 전부의 경로 원천이다. 탈출
+가드는 slot 홈을 경계로 한다(`domain/nas_mounts.py`, `commands/nas.py`).
 
 ## Q6. 컨테이너가 보려면 — compose 두 트리
 

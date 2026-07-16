@@ -203,6 +203,109 @@ def write_managed_fstab_entry(
         _replace_fstab(fstab_path, "\n".join(new_lines) + "\n")
 
 
+def managed_workspace_bind_marker(slot: str) -> str:
+    # One bind per slot (the workspace shows exactly one assigned rw mount),
+    # so the marker is keyed by slot alone — rewriting replaces the old line.
+    return f"# agent-runtime-ops nas-workspace slot={slot}"
+
+
+_WORKSPACE_MARKER_RE = re.compile(r"^# agent-runtime-ops nas-workspace slot=(?P<slot>\S+)$")
+
+
+def write_managed_workspace_bind_entry(
+    slot: str,
+    source_mountpoint: Path,
+    workspace_mountpoint: Path,
+    *,
+    fstab_path: Path = Path("/etc/fstab"),
+    lock_path: Path = Path("/run/agent-runtime-ops-fstab.lock"),
+) -> None:
+    marker = managed_workspace_bind_marker(slot)
+    entry = (
+        f"{fstab_escape(str(source_mountpoint))} {fstab_escape(str(workspace_mountpoint))} "
+        "none bind,nofail 0 0"
+    )
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.touch(exist_ok=True)
+    with lock_path.open("r+") as lock_handle:
+        _lock_exclusive(lock_handle)
+        lines = fstab_path.read_text(encoding="utf-8").splitlines() if fstab_path.exists() else []
+        new_lines: list[str] = []
+        skip_next = False
+        replaced = False
+        for line in lines:
+            if skip_next:
+                skip_next = False
+                continue
+            if line == marker:
+                skip_next = True
+                if not replaced:
+                    new_lines.extend([marker, entry])
+                    replaced = True
+                continue
+            new_lines.append(line)
+        if not replaced:
+            if new_lines and new_lines[-1] != "":
+                new_lines.append("")
+            new_lines.extend([marker, entry])
+        _backup_fstab(fstab_path)
+        _replace_fstab(fstab_path, "\n".join(new_lines) + "\n")
+
+
+def remove_managed_workspace_bind_entry(
+    slot: str,
+    *,
+    fstab_path: Path = Path("/etc/fstab"),
+    lock_path: Path = Path("/run/agent-runtime-ops-fstab.lock"),
+) -> bool:
+    marker = managed_workspace_bind_marker(slot)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.touch(exist_ok=True)
+    with lock_path.open("r+") as lock_handle:
+        _lock_exclusive(lock_handle)
+        lines = fstab_path.read_text(encoding="utf-8").splitlines() if fstab_path.exists() else []
+        new_lines: list[str] = []
+        removed = False
+        skip_next = False
+        for line in lines:
+            if skip_next:
+                skip_next = False
+                continue
+            if line == marker:
+                removed = True
+                skip_next = True
+                continue
+            new_lines.append(line)
+        if not removed:
+            return False
+        _backup_fstab(fstab_path)
+        _replace_fstab(fstab_path, "\n".join(new_lines) + "\n")
+        return True
+
+
+def read_managed_workspace_binds(fstab_path: Path = Path("/etc/fstab")) -> list[dict[str, str]]:
+    """Parse the stamped workspace binds: slot, bind source, bind target."""
+    if not fstab_path.exists():
+        return []
+    lines = fstab_path.read_text(encoding="utf-8").splitlines()
+    binds: list[dict[str, str]] = []
+    for index, line in enumerate(lines):
+        match = _WORKSPACE_MARKER_RE.match(line)
+        if not match or index + 1 >= len(lines):
+            continue
+        columns = lines[index + 1].split()
+        if len(columns) < 4:
+            continue
+        binds.append(
+            {
+                "slot": match.group("slot"),
+                "source": fstab_unescape(columns[0]),
+                "target": fstab_unescape(columns[1]),
+            }
+        )
+    return binds
+
+
 def remove_managed_fstab_entry(
     slot: str,
     share: str,

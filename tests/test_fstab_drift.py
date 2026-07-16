@@ -60,23 +60,39 @@ class FstabStampDriftTest(unittest.TestCase):
         self.assertEqual(detail, "entries=0")
 
     def test_current_ocn_stamp_passes(self) -> None:
+        from agent_runtime_ops.nas import host_component
+
+        current = f"/home/oc2/nas_rw/{host_component('10.10.10.2')}/OC2"
         ok, detail = _fstab_stamp_drift_ok(
-            [_entry("oc2", "//10.10.10.2/OC2", "/home/oc2/workspace", "rw")], "oc2"
+            [_entry("oc2", "//10.10.10.2/OC2", current, "rw")], "oc2"
         )
         self.assertTrue(ok, detail)
 
     def test_pre_split_ocn_stamp_is_drift(self) -> None:
-        # The actual incident shape: OCn stamped under nas_docs from before
-        # the split — boot would recreate it inside the read-only tree.
+        # The original incident shape: OCn stamped under nas_docs — boot would
+        # recreate it inside the read-only tree.
         ok, detail = _fstab_stamp_drift_ok(
             [_entry("oc2", "//10.10.10.2/OC2", "/home/oc2/nas_docs/host-b29e08d7b4bf/OC2", "rw")], "oc2"
         )
         self.assertFalse(ok)
         self.assertIn("mountpoint=/home/oc2/nas_docs/host-b29e08d7b4bf/OC2", detail)
 
-    def test_ocn_stamped_ro_is_drift(self) -> None:
+    def test_flat_workspace_stamp_is_drift(self) -> None:
+        # The interim flat placement: one hardcoded spot, two NAS hosts with
+        # the same share name collide. Stamps from that era must turn red —
+        # they are the fleet's migration todo list.
         ok, detail = _fstab_stamp_drift_ok(
-            [_entry("oc2", "//10.10.10.2/OC2", "/home/oc2/workspace", "ro")], "oc2"
+            [_entry("oc2", "//10.10.10.2/OC2", "/home/oc2/workspace", "rw")], "oc2"
+        )
+        self.assertFalse(ok)
+        self.assertIn("mountpoint=/home/oc2/workspace", detail)
+
+    def test_ocn_stamped_ro_is_drift(self) -> None:
+        from agent_runtime_ops.nas import host_component
+
+        current = f"/home/oc2/nas_rw/{host_component('10.10.10.2')}/OC2"
+        ok, detail = _fstab_stamp_drift_ok(
+            [_entry("oc2", "//10.10.10.2/OC2", current, "ro")], "oc2"
         )
         self.assertFalse(ok)
         self.assertIn("access=ro!=rw", detail)

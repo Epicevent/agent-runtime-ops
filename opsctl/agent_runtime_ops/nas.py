@@ -88,25 +88,33 @@ def nas_root(slot: str) -> Path:
 
 
 def workspace_root(slot: str) -> Path:
-    # OCN own-folder (the agent's writable workspace) lives OUTSIDE the
-    # read-only nas_docs tree, at its own top-level dir. This is precisely
-    # why the container's recursive read_only on nas_docs no longer freezes it.
+    # What the container sees: a single stable path, bound (bind mount) to the
+    # assigned writable mount under nas_rw. Lives OUTSIDE the read-only
+    # nas_docs tree, so the container's recursive read_only cannot freeze it.
     return Path("/home") / validate_linux_account(slot) / "workspace"
 
 
-def mountpoint_for_share(slot: str, share: SmbShare) -> Path:
-    if share_is_writable(share):
-        # Writable OCN: a FLAT mount — {home}/workspace IS the share root, so
-        # the compose bind of {target_home}/workspace exposes its content
-        # directly. Corpus (read-only) stays nested under nas_docs, below.
-        return workspace_root(slot)
-    root = nas_root(slot)
+def nas_rw_root(slot: str) -> Path:
+    # Writable (OCn) shares mount here, one place PER SOURCE — same shape as
+    # corpus under nas_docs. Two hosts exposing the same share name (old NAS /
+    # new NAS during a migration) each get their own spot instead of fighting
+    # over a single hardcoded path.
+    return Path("/home") / validate_linux_account(slot) / "nas_rw"
+
+
+def _nested_mountpoint(root: Path, share: SmbShare) -> Path:
     mountpoint = root / host_component(share.host) / share_component(share.share)
     resolved_root = root.resolve(strict=False)
     resolved_parent = mountpoint.parent.resolve(strict=False)
     if resolved_parent != resolved_root / host_component(share.host):
         raise ValueError(f"mountpoint escaped NAS root: {mountpoint}")
     return mountpoint
+
+
+def mountpoint_for_share(slot: str, share: SmbShare) -> Path:
+    if share_is_writable(share):
+        return _nested_mountpoint(nas_rw_root(slot), share)
+    return _nested_mountpoint(nas_root(slot), share)
 
 
 def agent_nas_dir(slot: str) -> Path:
