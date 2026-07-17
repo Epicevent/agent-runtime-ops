@@ -110,6 +110,38 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertIn("provider_raw=google", text)
         self.assertIn("provider_runtime=gemini", text)
         self.assertIn("family=hermes", text)
+        # a clean config surfaces no drift and no leftover routing keys
+        self.assertIn("model_endpoint_drift=no", text)
+        self.assertIn("model_routing_keys=none", text)
+
+    def test_runtime_config_status_flags_stray_endpoint_drift(self) -> None:
+        # A gemini slot left pointed at openrouter.ai must be flagged by
+        # config-status so an operator SEES the misroute without a live probe.
+        output = io.StringIO()
+        with (
+            patch("agent_runtime_ops.commands.runtime_config.is_root", return_value=True),
+            patch("agent_runtime_ops.commands.runtime_config._load_config_target", return_value=SimpleNamespace(slot="oc16", family="hermes")),
+            patch("agent_runtime_ops.commands.runtime_config.hermes_config_path", return_value=Path("/home/oc16/.hermes/config.yaml")),
+            patch(
+                "agent_runtime_ops.commands.runtime_config.read_hermes_config",
+                return_value={
+                    "provider": "gemini",
+                    "model": {
+                        "default": "gemini-3.5-flash",
+                        "provider": "gemini",
+                        "base_url": "https://openrouter.ai/api/v1",
+                    },
+                },
+            ),
+            contextlib.redirect_stdout(output),
+        ):
+            rc = cmd_runtime_config_status(argparse.Namespace(slot="oc16", state_root="/srv/openclaw-ops"))
+        text = output.getvalue()
+        self.assertEqual(rc, 0, text)
+        self.assertIn("model_endpoint_drift=yes", text)
+        self.assertIn("model_base_url_host=openrouter.ai", text)
+        self.assertIn("model_routing_keys=base_url", text)
+        self.assertIn("model_endpoint_drift_reason=", text)
 
     def test_runtime_config_sanitize_dry_run_reports_paths_without_writing_values(self) -> None:
         secret_value = "do-not-print-this-secret"

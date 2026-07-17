@@ -4,6 +4,7 @@ import copy
 import os
 from pathlib import Path
 import stat
+from urllib.parse import urlparse
 
 from ..host.account_files import ensure_not_symlink_chain, runtime_ids, slot_home
 from ..host.files import fsync_parent
@@ -33,6 +34,86 @@ RUNTIME_CONFIG_SECRET_OVERRIDE_PATHS = (
 def runtime_provider_id(value: str) -> str:
     raw = value.strip().lower()
     return RUNTIME_PROVIDER_ALIASES.get(raw, raw)
+
+
+# Canonical first-party endpoint host (substring) by normalized provider id.
+# A model.base_url whose host is inconsistent with the provider misroutes every
+# request: a gemini/google provider pointed at openrouter.ai authenticates a
+# Google key against a keyless aggregator and 401s (the exact drift that made a
+# dev slot's gemini traffic hang). set-model writes NO base_url for these
+# providers, so a lingering one — carried over from a previous provider — is
+# drift. Providers absent from this map (deliberate custom gateways) are judged
+# "unknown" rather than flagged, so intentional endpoints are not false-positived.
+_PROVIDER_CANONICAL_HOST = {
+    "gemini": "googleapis.com",  # google/google-ai aliases normalize to gemini
+    "anthropic": "anthropic.com",
+    "openai": "openai.com",
+    "openrouter": "openrouter.ai",
+}
+
+# model-level keys that pin request routing to a specific endpoint/protocol.
+# set-model drops all three on a provider change; a leftover misroutes traffic.
+_MODEL_ROUTING_KEYS = ("base_url", "api_key", "api_mode")
+
+
+def _url_host(url: str) -> str:
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url if "://" in url else "//" + url)
+    except Exception:
+        return ""
+    return (parsed.hostname or "").lower()
+
+
+def model_endpoint_drift(config: dict[str, object]) -> dict[str, object]:
+    """Assess whether ``config.model`` carries request-routing overrides that are
+    inconsistent with its provider — the misroute drift that ``set-model`` clears.
+
+    verdict:
+      * ``"clean"``   — no base_url, or base_url host matches the provider.
+      * ``"drift"``   — base_url host does not match a known first-party provider.
+      * ``"unknown"`` — a custom base_url on a provider with no canonical host
+                         (a deliberate gateway we cannot second-guess).
+
+    ``routing_keys`` lists which of base_url/api_key/api_mode are present, so a
+    stale api_key/api_mode left behind is visible even when the verdict is clean.
+    """
+    model_value = config.get("model")
+    if isinstance(model_value, dict):
+        provider_raw = str(model_value.get("provider") or config.get("provider") or "").strip()
+        base_url = str(model_value.get("base_url") or "").strip()
+        routing_keys = [key for key in _MODEL_ROUTING_KEYS if model_value.get(key)]
+    else:
+        provider_raw = str(config.get("provider") or "").strip()
+        base_url = ""
+        routing_keys = []
+    provider = runtime_provider_id(provider_raw) if provider_raw else ""
+    host = _url_host(base_url)
+    expected_host = _PROVIDER_CANONICAL_HOST.get(provider, "")
+
+    if not base_url:
+        verdict = "clean"
+        reason = "no custom endpoint"
+    elif not expected_host:
+        verdict = "unknown"
+        reason = f"provider={provider or 'missing'} has no canonical host; base_url={host or base_url}"
+    elif host and expected_host in host:
+        verdict = "clean"
+        reason = f"base_url host {host} matches provider {provider}"
+    else:
+        verdict = "drift"
+        reason = f"base_url host {host or base_url!r} does not match provider {provider} (expected *{expected_host})"
+
+    return {
+        "verdict": verdict,
+        "reason": reason,
+        "provider": provider,
+        "base_url": base_url,
+        "host": host,
+        "expected_host": expected_host,
+        "routing_keys": routing_keys,
+    }
 
 
 def hermes_config_path(slot: str) -> Path:
