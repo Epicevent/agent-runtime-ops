@@ -49,6 +49,48 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertIn("provider_runtime=gemini", text)
         self.assertIn("family=hermes", text)
 
+    def test_runtime_set_model_drops_stale_provider_routing(self) -> None:
+        # A base_url/api_key/api_mode left over from a previous provider (e.g. an
+        # OpenRouter endpoint carried onto a gemini provider) must not survive a
+        # provider/model change — otherwise gemini traffic keeps routing to the
+        # stale endpoint and 401s against a keyless OpenRouter. set-model writes
+        # the canonical provider/model with no inherited routing overrides.
+        written: dict[str, object] = {}
+        stale = {
+            "provider": "gemini",
+            "model": {
+                "default": "gemini-2.0-flash",
+                "provider": "gemini",
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key": "sk-stale",
+                "api_mode": "responses",
+            },
+        }
+        with (
+            patch("agent_runtime_ops.commands.runtime_config.is_root", return_value=True),
+            patch("agent_runtime_ops.commands.runtime_config._load_config_target", return_value=SimpleNamespace(slot="oc16", family="hermes")),
+            patch("agent_runtime_ops.commands.runtime_config.hermes_config_path", return_value=Path("/home/oc16/.hermes/config.yaml")),
+            patch("agent_runtime_ops.commands.runtime_config.read_hermes_config", return_value=stale),
+            patch("agent_runtime_ops.commands.runtime_config.write_hermes_config", side_effect=lambda _slot, _path, config: written.update(config)),
+            patch("agent_runtime_ops.commands.runtime_config.append_action_log"),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            rc = cmd_runtime_set_model(
+                argparse.Namespace(
+                    slot="oc16",
+                    provider="google",
+                    model="gemini-3.5-flash",
+                    state_root="/srv/openclaw-ops",
+                )
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            written["model"],
+            {"default": "gemini-3.5-flash", "provider": "gemini"},
+        )
+        self.assertNotIn("base_url", written["model"])
+        self.assertNotIn("api_key", written["model"])
+
     def test_runtime_config_status_prints_raw_and_runtime_provider(self) -> None:
         output = io.StringIO()
         with (

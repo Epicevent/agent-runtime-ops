@@ -151,6 +151,15 @@ def cmd_runtime_set_model(args: argparse.Namespace) -> int:
                 next_model = dict(current_model_value)
                 next_model["default"] = model
                 next_model["provider"] = provider
+                # Drop provider-specific routing left over from the previous
+                # provider. A stale base_url/api_key/api_mode (e.g. an OpenRouter
+                # base_url carried onto a gemini/google provider) misroutes every
+                # request to the wrong endpoint — the exact config drift that made
+                # a dev slot's gemini traffic 401 against keyless OpenRouter.
+                # set-model writes the canonical provider/model; a custom endpoint
+                # must be configured deliberately, not silently inherited.
+                for _stale_key in ("base_url", "api_key", "api_mode"):
+                    next_model.pop(_stale_key, None)
                 config["model"] = next_model
             else:
                 config["model"] = model
