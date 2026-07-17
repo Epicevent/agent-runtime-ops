@@ -44,6 +44,37 @@ def _workspace_current_row(slot: str) -> dict[str, str] | None:
     return rows[0]
 
 
+def workspace_bound_source(slot: str) -> str:
+    """The share the workspace currently shows, or "none". The bind's SOURCE
+    in the mount table is the underlying //host/share — the identity the
+    assignment ledger speaks, so consumers compare it directly."""
+    row = _workspace_current_row(slot)
+    if row is None:
+        return "none"
+    return row.get("source") or "none"
+
+
+def workspace_status_row(
+    slot: str,
+    rw_rows: list[dict[str, str]],
+    bound_source: str,
+    stamped_bind: bool,
+) -> dict[str, object]:
+    """One slot's live workspace reality, shaped for the fleet readout."""
+    return {
+        "slot": slot,
+        "bound_to": bound_source or "none",
+        "rw_sources": [row.get("source", "") for row in rw_rows],
+        "stamp_bind": stamped_bind,
+    }
+
+
+def workspace_status_has_signal(row: dict[str, object]) -> bool:
+    """Whether an UNSTAMPED candidate earns a line. Stamped slots always get
+    one — a stamp with nothing live is itself the drift worth showing."""
+    return row["bound_to"] != "none" or bool(row["rw_sources"]) or bool(row["stamp_bind"])
+
+
 def _release_workspace(slot: str, row: dict[str, str]) -> tuple[bool, str]:
     """Unmount whatever view currently sits at the workspace.
 

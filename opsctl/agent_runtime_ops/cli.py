@@ -40,6 +40,7 @@ from .commands.nas import (
     cmd_nas_mount,
     cmd_nas_mounted,
     cmd_nas_workspace_assign,
+    cmd_nas_workspace_status,
     cmd_nas_policy_check,
     cmd_nas_remove,
     cmd_nas_request,
@@ -412,6 +413,10 @@ def build_parser() -> argparse.ArgumentParser:
     nas_workspace_assign.add_argument("share")
     nas_workspace_assign.add_argument("--no-apply", action="store_true")
     nas_workspace_assign.set_defaults(func=cmd_nas_workspace_assign)
+    nas_workspace_status = nas_sub.add_parser(
+        "workspace-status", help="fleet-wide live workspace reality per slot: bound share + writable mounts (read-only)"
+    )
+    nas_workspace_status.set_defaults(func=cmd_nas_workspace_status)
     nas_unmount = nas_sub.add_parser("unmount")
     nas_unmount.add_argument("slot", metavar="target")
     nas_unmount.add_argument("share")

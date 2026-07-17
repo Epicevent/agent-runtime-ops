@@ -20,6 +20,10 @@ from ..domain.nas_mounts import prepare_mount_entry as _prepare_mount_entry
 from ..domain.workspace_bind import (
     assign_workspace_bind as _assign_workspace_bind,
     reconcile_workspace_bind as _reconcile_workspace_bind,
+    rw_cifs_mounts as _rw_cifs_mounts,
+    workspace_bound_source as _workspace_bound_source,
+    workspace_status_has_signal as _workspace_status_has_signal,
+    workspace_status_row as _workspace_status_row,
 )
 from ..domain.nas_mounts import write_managed_fstab_entry as _write_managed_fstab_entry
 from ..domain.nas_requests import move_request, safe_request_file
@@ -32,6 +36,8 @@ from ..host.account_files import (
     slot_uid_gid,
     write_credential_file,
 )
+from ..host.fstab import read_managed_fstab_entries as _read_managed_fstab_entries
+from ..host.fstab import read_managed_workspace_binds as _read_managed_workspace_binds
 from ..host.fstab import remove_managed_fstab_entry as _remove_managed_fstab_entry
 from ..host.fstab import update_managed_fstab_credentials as _update_managed_fstab_credentials
 from ..host.mounts import (
@@ -362,6 +368,52 @@ def cmd_nas_mounted(args: argparse.Namespace) -> int:
             print(f"{prefix}_official_credential_present=unknown")
             print(f"{prefix}_remount_possible=unknown")
     print("mounted_status=ok")
+    return 0
+
+
+def cmd_nas_workspace_status(args: argparse.Namespace) -> int:
+    """Fleet-wide live workspace reality in ONE call — what the assignment
+    reconciler reads every tick, mirroring how `nas view status` serves the
+    kakao-view axis. Read-only.
+
+    Stamped slots (managed fstab entry or workspace bind) always get a line:
+    a stamp with nothing live is exactly the drift worth showing. Unstamped
+    /home candidates need a live signal to earn one, so ordinary service
+    accounts stay out of the report.
+    """
+    entries = _read_managed_fstab_entries()
+    binds = _read_managed_workspace_binds()
+    stamped_bind_slots = {bind["slot"] for bind in binds}
+    stamped_slots = {entry["slot"] for entry in entries} | stamped_bind_slots
+    candidates = set(stamped_slots)
+    home = Path("/home")
+    if home.is_dir():
+        candidates |= {path.name for path in home.iterdir() if path.is_dir()}
+    print("mutates=false")
+    rows: list[dict[str, object]] = []
+    for slot in sorted(candidates):
+        try:
+            validate_linux_account(slot)
+        except Exception:
+            continue
+        row = _workspace_status_row(
+            slot,
+            _rw_cifs_mounts(slot),
+            _workspace_bound_source(slot),
+            slot in stamped_bind_slots,
+        )
+        if slot in stamped_slots or _workspace_status_has_signal(row):
+            rows.append(row)
+    print(f"ws_count={len(rows)}")
+    for index, row in enumerate(rows, start=1):
+        print(f"ws_{index}_slot={row['slot']}")
+        print(f"ws_{index}_bound_to={row['bound_to']}")
+        print(f"ws_{index}_stamp_bind={'yes' if row['stamp_bind'] else 'no'}")
+        sources = row["rw_sources"]
+        print(f"ws_{index}_rw_count={len(sources)}")
+        for rw_index, source in enumerate(sources, start=1):
+            print(f"ws_{index}_rw_{rw_index}={source}")
+    print("workspace_status=ok")
     return 0
 
 
