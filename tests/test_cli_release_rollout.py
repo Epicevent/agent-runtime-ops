@@ -540,6 +540,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 patch("agent_runtime_ops.domain.runtime_apply.slot_runtime_dir", return_value=runtime_dir),
                 patch("agent_runtime_ops.domain.runtime_apply.FINAL_WORKSPACE_GUIDANCE_STABILIZE_DELAYS_SECONDS", []),
                 patch("agent_runtime_ops.domain.runtime_apply.ensure_runtime_workspace_guidance", return_value={"workspace_guidance": "present"}) as guidance,
+                patch("agent_runtime_ops.domain.runtime_apply.ensure_nas_workspace_dir", return_value=runtime_dir / "workspace"),
                 patch("agent_runtime_ops.domain.runtime_apply.run_text_cwd", side_effect=fake_run),
                 patch(
                     "agent_runtime_ops.domain.runtime_apply.run_live_slot_checks_with_wait",
@@ -586,6 +587,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 patch("agent_runtime_ops.domain.runtime_apply.slot_runtime_dir", return_value=runtime_dir),
                 patch("agent_runtime_ops.domain.runtime_apply.FINAL_WORKSPACE_GUIDANCE_STABILIZE_DELAYS_SECONDS", []),
                 patch("agent_runtime_ops.domain.runtime_apply.ensure_runtime_workspace_guidance", return_value={"workspace_guidance": "present"}),
+                patch("agent_runtime_ops.domain.runtime_apply.ensure_nas_workspace_dir", return_value=runtime_dir / "workspace"),
                 patch(
                     "agent_runtime_ops.domain.runtime_apply.run_text_cwd",
                     return_value=subprocess.CompletedProcess(["docker"], 0, "", ""),
