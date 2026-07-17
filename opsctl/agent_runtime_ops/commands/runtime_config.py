@@ -10,6 +10,7 @@ from ..domain.config_contract import config_json_diff
 from ..domain.hermes_config import (
     current_model,
     hermes_config_path,
+    model_endpoint_drift,
     read_hermes_config,
     runtime_provider_id,
     sanitize_config_secret_overrides,
@@ -88,6 +89,15 @@ def cmd_runtime_config_status(args: argparse.Namespace) -> int:
     print(f"model={model or 'missing'}")
     print(f"model_ref={ref or 'missing'}")
     print(f"model_source={source}")
+    if desired.family == "hermes":
+        drift = model_endpoint_drift(config)
+        verdict = str(drift["verdict"])
+        routing_keys = drift["routing_keys"]
+        print(f"model_base_url_host={drift['host'] or 'none'}")
+        print(f"model_routing_keys={','.join(routing_keys) if routing_keys else 'none'}")
+        print(f"model_endpoint_drift={'yes' if verdict == 'drift' else verdict if verdict == 'unknown' else 'no'}")
+        if verdict != "clean":
+            print(f"model_endpoint_drift_reason={drift['reason']}")
     print("secret_value_printed=no")
     print("runtime_config_status=ok")
     return 0
