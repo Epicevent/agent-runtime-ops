@@ -76,7 +76,11 @@ from .commands.mitigation import (
     cmd_mitigation_list,
     cmd_mitigation_remove,
 )
-from .commands.runtime_secret import cmd_runtime_secret_set, cmd_runtime_secret_status
+from .commands.runtime_secret import (
+    cmd_runtime_secret_probe,
+    cmd_runtime_secret_set,
+    cmd_runtime_secret_status,
+)
 from .commands.runtime_config import (
     cmd_runtime_config_sanitize,
     cmd_runtime_config_status,
@@ -327,13 +331,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     runtime_secret = sub.add_parser("runtime-secret")
     runtime_secret_sub = runtime_secret.add_subparsers(dest="runtime_secret_command", required=True)
-    runtime_secret_set = runtime_secret_sub.add_parser("set")
+    runtime_secret_set = runtime_secret_sub.add_parser(
+        "set",
+        help="WRITES the secret immediately, then (optionally) restarts. NOT a dry-run — "
+        "even --check writes the value first, then verifies. To only VERIFY a key works, "
+        "use `runtime-secret probe` (read-only). Never use set to test a key.",
+    )
     runtime_secret_set.add_argument("slot", metavar="target")
     runtime_secret_set.add_argument("--env-file")
     runtime_secret_set.add_argument("--key")
     runtime_secret_set.add_argument("--value-stdin", action="store_true")
     runtime_secret_set.add_argument("--no-restart", action="store_true")
-    runtime_secret_set.add_argument("--check", action="store_true")
+    runtime_secret_set.add_argument(
+        "--check", action="store_true",
+        help="after writing, verify the value reached the container env + container is healthy. "
+        "This does NOT validate the value works with the provider, and it writes first — not a dry-run.",
+    )
     runtime_secret_set.add_argument(
         "--unsafe-service-recreate",
         action="store_true",
@@ -343,6 +356,14 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_secret_status = runtime_secret_sub.add_parser("status")
     runtime_secret_status.add_argument("slot", metavar="target")
     runtime_secret_status.set_defaults(func=cmd_runtime_secret_status)
+    runtime_secret_probe = runtime_secret_sub.add_parser(
+        "probe",
+        help="stored != valid: ask the provider whether the key actually works (read-only, no write). "
+        "The safe way to verify a key — never use `set` to test.",
+    )
+    runtime_secret_probe.add_argument("slot", metavar="target")
+    runtime_secret_probe.add_argument("--key", help="one provider key (e.g. GEMINI_API_KEY); default: all live-verified")
+    runtime_secret_probe.set_defaults(func=cmd_runtime_secret_probe)
 
     handoff = sub.add_parser("handoff")
     handoff_sub = handoff.add_subparsers(dest="handoff_command", required=True)
