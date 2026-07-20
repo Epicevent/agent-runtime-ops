@@ -40,7 +40,13 @@ from ..host.fstab import read_managed_fstab_entries as _read_managed_fstab_entri
 from ..host.fstab import read_managed_workspace_binds as _read_managed_workspace_binds
 from ..host.fstab import remove_managed_fstab_entry as _remove_managed_fstab_entry
 from ..host.fstab import update_managed_fstab_credentials as _update_managed_fstab_credentials
+from ..domain.nas_probe import (
+    probe_host as _probe_host,
+    probe_mounts as _probe_mounts,
+    smb_host_of as _smb_host_of,
+)
 from ..host.mounts import (
+    findmnt_all_cifs as _findmnt_all_cifs,
     findmnt_one as _findmnt_one,
     findmnt_under as _findmnt_under,
     is_readonly_mount as _is_readonly_mount,
@@ -415,6 +421,34 @@ def cmd_nas_workspace_status(args: argparse.Namespace) -> int:
             print(f"ws_{index}_rw_{rw_index}={source}")
     print("workspace_status=ok")
     return 0
+
+
+def cmd_nas_probe(args: argparse.Namespace) -> int:
+    """마운트됨 ≠ 연결됨 — 모든 cifs 마운트의 실제 읽기 생존을 잰다 (read-only).
+
+    rc 0 = 전부 살아있음, 1 = 죽은 마운트 있음, 2 = 목록 수집 실패.
+    마운트 테이블은 NAS 가 죽어도 그대로라(7/20 실측: 장비 다운 중에도 81개
+    "mounted"), 복구 후 "진짜 다 붙었나"는 이 명령만이 답한다.
+    """
+    rc, error, rows = _findmnt_all_cifs()
+    print("mutates=false")
+    if rc != 0:
+        print("nas_probe_status=fail")
+        print(f"reason={error or 'findmnt_failed'}")
+        return 2
+    hosts = sorted({h for h in (_smb_host_of(r.get("source", "")) for r in rows) if h})
+    for index, host in enumerate(hosts, start=1):
+        print(f"host_{index}={host}")
+        print(f"host_{index}_smb_open={'yes' if _probe_host(host) else 'no'}")
+    results = _probe_mounts(rows)
+    dead = [r for r in results if r["alive"] != "yes"]
+    for index, r in enumerate(results, start=1):
+        print(f"probe_{index}_target={r['target']}")
+        print(f"probe_{index}_source={r['source']}")
+        print(f"probe_{index}_alive={r['alive']}" + (f" reason={r['reason']}" if r["reason"] else ""))
+    print(f"probe_alive={len(results) - len(dead)}/{len(results)}")
+    print("nas_probe_status=ok")
+    return 0 if not dead else 1
 
 
 def cmd_nas_mount(args: argparse.Namespace) -> int:
