@@ -42,6 +42,7 @@ from ..nas import (
     parse_smb_share,
     root_credential_path,
     share_is_writable,
+    shared_credential_for_share,
 )
 
 
@@ -142,7 +143,15 @@ def cmd_nas_view_assign(args: argparse.Namespace) -> int:
             migrate_customer_credential_to_root(slot, decision.share)
             credential_path = root_credential_path(slot, decision.share)
             if not credential_path.exists():
-                raise ValueError("credential_missing: pass --username USER --password-stdin or create an official credential")
+                # per-slot 복사본이 없으면 공유 코퍼스 credential(ONE 공유 ro 계정,
+                # nas-policy corpus_credentials 선언)로 붙는다 — 슬롯마다 같은 비밀을
+                # 다시 심을 이유가 없다(공유 진실은 스토리지에 있다). override 가
+                # 필요하면 --username/--password-stdin 으로 per-slot 을 명시한다.
+                shared = shared_credential_for_share(decision.share, state_root)
+                if shared is not None and shared.exists():
+                    credential_path = shared
+                else:
+                    raise ValueError("credential_missing: no per-slot copy, and no corpus credential declared/present for this share (nas-policy corpus_credentials) — or pass --username USER --password-stdin")
 
         _ensure_hidden_dirs(slot)
         master = hidden_master(slot)
