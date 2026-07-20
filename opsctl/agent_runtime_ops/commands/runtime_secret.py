@@ -19,6 +19,11 @@ from ..domain.common import run_text_cwd as _run_text_cwd
 from ..domain.common import state_root as _state_root
 from ..domain.dev_recipe_runtime import upsert_runtime_env_file as _upsert_runtime_env_file
 from ..domain.hermes_smoke import run_hermes_http_smoke as _run_hermes_http_smoke
+from ..domain.secret_probe import (
+    PROBE_VERIFIED as _PROBE_VERIFIED,
+    PROVIDER_CHECKS as _PROVIDER_CHECKS,
+    probe_key_in_container as _probe_key_in_container,
+)
 from ..domain.runtime_checks import profile_startup_timeout_seconds as _profile_startup_timeout_seconds
 from ..domain.runtime_apply import apply_desired_slot as _apply_desired_slot
 from ..domain.docker_compose import compose_project_name, docker_compose_command
@@ -413,3 +418,63 @@ def cmd_runtime_secret_status(args: argparse.Namespace) -> int:
     print("secret_value_printed=no")
     print("runtime_secret_status=ok")
     return 0
+
+
+def cmd_runtime_secret_probe(args: argparse.Namespace) -> int:
+    """저장됨 ≠ 유효함 — 키가 실제로 provider 에 먹히는지 잰다 (read-only).
+
+    status 는 배관(값이 env 에 있나)만 본다. probe 는 그 값으로 provider 에 가장
+    싼 인증 콜을 한 번 날려 유효/무효를 가린다. 값은 컨테이너 안에서만 쓰이고
+    상태코드만 돌아온다(secret_probe 모듈 참조).
+
+    이 명령이 존재하는 이유는 사고 재발 방지다: 키를 확인하려고 쓰기 명령(set)을
+    쓸 필요가 없어진다. probe 는 아무것도 쓰지 않는다.
+
+    rc: 0 전부 유효(또는 잴 키 없음) · 1 무효 있음 · 2 컨테이너/실행 실패.
+    """
+    if not _is_root():
+        print("error: run as root/admin: sudo /usr/local/bin/opsctl runtime-secret probe TARGET", file=sys.stderr)
+        return 2
+    try:
+        desired = load_runtime_target(args.slot, _state_root(args))
+        profile = load_profile(desired.runtime_profile)
+        container, lookup = _find_gateway_container(desired.route, profile)
+    except Exception as exc:
+        print(f"target={args.slot}")
+        print("runtime_secret_probe=fail")
+        print(f"reason={exc}")
+        return 2
+
+    print(f"target={desired.slot}")
+    print(f"runtime_profile={profile.name}")
+    print("mutates=false")
+    if not container:
+        print("runtime_secret_probe=fail")
+        print(f"reason=gateway container not found ({lookup})")
+        return 2
+
+    # 라이브로 실증된 provider 만 잰다. --key 지정 시 그 하나(미검증이면 거부).
+    if args.key:
+        key = args.key.strip().upper()
+        if key not in _PROVIDER_CHECKS:
+            print("runtime_secret_probe=fail")
+            print(f"reason=no probe defined for key {key}")
+            return 2
+        if key not in _PROBE_VERIFIED:
+            print("runtime_secret_probe=fail")
+            print(f"reason={key} probe not live-verified yet (only {sorted(_PROBE_VERIFIED)})")
+            return 2
+        keys = [key]
+    else:
+        keys = sorted(_PROBE_VERIFIED)
+
+    print(f"secret_value_printed=no")
+    any_invalid = False
+    for index, key in enumerate(keys, start=1):
+        status, detail = _probe_key_in_container(container, _PROVIDER_CHECKS[key])
+        print(f"probe_{index}_key={key.lower()}")
+        print(f"probe_{index}_status={status}" + (f" detail={detail}" if detail else ""))
+        if status == "invalid":
+            any_invalid = True
+    print("runtime_secret_probe=ok")
+    return 1 if any_invalid else 0
