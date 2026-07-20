@@ -121,6 +121,12 @@ def findmnt_under(path: str, container_pid: int | None = None) -> tuple[int, str
     return proc.returncode, (proc.stderr or proc.stdout).strip(), rows
 
 
+def findmnt_all_cifs() -> tuple[int, str, list[dict[str, str]]]:
+    """Every cifs mount on the host — the probe's work list. Table only, no I/O."""
+    proc = _run_text(["findmnt", "-t", "cifs", "-P", "-o", "TARGET,SOURCE,FSTYPE,OPTIONS,PROPAGATION"])
+    return proc.returncode, (proc.stderr or proc.stdout).strip(), parse_findmnt_pairs(proc.stdout)
+
+
 def findmnt_one(path: Path) -> tuple[int, str, list[dict[str, str]]]:
     proc = _run_text(["findmnt", "-M", str(path), "-P", "-o", "TARGET,SOURCE,FSTYPE,OPTIONS,PROPAGATION"])
     return proc.returncode, (proc.stderr or proc.stdout).strip(), parse_findmnt_pairs(proc.stdout)
