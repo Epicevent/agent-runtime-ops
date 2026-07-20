@@ -137,6 +137,29 @@ def root_credential_path(slot: str, share: SmbShare) -> Path:
     return Path("/root") / "agent-runtime-ops" / "nas-credentials" / slot / host_component(share.host) / f"{share_component(share.share)}.cred"
 
 
+def canonical_shared_credential_path(share: SmbShare, policy: dict) -> Path | None:
+    """공유 코퍼스(kakao/그룹웨어 등 read-only)는 슬롯마다 다른 비밀이 아니라
+    ONE 공유 인프라 읽기계정으로 붙는다. 그 credential 은 슬롯이 아니라 스토리지에
+    있다 — root 소유 /etc/samba/credentials/*.cred, nas-policy.yaml corpus_credentials
+    에 share→cred 로 선언(시스템 fstab 이 이미 쓰는 그 파일과 일치). 매핑 없으면 None.
+
+    권한 경계는 슬롯(컴퓨트)이 아니라 스토리지에 둔다는 원칙의 구현. per-slot 복사본은
+    틀 오류(inherited)였고, 이 함수가 그 공유 진실을 opsctl 에 잇는다."""
+    mapping = policy.get("corpus_credentials") if isinstance(policy, dict) else None
+    if not isinstance(mapping, dict):
+        return None
+    for pattern, cred in mapping.items():
+        if isinstance(cred, str) and cred and _source_matches(str(pattern), share):
+            return Path(cred)
+    return None
+
+
+def shared_credential_for_share(share: SmbShare, state_root: Path) -> Path | None:
+    """nas-policy.yaml 을 읽어 이 share 의 공유 credential 경로를 돌려준다(있으면)."""
+    policy = load_yaml(state_path(state_root, "nas-policy.yaml"))
+    return canonical_shared_credential_path(share, policy)
+
+
 def request_path(slot: str, share: SmbShare) -> Path:
     return request_dir(slot) / f"{host_component(share.host)}--{share_component(share.share)}.env"
 
