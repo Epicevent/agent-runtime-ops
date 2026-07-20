@@ -12,9 +12,14 @@ from ..domain.hermes_config import (
     hermes_config_path,
     model_endpoint_drift,
     read_hermes_config,
+    read_version_notes,
+    remove_version_note,
     runtime_provider_id,
     sanitize_config_secret_overrides,
+    upsert_version_note,
+    version_notes_path,
     write_hermes_config,
+    write_version_notes,
 )
 from ..domain.openclaw_config import (
     build_model_ref,
@@ -208,6 +213,74 @@ def cmd_runtime_set_model(args: argparse.Namespace) -> int:
         "ok",
         f"{previous_ref or 'missing'} -> {new_ref}",
     )
+    return 0
+
+
+def cmd_runtime_version_note(args: argparse.Namespace) -> int:
+    """Operator-authored patch notes for the workspace "What's new" dialog.
+
+    The image bakes version/date only; the note TEXT customers read comes
+    from <slot home>/.hermes/version-notes.json — this command is the pen.
+    Live: the workspace re-reads the file on every /api/versions call, so
+    edits show up on the next dialog open, no rebuild, no restart.
+    """
+    if not is_root():
+        print("error: run as root/admin: sudo /usr/local/bin/opsctl runtime version-note TARGET", file=sys.stderr)
+        return 2
+    target = str(args.slot)
+    try:
+        desired = _load_hermes_target(target, args)
+        path = version_notes_path(desired.slot)
+        entries = read_version_notes(path)
+        version = str(getattr(args, "version", "") or "")
+        notes = [str(n) for n in (getattr(args, "note", None) or [])]
+        clear = bool(getattr(args, "clear", False))
+        if clear and not version:
+            raise ValueError("--clear requires --version")
+        if notes and not version:
+            raise ValueError("--note requires --version")
+        action = "show"
+        if version and clear:
+            entries, removed = remove_version_note(entries, version)
+            write_version_notes(desired.slot, path, entries)
+            action = "cleared" if removed else "clear_noop"
+        elif version:
+            entries = upsert_version_note(
+                entries, version, notes, date=str(getattr(args, "date", "") or "")
+            )
+            write_version_notes(desired.slot, path, entries)
+            action = "written"
+    except Exception as exc:
+        print(f"target={target}")
+        print("runtime_version_note_status=fail")
+        print(f"reason={exc}")
+        try:
+            append_action_log(state_root(args), "runtime_version_note", target, target, "fail", str(exc))
+        except Exception:
+            pass
+        return 1
+
+    print(f"target={desired.slot}")
+    print(f"notes_file={path}")
+    print(f"action={action}")
+    print(f"entry_count={len(entries)}")
+    for entry in entries:
+        entry_version = entry.get("version", "?")
+        entry_notes = entry.get("notes") or []
+        print(f"entry {entry_version} date={entry.get('date', '-')} notes={len(entry_notes) if isinstance(entry_notes, list) else '?'}")
+        if isinstance(entry_notes, list):
+            for note in entry_notes:
+                print(f"  - {note}")
+    print("runtime_version_note_status=ok")
+    if action in {"written", "cleared"}:
+        append_action_log(
+            state_root(args),
+            "runtime_version_note",
+            desired.slot,
+            desired.slot,
+            "ok",
+            f"{action} {version}",
+        )
     return 0
 
 

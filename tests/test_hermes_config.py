@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-from agent_runtime_ops.domain.hermes_config import model_endpoint_drift
+from agent_runtime_ops.domain.hermes_config import (
+    model_endpoint_drift,
+    remove_version_note,
+    upsert_version_note,
+)
 
 
 class ModelEndpointDriftTests(unittest.TestCase):
@@ -80,6 +84,49 @@ class ModelEndpointDriftTests(unittest.TestCase):
         )
         self.assertEqual(result["verdict"], "clean")
         self.assertEqual(result["routing_keys"], ["api_key", "api_mode"])
+
+
+class VersionNoteTests(unittest.TestCase):
+    def test_upsert_inserts_newest_first(self) -> None:
+        entries = upsert_version_note([], "2026.7.17", ["폴더 정리 지원"], date="2026-07-17")
+        entries = upsert_version_note(entries, "2026.7.20", ["버전 기록 추가"])
+        self.assertEqual([e["version"] for e in entries], ["2026.7.20", "2026.7.17"])
+        self.assertEqual(entries[1], {"version": "2026.7.17", "notes": ["폴더 정리 지원"], "date": "2026-07-17"})
+
+    def test_upsert_replaces_same_version(self) -> None:
+        entries = upsert_version_note([], "2026.7.17", ["초안"])
+        entries = upsert_version_note(entries, "2026.7.17", ["정정된 노트"])
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["notes"], ["정정된 노트"])
+
+    def test_upsert_strips_and_requires_nonempty(self) -> None:
+        entries = upsert_version_note([], "2026.7.17", ["  공백 정리  ", ""])
+        self.assertEqual(entries[0]["notes"], ["공백 정리"])
+        with self.assertRaises(ValueError):
+            upsert_version_note([], "2026.7.17", ["   ", ""])
+
+    def test_upsert_validates_version_and_date(self) -> None:
+        with self.assertRaises(ValueError):
+            upsert_version_note([], "v1.2.3", ["note"])
+        with self.assertRaises(ValueError):
+            upsert_version_note([], "2026.7.17", ["note"], date="17-07-2026")
+        # same-day follow-up suffix is valid
+        entries = upsert_version_note([], "2026.7.17-1", ["note"])
+        self.assertEqual(entries[0]["version"], "2026.7.17-1")
+
+    def test_upsert_limits(self) -> None:
+        with self.assertRaises(ValueError):
+            upsert_version_note([], "2026.7.17", ["x"] * 11)
+        with self.assertRaises(ValueError):
+            upsert_version_note([], "2026.7.17", ["y" * 301])
+
+    def test_remove(self) -> None:
+        entries = upsert_version_note([], "2026.7.17", ["note"])
+        remaining, removed = remove_version_note(entries, "2026.7.17")
+        self.assertTrue(removed)
+        self.assertEqual(remaining, [])
+        remaining, removed = remove_version_note(remaining, "2026.7.17")
+        self.assertFalse(removed)
 
 
 if __name__ == "__main__":

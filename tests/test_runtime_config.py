@@ -12,6 +12,7 @@ from agent_runtime_ops.commands.runtime_config import (
     cmd_runtime_config_sanitize,
     cmd_runtime_config_status,
     cmd_runtime_set_model,
+    cmd_runtime_version_note,
     runtime_provider_id,
 )
 
@@ -200,6 +201,63 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertNotIn("google-secret", text)
         self.assertNotIn("gemini-secret", text)
         self.assertNotIn("auth-secret", text)
+
+
+class RuntimeVersionNoteTests(unittest.TestCase):
+    def _run(self, *, existing, argv_extra):
+        written: dict[str, object] = {}
+        output = io.StringIO()
+        with (
+            patch("agent_runtime_ops.commands.runtime_config.is_root", return_value=True),
+            patch("agent_runtime_ops.commands.runtime_config._load_hermes_target", return_value=SimpleNamespace(slot="oc16", family="hermes")),
+            patch("agent_runtime_ops.commands.runtime_config.version_notes_path", return_value=Path("/home/oc16/.hermes/version-notes.json")),
+            patch("agent_runtime_ops.commands.runtime_config.read_version_notes", return_value=existing),
+            patch("agent_runtime_ops.commands.runtime_config.write_version_notes", side_effect=lambda _slot, _path, entries: written.update({"entries": entries})),
+            patch("agent_runtime_ops.commands.runtime_config.append_action_log"),
+            contextlib.redirect_stdout(output),
+        ):
+            rc = cmd_runtime_version_note(
+                argparse.Namespace(slot="oc16", state_root="/srv/openclaw-ops", **argv_extra)
+            )
+        return rc, written, output.getvalue()
+
+    def test_write_note_upserts_and_prints(self) -> None:
+        rc, written, text = self._run(
+            existing=[],
+            argv_extra={"version": "2026.7.17", "date": "2026-07-17", "note": ["폴더 정리 지원"], "clear": False},
+        )
+        self.assertEqual(rc, 0, text)
+        self.assertEqual(written["entries"], [{"version": "2026.7.17", "notes": ["폴더 정리 지원"], "date": "2026-07-17"}])
+        self.assertIn("action=written", text)
+        self.assertIn("  - 폴더 정리 지원", text)
+
+    def test_clear_removes_entry(self) -> None:
+        rc, written, text = self._run(
+            existing=[{"version": "2026.7.17", "notes": ["x"]}],
+            argv_extra={"version": "2026.7.17", "date": "", "note": None, "clear": True},
+        )
+        self.assertEqual(rc, 0, text)
+        self.assertEqual(written["entries"], [])
+        self.assertIn("action=cleared", text)
+
+    def test_show_without_version_reads_only(self) -> None:
+        rc, written, text = self._run(
+            existing=[{"version": "2026.7.14", "notes": ["이미지 표시"], "date": "2026-07-14"}],
+            argv_extra={"version": "", "date": "", "note": None, "clear": False},
+        )
+        self.assertEqual(rc, 0, text)
+        self.assertNotIn("entries", written)  # no write on show
+        self.assertIn("action=show", text)
+        self.assertIn("entry 2026.7.14", text)
+
+    def test_invalid_version_fails(self) -> None:
+        rc, written, text = self._run(
+            existing=[],
+            argv_extra={"version": "v1", "date": "", "note": ["x"], "clear": False},
+        )
+        self.assertEqual(rc, 1)
+        self.assertNotIn("entries", written)
+        self.assertIn("runtime_version_note_status=fail", text)
 
 
 class OpenClawSetModelTests(unittest.TestCase):

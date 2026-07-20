@@ -76,7 +76,12 @@ from .commands.mitigation import (
     cmd_mitigation_remove,
 )
 from .commands.runtime_secret import cmd_runtime_secret_set, cmd_runtime_secret_status
-from .commands.runtime_config import cmd_runtime_config_sanitize, cmd_runtime_config_status, cmd_runtime_set_model
+from .commands.runtime_config import (
+    cmd_runtime_config_sanitize,
+    cmd_runtime_config_status,
+    cmd_runtime_set_model,
+    cmd_runtime_version_note,
+)
 from .commands.runtime_truth import cmd_runtime_truth
 from .commands.status import cmd_plan, cmd_status
 from .commands.update import cmd_self_update, cmd_update_approve, cmd_update_status
@@ -191,6 +196,16 @@ def build_parser() -> argparse.ArgumentParser:
     sanitize_mode.add_argument("--dry-run", action="store_true")
     sanitize_mode.add_argument("--apply", action="store_true")
     runtime_config_sanitize.set_defaults(func=cmd_runtime_config_sanitize)
+    runtime_version_note = runtime_sub.add_parser(
+        "version-note",
+        help="operator-authored patch notes shown in the workspace What's new dialog",
+    )
+    runtime_version_note.add_argument("slot", metavar="target")
+    runtime_version_note.add_argument("--version", default="", help="CalVer entry, e.g. 2026.7.17")
+    runtime_version_note.add_argument("--date", default="", help="optional YYYY-MM-DD shown next to the version")
+    runtime_version_note.add_argument("--note", action="append", help="note bullet (repeatable); customer-facing text")
+    runtime_version_note.add_argument("--clear", action="store_true", help="remove the entry for --version")
+    runtime_version_note.set_defaults(func=cmd_runtime_version_note)
 
     document_tools = sub.add_parser("document-tools")
     document_tools_sub = document_tools.add_subparsers(dest="document_tools_command", required=True)
