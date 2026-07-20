@@ -25,8 +25,11 @@ from ..domain.openclaw_config import (
     build_model_ref,
     current_openclaw_model,
     openclaw_config_path,
+    openclaw_version_notes_path,
     read_openclaw_config,
+    read_openclaw_version_notes,
     run_openclaw_models_set,
+    write_openclaw_version_notes,
 )
 from ..domain.runtime_truth import find_gateway_container
 from ..profiles import load_profile
@@ -217,39 +220,82 @@ def cmd_runtime_set_model(args: argparse.Namespace) -> int:
 
 
 def cmd_runtime_version_note(args: argparse.Namespace) -> int:
-    """Operator-authored patch notes for the workspace "What's new" dialog.
+    """Operator-authored patch notes for the in-app version modal — one pen
+    for BOTH families (owner rule: the mechanisms must not diverge).
 
-    The image bakes version/date only; the note TEXT customers read comes
-    from <slot home>/.hermes/version-notes.json — this command is the pen.
-    Live: the workspace re-reads the file on every /api/versions call, so
-    edits show up on the next dialog open, no rebuild, no restart.
+    hermes:   <slot home>/.hermes/version-notes.json, entries
+              [{version, date?, notes: [...]}] — one bullet per --note.
+    openclaw: <slot home>/.openclaw/version-notes.json, {version: "note"}
+              (the product's version-notes-store contract, single string —
+              repeated --note values are joined with ", "; --date is baked
+              in the OC timeline and not accepted here).
+
+    Both are live overlays on mounted state: the product re-reads the file,
+    so edits show on next modal open — no rebuild, no restart.
     """
     if not is_root():
         print("error: run as root/admin: sudo /usr/local/bin/opsctl runtime version-note TARGET", file=sys.stderr)
         return 2
     target = str(args.slot)
     try:
-        desired = _load_hermes_target(target, args)
-        path = version_notes_path(desired.slot)
-        entries = read_version_notes(path)
+        desired = _load_config_target(target, args)
         version = str(getattr(args, "version", "") or "")
         notes = [str(n) for n in (getattr(args, "note", None) or [])]
+        date = str(getattr(args, "date", "") or "")
         clear = bool(getattr(args, "clear", False))
         if clear and not version:
             raise ValueError("--clear requires --version")
         if notes and not version:
             raise ValueError("--note requires --version")
         action = "show"
-        if version and clear:
-            entries, removed = remove_version_note(entries, version)
-            write_version_notes(desired.slot, path, entries)
-            action = "cleared" if removed else "clear_noop"
-        elif version:
-            entries = upsert_version_note(
-                entries, version, notes, date=str(getattr(args, "date", "") or "")
-            )
-            write_version_notes(desired.slot, path, entries)
-            action = "written"
+
+        if desired.family == "openclaw":
+            if date:
+                raise ValueError("openclaw notes carry no date (it comes from the baked build timeline)")
+            path = openclaw_version_notes_path(desired.slot)
+            oc_notes = read_openclaw_version_notes(path)
+            if version and clear:
+                removed = version in oc_notes
+                oc_notes.pop(version, None)
+                write_openclaw_version_notes(desired.slot, path, oc_notes)
+                action = "cleared" if removed else "clear_noop"
+            elif version:
+                joined = ", ".join(n.strip() for n in notes if n.strip())
+                # reuse the hermes validator for version format + length limits
+                upsert_version_note([], version, [joined] if joined else [])
+                oc_notes[version] = joined
+                write_openclaw_version_notes(desired.slot, path, oc_notes)
+                action = "written"
+            print(f"target={desired.slot}")
+            print(f"family={desired.family}")
+            print(f"notes_file={path}")
+            print(f"action={action}")
+            print(f"entry_count={len(oc_notes)}")
+            for entry_version in sorted(oc_notes, reverse=True):
+                print(f"entry {entry_version}")
+                print(f"  - {oc_notes[entry_version]}")
+        else:
+            path = version_notes_path(desired.slot)
+            entries = read_version_notes(path)
+            if version and clear:
+                entries, removed = remove_version_note(entries, version)
+                write_version_notes(desired.slot, path, entries)
+                action = "cleared" if removed else "clear_noop"
+            elif version:
+                entries = upsert_version_note(entries, version, notes, date=date)
+                write_version_notes(desired.slot, path, entries)
+                action = "written"
+            print(f"target={desired.slot}")
+            print(f"family={desired.family}")
+            print(f"notes_file={path}")
+            print(f"action={action}")
+            print(f"entry_count={len(entries)}")
+            for entry in entries:
+                entry_notes = entry.get("notes") or []
+                print(f"entry {entry.get('version', '?')} date={entry.get('date', '-')} notes={len(entry_notes) if isinstance(entry_notes, list) else '?'}")
+                if isinstance(entry_notes, list):
+                    for note in entry_notes:
+                        print(f"  - {note}")
     except Exception as exc:
         print(f"target={target}")
         print("runtime_version_note_status=fail")
@@ -260,17 +306,6 @@ def cmd_runtime_version_note(args: argparse.Namespace) -> int:
             pass
         return 1
 
-    print(f"target={desired.slot}")
-    print(f"notes_file={path}")
-    print(f"action={action}")
-    print(f"entry_count={len(entries)}")
-    for entry in entries:
-        entry_version = entry.get("version", "?")
-        entry_notes = entry.get("notes") or []
-        print(f"entry {entry_version} date={entry.get('date', '-')} notes={len(entry_notes) if isinstance(entry_notes, list) else '?'}")
-        if isinstance(entry_notes, list):
-            for note in entry_notes:
-                print(f"  - {note}")
     print("runtime_version_note_status=ok")
     if action in {"written", "cleared"}:
         append_action_log(

@@ -4,7 +4,8 @@ import json
 import os
 from pathlib import Path
 
-from ..host.account_files import ensure_not_symlink_chain, slot_home
+from ..host.account_files import ensure_not_symlink_chain, runtime_ids, slot_home
+from ..host.files import fsync_parent
 from .common import run_text
 
 
@@ -31,6 +32,56 @@ def openclaw_config_path(slot: str) -> Path:
     if path.exists() and path.is_symlink():
         raise ValueError(f"config file must not be a symlink: {path}")
     return path
+
+
+# ── Version-notes overlay (operator-authored patch notes) ────────────────────
+#
+# OpenClaw's version modal reads a live overlay keyed by build version:
+# <stateDir>/version-notes.json = {"2026.7.16": "note text", ...} — a SINGLE
+# string per version (the product's version-notes-store.ts contract; empty
+# clears). stateDir is the mounted /home/<slot>/.openclaw, so a root write
+# here shows up in the modal on next open, no rebuild. Same operator pen as
+# the hermes overlay — one opsctl command serves both families.
+
+def openclaw_version_notes_path(slot: str) -> Path:
+    home = slot_home(slot).resolve(strict=False)
+    path = home / ".openclaw" / "version-notes.json"
+    ensure_not_symlink_chain(path.parent, home)
+    if path.exists() and path.is_symlink():
+        raise ValueError(f"version-notes file must not be a symlink: {path}")
+    return path
+
+
+def read_openclaw_version_notes(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    if not path.is_file():
+        raise ValueError(f"version-notes path is not a regular file: {path}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"version-notes must be a JSON object: {path}")
+    return {k: v for k, v in data.items() if isinstance(v, str)}
+
+
+def write_openclaw_version_notes(slot: str, path: Path, notes: dict[str, str]) -> None:
+    """Atomic write, owned by the slot runtime user so the in-container
+    gateway (which reads it for the version modal) can open it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    uid, _, gid = runtime_ids(slot)
+    tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            json.dump(notes, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chown(tmp_path, uid, gid)
+        os.chmod(tmp_path, 0o640)
+        os.replace(tmp_path, path)
+        fsync_parent(path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def read_openclaw_config(path: Path) -> dict[str, object]:

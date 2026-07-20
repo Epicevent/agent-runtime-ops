@@ -209,7 +209,7 @@ class RuntimeVersionNoteTests(unittest.TestCase):
         output = io.StringIO()
         with (
             patch("agent_runtime_ops.commands.runtime_config.is_root", return_value=True),
-            patch("agent_runtime_ops.commands.runtime_config._load_hermes_target", return_value=SimpleNamespace(slot="oc16", family="hermes")),
+            patch("agent_runtime_ops.commands.runtime_config._load_config_target", return_value=SimpleNamespace(slot="oc16", family="hermes")),
             patch("agent_runtime_ops.commands.runtime_config.version_notes_path", return_value=Path("/home/oc16/.hermes/version-notes.json")),
             patch("agent_runtime_ops.commands.runtime_config.read_version_notes", return_value=existing),
             patch("agent_runtime_ops.commands.runtime_config.write_version_notes", side_effect=lambda _slot, _path, entries: written.update({"entries": entries})),
@@ -258,6 +258,66 @@ class RuntimeVersionNoteTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertNotIn("entries", written)
         self.assertIn("runtime_version_note_status=fail", text)
+
+
+class RuntimeVersionNoteOpenClawTests(unittest.TestCase):
+    """Same pen, openclaw family: {version: "single note string"} at
+    <slot home>/.openclaw/version-notes.json (product contract)."""
+
+    def _run(self, *, existing, argv_extra):
+        written: dict[str, object] = {}
+        output = io.StringIO()
+        with (
+            patch("agent_runtime_ops.commands.runtime_config.is_root", return_value=True),
+            patch("agent_runtime_ops.commands.runtime_config._load_config_target", return_value=SimpleNamespace(slot="oc14", family="openclaw")),
+            patch("agent_runtime_ops.commands.runtime_config.openclaw_version_notes_path", return_value=Path("/home/oc14/.openclaw/version-notes.json")),
+            patch("agent_runtime_ops.commands.runtime_config.read_openclaw_version_notes", return_value=existing),
+            patch("agent_runtime_ops.commands.runtime_config.write_openclaw_version_notes", side_effect=lambda _slot, _path, notes: written.update({"notes": notes})),
+            patch("agent_runtime_ops.commands.runtime_config.append_action_log"),
+            contextlib.redirect_stdout(output),
+        ):
+            rc = cmd_runtime_version_note(
+                argparse.Namespace(slot="oc14", state_root="/srv/openclaw-ops", **argv_extra)
+            )
+        return rc, written, output.getvalue()
+
+    def test_write_joins_notes_into_single_string(self) -> None:
+        rc, written, text = self._run(
+            existing={},
+            argv_extra={"version": "2026.7.16", "date": "", "note": ["세션 스크롤", "이미지 수정"], "clear": False},
+        )
+        self.assertEqual(rc, 0, text)
+        self.assertEqual(written["notes"], {"2026.7.16": "세션 스크롤, 이미지 수정"})
+        self.assertIn("action=written", text)
+        self.assertIn("family=openclaw", text)
+
+    def test_clear_removes_key(self) -> None:
+        rc, written, text = self._run(
+            existing={"2026.7.16": "x"},
+            argv_extra={"version": "2026.7.16", "date": "", "note": None, "clear": True},
+        )
+        self.assertEqual(rc, 0, text)
+        self.assertEqual(written["notes"], {})
+        self.assertIn("action=cleared", text)
+
+    def test_date_rejected_for_openclaw(self) -> None:
+        rc, written, text = self._run(
+            existing={},
+            argv_extra={"version": "2026.7.16", "date": "2026-07-16", "note": ["x"], "clear": False},
+        )
+        self.assertEqual(rc, 1)
+        self.assertNotIn("notes", written)
+        self.assertIn("baked build timeline", text)
+
+    def test_show_reads_only(self) -> None:
+        rc, written, text = self._run(
+            existing={"2026.7.16": "세션 스크롤 지원"},
+            argv_extra={"version": "", "date": "", "note": None, "clear": False},
+        )
+        self.assertEqual(rc, 0, text)
+        self.assertNotIn("notes", written)
+        self.assertIn("entry 2026.7.16", text)
+        self.assertIn("  - 세션 스크롤 지원", text)
 
 
 class OpenClawSetModelTests(unittest.TestCase):
