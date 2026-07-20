@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 from pathlib import Path
+import re as _re
 import stat
 from urllib.parse import urlparse
 
@@ -168,6 +170,96 @@ def write_hermes_config(slot: str, path: Path, config: dict[str, object]) -> Non
             os.fsync(handle.fileno())
         os.chown(tmp_path, uid, gid)
         os.chmod(tmp_path, mode)
+        os.replace(tmp_path, path)
+        fsync_parent(path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+# ── Version-notes overlay (operator-authored patch notes) ────────────────────
+#
+# The hermes workspace's "What's new" dialog shows customers a release
+# timeline. The IMAGE bakes only version/date; the customer-facing note text
+# is operator-authored and lives per-slot in <slot home>/.hermes/
+# version-notes.json — served merged by the workspace, editable live with no
+# rebuild. Shape mirrors the baked list: [{version, date, notes[]}].
+
+_VERSION_NOTE_VERSION_RE = _re.compile(r"^[0-9]{4}\.[0-9]{1,2}\.[0-9]{1,2}(-[0-9]+)?$")
+_VERSION_NOTE_DATE_RE = _re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+VERSION_NOTE_MAX_NOTES = 10
+VERSION_NOTE_MAX_NOTE_LENGTH = 300
+
+
+def version_notes_path(slot: str) -> Path:
+    home = slot_home(slot).resolve(strict=False)
+    path = home / ".hermes" / "version-notes.json"
+    ensure_not_symlink_chain(path.parent, home)
+    if path.exists() and path.is_symlink():
+        raise ValueError(f"version-notes file must not be a symlink: {path}")
+    return path
+
+
+def read_version_notes(path: Path) -> list[dict[str, object]]:
+    if not path.exists():
+        return []
+    if not path.is_file():
+        raise ValueError(f"version-notes path is not a regular file: {path}")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, list):
+        raise ValueError(f"version-notes must be a JSON array: {path}")
+    return [entry for entry in data if isinstance(entry, dict)]
+
+
+def upsert_version_note(
+    entries: list[dict[str, object]],
+    version: str,
+    notes: list[str],
+    date: str = "",
+) -> list[dict[str, object]]:
+    """Replace or insert the overlay entry for ``version`` (newest-first)."""
+    if not _VERSION_NOTE_VERSION_RE.match(version):
+        raise ValueError(f"invalid version (CalVer YYYY.M.D[-N] expected): {version!r}")
+    if date and not _VERSION_NOTE_DATE_RE.match(date):
+        raise ValueError(f"invalid date (YYYY-MM-DD expected): {date!r}")
+    cleaned = [note.strip() for note in notes if note.strip()]
+    if not cleaned:
+        raise ValueError("at least one non-empty --note is required")
+    if len(cleaned) > VERSION_NOTE_MAX_NOTES:
+        raise ValueError(f"too many notes (max {VERSION_NOTE_MAX_NOTES})")
+    for note in cleaned:
+        if len(note) > VERSION_NOTE_MAX_NOTE_LENGTH:
+            raise ValueError(
+                f"note too long (max {VERSION_NOTE_MAX_NOTE_LENGTH} chars): {note[:40]!r}…"
+            )
+    entry: dict[str, object] = {"version": version, "notes": cleaned}
+    if date:
+        entry["date"] = date
+    remaining = [e for e in entries if e.get("version") != version]
+    return [entry, *remaining]
+
+
+def remove_version_note(
+    entries: list[dict[str, object]], version: str
+) -> tuple[list[dict[str, object]], bool]:
+    remaining = [e for e in entries if e.get("version") != version]
+    return remaining, len(remaining) != len(entries)
+
+
+def write_version_notes(slot: str, path: Path, entries: list[dict[str, object]]) -> None:
+    """Atomic write, owned by the slot runtime user so the in-container
+    workspace server (which reads it on /api/versions) can open it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    uid, _, gid = runtime_ids(slot)
+    tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            json.dump(entries, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chown(tmp_path, uid, gid)
+        os.chmod(tmp_path, 0o640)
         os.replace(tmp_path, path)
         fsync_parent(path)
     except Exception:
