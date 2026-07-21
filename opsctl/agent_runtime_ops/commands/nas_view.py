@@ -95,9 +95,11 @@ def _mount_master(master: Path, share_source: str) -> tuple[bool, str]:
 
 
 def _apply_binds(plan: ViewPlan) -> tuple[bool, str, int]:
-    ok, reason = bind_ro(plan.package_dir, plan.package_bind)
-    if not ok:
-        return False, f"package_bind:{reason}", 0
+    # granted_paths 코퍼스는 단일 패키지가 없다 — 붙일 것이 전부 room_binds 에 있다.
+    if plan.package_dir is not None and plan.package_bind is not None:
+        ok, reason = bind_ro(plan.package_dir, plan.package_bind)
+        if not ok:
+            return False, f"package_bind:{reason}", 0
     bound_rooms = 0
     for source, target in plan.room_binds:
         ok, reason = bind_ro(source, target)
@@ -177,7 +179,9 @@ def cmd_nas_view_assign(args: argparse.Namespace) -> int:
         if not ok:
             raise ValueError(f"master_mount_failed: {reason}")
 
-        plan = build_view_plan(slot, user_id, decision.share.source, state_root)
+        plan = build_view_plan(
+            slot, user_id, decision.share.source, state_root, list(getattr(args, "path", None) or [])
+        )
         ok, reason, bound_rooms = _apply_binds(plan)
         if not ok:
             raise ValueError(f"bind_failed: {reason}")
@@ -193,7 +197,9 @@ def cmd_nas_view_assign(args: argparse.Namespace) -> int:
         "user_id": plan.user_id,
         "share": plan.share.source,
         "corpus": plan.corpus,
-        "package": plan.package_dir.name,
+        "package": plan.package_dir.name if plan.package_dir else "",
+        # 재부팅 복구가 같은 경로를 다시 세울 수 있게 원장에 남긴다(restore 는 DB 를 못 본다).
+        "paths": list(plan.paths),
         "rooms_bound": bound_rooms,
         "rooms_missing_media": list(plan.missing_rooms),
         "assigned_at": _now_iso(),
@@ -204,7 +210,11 @@ def cmd_nas_view_assign(args: argparse.Namespace) -> int:
     print(f"user_id={plan.user_id}")
     print(f"corpus={plan.corpus}")
     print(f"share={plan.share.source}")
-    print(f"package={plan.package_dir.name}")
+    print(f"package={plan.package_dir.name if plan.package_dir else ''}")
+    if plan.paths:
+        print(f"paths_bound={bound_rooms}/{len(plan.paths)}")
+        if plan.missing_rooms:
+            print("paths_missing=" + ",".join(plan.missing_rooms))
     print(f"entry={plan.entry}")
     print(f"rooms_bound={bound_rooms}")
     print(f"rooms_missing_media={len(plan.missing_rooms)}")
@@ -440,7 +450,9 @@ def _restore_views(state_root: Path, records: list) -> int:
             ok, reason = _mount_master(hidden_master(slot, corpus), share_source)
             if not ok:
                 raise ValueError(f"master_mount_failed: {reason}")
-            plan = build_view_plan(slot, user_id, share_source, state_root)
+            plan = build_view_plan(
+                slot, user_id, share_source, state_root, list(record.get("paths") or [])
+            )
             ok, reason, bound_rooms = _apply_binds(plan)
             if not ok:
                 raise ValueError(f"bind_failed: {reason}")

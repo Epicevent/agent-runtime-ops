@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -19,8 +20,11 @@ from agent_runtime_ops.domain.nas_views import (
     get_view_record,
     hidden_master,
     iter_view_records,
+    path_alias,
     put_view_record,
+    resolve_granted_dirs,
     slot_entry,
+    validate_relative_path,
     view_root,
 )
 
@@ -46,7 +50,7 @@ class CorpusPathsTest(unittest.TestCase):
     def test_share_resolves_to_corpus(self):
         self.assertEqual(corpus_for_share("//10.10.10.2/kakao-work").name, "kakao")
         spec = corpus_for_share("//10.10.10.2/hanpass_groupware")
-        self.assertEqual((spec.name, spec.layout, spec.person_root), ("groupware", "person_dir", "groupware/mails"))
+        self.assertEqual((spec.name, spec.layout), ("groupware", "granted_paths"))
 
     def test_unknown_share_is_refused_not_defaulted(self):
         # 조용히 카카오 레이아웃으로 흘러 엉뚱한 폴더를 여는 것보다 안 붙는 편이 안전하다.
@@ -73,6 +77,34 @@ class ViewRecordsTest(unittest.TestCase):
         self.assertIsNone(get_view_record(views, "oc3", "groupware"))
         self.assertIsNotNone(get_view_record(views, "oc3", "kakao"))
         self.assertNotIn("oc3", views["corpus_views"])  # 빈 껍데기 안 남긴다
+
+
+class GrantedPathsTest(unittest.TestCase):
+    """붙일 경로의 진실은 grant 원장(운영자가 폴더를 직접 고른다) — opsctl 은 규칙을
+    발명하지 않고 '받은 경로만' 붙인다. mails/{mb_id} 같은 규칙은 approval(표시이름
+    폴더)에서 이미 깨지고, 폴더 없는 사람 27명(측정 7/21)에서도 깨진다."""
+
+    def test_alias_flattens_full_path_so_same_leaf_does_not_collide(self):
+        self.assertEqual(path_alias("mails/bkkim/"), "mails_bkkim")
+        self.assertNotEqual(path_alias("mails/kim"), path_alias("approval/kim"))
+
+    def test_path_escape_is_refused(self):
+        for bad in ("/etc/passwd", "../../etc", "mails/../../x", "", "a\\b"):
+            with self.assertRaises(ValueError):
+                validate_relative_path(bad)
+
+    def test_korean_and_space_folder_names_survive(self):
+        # approval/ 은 표시이름 폴더다 — 공백·한글이 정상값이지 예외가 아니다.
+        self.assertEqual(validate_relative_path("approval/HARI SEKHAR BABU"), "approval/HARI SEKHAR BABU")
+        self.assertEqual(path_alias("approval/유태현 수석"), "approval_유태현 수석")
+
+    def test_missing_folder_is_reported_not_fatal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            master = Path(tmp)
+            (master / "mails" / "bkkim").mkdir(parents=True)
+            binds, missing = resolve_granted_dirs(master, ["mails/bkkim/", "mails/nobody/"])
+            self.assertEqual([str(a) for _s, a in binds], ["mails_bkkim"])
+            self.assertEqual(missing, ["mails/nobody"])
 
 
 if __name__ == "__main__":
