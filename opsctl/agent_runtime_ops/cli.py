@@ -210,6 +210,20 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_version_note.add_argument("--date", default="", help="optional YYYY-MM-DD shown next to the version")
     runtime_version_note.add_argument("--note", action="append", help="note bullet (repeatable); customer-facing text")
     runtime_version_note.add_argument("--clear", action="store_true", help="remove the entry for --version")
+    release_gate = runtime_version_note.add_mutually_exclusive_group()
+    release_gate.add_argument(
+        "--publish",
+        dest="customer_release",
+        action="store_true",
+        default=None,
+        help="show this version to customers (OpenClaw customerRelease)",
+    )
+    release_gate.add_argument(
+        "--unpublish",
+        dest="customer_release",
+        action="store_false",
+        help="hide this version from customers again",
+    )
     runtime_version_note.set_defaults(func=cmd_runtime_version_note)
 
     document_tools = sub.add_parser("document-tools")

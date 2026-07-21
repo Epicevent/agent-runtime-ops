@@ -120,6 +120,21 @@ class VersionNoteTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             upsert_version_note([], "2026.7.17", ["y" * 301])
 
+    def test_publishing_is_separate_from_writing(self) -> None:
+        # writing a note must not publish it (OpenClaw customerRelease parity)
+        entries = upsert_version_note([], "2026.7.21", ["초안"])
+        self.assertNotIn("customerRelease", entries[0])
+        # publish explicitly
+        entries = upsert_version_note(entries, "2026.7.21", [], customer_release=True)
+        self.assertTrue(entries[0]["customerRelease"])
+        self.assertEqual(entries[0]["notes"], ["초안"])  # flag-only edit keeps notes
+        # editing text later keeps it published
+        entries = upsert_version_note(entries, "2026.7.21", ["고친 문구"])
+        self.assertTrue(entries[0]["customerRelease"])
+        # and can be pulled back
+        entries = upsert_version_note(entries, "2026.7.21", [], customer_release=False)
+        self.assertNotIn("customerRelease", entries[0])
+
     def test_remove(self) -> None:
         entries = upsert_version_note([], "2026.7.17", ["note"])
         remaining, removed = remove_version_note(entries, "2026.7.17")

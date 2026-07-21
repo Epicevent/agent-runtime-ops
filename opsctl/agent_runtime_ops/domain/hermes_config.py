@@ -216,14 +216,20 @@ def upsert_version_note(
     version: str,
     notes: list[str],
     date: str = "",
+    customer_release: bool | None = None,
 ) -> list[dict[str, object]]:
-    """Replace or insert the overlay entry for ``version`` (newest-first)."""
+    """Replace or insert the overlay entry for ``version`` (newest-first).
+
+    Publishing is a SEPARATE act from writing (OpenClaw's ``customerRelease``):
+    ``customer_release=None`` keeps whatever the entry already had, so editing
+    a note never silently publishes or unpublishes it.
+    """
     if not _VERSION_NOTE_VERSION_RE.match(version):
         raise ValueError(f"invalid version (CalVer YYYY.M.D[-N] expected): {version!r}")
     if date and not _VERSION_NOTE_DATE_RE.match(date):
         raise ValueError(f"invalid date (YYYY-MM-DD expected): {date!r}")
     cleaned = [note.strip() for note in notes if note.strip()]
-    if not cleaned:
+    if not cleaned and customer_release is None:
         raise ValueError("at least one non-empty --note is required")
     if len(cleaned) > VERSION_NOTE_MAX_NOTES:
         raise ValueError(f"too many notes (max {VERSION_NOTE_MAX_NOTES})")
@@ -232,10 +238,26 @@ def upsert_version_note(
             raise ValueError(
                 f"note too long (max {VERSION_NOTE_MAX_NOTE_LENGTH} chars): {note[:40]!r}…"
             )
+    previous = next((e for e in entries if e.get("version") == version), None)
+    if not cleaned and previous is not None:
+        # flag-only change: keep the notes already written
+        prev_notes = previous.get("notes")
+        cleaned = [str(n) for n in prev_notes] if isinstance(prev_notes, list) else []
+    published = (
+        customer_release
+        if customer_release is not None
+        else bool(previous.get("customerRelease")) if previous else False
+    )
     entry: dict[str, object] = {"version": version, "notes": cleaned}
     if date:
         entry["date"] = date
+    elif previous and previous.get("date"):
+        entry["date"] = previous["date"]
+    if published:
+        entry["customerRelease"] = True
     remaining = [e for e in entries if e.get("version") != version]
+    if not cleaned and not published:
+        return remaining
     return [entry, *remaining]
 
 
