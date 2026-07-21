@@ -300,7 +300,10 @@ class NasViewCliTests(unittest.TestCase):
             root = Path(tmp) / "state"
             root.mkdir()
             data = load_views_state(root)
-            data["views"]["oc3"] = {"user_id": "42", "share": "//h/s", "package": "p_42"}
+            data["views"]["oc3"] = {
+                "user_id": "42", "share": "//h/s", "package": "p_42",
+                "paths": ["groupware/mails/jitech", "groupware/approval/대표 이사"],
+            }
             save_views_state(root, data)
             output = io.StringIO()
             fstab = "# agent-runtime-ops nas slot=oc3 source=//h/s\n//h/s /srv/kw-nas/slots/oc3/master cifs ro,nofail 0 0\n"
@@ -316,6 +319,10 @@ class NasViewCliTests(unittest.TestCase):
                 rc = cmd_nas_view_status(argparse.Namespace(state_root=str(root)))
             self.assertEqual(rc, 0, output.getvalue())
             self.assertIn("view_1_target=oc3", output.getvalue())
+            self.assertIn(
+                'view_1_paths_json=["groupware/mails/jitech","groupware/approval/대표 이사"]',
+                output.getvalue(),
+            )
             self.assertIn("view_1_healthy=yes", output.getvalue())
             self.assertIn("boot_fstab_entries=1/1", output.getvalue())
             self.assertIn("boot_restore_cron=unknown_requires_root", output.getvalue())

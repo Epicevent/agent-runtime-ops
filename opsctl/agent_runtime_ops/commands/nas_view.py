@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import sys
 from pathlib import Path
 
@@ -303,6 +304,7 @@ def cmd_nas_view_status(args: argparse.Namespace) -> int:
         print(f"{prefix}_user_id={record.get('user_id', '')}")
         print(f"{prefix}_share={record.get('share', '')}")
         print(f"{prefix}_package={record.get('package', '')}")
+        print(f"{prefix}_paths_json={json.dumps(record.get('paths') or [], ensure_ascii=False, separators=(',', ':'))}")
         checks = {
             "master_mounted": hidden_master(slot, corpus),
             "entry_mounted": slot_entry(slot, corpus),
