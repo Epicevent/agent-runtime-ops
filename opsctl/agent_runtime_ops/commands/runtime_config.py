@@ -243,10 +243,13 @@ def cmd_runtime_version_note(args: argparse.Namespace) -> int:
         notes = [str(n) for n in (getattr(args, "note", None) or [])]
         date = str(getattr(args, "date", "") or "")
         clear = bool(getattr(args, "clear", False))
+        customer_release = getattr(args, "customer_release", None)
         if clear and not version:
             raise ValueError("--clear requires --version")
         if notes and not version:
             raise ValueError("--note requires --version")
+        if customer_release is not None and not version:
+            raise ValueError("--publish/--unpublish requires --version")
         action = "show"
 
         if desired.family == "openclaw":
@@ -282,7 +285,9 @@ def cmd_runtime_version_note(args: argparse.Namespace) -> int:
                 write_version_notes(desired.slot, path, entries)
                 action = "cleared" if removed else "clear_noop"
             elif version:
-                entries = upsert_version_note(entries, version, notes, date=date)
+                entries = upsert_version_note(
+                    entries, version, notes, date=date, customer_release=customer_release
+                )
                 write_version_notes(desired.slot, path, entries)
                 action = "written"
             print(f"target={desired.slot}")
@@ -292,7 +297,12 @@ def cmd_runtime_version_note(args: argparse.Namespace) -> int:
             print(f"entry_count={len(entries)}")
             for entry in entries:
                 entry_notes = entry.get("notes") or []
-                print(f"entry {entry.get('version', '?')} date={entry.get('date', '-')} notes={len(entry_notes) if isinstance(entry_notes, list) else '?'}")
+                published = "yes" if entry.get("customerRelease") else "no"
+                print(
+                    f"entry {entry.get('version', '?')} date={entry.get('date', '-')} "
+                    f"customer_visible={published} "
+                    f"notes={len(entry_notes) if isinstance(entry_notes, list) else '?'}"
+                )
                 if isinstance(entry_notes, list):
                     for note in entry_notes:
                         print(f"  - {note}")
