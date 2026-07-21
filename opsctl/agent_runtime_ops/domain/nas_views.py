@@ -38,7 +38,12 @@ SAFE_ROOM_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
 # 한 슬롯은 그 사람의 소스 "전부"를 봐야 한다(카카오·그룹웨어·와츠앱…). 코퍼스마다
 # 디스크 레이아웃이 다르므로 뷰 계획은 여기서 갈린다:
 #   kakao_package — users/{이름}_{직함}_{user_id} 패키지 + membership.json 의 방 바인드
-#   person_dir    — {person_root}/{user_id} 사람 폴더 하나. 방 개념 없음(그룹웨어)
+#   granted_paths — 무엇을 붙일지 opsctl 이 스스로 정하지 않는다. 호출자(리컨실러)가
+#                   경로를 명시로 넘긴다. 그룹웨어에서 "이 사람이 볼 경로"의 진실은
+#                   grant 원장(g5_dashboard_nas_grant)이고 운영자가 편집 페이지에서
+#                   폴더를 직접 고른다 — mails/{mb_id} 같은 규칙은 편의 기본값일 뿐
+#                   진실이 아니다(approval 은 표시이름 폴더라 규칙으로는 안 잡힌다).
+#                   opsctl 은 DB 를 모른 채 "받은 경로만" 마운트한다.
 # PRIMARY(kakao)의 경로는 고객 슬롯에 이미 살아 있으므로 절대 바꾸지 않는다:
 # master/view 는 slots/{slot}/ 바로 아래, 진입점은 nas_docs/kw 그대로. 새 코퍼스는
 # slots/{slot}/{corpus}/ 와 nas_docs/{entry} 로 나란히 선다.
@@ -49,13 +54,12 @@ PRIMARY_CORPUS = "kakao"
 class Corpus:
     name: str
     entry_name: str          # /home/{slot}/nas_docs/{entry_name}
-    layout: str              # "kakao_package" | "person_dir"
-    person_root: str = ""    # person_dir: master 아래 사람 폴더들의 부모
+    layout: str              # "kakao_package" | "granted_paths"
 
 
 CORPORA: dict[str, Corpus] = {
     "kakao-work": Corpus(PRIMARY_CORPUS, "kw", "kakao_package"),
-    "hanpass_groupware": Corpus("groupware", "groupware", "person_dir", "groupware/mails"),
+    "hanpass_groupware": Corpus("groupware", "groupware", "granted_paths"),
 }
 
 
@@ -200,23 +204,50 @@ def load_membership_rooms(package_dir: Path) -> list[str]:
     return [validate_room_id(room) for room in rooms]
 
 
-def find_person_dir(master: Path, person_root: str, user_id: str) -> Path:
-    """{person_root}/{user_id} — 사람 폴더가 곧 패키지인 코퍼스(그룹웨어 mails).
+def validate_relative_path(value: str) -> str:
+    """마운트할 상대경로 검증 — 절대경로·상위탈출·빈 조각을 막는다.
 
-    카카오처럼 접미사 탐색을 하지 않는다: 그룹웨어 메일함은 폴더명 == mb_id 라
-    정확히 일치하는 하나만 연다(부분일치로 남의 폴더가 걸리는 경로를 아예 없앰)."""
-    user_id = validate_user_id(user_id)
-    parent = master
-    for part in str(person_root).strip("/").split("/"):
-        if part in {"", ".", ".."}:
-            raise ValueError(f"unsafe person_root: {person_root!r}")
-        parent = parent / part
-    if not parent.is_dir():
-        raise FileNotFoundError(f"person root not found under master mount: {parent}")
-    target = parent / user_id
-    if not target.is_dir() or target.is_symlink():
-        raise FileNotFoundError(f"no person folder {user_id!r} under {parent}")
-    return target
+    이 경로는 grant 원장에서 오고 운영자가 폴더 브라우저로 고른 값이다. 그래도
+    opsctl 은 받은 값을 믿지 않는다: master 밖으로 새는 경로는 여기서 끊는다."""
+    text = str(value).strip()
+    # 절대경로는 앞 '/' 를 벗겨 상대경로로 봐주지 않는다 — 입력을 말없이 다른 뜻으로
+    # 바꾸면 운영자가 고른 것과 실제 붙는 것이 갈린다. 거부해서 다시 고르게 한다.
+    if text.startswith("/"):
+        raise ValueError(f"path must be corpus-relative, got absolute: {value!r}")
+    raw = text.rstrip("/")
+    if not raw or len(raw) > 512 or "\\" in raw:
+        raise ValueError(f"unsafe path: {value!r}")
+    parts = [p for p in raw.split("/")]
+    if any(p in {"", ".", ".."} for p in parts):
+        raise ValueError(f"unsafe path: {value!r}")
+    return "/".join(parts)
+
+
+def path_alias(rel_path: str) -> str:
+    """view/ 아래 붙일 이름 — 경로를 납작하게. mails/bkkim -> mails_bkkim.
+    폴더명이 겹쳐도(mails/kim vs approval/kim) 서로 덮지 않게 전체 경로를 쓴다."""
+    return validate_relative_path(rel_path).replace("/", "_")
+
+
+def resolve_granted_dirs(master: Path, paths: list[str]) -> tuple[list[tuple[Path, Path]], list[str]]:
+    """(바인드쌍, 없는 경로들). 없는 경로는 실패가 아니라 '못 붙은 것'으로 보고한다 —
+    grant 는 있는데 폴더가 아직 없는 사람이 실제로 있고(측정 7/21: 65명 중 27명),
+    그 한 건 때문에 나머지 소스까지 안 붙으면 안 된다."""
+    binds: list[tuple[Path, Path]] = []
+    missing: list[str] = []
+    view_names: set[str] = set()
+    for raw in paths:
+        rel = validate_relative_path(raw)
+        source = master / rel
+        if not source.is_dir() or source.is_symlink():
+            missing.append(rel)
+            continue
+        alias = path_alias(rel)
+        if alias in view_names:
+            continue
+        view_names.add(alias)
+        binds.append((source, Path(alias)))
+    return binds, missing
 
 
 @dataclass(frozen=True)
@@ -227,14 +258,22 @@ class ViewPlan:
     master: Path
     view: Path
     entry: Path
-    package_dir: Path
-    package_bind: Path
+    # granted_paths 코퍼스는 단일 패키지가 없다(경로 여러 개) — package_* 는 None.
+    package_dir: Path | None = None
+    package_bind: Path | None = None
     room_binds: list[tuple[Path, Path]] = field(default_factory=list)
     missing_rooms: list[str] = field(default_factory=list)
     corpus: str = PRIMARY_CORPUS
+    paths: list[str] = field(default_factory=list)
 
 
-def build_view_plan(slot: str, user_id: str, share_source: str, state_root: Path) -> ViewPlan:
+def build_view_plan(
+    slot: str,
+    user_id: str,
+    share_source: str,
+    state_root: Path,
+    paths: list[str] | None = None,
+) -> ViewPlan:
     """Requires the hidden master to be mounted already (package discovery reads it).
 
     코퍼스 레이아웃별로 갈린다(CORPORA). 카카오는 users/ 패키지 + 방 바인드,
@@ -250,16 +289,28 @@ def build_view_plan(slot: str, user_id: str, share_source: str, state_root: Path
     view = view_root(slot, spec.name)
     room_binds: list[tuple[Path, Path]] = []
     missing: list[str] = []
+    package_dir: Path | None = None
+    package_bind: Path | None = None
+    used_paths: list[str] = []
     if spec.layout == "kakao_package":
         package_dir = find_user_package(master, user_id)
+        package_bind = view / "package"
         for room in load_membership_rooms(package_dir):
             source = master / "media" / room
             if source.is_dir() and not source.is_symlink():
                 room_binds.append((source, view / "media" / room))
             else:
                 missing.append(room)
-    elif spec.layout == "person_dir":
-        package_dir = find_person_dir(master, spec.person_root, user_id)
+    elif spec.layout == "granted_paths":
+        # 무엇을 붙일지는 호출자가 정한다(그룹웨어 = grant 원장). 빈 목록이면 붙일 게
+        # 없다는 뜻이므로 조용히 빈 뷰를 만들지 않고 거부한다.
+        if not paths:
+            raise ValueError(f"corpus {spec.name!r} needs explicit --path (granted prefixes); none given")
+        resolved, missing = resolve_granted_dirs(master, paths)
+        if not resolved:
+            raise FileNotFoundError(f"none of the granted paths exist under master: {', '.join(missing)}")
+        room_binds = [(source, view / alias) for source, alias in resolved]
+        used_paths = [validate_relative_path(p) for p in paths]
     else:
         raise ValueError(f"unknown corpus layout: {spec.layout!r}")
     return ViewPlan(
@@ -270,10 +321,11 @@ def build_view_plan(slot: str, user_id: str, share_source: str, state_root: Path
         view=view,
         entry=slot_entry(slot, spec.name),
         package_dir=package_dir,
-        package_bind=view / "package",
+        package_bind=package_bind,
         room_binds=room_binds,
         missing_rooms=missing,
         corpus=spec.name,
+        paths=used_paths,
     )
 
 

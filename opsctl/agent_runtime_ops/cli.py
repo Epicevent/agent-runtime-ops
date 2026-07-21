@@ -476,6 +476,14 @@ def build_parser() -> argparse.ArgumentParser:
     nas_view_assign.add_argument("slot", metavar="target")
     nas_view_assign.add_argument("user_id")
     nas_view_assign.add_argument("--share", required=True)
+    nas_view_assign.add_argument(
+        "--path",
+        action="append",
+        default=[],
+        metavar="REL_PATH",
+        help="corpus-relative folder to expose (repeatable). grant 원장이 진실인 코퍼스"
+             "(그룹웨어)는 필수 — 호출자가 준 경로만 붙는다. 카카오는 무시(패키지 자동탐색).",
+    )
     nas_view_assign.add_argument("--username")
     nas_view_assign.add_argument("--password-stdin", action="store_true")
     nas_view_assign.add_argument("--domain")
