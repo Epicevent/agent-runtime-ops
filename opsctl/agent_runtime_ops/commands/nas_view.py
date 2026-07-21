@@ -13,13 +13,19 @@ from ..domain.common import state_root as _state_root
 from ..domain.nas_credentials import migrate_customer_credential_to_root
 from ..domain.nas_mounts import write_managed_fstab_entry as _write_managed_fstab_entry
 from ..domain.nas_views import (
+    PRIMARY_CORPUS,
     ViewPlan,
     build_view_plan,
+    corpus_for_share,
     crontab_has_reboot_restore,
+    drop_view_record,
     fstab_boot_entry_present,
+    get_view_record,
     hidden_master,
+    iter_view_records,
     load_views_state,
     managed_fstab_mount_targets,
+    put_view_record,
     save_views_state,
     slot_entry,
     slot_views_root,
@@ -53,14 +59,19 @@ def _require_root(command: str) -> bool:
     return False
 
 
-def _ensure_hidden_dirs(slot: str) -> None:
+def _ensure_hidden_dirs(slot: str, corpus: str = PRIMARY_CORPUS) -> None:
     from ..domain.nas_views import VIEWS_ROOT
 
-    for path, mode in ((VIEWS_ROOT, 0o700), (slot_views_root(slot), 0o700)):
+    # 0700 부모가 마스터 마운트를 슬롯에게서 가린다 — 코퍼스 하위 디렉터리도
+    # 같은 규율로 만든다(슬롯은 bind 된 view 만 본다).
+    roots = [(VIEWS_ROOT, 0o700), (slot_views_root(slot), 0o700)]
+    if corpus != PRIMARY_CORPUS:
+        roots.append((slot_views_root(slot, corpus), 0o700))
+    for path, mode in roots:
         path.mkdir(parents=True, exist_ok=True)
         path.chmod(mode)
-    hidden_master(slot).mkdir(parents=True, exist_ok=True)
-    view_root(slot).mkdir(parents=True, exist_ok=True)
+    hidden_master(slot, corpus).mkdir(parents=True, exist_ok=True)
+    view_root(slot, corpus).mkdir(parents=True, exist_ok=True)
 
 
 def _mount_master(master: Path, share_source: str) -> tuple[bool, str]:
@@ -112,11 +123,17 @@ def cmd_nas_view_assign(args: argparse.Namespace) -> int:
         if share_is_writable(decision.share):
             raise ValueError("nas view is for shared corpus (kakao/groupware/whatsapp); OCn own-folder shares use `nas mount`")
         user_id = validate_user_id(args.user_id)
-
+        # 소스별로 뷰가 선다: 카카오가 붙은 슬롯에도 그룹웨어를 나란히 붙일 수 있다
+        # (사람이 슬롯에 오면 그 사람 것 '전부'가 보여야 한다). 같은 코퍼스를 두 번
+        # 붙이는 것만 막는다 — 그건 교체이므로 detach 를 거쳐야 한다.
+        spec = corpus_for_share(decision.share.source)
         views = load_views_state(state_root)
-        existing = views["views"].get(slot)
+        existing = get_view_record(views, slot, spec.name)
         if existing:
-            raise ValueError(f"slot already has a view (user_id={existing.get('user_id')}) — run: opsctl nas view detach {slot}")
+            raise ValueError(
+                f"slot already has a {spec.name} view (user_id={existing.get('user_id')}) — "
+                f"run: opsctl nas view detach {slot} --corpus {spec.name}"
+            )
 
         full_mount = mountpoint_for_share(slot, decision.share)
         rc, _, rows = _findmnt_one(full_mount)
@@ -153,8 +170,8 @@ def cmd_nas_view_assign(args: argparse.Namespace) -> int:
                 else:
                     raise ValueError("credential_missing: no per-slot copy, and no corpus credential declared/present for this share (nas-policy corpus_credentials) — or pass --username USER --password-stdin")
 
-        _ensure_hidden_dirs(slot)
-        master = hidden_master(slot)
+        _ensure_hidden_dirs(slot, spec.name)
+        master = hidden_master(slot, spec.name)
         _write_managed_fstab_entry(slot, decision.share.source, master, credential_path)
         ok, reason = _mount_master(master, decision.share.source)
         if not ok:
@@ -172,18 +189,20 @@ def cmd_nas_view_assign(args: argparse.Namespace) -> int:
         _append_action_log(state_root, "nas_view_assign", args.slot, args.share, "fail", str(exc))
         return 1
 
-    views["views"][slot] = {
+    put_view_record(views, slot, plan.corpus, {
         "user_id": plan.user_id,
         "share": plan.share.source,
+        "corpus": plan.corpus,
         "package": plan.package_dir.name,
         "rooms_bound": bound_rooms,
         "rooms_missing_media": list(plan.missing_rooms),
         "assigned_at": _now_iso(),
-    }
+    })
     save_views_state(state_root, views)
 
     print(f"target={slot}")
     print(f"user_id={plan.user_id}")
+    print(f"corpus={plan.corpus}")
     print(f"share={plan.share.source}")
     print(f"package={plan.package_dir.name}")
     print(f"entry={plan.entry}")
@@ -201,18 +220,28 @@ def cmd_nas_view_detach(args: argparse.Namespace) -> int:
     state_root = _state_root(args)
     try:
         views = load_views_state(state_root)
-        record = views["views"].get(args.slot)
         slot = args.slot
+        # 어느 소스를 떼는가: --corpus 우선, 없으면 --share 에서 유도, 그것도 없으면
+        # 카카오(기존 호출 호환). 슬롯에 여러 뷰가 설 수 있으므로 대상을 명시해야 한다.
+        # 순서 주의: own-folder 가드가 코퍼스 판별보다 **먼저**다. `//host/OC3` 같은
+        # 자기폴더 share 에는 "nas unmount 를 쓰라"는 안내가 나와야 하는데, 코퍼스
+        # 미등록 오류가 먼저 터지면 그 안내가 사라진다.
+        corpus = (getattr(args, "corpus", "") or "").strip()
+        record = get_view_record(views, slot, corpus) if corpus else views["views"].get(slot)
         share_source = (record or {}).get("share") or args.share
         if not share_source:
             raise ValueError("view not recorded and no --share given — cannot resolve fstab entry")
         share = parse_smb_share(share_source)
         if share_is_writable(share):
             raise ValueError("nas view detach is for shared corpus; OCn own-folder shares use `nas unmount`")
+        if not corpus:
+            corpus = corpus_for_share(share_source).name
+            if corpus != PRIMARY_CORPUS:
+                record = get_view_record(views, slot, corpus)
 
-        entry_failed, entry_errors = unmount_tree(slot_entry(slot))
-        view_failed, view_errors = unmount_tree(view_root(slot))
-        master_failed, master_errors = unmount_tree(hidden_master(slot))
+        entry_failed, entry_errors = unmount_tree(slot_entry(slot, corpus))
+        view_failed, view_errors = unmount_tree(view_root(slot, corpus))
+        master_failed, master_errors = unmount_tree(hidden_master(slot, corpus))
         failures = entry_errors + view_errors + master_errors
         if entry_failed or view_failed or master_failed:
             raise ValueError("umount_failed: " + "; ".join(failures))
@@ -233,9 +262,10 @@ def cmd_nas_view_detach(args: argparse.Namespace) -> int:
 
     had_record = record is not None
     if had_record:
-        del views["views"][slot]
+        drop_view_record(views, slot, corpus)
         save_views_state(state_root, views)
     print(f"target={slot}")
+    print(f"corpus={corpus}")
     print(f"share={share_source}")
     print(f"fstab_entry_removed={'yes' if fstab_removed else 'no'}")
     print(f"state_record_removed={'yes' if had_record else 'no'}")
@@ -249,19 +279,23 @@ def cmd_nas_view_detach(args: argparse.Namespace) -> int:
 def cmd_nas_view_status(args: argparse.Namespace) -> int:
     state_root = _state_root(args)
     views = load_views_state(state_root)
-    records = views.get("views", {})
+    # 한 슬롯이 여러 소스 뷰를 가질 수 있다 — 전부 싣는다. 소비자(리컨실러)는
+    # view_N_share/_corpus 로 소스를 가른다. 빠뜨리면 그 소스는 화면에서 사라지고,
+    # 안 보이는 소스는 초록으로 오해된다.
+    records = list(iter_view_records(views))
     print(f"view_count={len(records)}")
     print("mutates=false")
     exit_code = 0
-    for index, (slot, record) in enumerate(sorted(records.items()), start=1):
+    for index, (slot, corpus, record) in enumerate(records, start=1):
         prefix = f"view_{index}"
         print(f"{prefix}_target={slot}")
+        print(f"{prefix}_corpus={corpus}")
         print(f"{prefix}_user_id={record.get('user_id', '')}")
         print(f"{prefix}_share={record.get('share', '')}")
         print(f"{prefix}_package={record.get('package', '')}")
         checks = {
-            "master_mounted": hidden_master(slot),
-            "entry_mounted": slot_entry(slot),
+            "master_mounted": hidden_master(slot, corpus),
+            "entry_mounted": slot_entry(slot, corpus),
         }
         healthy = True
         for label, path in checks.items():
@@ -282,7 +316,7 @@ def cmd_nas_view_status(args: argparse.Namespace) -> int:
     # half is only decidable when run via sudo).
     fstab_text = _read_fstab()
     if records:
-        missing = [slot for slot, record in sorted(records.items()) if not fstab_boot_entry_present(slot, record.get("share", ""), fstab_text)]
+        missing = [slot for slot, _corpus, record in records if not fstab_boot_entry_present(slot, record.get("share", ""), fstab_text)]
         print(f"boot_fstab_entries={len(records) - len(missing)}/{len(records)}")
         if missing:
             print(f"boot_fstab_missing={','.join(missing)}")
@@ -364,7 +398,7 @@ def cmd_nas_view_restore(args: argparse.Namespace) -> int:
         return 2
     state_root = _state_root(args)
     views = load_views_state(state_root)
-    records = views.get("views", {})
+    records = list(iter_view_records(views))
     print(f"view_count={len(records)}")
     boot_failed = 0
     with _restore_lock():
@@ -373,7 +407,7 @@ def cmd_nas_view_restore(args: argparse.Namespace) -> int:
             # wait for SMB, then remount every fstab CIFS entry that lost the boot
             # race (mount -a is idempotent: already-mounted entries are skipped).
             hosts = []
-            for record in records.values():
+            for _slot, _corpus, record in records:
                 try:
                     hosts.append(parse_smb_share(record.get("share", "")).host)
                 except ValueError:
@@ -394,21 +428,23 @@ def cmd_nas_view_restore(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
-def _restore_views(state_root: Path, records: dict) -> int:
+def _restore_views(state_root: Path, records: list) -> int:
+    """재부팅 복구 — 슬롯의 모든 소스 뷰를 되살린다. 한 소스가 실패해도 나머지는
+    계속 복구한다(카카오가 죽어서 그룹웨어까지 못 돌아오는 일 없게)."""
     failed = 0
-    for slot, record in sorted(records.items()):
+    for slot, corpus, record in records:
         share_source = record.get("share", "")
         user_id = record.get("user_id", "")
         try:
-            _ensure_hidden_dirs(slot)
-            ok, reason = _mount_master(hidden_master(slot), share_source)
+            _ensure_hidden_dirs(slot, corpus)
+            ok, reason = _mount_master(hidden_master(slot, corpus), share_source)
             if not ok:
                 raise ValueError(f"master_mount_failed: {reason}")
             plan = build_view_plan(slot, user_id, share_source, state_root)
             ok, reason, bound_rooms = _apply_binds(plan)
             if not ok:
                 raise ValueError(f"bind_failed: {reason}")
-            print(f"restored target={slot} user_id={user_id} rooms_bound={bound_rooms}")
+            print(f"restored target={slot} corpus={corpus} user_id={user_id} rooms_bound={bound_rooms}")
             _append_action_log(state_root, "nas_view_restore", slot, share_source, "ok", f"user_id={user_id}")
         except Exception as exc:
             failed += 1
