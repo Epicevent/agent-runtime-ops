@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import sqlite3
 import re
 from pathlib import Path
 
@@ -202,6 +203,30 @@ def load_membership_rooms(package_dir: Path) -> list[str]:
     if not isinstance(rooms, list) or not rooms:
         raise ValueError(f"membership.json has no conversation_ids: {membership_path}")
     return [validate_room_id(room) for room in rooms]
+
+
+def load_package_room_summary(package_dir: Path) -> list[dict[str, object]]:
+    """List the real rooms published in a Kakao package without reading messages."""
+    allowed = set(load_membership_rooms(package_dir))
+    sqlite_path = package_dir / "messages.sqlite"
+    if not sqlite_path.is_file() or sqlite_path.is_symlink():
+        raise FileNotFoundError(f"messages.sqlite not found in package: {package_dir}")
+    conn = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            "SELECT conversation_id, MAX(room_name) AS room_name, COUNT(*) AS message_count, "
+            "MAX(sent_time) AS latest_sent_time FROM messages "
+            "GROUP BY conversation_id ORDER BY latest_sent_time DESC"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [
+        {
+            "conversation_id": str(cid), "room_name": str(name or ""),
+            "message_count": int(count), "latest_sent_time": int(latest or 0),
+        }
+        for cid, name, count, latest in rows if str(cid) in allowed
+    ]
 
 
 def validate_relative_path(value: str) -> str:

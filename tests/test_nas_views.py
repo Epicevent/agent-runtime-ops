@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import io
 import json
+import sqlite3
 from pathlib import Path
 import tempfile
 import unittest
@@ -19,6 +20,7 @@ from agent_runtime_ops.domain.nas_views import (
     build_view_plan,
     find_user_package,
     load_membership_rooms,
+    load_package_room_summary,
     load_views_state,
     save_views_state,
     validate_room_id,
@@ -109,6 +111,23 @@ class NasViewDomainTests(unittest.TestCase):
             package = write_master(master, rooms=["ok1", "../bad"])
             with self.assertRaises(ValueError):
                 load_membership_rooms(package)
+
+    def test_package_room_summary_uses_membership_and_real_sqlite_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            package = write_master(Path(tmp), rooms=["r1", "r2"])
+            conn = sqlite3.connect(package / "messages.sqlite")
+            conn.execute("CREATE TABLE messages (conversation_id TEXT, room_name TEXT, sent_time INTEGER)")
+            conn.executemany(
+                "INSERT INTO messages VALUES (?,?,?)",
+                [("r1", "실제 방 1", 10), ("r1", "실제 방 1", 20), ("outside", "제외", 30)],
+            )
+            conn.commit()
+            conn.close()
+            rows = load_package_room_summary(package)
+        self.assertEqual(rows, [{
+            "conversation_id": "r1", "room_name": "실제 방 1",
+            "message_count": 2, "latest_sent_time": 20,
+        }])
 
     def test_build_view_plan_binds_only_rooms_with_media(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

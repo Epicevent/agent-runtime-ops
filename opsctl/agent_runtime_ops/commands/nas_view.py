@@ -25,6 +25,9 @@ from ..domain.nas_views import (
     hidden_master,
     iter_view_records,
     load_views_state,
+    find_user_package,
+    load_membership_rooms,
+    load_package_room_summary,
     managed_fstab_mount_targets,
     put_view_record,
     save_views_state,
@@ -33,6 +36,8 @@ from ..domain.nas_views import (
     validate_user_id,
     view_root,
 )
+
+_KAKAO_PACKAGE_ROOT = Path("/mnt/nas/kakao-work")
 from ..host.account_files import (
     read_password_from_stdin,
     write_credential_file,
@@ -371,6 +376,33 @@ def cmd_nas_view_status(args: argparse.Namespace) -> int:
         exit_code = 1
     print("view_status=ok")
     return exit_code
+
+
+def cmd_nas_view_package_info(args: argparse.Namespace) -> int:
+    """Read-only package evidence used by the scoped operator console."""
+    if not _require_root("package-info"):
+        return 2
+    try:
+        user_id = validate_user_id(args.user_id)
+        rc, _, rows = _findmnt_one(_KAKAO_PACKAGE_ROOT)
+        if rc != 0 or not rows or rows[0].get("fstype") != "cifs" or not _is_readonly_mount(rows[0]):
+            raise ValueError("kakao package root is not a read-only CIFS mount")
+        package = find_user_package(_KAKAO_PACKAGE_ROOT, user_id)
+        rooms = load_package_room_summary(package)
+        membership_count = len(load_membership_rooms(package))
+    except Exception as exc:
+        print(f"user_id={getattr(args, 'user_id', '')}")
+        print("package_status=fail")
+        print(f"reason={exc}")
+        print("mutates=false")
+        return 1
+    print(f"user_id={user_id}")
+    print(f"package={package.name}")
+    print(f"membership_room_count={membership_count}")
+    print(f"rooms_json={json.dumps(rooms, ensure_ascii=False, separators=(',', ':'))}")
+    print("package_status=ok")
+    print("mutates=false")
+    return 0
 
 
 def _read_fstab() -> str:
