@@ -483,6 +483,11 @@ def build_parser() -> argparse.ArgumentParser:
     nas_view_detach = nas_view_sub.add_parser("detach")
     nas_view_detach.add_argument("slot", metavar="target")
     nas_view_detach.add_argument("--share")
+    nas_view_detach.add_argument(
+        "--corpus",
+        default="",
+        help="which source view to detach (kakao|groupware|…); default kakao, or derived from --share",
+    )
     nas_view_detach.set_defaults(func=cmd_nas_view_detach)
     nas_view_status = nas_view_sub.add_parser("status")
     nas_view_status.set_defaults(func=cmd_nas_view_status)
