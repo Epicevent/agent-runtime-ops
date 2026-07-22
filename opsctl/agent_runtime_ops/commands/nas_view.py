@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from ..domain.nas_views import (
     PRIMARY_CORPUS,
     ViewPlan,
     build_view_plan,
+    corpus_named,
     corpus_for_share,
     crontab_has_reboot_restore,
     drop_view_record,
@@ -405,36 +407,71 @@ def cmd_nas_view_package_info(args: argparse.Namespace) -> int:
     return 0
 
 
+def _kakao_catalog(root: Path) -> tuple[list[dict], dict[str, str]]:
+    catalog_path = root / "users.json"
+    rc, _, rows = _findmnt_one(root)
+    if rc != 0 or not rows or rows[0].get("fstype") != "cifs" or not _is_readonly_mount(rows[0]):
+        raise ValueError("kakao package root is not a read-only CIFS mount")
+    document = json.loads(catalog_path.read_text(encoding="utf-8"))
+    if document.get("schema") != "kw-users-catalog/1" or not isinstance(document.get("users"), list):
+        raise ValueError("unexpected Kakao catalog schema")
+    users = []
+    for raw in document["users"]:
+        if not isinstance(raw, dict):
+            continue
+        users.append({
+            "user_id": validate_user_id(str(raw.get("user_id") or "")),
+            "display_name": str(raw.get("display_name") or "")[:100],
+            "job_title": str(raw.get("job_title") or "")[:100],
+            "package_dir": str(raw.get("package_dir") or "")[:300],
+        })
+    return users, {"membership_complete": "true"}
+
+
+def _whatsapp_catalog(root: Path) -> tuple[list[dict], dict[str, str]]:
+    db = root / "whatsapp.db"
+    rc, _, rows = _findmnt_one(root)
+    if rc != 0 or not rows or rows[0].get("fstype") != "cifs" or not _is_readonly_mount(rows[0]):
+        raise ValueError("WhatsApp root is not a read-only CIFS mount")
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        result = [{
+            "user_id": validate_user_id(str(user_id)), "display_name": str(display_name)[:100],
+            "message_count": int(message_count), "observed_room_count": int(room_count),
+        } for user_id, display_name, message_count, room_count in conn.execute(
+            "SELECT author, COALESCE(MAX(NULLIF(TRIM(author_name),'')),''), COUNT(*), "
+            "COUNT(DISTINCT chat_id) FROM messages "
+            "WHERE is_group=1 AND author IS NOT NULL AND TRIM(author)<>'' "
+            "GROUP BY author ORDER BY 2, author"
+        )]
+    finally:
+        conn.close()
+    return result, {"membership_complete": "false"}
+
+
+_CATALOG_DRIVERS = {"kakao_package": _kakao_catalog, "whatsapp_author": _whatsapp_catalog}
+
+
 def cmd_nas_view_catalog(args: argparse.Namespace) -> int:
-    """Return the non-secret Kakao user catalog through the privileged ops lane."""
+    """Return sanitized observations for any registered catalog driver."""
     if not _require_root("catalog"):
         return 2
-    catalog_path = _KAKAO_PACKAGE_ROOT / "users.json"
+    source = str(getattr(args, "source", "kakao") or "kakao")
     try:
-        rc, _, rows = _findmnt_one(_KAKAO_PACKAGE_ROOT)
-        if rc != 0 or not rows or rows[0].get("fstype") != "cifs" or not _is_readonly_mount(rows[0]):
-            raise ValueError("kakao package root is not a read-only CIFS mount")
-        document = json.loads(catalog_path.read_text(encoding="utf-8"))
-        if document.get("schema") != "kw-users-catalog/1" or not isinstance(document.get("users"), list):
-            raise ValueError("unexpected Kakao catalog schema")
-        users = []
-        for raw in document["users"]:
-            if not isinstance(raw, dict):
-                continue
-            user_id = validate_user_id(str(raw.get("user_id") or ""))
-            users.append({
-                "user_id": user_id,
-                "display_name": str(raw.get("display_name") or "")[:100],
-                "job_title": str(raw.get("job_title") or "")[:100],
-                "package_dir": str(raw.get("package_dir") or "")[:300],
-            })
+        share_name, corpus = corpus_named(source)
+        driver = _CATALOG_DRIVERS[corpus.layout]
+        result, metadata = driver(Path("/mnt/nas") / share_name)
     except Exception as exc:
         print("catalog_status=fail")
         print(f"reason={exc}")
         print("mutates=false")
         return 1
-    print(f"catalog_count={len(users)}")
-    print(f"catalog_json={json.dumps(users, ensure_ascii=False, separators=(',', ':'))}")
+    print(f"catalog_count={len(result)}")
+    print(f"catalog_json={json.dumps(result, ensure_ascii=False, separators=(',', ':'))}")
+    for key, value in metadata.items():
+        print(f"{key}={value}")
+    print(f"source={source}")
+    print("identity_authority=person_identity")
     print("catalog_status=ok")
     print("mutates=false")
     return 0

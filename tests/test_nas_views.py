@@ -16,6 +16,7 @@ from agent_runtime_ops.commands.nas_view import (
     cmd_nas_view_detach,
     cmd_nas_view_status,
     cmd_nas_view_catalog,
+    _kakao_catalog,
 )
 from agent_runtime_ops.domain.nas_views import (
     build_view_plan,
@@ -363,7 +364,7 @@ class CatalogCommandTests(unittest.TestCase):
             }, ensure_ascii=False), encoding="utf-8")
             output = io.StringIO()
             with (
-                patch("agent_runtime_ops.commands.nas_view._KAKAO_PACKAGE_ROOT", root),
+                patch("agent_runtime_ops.commands.nas_view._CATALOG_DRIVERS", {"kakao_package": lambda _: _kakao_catalog(root)}),
                 patch("agent_runtime_ops.commands.nas_view._is_root", return_value=True),
                 patch("agent_runtime_ops.commands.nas_view._findmnt_one", return_value=(0, "", [{"fstype": "cifs"}])),
                 patch("agent_runtime_ops.commands.nas_view._is_readonly_mount", return_value=True),

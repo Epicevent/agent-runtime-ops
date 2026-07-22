@@ -520,9 +520,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     nas_view_package_info.add_argument("user_id")
     nas_view_package_info.set_defaults(func=cmd_nas_view_package_info)
-    nas_view_catalog = nas_view_sub.add_parser(
-        "catalog", help="show the sanitized Kakao user catalog (read-only)"
-    )
+    nas_view_catalog = nas_view_sub.add_parser("catalog", help="show sanitized source observations (read-only)")
+    nas_view_catalog.add_argument("--source", default="kakao")
     nas_view_catalog.set_defaults(func=cmd_nas_view_catalog)
     nas_view_restore = nas_view_sub.add_parser("restore")
     nas_view_restore.add_argument(

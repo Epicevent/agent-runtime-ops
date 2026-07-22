@@ -22,7 +22,11 @@ def bind_ro(source: Path, target: Path, *, recursive: bool = False) -> tuple[boo
             return False, "stale_mount_unmount_failed:" + "; ".join(errors)
     if not source.exists():
         return False, f"bind_source_missing:{source}"
-    target.mkdir(parents=True, exist_ok=True)
+    if source.is_file():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.touch(exist_ok=True)
+    else:
+        target.mkdir(parents=True, exist_ok=True)
     proc = _run_text(["mount", "--rbind" if recursive else "--bind", str(source), str(target)], timeout=30)
     if proc.returncode != 0:
         return False, (proc.stderr or proc.stdout).strip()

@@ -31,8 +31,8 @@ from ..yamlio import dump_yaml, load_yaml
 
 VIEWS_STATE_NAME = "nas-views.yaml"
 VIEWS_ROOT = Path("/srv/kw-nas/slots")
-SAFE_USER_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-SAFE_ROOM_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
+SAFE_USER_ID_RE = re.compile(r"^[A-Za-z0-9.@_-]{1,64}$")
+SAFE_ROOM_ID_RE = re.compile(r"^[A-Za-z0-9.@_-]{1,80}$")
 
 
 # ── corpus registry ───────────────────────────────────────────────────
@@ -61,6 +61,7 @@ class Corpus:
 CORPORA: dict[str, Corpus] = {
     "kakao-work": Corpus(PRIMARY_CORPUS, "kw", "kakao_package"),
     "hanpass_groupware": Corpus("groupware", "groupware", "granted_paths"),
+    "whatsapp": Corpus("whatsapp", "whatsapp", "whatsapp_author"),
 }
 
 
@@ -74,6 +75,13 @@ def corpus_for_share(share_source: str) -> Corpus:
         known = ", ".join(sorted(CORPORA))
         raise ValueError(f"unknown corpus share {name!r} — declare it in CORPORA (known: {known})")
     return corpus
+
+
+def corpus_named(name: str) -> tuple[str, Corpus]:
+    matches = [(share, corpus) for share, corpus in CORPORA.items() if corpus.name == name]
+    if len(matches) != 1:
+        raise ValueError(f"unknown or ambiguous corpus name: {name!r}")
+    return matches[0]
 
 
 def validate_user_id(user_id: str) -> str:
@@ -229,6 +237,30 @@ def load_package_room_summary(package_dir: Path) -> list[dict[str, object]]:
     ]
 
 
+def load_whatsapp_rooms(master: Path, user_id: str) -> list[str]:
+    """Return rooms in which the verified WhatsApp identity actually authored a message.
+
+    The collector publishes no participant/membership ledger.  Authorship is therefore a
+    conservative external observation: it cannot invent access, but silent rooms may be
+    absent.  The operator-verified mb_id -> @lid link remains the identity authority.
+    """
+    user_id = validate_user_id(user_id)
+    db = master / "whatsapp.db"
+    if not db.is_file() or db.is_symlink():
+        raise FileNotFoundError(f"whatsapp.db not found under master mount: {db}")
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT chat_id FROM messages "
+            "WHERE is_group=1 AND (author=? OR (author IS NULL AND from_addr=?)) "
+            "ORDER BY chat_id",
+            (user_id, user_id),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [validate_room_id(str(row[0])) for row in rows]
+
+
 def validate_relative_path(value: str) -> str:
     """마운트할 상대경로 검증 — 절대경로·상위탈출·빈 조각을 막는다.
 
@@ -336,6 +368,19 @@ def build_view_plan(
             raise FileNotFoundError(f"none of the granted paths exist under master: {', '.join(missing)}")
         room_binds = [(source, view / alias) for source, alias in resolved]
         used_paths = [validate_relative_path(p) for p in paths]
+    elif spec.layout == "whatsapp_author":
+        rooms = load_whatsapp_rooms(master, user_id)
+        if not rooms:
+            raise FileNotFoundError(f"no authored WhatsApp rooms for identity {user_id!r}")
+        for room in rooms:
+            message_file = master / "messages" / f"{room}.json"
+            media_dir = master / "media" / room
+            if message_file.is_file() and not message_file.is_symlink():
+                room_binds.append((message_file, view / "messages" / f"{room}.json"))
+            else:
+                missing.append(f"messages/{room}.json")
+            if media_dir.is_dir() and not media_dir.is_symlink():
+                room_binds.append((media_dir, view / "media" / room))
     else:
         raise ValueError(f"unknown corpus layout: {spec.layout!r}")
     return ViewPlan(
