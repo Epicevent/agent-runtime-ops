@@ -15,6 +15,7 @@ from agent_runtime_ops.commands.nas_view import (
     cmd_nas_view_assign,
     cmd_nas_view_detach,
     cmd_nas_view_status,
+    cmd_nas_view_catalog,
 )
 from agent_runtime_ops.domain.nas_views import (
     build_view_plan,
@@ -345,6 +346,39 @@ class NasViewCliTests(unittest.TestCase):
             self.assertIn("view_1_healthy=yes", output.getvalue())
             self.assertIn("boot_fstab_entries=1/1", output.getvalue())
             self.assertIn("boot_restore_cron=unknown_requires_root", output.getvalue())
+
+
+class CatalogCommandTests(unittest.TestCase):
+    def test_catalog_returns_only_sanitized_non_secret_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "users.json").write_text(json.dumps({
+                "schema": "kw-users-catalog/1",
+                "generated_at": "2026-07-22T00:00:00Z",
+                "internal_note": "must not leak",
+                "users": [{
+                    "user_id": "7362168", "display_name": "함석헌", "job_title": "대표이사",
+                    "package_dir": "users/함석헌_대표이사_7362168", "secret": "nope",
+                }],
+            }, ensure_ascii=False), encoding="utf-8")
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.commands.nas_view._KAKAO_PACKAGE_ROOT", root),
+                patch("agent_runtime_ops.commands.nas_view._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.nas_view._findmnt_one", return_value=(0, "", [{"fstype": "cifs"}])),
+                patch("agent_runtime_ops.commands.nas_view._is_readonly_mount", return_value=True),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_nas_view_catalog(argparse.Namespace())
+        self.assertEqual(rc, 0, output.getvalue())
+        values = dict(line.split("=", 1) for line in output.getvalue().splitlines() if "=" in line)
+        users = json.loads(values["catalog_json"])
+        self.assertEqual(users, [{
+            "user_id": "7362168", "display_name": "함석헌", "job_title": "대표이사",
+            "package_dir": "users/함석헌_대표이사_7362168",
+        }])
+        self.assertNotIn("secret", output.getvalue())
+        self.assertEqual(values["mutates"], "false")
 
 
 class FakeProc:

@@ -405,6 +405,41 @@ def cmd_nas_view_package_info(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_nas_view_catalog(args: argparse.Namespace) -> int:
+    """Return the non-secret Kakao user catalog through the privileged ops lane."""
+    if not _require_root("catalog"):
+        return 2
+    catalog_path = _KAKAO_PACKAGE_ROOT / "users.json"
+    try:
+        rc, _, rows = _findmnt_one(_KAKAO_PACKAGE_ROOT)
+        if rc != 0 or not rows or rows[0].get("fstype") != "cifs" or not _is_readonly_mount(rows[0]):
+            raise ValueError("kakao package root is not a read-only CIFS mount")
+        document = json.loads(catalog_path.read_text(encoding="utf-8"))
+        if document.get("schema") != "kw-users-catalog/1" or not isinstance(document.get("users"), list):
+            raise ValueError("unexpected Kakao catalog schema")
+        users = []
+        for raw in document["users"]:
+            if not isinstance(raw, dict):
+                continue
+            user_id = validate_user_id(str(raw.get("user_id") or ""))
+            users.append({
+                "user_id": user_id,
+                "display_name": str(raw.get("display_name") or "")[:100],
+                "job_title": str(raw.get("job_title") or "")[:100],
+                "package_dir": str(raw.get("package_dir") or "")[:300],
+            })
+    except Exception as exc:
+        print("catalog_status=fail")
+        print(f"reason={exc}")
+        print("mutates=false")
+        return 1
+    print(f"catalog_count={len(users)}")
+    print(f"catalog_json={json.dumps(users, ensure_ascii=False, separators=(',', ':'))}")
+    print("catalog_status=ok")
+    print("mutates=false")
+    return 0
+
+
 def _read_fstab() -> str:
     try:
         return Path("/etc/fstab").read_text(encoding="utf-8")
