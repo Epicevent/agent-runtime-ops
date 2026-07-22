@@ -350,6 +350,39 @@ class NasViewCliTests(unittest.TestCase):
 
 
 class CatalogCommandTests(unittest.TestCase):
+    def test_whatsapp_catalog_includes_observed_room_names(self) -> None:
+        from agent_runtime_ops.commands.nas_view import _whatsapp_catalog
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conn = sqlite3.connect(root / "whatsapp.db")
+            conn.execute(
+                "CREATE TABLE messages (author TEXT, author_name TEXT, chat_id TEXT, "
+                "chat_name TEXT, is_group INTEGER, timestamp INTEGER)"
+            )
+            conn.executemany(
+                "INSERT INTO messages VALUES (?,?,?,?,?,?)",
+                [
+                    ("123@lid", "나종무", "room-a@g.us", "운영방", 1, 10),
+                    ("123@lid", "나종무", "room-a@g.us", "운영방", 1, 20),
+                    ("123@lid", "나종무", "room-b@g.us", "고객방", 1, 30),
+                ],
+            )
+            conn.commit()
+            conn.close()
+            with (
+                patch("agent_runtime_ops.commands.nas_view._findmnt_one", return_value=(0, "", [{"fstype": "cifs"}])),
+                patch("agent_runtime_ops.commands.nas_view._is_readonly_mount", return_value=True),
+            ):
+                rows, metadata = _whatsapp_catalog(root)
+
+        self.assertEqual(metadata["membership_complete"], "false")
+        self.assertEqual(rows[0]["observed_room_count"], 2)
+        self.assertEqual(
+            [(room["room_name"], room["message_count"]) for room in rows[0]["rooms"]],
+            [("고객방", 1), ("운영방", 2)],
+        )
+
     def test_catalog_returns_only_sanitized_non_secret_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

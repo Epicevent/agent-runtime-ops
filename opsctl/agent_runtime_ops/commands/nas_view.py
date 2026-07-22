@@ -435,9 +435,21 @@ def _whatsapp_catalog(root: Path) -> tuple[list[dict], dict[str, str]]:
         raise ValueError("WhatsApp root is not a read-only CIFS mount")
     conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     try:
+        rooms_by_user: dict[str, list[dict[str, object]]] = {}
+        for user_id, chat_id, room_name, message_count in conn.execute(
+            "SELECT author, chat_id, COALESCE(MAX(NULLIF(TRIM(chat_name),'')),''), COUNT(*) "
+            "FROM messages WHERE is_group=1 AND author IS NOT NULL AND TRIM(author)<>'' "
+            "GROUP BY author, chat_id ORDER BY author, MAX(timestamp) DESC"
+        ):
+            rooms_by_user.setdefault(str(user_id), []).append({
+                "chat_id": str(chat_id),
+                "room_name": str(room_name)[:200],
+                "message_count": int(message_count),
+            })
         result = [{
             "user_id": validate_user_id(str(user_id)), "display_name": str(display_name)[:100],
             "message_count": int(message_count), "observed_room_count": int(room_count),
+            "rooms": rooms_by_user.get(str(user_id), []),
         } for user_id, display_name, message_count, room_count in conn.execute(
             "SELECT author, COALESCE(MAX(NULLIF(TRIM(author_name),'')),''), COUNT(*), "
             "COUNT(DISTINCT chat_id) FROM messages "
