@@ -98,33 +98,42 @@ function parseJson(label, response) {
     detail: `status=${chatRes.status} stream_event=${chatOk}`
   });
   if (attestModel) {
-    const receipts = [];
+    const donePayloads = [];
+    let eventType = '';
     for (const line of chatRes.body.split(/\r?\n/)) {
+      if (line.startsWith('event:')) {
+        eventType = line.slice(6).trim();
+        continue;
+      }
       if (!line.startsWith('data:')) continue;
       const raw = line.slice(5).trim();
-      if (!raw || raw === '[DONE]') continue;
-      try { receipts.push(JSON.parse(raw)); } catch {}
+      if (eventType !== 'done' || !raw || raw === '[DONE]') continue;
+      try { donePayloads.push(JSON.parse(raw)); } catch {}
     }
-    const versions = [];
-    function collect(value) {
-      if (!value || typeof value !== 'object') return;
-      if (Array.isArray(value)) { for (const item of value) collect(item); return; }
-      for (const [key, item] of Object.entries(value)) {
-        if (key === 'modelVersion' && typeof item === 'string') versions.push(item);
-        else collect(item);
-      }
+    function receiptAtAllowedPointer(payload) {
+      const candidates = [payload, payload && payload.response, payload && payload.providerResponse];
+      return candidates.find(value => value && typeof value === 'object'
+        && typeof value.responseId === 'string' && value.responseId
+        && typeof value.modelVersion === 'string' && value.modelVersion
+        && value.usageMetadata && typeof value.usageMetadata === 'object'
+        && Array.isArray(value.candidates) && value.candidates.length > 0
+        && typeof value.candidates[0].finishReason === 'string' && value.candidates[0].finishReason
+      ) || null;
     }
-    for (const receipt of receipts) collect(receipt);
+    const receipts = donePayloads.map(receiptAtAllowedPointer).filter(Boolean);
     const configuredRaw = typeof config.model === 'string'
       ? config.model
       : ((config.model && config.model.default) || '');
     const configured = String(configuredRaw).replace(/^models\//, '');
-    const normalized = [...new Set(versions.map(value => String(value).replace(/^models\//, '')))];
-    const matched = configured && normalized.includes(configured);
+    const configuredProvider = String(config.provider || '').toLowerCase();
+    const providerOk = configuredProvider === 'gemini' || configuredProvider === 'google';
+    const normalized = [...new Set(receipts.map(value => String(value.modelVersion).replace(/^models\//, '')))];
+    const matched = providerOk && configured && receipts.length === donePayloads.length
+      && receipts.length > 0 && normalized.length === 1 && normalized[0] === configured;
     checks.push({
       name: 'hermes_smoke_model_attested',
       ok: Boolean(chatOk && matched),
-      detail: `configured=${configured || 'missing'} receipt_model_versions=${normalized.length ? normalized.join(',') : 'missing'} source=provider_response_modelVersion`
+      detail: `configured_provider=${configuredProvider || 'missing'} configured_model=${configured || 'missing'} done_events=${donePayloads.length} complete_provider_receipts=${receipts.length} receipt_model_versions=${normalized.length ? normalized.join(',') : 'missing'} receipt_fields=responseId,modelVersion,usageMetadata,candidates[0].finishReason source=done_event_provider_receipt`
     });
   }
   console.log(JSON.stringify(checks));
