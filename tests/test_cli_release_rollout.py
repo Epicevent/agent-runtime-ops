@@ -730,6 +730,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
         self.assertIn(" check * --live", text)
         self.assertIn(" check * --live *", text)
         self.assertIn(" runtime config-sanitize *", text)
+        self.assertIn(" runtime model-catalog *", text)
         self.assertIn(" document-tools status *", text)
         self.assertIn(" recipe apply-dev *", text)
         self.assertIn(" recipe capture-dev *", text)
