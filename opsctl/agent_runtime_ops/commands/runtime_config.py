@@ -9,7 +9,7 @@ import urllib.request
 
 from ..domain.actions import append_action_log
 from ..domain.common import is_root, state_root
-from ..domain.config_contract import config_json_diff
+from ..domain.config_contract import config_json_diff, run_config_validate_in_container
 from ..domain.hermes_config import (
     current_model,
     hermes_config_path,
@@ -26,18 +26,19 @@ from ..domain.hermes_config import (
 )
 from ..domain.openclaw_config import (
     build_model_ref,
+    capture_openclaw_config_snapshot,
     current_openclaw_model,
     openclaw_config_path,
     openclaw_version_notes_path,
-    provider_model_registration,
     read_openclaw_config,
     read_openclaw_version_notes,
+    restore_openclaw_config_snapshot,
     run_openclaw_models_set,
-    ensure_provider_model,
-    write_openclaw_config,
     write_openclaw_version_notes,
 )
 from ..domain.runtime_truth import find_gateway_container
+from ..domain.image_specs import image_spec_config_contract, image_spec_selftest_contract
+from ..domain.selftest_contract import CONTRACT_OK_CHECK, run_image_selftest_contract
 from ..profiles import load_profile
 from ..runtime_secrets import parse_secret_env_text, primary_profile_secret_file
 from ..state import load_runtime_target
@@ -112,7 +113,6 @@ def cmd_runtime_config_status(args: argparse.Namespace) -> int:
             config = read_openclaw_config(config_path)
             provider, model, ref, source = current_openclaw_model(config)
             provider_runtime = provider  # openclaw provider ids are used verbatim (e.g. "google")
-            model_registered, provider_model_count = provider_model_registration(config, provider, model)
         else:
             config_path = hermes_config_path(desired.slot)
             config = read_hermes_config(config_path)
@@ -133,9 +133,6 @@ def cmd_runtime_config_status(args: argparse.Namespace) -> int:
     print(f"model={model or 'missing'}")
     print(f"model_ref={ref or 'missing'}")
     print(f"model_source={source}")
-    if desired.family == "openclaw":
-        print(f"provider_model_registered={'yes' if model_registered else 'no'}")
-        print(f"provider_model_count={provider_model_count}")
     if desired.family == "hermes":
         drift = model_endpoint_drift(config)
         verdict = str(drift["verdict"])
@@ -183,6 +180,25 @@ def cmd_runtime_model_catalog(args: argparse.Namespace) -> int:
     return 0
 
 
+def _attest_openclaw_model_change(desired, container: str) -> tuple[bool, str]:
+    """Use only product-attested contracts to prove config and customer model truth."""
+    config_contract = image_spec_config_contract(desired.image_spec)
+    selftest_contract = image_spec_selftest_contract(desired.image_spec)
+    if not config_contract or not selftest_contract:
+        return False, "running image is missing config or selftest contract"
+    valid, config_detail = run_config_validate_in_container(container, config_contract)
+    if not valid:
+        return False, f"config={config_detail}"
+    checks = run_image_selftest_contract(container, selftest_contract)
+    contract = next((item for item in checks if item[1] == CONTRACT_OK_CHECK), None)
+    if contract is None or not contract[0]:
+        failed = ",".join(
+            f"{name}:{detail or 'failed'}" for ok, name, detail in checks if not ok
+        )
+        return False, f"selftest={failed or 'contract result missing'}"[:500]
+    return True, f"config={config_detail}; selftest={contract[2] or 'ok'}"
+
+
 def _set_model_openclaw(desired, provider_raw: str, model: str) -> tuple[str, list[str], str, str, str, str]:
     """Change the slot's default model with the product's OWN ``models set`` command, run inside
     the live gateway container (``docker exec``). This preserves the canonical
@@ -197,16 +213,29 @@ def _set_model_openclaw(desired, provider_raw: str, model: str) -> tuple[str, li
         raise ValueError(f"no running gateway container for {desired.slot}: {method}")
     config_path = openclaw_config_path(desired.slot)
     before = read_openclaw_config(config_path)
+    snapshot_before_attestation = capture_openclaw_config_snapshot(config_path)
     _prev_provider, _prev_model, previous_ref, source = current_openclaw_model(before)
     new_ref = build_model_ref(provider_raw, model)
+    before_ok, before_detail = _attest_openclaw_model_change(desired, container)
+    if not before_ok:
+        raise ValueError(
+            f"refusing model change because current state is not verified-good: {before_detail}"
+        )
+    verified_snapshot = capture_openclaw_config_snapshot(config_path)
+    if verified_snapshot != snapshot_before_attestation:
+        raise ValueError("config changed while establishing the verified rollback baseline")
     ok, detail = run_openclaw_models_set(container, new_ref)
     if not ok:
         rollback = "not_needed"
         try:
             partial = read_openclaw_config(config_path)
             if partial != before:
-                write_openclaw_config(desired.slot, config_path, before)
+                restore_openclaw_config_snapshot(config_path, verified_snapshot)
                 rollback = "restored"
+            restored_ok, restored_detail = _attest_openclaw_model_change(desired, container)
+            if not restored_ok:
+                raise ValueError(f"restored state failed attestation: {restored_detail}")
+            rollback += "_verified"
         except Exception as rollback_exc:
             raise ValueError(
                 f"product models set failed (container={container}): {detail}; "
@@ -215,19 +244,21 @@ def _set_model_openclaw(desired, provider_raw: str, model: str) -> tuple[str, li
         raise ValueError(
             f"product models set failed (container={container}): {detail}; rollback={rollback}"
         )
-    try:
-        after = read_openclaw_config(config_path)
-        if ensure_provider_model(after, provider_raw, model):
-            write_openclaw_config(desired.slot, config_path, after)
-            after = read_openclaw_config(config_path)
-    except Exception as exc:
+    after = read_openclaw_config(config_path)
+    after_ok, after_detail = _attest_openclaw_model_change(desired, container)
+    if not after_ok:
         try:
-            write_openclaw_config(desired.slot, config_path, before)
+            restore_openclaw_config_snapshot(config_path, verified_snapshot)
+            restored_ok, restored_detail = _attest_openclaw_model_change(desired, container)
+            if not restored_ok:
+                raise ValueError(f"restored state failed attestation: {restored_detail}")
         except Exception as rollback_exc:
             raise ValueError(
-                f"provider model registration failed: {exc}; rollback failed: {rollback_exc}"
-            ) from exc
-        raise ValueError(f"provider model registration failed: {exc}; rollback=restored") from exc
+                f"candidate attestation failed: {after_detail}; rollback failed: {rollback_exc}"
+            ) from rollback_exc
+        raise ValueError(
+            f"candidate attestation failed: {after_detail}; rollback=restored_verified"
+        )
     diff_lines = config_json_diff(before, after)
     return str(config_path), diff_lines, previous_ref, new_ref, source, f"{container}:{method}"
 

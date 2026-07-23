@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from dataclasses import dataclass
 
 from ..host.account_files import ensure_not_symlink_chain, runtime_ids, slot_home
 from ..host.files import fsync_parent
@@ -118,48 +119,44 @@ def write_openclaw_config(slot: str, path: Path, config: dict[str, object]) -> N
         raise
 
 
-def ensure_provider_model(config: dict[str, object], provider: str, model: str) -> bool:
-    """Register a provider model required by OpenClaw's runtime resolver.
-
-    The product's ``models set`` command can update ``agents.defaults.model`` without adding the
-    matching ``models.providers[provider].models[]`` entry.  In that partial state the config
-    looks updated but every model roundtrip fails.  Preserve all existing provider fields and
-    model objects, adding only the missing ``{"id": model}`` entry.
-    """
-    models_root = config.setdefault("models", {})
-    if not isinstance(models_root, dict):
-        raise ValueError("openclaw models must be an object")
-    providers = models_root.setdefault("providers", {})
-    if not isinstance(providers, dict):
-        raise ValueError("openclaw models.providers must be an object")
-    provider_config = providers.setdefault(provider, {})
-    if not isinstance(provider_config, dict):
-        raise ValueError(f"openclaw models.providers[{provider!r}] must be an object")
-    registered = provider_config.setdefault("models", [])
-    if not isinstance(registered, list):
-        raise ValueError(f"openclaw models.providers[{provider!r}].models must be an array")
-    for entry in registered:
-        if isinstance(entry, dict) and entry.get("id") == model:
-            return False
-        if entry == model:
-            return False
-    registered.append({"id": model})
-    return True
+@dataclass(frozen=True)
+class OpenClawConfigSnapshot:
+    content: bytes
+    uid: int
+    gid: int
+    mode: int
 
 
-def provider_model_registration(config: dict[str, object], provider: str, model: str) -> tuple[bool, int]:
-    """Return whether the selected model is registered and the provider model count."""
-    models_root = config.get("models")
-    providers = models_root.get("providers") if isinstance(models_root, dict) else None
-    provider_config = providers.get(provider) if isinstance(providers, dict) else None
-    registered = provider_config.get("models") if isinstance(provider_config, dict) else None
-    if not isinstance(registered, list):
-        return False, 0
-    found = any(
-        (isinstance(entry, dict) and entry.get("id") == model) or entry == model
-        for entry in registered
+def capture_openclaw_config_snapshot(path: Path) -> OpenClawConfigSnapshot:
+    """Capture the verified file itself, not a re-serialized interpretation of it."""
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"config snapshot source must be a regular non-symlink file: {path}")
+    stat_result = path.stat()
+    return OpenClawConfigSnapshot(
+        content=path.read_bytes(),
+        uid=stat_result.st_uid,
+        gid=stat_result.st_gid,
+        mode=stat_result.st_mode & 0o7777,
     )
-    return found, len(registered)
+
+
+def restore_openclaw_config_snapshot(path: Path, snapshot: OpenClawConfigSnapshot) -> None:
+    """Atomically restore exact verified bytes and original ownership/mode."""
+    if path.exists() and path.is_symlink():
+        raise ValueError(f"config file must not be a symlink: {path}")
+    tmp_path = path.with_name(f".{path.name}.restore.{os.getpid()}")
+    try:
+        with tmp_path.open("wb") as handle:
+            handle.write(snapshot.content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chown(tmp_path, snapshot.uid, snapshot.gid)
+        os.chmod(tmp_path, snapshot.mode)
+        os.replace(tmp_path, path)
+        fsync_parent(path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def _model_field(config: dict[str, object]) -> object:

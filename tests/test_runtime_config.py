@@ -4,7 +4,9 @@ import argparse
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -360,7 +362,7 @@ class OpenClawSetModelTests(unittest.TestCase):
     """openclaw set-model applies the change with the product's OWN `models set` inside the live
     container (docker exec), then shows a before/after diff of the on-disk config."""
 
-    def _run(self, *, initial, models_set, container=("c123", "instance_label"), provider="google", model="gemini-3.5-flash", writer=None):
+    def _run(self, *, initial, models_set, container=("c123", "instance_label"), provider="google", model="gemini-3.5-flash", attest=None):
         store = {"cfg": initial}
         calls: list[tuple[str, str]] = []
         output = io.StringIO()
@@ -378,7 +380,7 @@ class OpenClawSetModelTests(unittest.TestCase):
             patch("agent_runtime_ops.commands.runtime_config.is_root", return_value=True),
             patch(
                 "agent_runtime_ops.commands.runtime_config._load_config_target",
-                return_value=SimpleNamespace(slot="oc1", family="openclaw", route=object(), runtime_profile="openclaw-customer"),
+                return_value=SimpleNamespace(slot="oc1", family="openclaw", route=object(), runtime_profile="openclaw-customer", image_spec={}),
             ),
             patch("agent_runtime_ops.commands.runtime_config.load_profile", return_value=object()),
             patch("agent_runtime_ops.commands.runtime_config.find_gateway_container", return_value=container),
@@ -386,8 +388,16 @@ class OpenClawSetModelTests(unittest.TestCase):
             patch("agent_runtime_ops.commands.runtime_config.read_openclaw_config", side_effect=_read),
             patch("agent_runtime_ops.commands.runtime_config.run_openclaw_models_set", side_effect=_models_set),
             patch(
-                "agent_runtime_ops.commands.runtime_config.write_openclaw_config",
-                side_effect=writer or (lambda _slot, _path, config: store.update(cfg=config)),
+                "agent_runtime_ops.commands.runtime_config.capture_openclaw_config_snapshot",
+                return_value=object(),
+            ),
+            patch(
+                "agent_runtime_ops.commands.runtime_config.restore_openclaw_config_snapshot",
+                side_effect=lambda _path, _snapshot: store.update(cfg=initial),
+            ),
+            patch(
+                "agent_runtime_ops.commands.runtime_config._attest_openclaw_model_change",
+                side_effect=attest or (lambda *_args: (True, "verified")),
             ),
             patch("agent_runtime_ops.commands.runtime_config.append_action_log"),
             contextlib.redirect_stdout(output),
@@ -409,10 +419,7 @@ class OpenClawSetModelTests(unittest.TestCase):
         # the product command was invoked with the composed provider/model ref
         self.assertEqual(calls, [("c123", "google/gemini-3.5-flash")])
         self.assertEqual(cfg["agents"]["defaults"]["model"], "google/gemini-3.5-flash")
-        self.assertEqual(
-            cfg["models"]["providers"]["google"]["models"],
-            [{"id": "gemini-3.5-flash"}],
-        )
+        self.assertNotIn("models", cfg)
         self.assertIn("family=openclaw", text)
         self.assertIn("exec_container=c123:instance_label", text)
         self.assertIn("model_ref=google/gemini-3.5-flash", text)
@@ -431,7 +438,17 @@ class OpenClawSetModelTests(unittest.TestCase):
         self.assertIn("no running gateway container", text)
         self.assertIn("runtime_config_status=fail", text)
 
-    def test_preserves_provider_config_and_does_not_duplicate_registered_model(self) -> None:
+    def test_unverified_current_state_is_never_mutated(self) -> None:
+        rc, text, _cfg, calls = self._run(
+            initial={"agents": {"defaults": {"model": "google/gemini-2.5-flash"}}},
+            models_set=lambda *_a: (True, "must not run"),
+            attest=lambda *_args: (False, "selftest=current model failed"),
+        )
+        self.assertEqual(rc, 1, text)
+        self.assertEqual(calls, [])
+        self.assertIn("current state is not verified-good", text)
+
+    def test_preserves_product_written_config_without_schema_reach_in(self) -> None:
         def apply(store, _container, ref):
             store["cfg"]["agents"]["defaults"]["model"] = ref
             return True, "exit=0"
@@ -453,27 +470,27 @@ class OpenClawSetModelTests(unittest.TestCase):
         self.assertEqual(google["baseUrl"], "https://generativelanguage.googleapis.com")
         self.assertEqual(google["models"], [{"id": "gemini-3.5-flash", "name": "kept"}])
 
-    def test_registration_write_failure_restores_exact_previous_config(self) -> None:
+    def test_failed_candidate_attestation_restores_exact_previous_config(self) -> None:
         initial = {"agents": {"defaults": {"model": "google/gemini-2.5-flash"}}}
-        store_ref = {"cfg": initial}
-        writes = []
 
         def apply(store, _container, ref):
-            store_ref["cfg"] = store["cfg"]
             store["cfg"] = {"agents": {"defaults": {"model": ref}}}
-            store_ref["cfg"] = store["cfg"]
             return True, "exit=0"
 
-        def writer(_slot, _path, config):
-            writes.append(config)
-            if len(writes) == 1:
-                raise OSError("disk full")
-            store_ref["cfg"] = config
+        attest_results = iter([
+            (True, "before verified"),
+            (False, "selftest=model roundtrip failed"),
+            (True, "restore verified"),
+        ])
 
-        rc, text, _cfg, _calls = self._run(initial=initial, models_set=apply, writer=writer)
+        rc, text, cfg, _calls = self._run(
+            initial=initial,
+            models_set=apply,
+            attest=lambda *_args: next(attest_results),
+        )
         self.assertEqual(rc, 1, text)
-        self.assertIn("rollback=restored", text)
-        self.assertEqual(writes[-1], initial)
+        self.assertIn("rollback=restored_verified", text)
+        self.assertEqual(cfg, initial)
 
     def test_product_command_failure_reports(self) -> None:
         rc, text, _cfg, _calls = self._run(
@@ -482,7 +499,7 @@ class OpenClawSetModelTests(unittest.TestCase):
         )
         self.assertEqual(rc, 1, text)
         self.assertIn("product models set failed", text)
-        self.assertIn("rollback=not_needed", text)
+        self.assertIn("rollback=not_needed_verified", text)
         self.assertIn("runtime_config_status=fail", text)
 
     def test_product_command_partial_write_is_restored_on_failure(self) -> None:
@@ -522,11 +539,30 @@ class OpenClawSetModelTests(unittest.TestCase):
         self.assertIn("provider=google", text)
         self.assertIn("model=gemini-2.5-flash", text)
         self.assertIn("model_ref=google/gemini-2.5-flash", text)
-        self.assertIn("provider_model_registered=yes", text)
-        self.assertIn("provider_model_count=1", text)
+        self.assertNotIn("provider_model_registered", text)
 
 
 class OpenClawConfigDomainTests(unittest.TestCase):
+    def test_snapshot_restore_preserves_exact_bytes_and_mode(self) -> None:
+        from agent_runtime_ops.domain.openclaw_config import (
+            capture_openclaw_config_snapshot,
+            restore_openclaw_config_snapshot,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "openclaw.json"
+            original = b'{\n  "agents": {"defaults": {"model": "google/gemini-3.5-flash"}}\n}\n'
+            path.write_bytes(original)
+            path.chmod(0o640)
+            snapshot = capture_openclaw_config_snapshot(path)
+            path.write_text('{"broken":true}\n', encoding="utf-8")
+            path.chmod(0o600)
+            with patch("agent_runtime_ops.domain.openclaw_config.os.chown", create=True):
+                restore_openclaw_config_snapshot(path, snapshot)
+            self.assertEqual(path.read_bytes(), original)
+            if os.name != "nt":
+                self.assertEqual(path.stat().st_mode & 0o777, 0o640)
+
     def test_current_model_string_object_missing(self) -> None:
         from agent_runtime_ops.domain.openclaw_config import current_openclaw_model
 
