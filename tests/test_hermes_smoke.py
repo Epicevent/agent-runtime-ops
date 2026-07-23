@@ -62,7 +62,7 @@ class HermesSmokeTests(unittest.TestCase):
                 {
                     "name": "hermes_smoke_model_attested",
                     "ok": True,
-                    "detail": "configured_provider=gemini configured_model=gemini-3.6-flash done_events=1 complete_provider_receipts=1 receipt_model_versions=gemini-3.6-flash receipt_fields=responseId,modelVersion,usageMetadata,candidates[0].finishReason source=done_event_provider_receipt",
+                    "detail": "configured_provider=gemini configured_model=gemini-3.6-flash done_events=1 complete_provider_receipts=1 receipt_model_versions=gemini-3.6-flash receipt_fields=responseId,modelVersion,usageMetadata,finishReason source=done_event_providerReceipt",
                 },
             ]
             return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
@@ -75,7 +75,7 @@ class HermesSmokeTests(unittest.TestCase):
             (
                 True,
                 "hermes_smoke_model_attested",
-                "configured_provider=gemini configured_model=gemini-3.6-flash done_events=1 complete_provider_receipts=1 receipt_model_versions=gemini-3.6-flash receipt_fields=responseId,modelVersion,usageMetadata,candidates[0].finishReason source=done_event_provider_receipt",
+                "configured_provider=gemini configured_model=gemini-3.6-flash done_events=1 complete_provider_receipts=1 receipt_model_versions=gemini-3.6-flash receipt_fields=responseId,modelVersion,usageMetadata,finishReason source=done_event_providerReceipt",
             ),
             checks,
         )
