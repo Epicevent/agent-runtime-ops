@@ -49,6 +49,37 @@ class HermesSmokeTests(unittest.TestCase):
 
         self.assertIn((True, "hermes_smoke_chat_not_required", "not_required"), checks)
 
+    def test_model_attestation_is_a_separate_required_result(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run_text(argv: list[str], timeout: int = 20) -> subprocess.CompletedProcess[str]:
+            calls.append(argv)
+            payload = [
+                {"name": "hermes_smoke_config_ok", "ok": True, "detail": "status=200"},
+                {"name": "hermes_smoke_model_info_ok", "ok": True, "detail": "status=200"},
+                {"name": "hermes_smoke_claude_proxy_models_ok", "ok": True, "detail": "status=200"},
+                {"name": "hermes_smoke_chat_ok", "ok": True, "detail": "status=200"},
+                {
+                    "name": "hermes_smoke_model_attested",
+                    "ok": True,
+                    "detail": "configured=gemini-3.6-flash receipt_model_versions=gemini-3.6-flash source=provider_response_modelVersion",
+                },
+            ]
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
+
+        with patch("agent_runtime_ops.domain.hermes_smoke.run_text", side_effect=fake_run_text):
+            checks = run_hermes_http_smoke("container123", chat_smoke=False, model_attest=True)
+
+        self.assertIn("HERMES_MODEL_ATTEST=1", calls[0])
+        self.assertIn(
+            (
+                True,
+                "hermes_smoke_model_attested",
+                "configured=gemini-3.6-flash receipt_model_versions=gemini-3.6-flash source=provider_response_modelVersion",
+            ),
+            checks,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

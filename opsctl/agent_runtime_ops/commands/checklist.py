@@ -109,11 +109,19 @@ def _provider_state_checks(desired, profile) -> list[tuple[bool, str, str | None
     return checks
 
 
-def _workspace_endpoint_checks(container: str, *, gemini_chat_smoke: bool) -> list[tuple[bool, str, str | None]]:
-    return run_hermes_http_smoke(container, chat_smoke=gemini_chat_smoke)
+def _workspace_endpoint_checks(
+    container: str, *, gemini_chat_smoke: bool, gemini_model_attest: bool
+) -> list[tuple[bool, str, str | None]]:
+    return run_hermes_http_smoke(
+        container,
+        chat_smoke=gemini_chat_smoke or gemini_model_attest,
+        model_attest=gemini_model_attest,
+    )
 
 
-def _hermes_runtime_pack_checks(desired, profile, *, gemini_chat_smoke: bool) -> list[tuple[bool, str, str | None]]:
+def _hermes_runtime_pack_checks(
+    desired, profile, *, gemini_chat_smoke: bool, gemini_model_attest: bool
+) -> list[tuple[bool, str, str | None]]:
     checks: list[tuple[bool, str, str | None]] = []
     checks.extend(_provider_state_checks(desired, profile))
     docker = shutil.which("docker")
@@ -124,7 +132,13 @@ def _hermes_runtime_pack_checks(desired, profile, *, gemini_chat_smoke: bool) ->
     checks.append((bool(container), "checklist_container_lookup", lookup))
     if not container:
         return checks
-    checks.extend(_workspace_endpoint_checks(container, gemini_chat_smoke=gemini_chat_smoke))
+    checks.extend(
+        _workspace_endpoint_checks(
+            container,
+            gemini_chat_smoke=gemini_chat_smoke,
+            gemini_model_attest=gemini_model_attest,
+        )
+    )
     return checks
 
 
@@ -155,6 +169,7 @@ def cmd_checklist_pack(args: argparse.Namespace) -> int:
                     desired,
                     profile,
                     gemini_chat_smoke=bool(getattr(args, "gemini_chat_smoke", False)),
+                    gemini_model_attest=bool(getattr(args, "gemini_model_attest", False)),
                 )
             )
     except Exception as exc:
@@ -167,6 +182,7 @@ def cmd_checklist_pack(args: argparse.Namespace) -> int:
     print(f"checklist_pack={args.pack}")
     print(f"runtime_profile={profile.name}")
     print(f"gemini_chat_smoke={'enabled' if getattr(args, 'gemini_chat_smoke', False) else 'not_run'}")
+    print(f"gemini_model_attest={'enabled' if getattr(args, 'gemini_model_attest', False) else 'not_run'}")
     failed = 0
     for ok, name, detail in checks:
         _check_line(ok, name, detail)

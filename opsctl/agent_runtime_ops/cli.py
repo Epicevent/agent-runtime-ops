@@ -607,6 +607,11 @@ def build_parser() -> argparse.ArgumentParser:
     checklist_pack.add_argument("slot", metavar="target")
     checklist_pack.add_argument("--pack", default="hermes-runtime", choices=["hermes-runtime", "openclaw-runtime"])
     checklist_pack.add_argument("--gemini-chat-smoke", action="store_true")
+    checklist_pack.add_argument(
+        "--gemini-model-attest",
+        action="store_true",
+        help="send an isolated chat and require provider response modelVersion to match configured model",
+    )
     checklist_pack.set_defaults(func=cmd_checklist_pack)
 
     return parser

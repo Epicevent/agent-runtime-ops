@@ -5,10 +5,14 @@ import json
 from .common import run_text
 
 
-def run_hermes_http_smoke(container: str, *, chat_smoke: bool) -> list[tuple[bool, str, str | None]]:
+def run_hermes_http_smoke(
+    container: str, *, chat_smoke: bool, model_attest: bool = False
+) -> list[tuple[bool, str, str | None]]:
+    run_chat = chat_smoke or model_attest
     script = r'''
 const http = require('http');
 const runChatSmoke = process.env.HERMES_CHAT_SMOKE === '1';
+const attestModel = process.env.HERMES_MODEL_ATTEST === '1';
 const password = process.env.HERMES_PASSWORD || process.env.CLAUDE_PASSWORD || '';
 
 function request(method, path, headers = {}, body = '') {
@@ -93,6 +97,36 @@ function parseJson(label, response) {
     ok: chatOk,
     detail: `status=${chatRes.status} stream_event=${chatOk}`
   });
+  if (attestModel) {
+    const receipts = [];
+    for (const line of chatRes.body.split(/\r?\n/)) {
+      if (!line.startsWith('data:')) continue;
+      const raw = line.slice(5).trim();
+      if (!raw || raw === '[DONE]') continue;
+      try { receipts.push(JSON.parse(raw)); } catch {}
+    }
+    const versions = [];
+    function collect(value) {
+      if (!value || typeof value !== 'object') return;
+      if (Array.isArray(value)) { for (const item of value) collect(item); return; }
+      for (const [key, item] of Object.entries(value)) {
+        if (key === 'modelVersion' && typeof item === 'string') versions.push(item);
+        else collect(item);
+      }
+    }
+    for (const receipt of receipts) collect(receipt);
+    const configuredRaw = typeof config.model === 'string'
+      ? config.model
+      : ((config.model && config.model.default) || '');
+    const configured = String(configuredRaw).replace(/^models\//, '');
+    const normalized = [...new Set(versions.map(value => String(value).replace(/^models\//, '')))];
+    const matched = configured && normalized.includes(configured);
+    checks.push({
+      name: 'hermes_smoke_model_attested',
+      ok: Boolean(chatOk && matched),
+      detail: `configured=${configured || 'missing'} receipt_model_versions=${normalized.length ? normalized.join(',') : 'missing'} source=provider_response_modelVersion`
+    });
+  }
   console.log(JSON.stringify(checks));
 })().catch(error => {
   console.error(error.message);
@@ -103,13 +137,17 @@ function parseJson(label, response) {
         "hermes_smoke_config_ok",
         "hermes_smoke_model_info_ok",
         "hermes_smoke_claude_proxy_models_ok",
-        "hermes_smoke_chat_ok" if chat_smoke else "hermes_smoke_chat_not_required",
+        "hermes_smoke_chat_ok" if run_chat else "hermes_smoke_chat_not_required",
     ]
+    if model_attest:
+        names.append("hermes_smoke_model_attested")
     argv = ["docker", "exec"]
-    if chat_smoke:
+    if run_chat:
         argv.extend(["-e", "HERMES_CHAT_SMOKE=1"])
+    if model_attest:
+        argv.extend(["-e", "HERMES_MODEL_ATTEST=1"])
     argv.extend([container, "node", "-e", script])
-    proc = run_text(argv, timeout=120 if chat_smoke else 30)
+    proc = run_text(argv, timeout=120 if run_chat else 30)
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout).strip() or f"returncode={proc.returncode}"
         return [(False, name, detail[:200]) for name in names]
