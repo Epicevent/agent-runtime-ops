@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from agent_runtime_ops.commands.runtime_config import (
+    _gemini_model_catalog,
     cmd_runtime_config_sanitize,
     cmd_runtime_config_status,
     cmd_runtime_set_model,
@@ -18,6 +20,40 @@ from agent_runtime_ops.commands.runtime_config import (
 
 
 class RuntimeConfigTests(unittest.TestCase):
+    def test_gemini_model_catalog_returns_all_generate_content_ids(self) -> None:
+        payloads = iter([
+            {
+                "models": [
+                    {"name": "models/gemini-3.6-flash", "supportedGenerationMethods": ["generateContent"]},
+                    {"name": "models/text-embedding", "supportedGenerationMethods": ["embedContent"]},
+                ],
+                "nextPageToken": "next",
+            },
+            {
+                "models": [
+                    {"name": "models/gemini-3.5-flash-lite", "supportedGenerationMethods": ["generateContent"]},
+                ]
+            },
+        ])
+
+        class Response:
+            def __init__(self, payload):
+                self.payload = payload
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def read(self):
+                return json.dumps(self.payload).encode()
+
+        with patch(
+            "agent_runtime_ops.commands.runtime_config.urllib.request.urlopen",
+            side_effect=lambda request, timeout: Response(next(payloads)),
+        ):
+            models = _gemini_model_catalog("not-printed")
+
+        self.assertEqual(models, ["gemini-3.5-flash-lite", "gemini-3.6-flash"])
+
     def test_runtime_provider_id_canonicalizes_google_aliases(self) -> None:
         for provider in ("google", "google-ai", "google_ai", "google-gemini", "google_gemini", "gemini"):
             self.assertEqual(runtime_provider_id(provider), "gemini")

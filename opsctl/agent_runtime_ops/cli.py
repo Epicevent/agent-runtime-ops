@@ -86,6 +86,7 @@ from .commands.runtime_secret import (
 from .commands.runtime_config import (
     cmd_runtime_config_sanitize,
     cmd_runtime_config_status,
+    cmd_runtime_model_catalog,
     cmd_runtime_set_model,
     cmd_runtime_version_note,
 )
@@ -192,6 +193,9 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_config_status = runtime_sub.add_parser("config-status")
     runtime_config_status.add_argument("slot", metavar="target")
     runtime_config_status.set_defaults(func=cmd_runtime_config_status)
+    runtime_model_catalog = runtime_sub.add_parser("model-catalog")
+    runtime_model_catalog.add_argument("slot", metavar="target")
+    runtime_model_catalog.set_defaults(func=cmd_runtime_model_catalog)
     runtime_set_model = runtime_sub.add_parser("set-model")
     runtime_set_model.add_argument("slot", metavar="target")
     runtime_set_model.add_argument("--provider", required=True)

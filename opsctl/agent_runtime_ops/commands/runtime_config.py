@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
+import urllib.parse
+import urllib.request
 
 from ..domain.actions import append_action_log
 from ..domain.common import is_root, state_root
@@ -33,6 +36,7 @@ from ..domain.openclaw_config import (
 )
 from ..domain.runtime_truth import find_gateway_container
 from ..profiles import load_profile
+from ..runtime_secrets import parse_secret_env_text, primary_profile_secret_file
 from ..state import load_runtime_target
 
 
@@ -41,6 +45,34 @@ _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,160}$")
 
 # runtime config (model read/write) is supported for these product families.
 _CONFIG_FAMILIES = frozenset({"hermes", "openclaw"})
+
+
+def _gemini_model_catalog(api_key: str) -> list[str]:
+    """Return every model currently advertised for generateContent by Gemini API."""
+    models: set[str] = set()
+    page_token = ""
+    while True:
+        query = {"pageSize": "1000"}
+        if page_token:
+            query["pageToken"] = page_token
+        request = urllib.request.Request(
+            "https://generativelanguage.googleapis.com/v1beta/models?" + urllib.parse.urlencode(query),
+            headers={"x-goog-api-key": api_key, "Accept": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        for row in payload.get("models") or []:
+            if not isinstance(row, dict) or "generateContent" not in (row.get("supportedGenerationMethods") or []):
+                continue
+            name = str(row.get("name") or "")
+            if name.startswith("models/"):
+                name = name.removeprefix("models/")
+            if _MODEL_RE.fullmatch(name):
+                models.add(name)
+        page_token = str(payload.get("nextPageToken") or "")
+        if not page_token:
+            break
+    return sorted(models)
 
 
 def _assert_name(value: str, pattern: re.Pattern[str], label: str) -> str:
@@ -108,6 +140,39 @@ def cmd_runtime_config_status(args: argparse.Namespace) -> int:
             print(f"model_endpoint_drift_reason={drift['reason']}")
     print("secret_value_printed=no")
     print("runtime_config_status=ok")
+    return 0
+
+
+def cmd_runtime_model_catalog(args: argparse.Namespace) -> int:
+    if not is_root():
+        print("error: run as root/admin: sudo /usr/local/bin/opsctl runtime model-catalog TARGET", file=sys.stderr)
+        return 2
+    try:
+        desired = _load_config_target(args.slot, args)
+        profile = load_profile(desired.runtime_profile)
+        secret_file = primary_profile_secret_file(profile, desired.slot)
+        secrets = parse_secret_env_text(
+            secret_file.path.read_text(encoding="utf-8", errors="replace"),
+            source=str(secret_file.path),
+        )
+        api_key = str(secrets.get("GOOGLE_API_KEY") or secrets.get("GEMINI_API_KEY") or "")
+        if not api_key:
+            raise ValueError("Gemini API key is absent")
+        models = _gemini_model_catalog(api_key)
+        if not models:
+            raise ValueError("Gemini API returned no generateContent models")
+    except Exception as exc:
+        print(f"target={args.slot}")
+        print("model_catalog_status=fail")
+        print(f"reason={exc}")
+        print("secret_value_printed=no")
+        return 1
+    print(f"target={desired.slot}")
+    print("provider=google")
+    print(f"model_count={len(models)}")
+    print(f"models_json={json.dumps(models, ensure_ascii=False, separators=(',', ':'))}")
+    print("secret_value_printed=no")
+    print("model_catalog_status=ok")
     return 0
 
 
