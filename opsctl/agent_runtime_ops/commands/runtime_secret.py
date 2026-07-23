@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import hashlib
 import json
 import os
@@ -39,6 +40,119 @@ from ..runtime_secrets import (
     validate_runtime_secret_values,
 )
 from ..state import load_runtime_target
+
+
+@dataclass(frozen=True)
+class _SecretFileSnapshot:
+    path: Path
+    existed: bool
+    backup: Path | None
+    uid: int | None
+    gid: int | None
+    mode: int | None
+    sha256: str | None
+
+
+@dataclass(frozen=True)
+class _SecretTransaction:
+    root: Path
+    files: tuple[_SecretFileSnapshot, ...]
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _begin_secret_transaction(state_root: Path, slot: str, paths: list[Path]) -> _SecretTransaction:
+    parent = state_root / "runtime-secret-transactions"
+    parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(parent, 0o700)
+    root = parent / f"{slot}.lock"
+    root.mkdir(mode=0o700)  # atomic per-slot exclusion; a failed rollback deliberately leaves this lock
+    try:
+        snapshots: list[_SecretFileSnapshot] = []
+        for index, path in enumerate(paths):
+            if path.is_symlink() or (path.exists() and not path.is_file()):
+                raise ValueError(f"transaction source is not a regular file: {path}")
+            if not path.exists():
+                snapshots.append(_SecretFileSnapshot(path, False, None, None, None, None, None))
+                continue
+            info = path.stat()
+            backup = root / f"file-{index}.bak"
+            shutil.copy2(path, backup)
+            os.chmod(backup, 0o600)
+            snapshots.append(_SecretFileSnapshot(
+                path, True, backup, info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode), _file_sha256(backup),
+            ))
+        manifest = {
+            "slot": slot,
+            "secret_values_in_manifest": False,
+            "protected_backups_contain_secret_values": True,
+            "files": [
+                {
+                    "path": str(item.path), "existed": item.existed,
+                    "backup": item.backup.name if item.backup else None,
+                    "uid": item.uid, "gid": item.gid, "mode": item.mode,
+                    "sha256": item.sha256,
+                }
+                for item in snapshots
+            ],
+        }
+        (root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        os.chmod(root / "manifest.json", 0o600)
+        return _SecretTransaction(root, tuple(snapshots))
+    except Exception:
+        shutil.rmtree(root, ignore_errors=True)
+        raise
+
+
+def _restore_secret_transaction(transaction: _SecretTransaction) -> tuple[bool, str]:
+    try:
+        for item in transaction.files:
+            if not item.existed:
+                if item.path.exists():
+                    if item.path.is_symlink() or not item.path.is_file():
+                        raise ValueError(f"rollback target is not a regular file: {item.path}")
+                    item.path.unlink()
+                continue
+            if item.backup is None or not item.backup.is_file() or _file_sha256(item.backup) != item.sha256:
+                raise ValueError(f"rollback backup verification failed: {item.path}")
+            item.path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(item.backup, item.path)
+            if hasattr(os, "chown"):
+                os.chown(item.path, int(item.uid), int(item.gid))
+            os.chmod(item.path, int(item.mode))
+            if _file_sha256(item.path) != item.sha256:
+                raise ValueError(f"rollback restore verification failed: {item.path}")
+        return True, "restored_verified"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _finish_secret_transaction(transaction: _SecretTransaction) -> None:
+    shutil.rmtree(transaction.root)
+
+
+def _load_secret_transaction(state_root: Path, slot: str) -> _SecretTransaction:
+    root = state_root / "runtime-secret-transactions" / f"{slot}.lock"
+    raw = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    if raw.get("slot") != slot or not isinstance(raw.get("files"), list):
+        raise ValueError("invalid runtime-secret recovery manifest")
+    files: list[_SecretFileSnapshot] = []
+    for item in raw["files"]:
+        backup_name = item.get("backup")
+        backup = root / backup_name if backup_name else None
+        if backup is not None and backup.parent != root:
+            raise ValueError("invalid runtime-secret backup path")
+        files.append(_SecretFileSnapshot(
+            Path(item["path"]), bool(item["existed"]), backup,
+            item.get("uid"), item.get("gid"), item.get("mode"), item.get("sha256"),
+        ))
+    return _SecretTransaction(root, tuple(files))
 
 
 def _assert_secret_path_safe(slot: str, path: Path, *, create_parent: bool = False) -> None:
@@ -296,22 +410,71 @@ def cmd_runtime_secret_set(args: argparse.Namespace) -> int:
         print("error: run as root/admin: sudo /usr/local/bin/opsctl runtime-secret set TARGET", file=sys.stderr)
         return 2
     state_root = _state_root(args)
+    transaction: _SecretTransaction | None = None
+    restart_attempted = False
     try:
         desired = load_runtime_target(args.slot, state_root)
         profile = load_profile(desired.runtime_profile)
         values = _secret_values_from_args(args)
-        secret_path = _upsert_runtime_secret_file(desired.slot, profile, values)
         runtime_dir = slot_runtime_dir(desired.slot)
+        secret_file = primary_profile_secret_file(profile, desired.slot)
+        transaction_paths = [secret_file.path]
+        if values.get("API_SERVER_KEY"):
+            transaction_paths.append(runtime_dir / ".env")
+        transaction = _begin_secret_transaction(state_root, desired.slot, transaction_paths)
+        secret_path = _upsert_runtime_secret_file(desired.slot, profile, values)
         runtime_env_synced_keys = _sync_runtime_compose_env_for_secret_values(desired.slot, runtime_dir, values)
     except Exception as exc:
         print(f"target={args.slot}")
         print("runtime_secret_status=fail")
         print(f"reason={exc}")
+        if transaction is not None:
+            restored, restore_reason = _restore_secret_transaction(transaction)
+            print(f"rollback_status={'restored_verified' if restored else 'failed'}")
+            print(f"rollback_reason={restore_reason}")
+            if restored:
+                _finish_secret_transaction(transaction)
+            else:
+                print(f"recovery_dir={transaction.root}")
         try:
             _append_action_log(state_root, "runtime_secret_set", args.slot, args.slot, "fail", str(exc))
         except Exception:
             pass
         return 1
+
+    def fail_and_restore(reason: str, rc: int = 1) -> int:
+        restored, restore_reason = _restore_secret_transaction(transaction)
+        runtime_restored = True
+        if restored and restart_attempted:
+            print("phase=rollback_recreate")
+            rollback_rc = _apply_desired_slot(
+                desired=desired,
+                profile=profile,
+                state_root=state_root,
+                allow_first_apply=False,
+                action_name="runtime_secret_rollback",
+                emit_progress=True,
+            )
+            runtime_restored = rollback_rc == 0
+            if not runtime_restored:
+                restore_reason = f"{restore_reason}; rollback_recreate_failed rc={rollback_rc}"
+        rollback_ok = restored and runtime_restored
+        print(f"rollback_status={'restored_verified' if rollback_ok else 'failed'}")
+        print(f"rollback_reason={restore_reason}")
+        if rollback_ok:
+            _finish_secret_transaction(transaction)
+        else:
+            print(f"recovery_dir={transaction.root}")
+        _append_action_log(
+            state_root,
+            "runtime_secret_set",
+            desired.slot,
+            desired.slot,
+            "fail",
+            f"{reason} rollback={'ok' if rollback_ok else 'fail'}",
+        )
+        print("runtime_secret_status=fail")
+        return rc or 1
 
     print(f"target={desired.slot}")
     print(f"runtime_profile={profile.name}")
@@ -325,20 +488,21 @@ def cmd_runtime_secret_set(args: argparse.Namespace) -> int:
         print("restart=skipped")
         _append_action_log(state_root, "runtime_secret_set", desired.slot, desired.slot, "ok", "restart=skipped keys=" + ",".join(sorted(values)))
         print("runtime_secret_status=stored")
+        _finish_secret_transaction(transaction)
         return 0
 
     if getattr(args, "unsafe_service_recreate", False):
+        restart_attempted = True
         print("phase=unsafe_service_recreate")
         print("warning=unsafe_service_recreate_bypasses_full_apply_live_check")
         restart_ok, restart_reason = _unsafe_service_recreate_after_runtime_secret_set(desired, profile, runtime_dir)
         print(f"restart_status={'ok' if restart_ok else 'fail'}")
         print(f"restart_reason={restart_reason}")
         if not restart_ok:
-            _append_action_log(state_root, "runtime_secret_set", desired.slot, desired.slot, "fail", restart_reason)
-            print("runtime_secret_status=fail")
-            return 1
+            return fail_and_restore(f"unsafe_recreate_failed reason={restart_reason}")
     else:
         print("phase=full_recreate")
+        restart_attempted = True
         apply_rc = _apply_desired_slot(
             desired=desired,
             profile=profile,
@@ -348,9 +512,7 @@ def cmd_runtime_secret_set(args: argparse.Namespace) -> int:
             emit_progress=True,
         )
         if apply_rc != 0:
-            _append_action_log(state_root, "runtime_secret_set", desired.slot, desired.slot, "fail", f"full_recreate_failed rc={apply_rc}")
-            print("runtime_secret_status=fail")
-            return apply_rc or 1
+            return fail_and_restore(f"full_recreate_failed rc={apply_rc}", apply_rc)
 
     if args.check:
         print("phase=secret_check")
@@ -365,9 +527,25 @@ def cmd_runtime_secret_set(args: argparse.Namespace) -> int:
             if not check_ok:
                 failed += 1
         if failed:
-            _append_action_log(state_root, "runtime_secret_set", desired.slot, desired.slot, "fail", f"live_failed={failed}")
             print(f"runtime_secret_status=fail live_failed={failed}")
-            return 1
+            return fail_and_restore(f"live_failed={failed}")
+        provider_failed = 0
+        provider_keys = sorted(set(values) & set(_PROBE_VERIFIED))
+        if provider_keys:
+            print("phase=provider_probe")
+            container, lookup = _find_gateway_container(desired.route, profile)
+            if not container:
+                _check_line(False, "runtime_secret_provider_container_lookup", lookup)
+                provider_failed += 1
+            else:
+                for key in provider_keys:
+                    probe_status, probe_detail = _probe_key_in_container(container, _PROVIDER_CHECKS[key])
+                    probe_ok = probe_status == "valid"
+                    _check_line(probe_ok, f"runtime_secret_{key.lower()}_provider_valid", probe_detail)
+                    if not probe_ok:
+                        provider_failed += 1
+        if provider_failed:
+            return fail_and_restore(f"provider_probe_failed={provider_failed}")
         if profile.metadata.get("family") == "hermes":
             print("phase=hermes_smoke")
             container, lookup = _find_gateway_container(desired.route, profile)
@@ -383,12 +561,12 @@ def cmd_runtime_secret_set(args: argparse.Namespace) -> int:
                 if not check_ok:
                     smoke_failed += 1
             if smoke_failed:
-                _append_action_log(state_root, "runtime_secret_set", desired.slot, desired.slot, "fail", f"hermes_smoke_failed={smoke_failed}")
                 print(f"runtime_secret_status=fail hermes_smoke_failed={smoke_failed}")
-                return 1
+                return fail_and_restore(f"hermes_smoke_failed={smoke_failed}")
 
     _append_action_log(state_root, "runtime_secret_set", desired.slot, desired.slot, "ok", "keys=" + ",".join(sorted(values)))
     print(f"runtime_secret_status={'stored_checked' if args.check else 'stored'}")
+    _finish_secret_transaction(transaction)
     return 0
 
 
@@ -418,6 +596,44 @@ def cmd_runtime_secret_status(args: argparse.Namespace) -> int:
     print("secret_value_printed=no")
     print("runtime_secret_status=ok")
     return 0
+
+
+def cmd_runtime_secret_recover(args: argparse.Namespace) -> int:
+    if not _is_root():
+        print("error: run as root/admin: sudo /usr/local/bin/opsctl runtime-secret recover TARGET", file=sys.stderr)
+        return 2
+    state_root = _state_root(args)
+    try:
+        desired = load_runtime_target(args.slot, state_root)
+        profile = load_profile(desired.runtime_profile)
+        transaction = _load_secret_transaction(state_root, desired.slot)
+        restored, reason = _restore_secret_transaction(transaction)
+        print(f"target={desired.slot}")
+        print(f"file_restore_status={'restored_verified' if restored else 'failed'}")
+        if not restored:
+            print(f"reason={reason}")
+            print(f"recovery_dir={transaction.root}")
+            print("runtime_secret_recover_status=fail")
+            return 1
+        apply_rc = _apply_desired_slot(
+            desired=desired, profile=profile, state_root=state_root,
+            allow_first_apply=False, action_name="runtime_secret_manual_recover", emit_progress=True,
+        )
+        if apply_rc != 0:
+            print(f"reason=runtime_recreate_failed rc={apply_rc}")
+            print(f"recovery_dir={transaction.root}")
+            print("runtime_secret_recover_status=fail")
+            return apply_rc or 1
+        _finish_secret_transaction(transaction)
+        _append_action_log(state_root, "runtime_secret_recover", desired.slot, desired.slot, "ok", "restored_verified")
+        print("runtime_restore_status=restored_verified")
+        print("runtime_secret_recover_status=ok")
+        return 0
+    except Exception as exc:
+        print(f"target={args.slot}")
+        print(f"reason={exc}")
+        print("runtime_secret_recover_status=fail")
+        return 1
 
 
 def cmd_runtime_secret_probe(args: argparse.Namespace) -> int:

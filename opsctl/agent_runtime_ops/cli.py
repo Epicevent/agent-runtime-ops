@@ -80,6 +80,7 @@ from .commands.mitigation import (
 )
 from .commands.runtime_secret import (
     cmd_runtime_secret_probe,
+    cmd_runtime_secret_recover,
     cmd_runtime_secret_set,
     cmd_runtime_secret_status,
 )
@@ -364,8 +365,8 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_secret_set.add_argument("--no-restart", action="store_true")
     runtime_secret_set.add_argument(
         "--check", action="store_true",
-        help="after writing, verify the value reached the container env + container is healthy. "
-        "This does NOT validate the value works with the provider, and it writes first — not a dry-run.",
+        help="after writing, verify container delivery + health; live-verified provider keys are also probed. "
+        "Any failure restores the protected pre-change files and recreates the previous runtime.",
     )
     runtime_secret_set.add_argument(
         "--unsafe-service-recreate",
@@ -376,6 +377,11 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_secret_status = runtime_secret_sub.add_parser("status")
     runtime_secret_status.add_argument("slot", metavar="target")
     runtime_secret_status.set_defaults(func=cmd_runtime_secret_status)
+    runtime_secret_recover = runtime_secret_sub.add_parser(
+        "recover", help="restore a retained failed-transaction recovery point and recreate the previous runtime",
+    )
+    runtime_secret_recover.add_argument("slot", metavar="target")
+    runtime_secret_recover.set_defaults(func=cmd_runtime_secret_recover)
     runtime_secret_probe = runtime_secret_sub.add_parser(
         "probe",
         help="stored != valid: ask the provider whether the key actually works (read-only, no write). "

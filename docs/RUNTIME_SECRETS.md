@@ -38,6 +38,21 @@ printf '%s' "$GEMINI_API_KEY" | sudo /usr/local/bin/opsctl runtime-secret set \
 unset GEMINI_API_KEY
 ```
 
+With `--check`, the write is transactional per slot. `opsctl` takes protected
+pre-change copies, recreates the runtime, verifies container delivery and health,
+and probes live-verified provider keys. Any failure restores both secret-bearing
+files and recreates the previous runtime. Concurrent changes to the same slot are
+refused. A failed automatic rollback retains its protected recovery directory and
+lock; recover it through the supported command instead of editing files directly:
+
+```bash
+sudo /usr/local/bin/opsctl runtime-secret recover TARGET
+```
+
+Successful commits and verified rollbacks remove their temporary protected copies.
+The retained recovery directory contains secret values, is root-only, and must never
+be copied into chat or logs.
+
 Inject a Gemini key into Hermes dev:
 
 ```bash

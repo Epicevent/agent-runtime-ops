@@ -12,11 +12,13 @@ import uuid
 from unittest.mock import patch
 
 from agent_runtime_ops.commands.runtime_secret import (
+    _begin_secret_transaction,
     _run_runtime_secret_container_checks,
     _secret_value_matches_container_env,
     _sync_runtime_compose_env_for_secret_values,
     cmd_runtime_secret_set,
     cmd_runtime_secret_status,
+    cmd_runtime_secret_recover,
 )
 from agent_runtime_ops.routing import RuntimeBinding, dump_runtime_bindings
 from agent_runtime_ops.runtime_secrets import RuntimeSecretFile
@@ -59,6 +61,28 @@ def write_state(root: Path) -> None:
 
 
 class CliRuntimeSecretTests(unittest.TestCase):
+    def test_manual_recover_restores_retained_transaction_and_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            secret_file = root / "secret.env"
+            secret_file.write_text("GEMINI_API_KEY=old\n", encoding="utf-8")
+            transaction = _begin_secret_transaction(root, "dev-hermess", [secret_file])
+            secret_file.write_text("GEMINI_API_KEY=new\n", encoding="utf-8")
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.commands.runtime_secret._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.runtime_secret._apply_desired_slot", return_value=0) as apply,
+                patch("agent_runtime_ops.commands.runtime_secret._append_action_log"),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_runtime_secret_recover(argparse.Namespace(slot="dev-hermess", state_root=str(root)))
+            self.assertEqual(rc, 0)
+            self.assertEqual(secret_file.read_text(encoding="utf-8"), "GEMINI_API_KEY=old\n")
+            self.assertFalse(transaction.root.exists())
+            apply.assert_called_once()
+            self.assertIn("runtime_secret_recover_status=ok", output.getvalue())
+
     def test_runtime_secret_status_reports_api_server_key_without_value(self) -> None:
         secret_value = "internal-api-token"
         with tempfile.TemporaryDirectory() as tmp:
@@ -226,6 +250,7 @@ class CliRuntimeSecretTests(unittest.TestCase):
                     return_value=[(True, "runtime_secret_api_server_key_matches_intended_value", "secret_value_printed=no")],
                 ),
                 patch("agent_runtime_ops.commands.runtime_secret._find_gateway_container", return_value=("container123", "lookup_ok")),
+                patch("agent_runtime_ops.commands.runtime_secret._probe_key_in_container", return_value=("valid", "http=200")),
                 patch(
                     "agent_runtime_ops.commands.runtime_secret._run_hermes_http_smoke",
                     return_value=[(True, "hermes_smoke_chat_not_required", "not_required")],
@@ -281,6 +306,7 @@ class CliRuntimeSecretTests(unittest.TestCase):
                     return_value=[(True, "runtime_secret_gemini_api_key_matches_intended_value", "secret_value_printed=no")],
                 ),
                 patch("agent_runtime_ops.commands.runtime_secret._find_gateway_container", return_value=("container123", "lookup_ok")),
+                patch("agent_runtime_ops.commands.runtime_secret._probe_key_in_container", return_value=("valid", "http=200")),
                 patch(
                     "agent_runtime_ops.commands.runtime_secret._run_hermes_http_smoke",
                     return_value=[(True, "hermes_smoke_chat_ok", "status=200")],
@@ -303,6 +329,117 @@ class CliRuntimeSecretTests(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         smoke.assert_called_once_with("container123", chat_smoke=True)
+
+    def test_failed_live_check_restores_files_and_recreates_previous_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            secret_file = root / "secret.env"
+            runtime_dir = root / "runtime-dir"
+            runtime_dir.mkdir()
+            runtime_env = runtime_dir / ".env"
+            secret_file.write_text("GEMINI_API_KEY=old-secret\n", encoding="utf-8")
+            runtime_env.write_text("API_SERVER_KEY=old-server\n", encoding="utf-8")
+            old_secret = secret_file.read_bytes()
+            old_runtime_env = runtime_env.read_bytes()
+
+            def write_new_secret(*_args, **_kwargs):
+                secret_file.write_text("GEMINI_API_KEY=new-secret\n", encoding="utf-8")
+                return secret_file
+
+            def write_new_runtime(*_args, **_kwargs):
+                runtime_env.write_text("API_SERVER_KEY=new-server\n", encoding="utf-8")
+                return ["API_SERVER_KEY"]
+
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.commands.runtime_secret._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.runtime_secret._secret_values_from_args", return_value={"API_SERVER_KEY": "new-server"}),
+                patch(
+                    "agent_runtime_ops.commands.runtime_secret.primary_profile_secret_file",
+                    return_value=RuntimeSecretFile(path=secret_file, owner_mode="root"),
+                ),
+                patch("agent_runtime_ops.commands.runtime_secret.slot_runtime_dir", return_value=runtime_dir),
+                patch("agent_runtime_ops.commands.runtime_secret._upsert_runtime_secret_file", side_effect=write_new_secret),
+                patch("agent_runtime_ops.commands.runtime_secret._sync_runtime_compose_env_for_secret_values", side_effect=write_new_runtime),
+                patch("agent_runtime_ops.commands.runtime_secret._apply_desired_slot", side_effect=[0, 0]) as apply,
+                patch(
+                    "agent_runtime_ops.commands.runtime_secret._run_runtime_secret_container_checks_with_wait",
+                    return_value=[(False, "runtime_secret_api_server_key_matches_intended_value", "secret_value_printed=no")],
+                ),
+                patch("agent_runtime_ops.commands.runtime_secret._append_action_log"),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_runtime_secret_set(argparse.Namespace(
+                    slot="dev-hermess", state_root=str(root), env_file=None,
+                    key="API_SERVER_KEY", value_stdin=True, no_restart=False,
+                    check=True, unsafe_service_recreate=False,
+                ))
+
+            self.assertEqual(rc, 1)
+            self.assertEqual(secret_file.read_bytes(), old_secret)
+            self.assertEqual(runtime_env.read_bytes(), old_runtime_env)
+            self.assertEqual(apply.call_count, 2)
+            self.assertIn("rollback_status=restored_verified", output.getvalue())
+            self.assertEqual(list((root / "runtime-secret-transactions").glob("dev-hermess*")), [])
+
+    def test_secret_transaction_refuses_concurrent_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            lock = root / "runtime-secret-transactions" / "dev-hermess.lock"
+            lock.mkdir(parents=True)
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.commands.runtime_secret._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.runtime_secret._secret_values_from_args", return_value={"GEMINI_API_KEY": "new-key"}),
+                patch(
+                    "agent_runtime_ops.commands.runtime_secret.primary_profile_secret_file",
+                    return_value=RuntimeSecretFile(path=root / "secret.env", owner_mode="root"),
+                ),
+                patch("agent_runtime_ops.commands.runtime_secret.slot_runtime_dir", return_value=root / "runtime-dir"),
+                patch("agent_runtime_ops.commands.runtime_secret._append_action_log"),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_runtime_secret_set(argparse.Namespace(
+                    slot="dev-hermess", state_root=str(root), env_file=None,
+                    key="GEMINI_API_KEY", value_stdin=True, no_restart=False,
+                    check=True, unsafe_service_recreate=False,
+                ))
+            self.assertEqual(rc, 1)
+            self.assertIn("dev-hermess.lock", output.getvalue())
+
+    def test_invalid_provider_probe_rolls_back_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.commands.runtime_secret._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.runtime_secret._secret_values_from_args", return_value={"GEMINI_API_KEY": "new-key"}),
+                patch("agent_runtime_ops.commands.runtime_secret._upsert_runtime_secret_file", return_value=Path("/home/dev-hermess/.hermes/.env")),
+                patch("agent_runtime_ops.commands.runtime_secret._sync_runtime_compose_env_for_secret_values", return_value=[]),
+                patch("agent_runtime_ops.commands.runtime_secret.slot_runtime_dir", return_value=Path("/home/dev-hermess/openclaw")),
+                patch("agent_runtime_ops.commands.runtime_secret._apply_desired_slot", side_effect=[0, 0]) as apply,
+                patch(
+                    "agent_runtime_ops.commands.runtime_secret._run_runtime_secret_container_checks_with_wait",
+                    return_value=[(True, "runtime_secret_gemini_api_key_matches_intended_value", "secret_value_printed=no")],
+                ),
+                patch("agent_runtime_ops.commands.runtime_secret._find_gateway_container", return_value=("container123", "lookup_ok")),
+                patch("agent_runtime_ops.commands.runtime_secret._probe_key_in_container", return_value=("invalid", "http=401")),
+                patch("agent_runtime_ops.commands.runtime_secret._append_action_log"),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_runtime_secret_set(argparse.Namespace(
+                    slot="dev-hermess", state_root=str(root), env_file=None,
+                    key="GEMINI_API_KEY", value_stdin=True, no_restart=False,
+                    check=True, unsafe_service_recreate=False,
+                ))
+
+            self.assertEqual(rc, 1)
+            self.assertEqual(apply.call_count, 2)
+            self.assertIn("phase=provider_probe", output.getvalue())
+            self.assertIn("rollback_status=restored_verified", output.getvalue())
 
     def test_runtime_secret_set_no_restart_still_syncs_runtime_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

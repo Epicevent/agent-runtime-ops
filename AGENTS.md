@@ -295,6 +295,7 @@ sudo /usr/local/bin/opsctl rollout image-dev-apply --target TARGET --wrapper-ima
 sudo /usr/local/bin/opsctl rollout image-canary --target TARGET --wrapper-image WRAP@sha256:... --product-image PROD@sha256:...
 sudo /usr/local/bin/opsctl rollout image-promote --from-target TARGET --targets TARGET1,TARGET2
 sudo /usr/local/bin/opsctl runtime-secret set TARGET --key KEY --value-stdin --check
+sudo /usr/local/bin/opsctl runtime-secret recover TARGET
 sudo /usr/local/bin/opsctl heartbeat disable TARGET
 sudo /usr/local/bin/opsctl nas mount TARGET //HOST/SHARE
 sudo /usr/local/bin/opsctl nas unmount TARGET //HOST/SHARE
