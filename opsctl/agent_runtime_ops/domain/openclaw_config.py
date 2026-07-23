@@ -95,6 +95,73 @@ def read_openclaw_config(path: Path) -> dict[str, object]:
     return dict(data)
 
 
+def write_openclaw_config(slot: str, path: Path, config: dict[str, object]) -> None:
+    """Atomically persist an OpenClaw config with the slot runtime ownership."""
+    home = slot_home(slot).resolve(strict=False)
+    ensure_not_symlink_chain(path.parent, home)
+    if path.exists() and path.is_symlink():
+        raise ValueError(f"config file must not be a symlink: {path}")
+    uid, _, gid = runtime_ids(slot)
+    tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            json.dump(config, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chown(tmp_path, uid, gid)
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, path)
+        fsync_parent(path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def ensure_provider_model(config: dict[str, object], provider: str, model: str) -> bool:
+    """Register a provider model required by OpenClaw's runtime resolver.
+
+    The product's ``models set`` command can update ``agents.defaults.model`` without adding the
+    matching ``models.providers[provider].models[]`` entry.  In that partial state the config
+    looks updated but every model roundtrip fails.  Preserve all existing provider fields and
+    model objects, adding only the missing ``{"id": model}`` entry.
+    """
+    models_root = config.setdefault("models", {})
+    if not isinstance(models_root, dict):
+        raise ValueError("openclaw models must be an object")
+    providers = models_root.setdefault("providers", {})
+    if not isinstance(providers, dict):
+        raise ValueError("openclaw models.providers must be an object")
+    provider_config = providers.setdefault(provider, {})
+    if not isinstance(provider_config, dict):
+        raise ValueError(f"openclaw models.providers[{provider!r}] must be an object")
+    registered = provider_config.setdefault("models", [])
+    if not isinstance(registered, list):
+        raise ValueError(f"openclaw models.providers[{provider!r}].models must be an array")
+    for entry in registered:
+        if isinstance(entry, dict) and entry.get("id") == model:
+            return False
+        if entry == model:
+            return False
+    registered.append({"id": model})
+    return True
+
+
+def provider_model_registration(config: dict[str, object], provider: str, model: str) -> tuple[bool, int]:
+    """Return whether the selected model is registered and the provider model count."""
+    models_root = config.get("models")
+    providers = models_root.get("providers") if isinstance(models_root, dict) else None
+    provider_config = providers.get(provider) if isinstance(providers, dict) else None
+    registered = provider_config.get("models") if isinstance(provider_config, dict) else None
+    if not isinstance(registered, list):
+        return False, 0
+    found = any(
+        (isinstance(entry, dict) and entry.get("id") == model) or entry == model
+        for entry in registered
+    )
+    return found, len(registered)
+
+
 def _model_field(config: dict[str, object]) -> object:
     agents = config.get("agents")
     if not isinstance(agents, dict):

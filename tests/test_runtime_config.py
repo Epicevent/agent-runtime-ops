@@ -360,7 +360,7 @@ class OpenClawSetModelTests(unittest.TestCase):
     """openclaw set-model applies the change with the product's OWN `models set` inside the live
     container (docker exec), then shows a before/after diff of the on-disk config."""
 
-    def _run(self, *, initial, models_set, container=("c123", "instance_label"), provider="google", model="gemini-3.5-flash"):
+    def _run(self, *, initial, models_set, container=("c123", "instance_label"), provider="google", model="gemini-3.5-flash", writer=None):
         store = {"cfg": initial}
         calls: list[tuple[str, str]] = []
         output = io.StringIO()
@@ -385,6 +385,10 @@ class OpenClawSetModelTests(unittest.TestCase):
             patch("agent_runtime_ops.commands.runtime_config.openclaw_config_path", return_value=Path("/home/oc1/.openclaw/openclaw.json")),
             patch("agent_runtime_ops.commands.runtime_config.read_openclaw_config", side_effect=_read),
             patch("agent_runtime_ops.commands.runtime_config.run_openclaw_models_set", side_effect=_models_set),
+            patch(
+                "agent_runtime_ops.commands.runtime_config.write_openclaw_config",
+                side_effect=writer or (lambda _slot, _path, config: store.update(cfg=config)),
+            ),
             patch("agent_runtime_ops.commands.runtime_config.append_action_log"),
             contextlib.redirect_stdout(output),
         ):
@@ -405,6 +409,10 @@ class OpenClawSetModelTests(unittest.TestCase):
         # the product command was invoked with the composed provider/model ref
         self.assertEqual(calls, [("c123", "google/gemini-3.5-flash")])
         self.assertEqual(cfg["agents"]["defaults"]["model"], "google/gemini-3.5-flash")
+        self.assertEqual(
+            cfg["models"]["providers"]["google"]["models"],
+            [{"id": "gemini-3.5-flash"}],
+        )
         self.assertIn("family=openclaw", text)
         self.assertIn("exec_container=c123:instance_label", text)
         self.assertIn("model_ref=google/gemini-3.5-flash", text)
@@ -423,6 +431,50 @@ class OpenClawSetModelTests(unittest.TestCase):
         self.assertIn("no running gateway container", text)
         self.assertIn("runtime_config_status=fail", text)
 
+    def test_preserves_provider_config_and_does_not_duplicate_registered_model(self) -> None:
+        def apply(store, _container, ref):
+            store["cfg"]["agents"]["defaults"]["model"] = ref
+            return True, "exit=0"
+
+        initial = {
+            "agents": {"defaults": {"model": "google/gemini-2.5-flash"}},
+            "models": {
+                "providers": {
+                    "google": {
+                        "baseUrl": "https://generativelanguage.googleapis.com",
+                        "models": [{"id": "gemini-3.5-flash", "name": "kept"}],
+                    }
+                }
+            },
+        }
+        rc, text, cfg, _calls = self._run(initial=initial, models_set=apply)
+        self.assertEqual(rc, 0, text)
+        google = cfg["models"]["providers"]["google"]
+        self.assertEqual(google["baseUrl"], "https://generativelanguage.googleapis.com")
+        self.assertEqual(google["models"], [{"id": "gemini-3.5-flash", "name": "kept"}])
+
+    def test_registration_write_failure_restores_exact_previous_config(self) -> None:
+        initial = {"agents": {"defaults": {"model": "google/gemini-2.5-flash"}}}
+        store_ref = {"cfg": initial}
+        writes = []
+
+        def apply(store, _container, ref):
+            store_ref["cfg"] = store["cfg"]
+            store["cfg"] = {"agents": {"defaults": {"model": ref}}}
+            store_ref["cfg"] = store["cfg"]
+            return True, "exit=0"
+
+        def writer(_slot, _path, config):
+            writes.append(config)
+            if len(writes) == 1:
+                raise OSError("disk full")
+            store_ref["cfg"] = config
+
+        rc, text, _cfg, _calls = self._run(initial=initial, models_set=apply, writer=writer)
+        self.assertEqual(rc, 1, text)
+        self.assertIn("rollback=restored", text)
+        self.assertEqual(writes[-1], initial)
+
     def test_product_command_failure_reports(self) -> None:
         rc, text, _cfg, _calls = self._run(
             initial={"agents": {"defaults": {"model": "google/gemini-2.5-flash"}}},
@@ -430,7 +482,20 @@ class OpenClawSetModelTests(unittest.TestCase):
         )
         self.assertEqual(rc, 1, text)
         self.assertIn("product models set failed", text)
+        self.assertIn("rollback=not_needed", text)
         self.assertIn("runtime_config_status=fail", text)
+
+    def test_product_command_partial_write_is_restored_on_failure(self) -> None:
+        initial = {"agents": {"defaults": {"model": "google/gemini-2.5-flash"}}}
+
+        def fail_after_partial_write(store, _container, ref):
+            store["cfg"] = {"agents": {"defaults": {"model": ref}}}
+            return False, "exit=1 stderr=late failure"
+
+        rc, text, cfg, _calls = self._run(initial=initial, models_set=fail_after_partial_write)
+        self.assertEqual(rc, 1, text)
+        self.assertIn("rollback=restored", text)
+        self.assertEqual(cfg, initial)
 
     def test_openclaw_config_status_reports_ref(self) -> None:
         output = io.StringIO()
@@ -443,7 +508,10 @@ class OpenClawSetModelTests(unittest.TestCase):
             patch("agent_runtime_ops.commands.runtime_config.openclaw_config_path", return_value=Path("/home/oc1/.openclaw/openclaw.json")),
             patch(
                 "agent_runtime_ops.commands.runtime_config.read_openclaw_config",
-                return_value={"agents": {"defaults": {"model": "google/gemini-2.5-flash"}}},
+                return_value={
+                    "agents": {"defaults": {"model": "google/gemini-2.5-flash"}},
+                    "models": {"providers": {"google": {"models": [{"id": "gemini-2.5-flash"}]}}},
+                },
             ),
             contextlib.redirect_stdout(output),
         ):
@@ -454,6 +522,8 @@ class OpenClawSetModelTests(unittest.TestCase):
         self.assertIn("provider=google", text)
         self.assertIn("model=gemini-2.5-flash", text)
         self.assertIn("model_ref=google/gemini-2.5-flash", text)
+        self.assertIn("provider_model_registered=yes", text)
+        self.assertIn("provider_model_count=1", text)
 
 
 class OpenClawConfigDomainTests(unittest.TestCase):

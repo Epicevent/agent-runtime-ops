@@ -29,9 +29,12 @@ from ..domain.openclaw_config import (
     current_openclaw_model,
     openclaw_config_path,
     openclaw_version_notes_path,
+    provider_model_registration,
     read_openclaw_config,
     read_openclaw_version_notes,
     run_openclaw_models_set,
+    ensure_provider_model,
+    write_openclaw_config,
     write_openclaw_version_notes,
 )
 from ..domain.runtime_truth import find_gateway_container
@@ -109,6 +112,7 @@ def cmd_runtime_config_status(args: argparse.Namespace) -> int:
             config = read_openclaw_config(config_path)
             provider, model, ref, source = current_openclaw_model(config)
             provider_runtime = provider  # openclaw provider ids are used verbatim (e.g. "google")
+            model_registered, provider_model_count = provider_model_registration(config, provider, model)
         else:
             config_path = hermes_config_path(desired.slot)
             config = read_hermes_config(config_path)
@@ -129,6 +133,9 @@ def cmd_runtime_config_status(args: argparse.Namespace) -> int:
     print(f"model={model or 'missing'}")
     print(f"model_ref={ref or 'missing'}")
     print(f"model_source={source}")
+    if desired.family == "openclaw":
+        print(f"provider_model_registered={'yes' if model_registered else 'no'}")
+        print(f"provider_model_count={provider_model_count}")
     if desired.family == "hermes":
         drift = model_endpoint_drift(config)
         verdict = str(drift["verdict"])
@@ -194,8 +201,33 @@ def _set_model_openclaw(desired, provider_raw: str, model: str) -> tuple[str, li
     new_ref = build_model_ref(provider_raw, model)
     ok, detail = run_openclaw_models_set(container, new_ref)
     if not ok:
-        raise ValueError(f"product models set failed (container={container}): {detail}")
-    after = read_openclaw_config(config_path)
+        rollback = "not_needed"
+        try:
+            partial = read_openclaw_config(config_path)
+            if partial != before:
+                write_openclaw_config(desired.slot, config_path, before)
+                rollback = "restored"
+        except Exception as rollback_exc:
+            raise ValueError(
+                f"product models set failed (container={container}): {detail}; "
+                f"rollback failed: {rollback_exc}"
+            ) from rollback_exc
+        raise ValueError(
+            f"product models set failed (container={container}): {detail}; rollback={rollback}"
+        )
+    try:
+        after = read_openclaw_config(config_path)
+        if ensure_provider_model(after, provider_raw, model):
+            write_openclaw_config(desired.slot, config_path, after)
+            after = read_openclaw_config(config_path)
+    except Exception as exc:
+        try:
+            write_openclaw_config(desired.slot, config_path, before)
+        except Exception as rollback_exc:
+            raise ValueError(
+                f"provider model registration failed: {exc}; rollback failed: {rollback_exc}"
+            ) from exc
+        raise ValueError(f"provider model registration failed: {exc}; rollback=restored") from exc
     diff_lines = config_json_diff(before, after)
     return str(config_path), diff_lines, previous_ref, new_ref, source, f"{container}:{method}"
 
