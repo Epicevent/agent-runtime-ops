@@ -87,6 +87,7 @@ from .commands.runtime_secret import (
 from .commands.runtime_config import (
     cmd_runtime_config_sanitize,
     cmd_runtime_config_status,
+    cmd_runtime_model_attest,
     cmd_runtime_model_catalog,
     cmd_runtime_set_model,
     cmd_runtime_version_note,
@@ -197,6 +198,12 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_model_catalog = runtime_sub.add_parser("model-catalog")
     runtime_model_catalog.add_argument("slot", metavar="target")
     runtime_model_catalog.set_defaults(func=cmd_runtime_model_catalog)
+    runtime_model_attest = runtime_sub.add_parser(
+        "model-attest",
+        help="run an isolated completion and report the provider-observed model",
+    )
+    runtime_model_attest.add_argument("slot", metavar="target")
+    runtime_model_attest.set_defaults(func=cmd_runtime_model_attest)
     runtime_set_model = runtime_sub.add_parser("set-model")
     runtime_set_model.add_argument("slot", metavar="target")
     runtime_set_model.add_argument("--provider", required=True)

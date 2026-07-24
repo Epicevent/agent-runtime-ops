@@ -395,8 +395,8 @@ check names in opsctl.
 
 ### Runtime model config (Hermes and OpenClaw)
 
-`opsctl runtime set-model` / `runtime config-status` support BOTH families (each is root-only /
-svcops NOPASSWD). They dispatch on the slot's family:
+`opsctl runtime set-model`, `runtime config-status`, and `runtime model-attest` support BOTH
+families (each is root-only / svcops NOPASSWD). They dispatch on the slot's family:
 - **Hermes**: read/write `.hermes/config.yaml` `agents.defaults.model.default` directly.
 - **OpenClaw**: `config-status` reads `.openclaw/openclaw.json` `agents.defaults.model`
   (`provider/model` ref). `set-model` runs the product's OWN `models set` **inside the live gateway
@@ -410,10 +410,18 @@ same-provider bump needs no new key). Verify with a REAL turn, not just config v
 
 ```bash
 ssh svcops "sudo /usr/local/bin/opsctl runtime config-status oc1"                              # current provider/model
+ssh svcops "sudo /usr/local/bin/opsctl runtime model-attest oc1"                               # isolated provider receipt
 ssh svcops "sudo /usr/local/bin/opsctl runtime set-model oc1 --provider google --model gemini-3.5-flash"
 ssh svcops "sudo /usr/local/bin/opsctl checklist pack oc1 --pack openclaw-runtime --gemini-chat-smoke"   # real completion
 # hermes uses the same command shape (checklist pack ... --pack hermes-runtime --gemini-chat-smoke)
 ```
+
+`runtime model-attest` deliberately separates response arrival, provider-receipt presence, the OPS
+configured model, the model actually sent in the provider request, and the model version recorded in
+the provider response. It must fail closed when a product reports only its selected/configured model.
+A numeric provider revision (for example configured `gemini-3.6-flash` and actual
+`gemini-3.6-flash-001`) is reported explicitly rather than collapsed into one value. The command
+runs one isolated completion and does not use or alter a customer's conversation session.
 
 Most config (including `agents.defaults.model.primary`) hot-reloads live;
 `gateway.controlUi.allowedOrigins` requires a gateway restart to apply. Rollback = set-model back to

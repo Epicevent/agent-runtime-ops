@@ -112,34 +112,55 @@ function parseJson(label, response) {
       if (eventType !== 'done' || !raw || raw === '[DONE]') continue;
       try { donePayloads.push(JSON.parse(raw)); } catch {}
     }
-    function receiptAtAllowedPointer(payload) {
-      const value = payload && payload.providerReceipt;
-      if (!value || typeof value !== 'object') return null;
-      const usage = value.usageMetadata;
+    function evidenceAtAllowedPointer(payload) {
+      const evidence = payload && payload.providerModelEvidence;
+      const receipt = payload && payload.providerReceipt;
+      if (!evidence || typeof evidence !== 'object' || !receipt || typeof receipt !== 'object') return null;
+      const usage = receipt.usageMetadata;
       const tokenCounts = usage && typeof usage === 'object'
         ? Object.values(usage).filter(item => Number.isInteger(item))
         : [];
-      return value.provider === 'gemini'
-        && typeof value.responseId === 'string' && value.responseId
-        && typeof value.modelVersion === 'string' && value.modelVersion
+      const configuredModel = typeof evidence.configuredModel === 'string'
+        ? evidence.configuredModel.replace(/^models\//, '') : '';
+      const actualModel = typeof evidence.actualModel === 'string'
+        ? evidence.actualModel.replace(/^models\//, '') : '';
+      const receiptModel = typeof receipt.modelVersion === 'string'
+        ? receipt.modelVersion.replace(/^models\//, '') : '';
+      return receipt.provider === 'gemini'
+        && evidence.evidenceSource === 'gemini_response.modelVersion'
+        && configuredModel && actualModel
+        && typeof evidence.responseId === 'string' && evidence.responseId
+        && receipt.responseId === evidence.responseId
+        && receiptModel === actualModel
         && tokenCounts.length > 0
-        && typeof value.finishReason === 'string' && value.finishReason
-        ? value : null;
+        && typeof receipt.finishReason === 'string' && receipt.finishReason
+        ? {configuredModel, actualModel, evidenceSource: evidence.evidenceSource, responseId: evidence.responseId}
+        : null;
     }
-    const receipts = donePayloads.map(receiptAtAllowedPointer).filter(Boolean);
+    const receipts = donePayloads.map(evidenceAtAllowedPointer).filter(Boolean);
     const configuredRaw = config.activeModel || (typeof config.model === 'string'
       ? config.model
       : ((config.model && config.model.default) || ''));
     const configured = String(configuredRaw).replace(/^models\//, '');
     const configuredProvider = String(config.activeProvider || config.provider || '').toLowerCase();
     const providerOk = configuredProvider === 'gemini' || configuredProvider === 'google';
-    const normalized = [...new Set(receipts.map(value => String(value.modelVersion).replace(/^models\//, '')))];
+    const requested = [...new Set(receipts.map(value => value.configuredModel))];
+    const normalized = [...new Set(receipts.map(value => value.actualModel))];
+    const responseIds = [...new Set(receipts.map(value => String(value.responseId)))];
+    const evidenceSources = [...new Set(receipts.map(value => value.evidenceSource))];
+    const actualRelation = normalized.length !== 1 ? 'unknown'
+      : normalized[0] === configured ? 'exact'
+      : normalized[0].startsWith(`${configured}-`) && /^\d{3,}$/.test(normalized[0].slice(configured.length + 1))
+        ? 'provider_revision' : 'different';
     const matched = providerOk && configured && receipts.length === donePayloads.length
-      && receipts.length > 0 && normalized.length === 1 && normalized[0] === configured;
+      && receipts.length > 0 && requested.length === 1 && requested[0] === configured
+      && normalized.length === 1 && evidenceSources.length === 1
+      && evidenceSources[0] === 'gemini_response.modelVersion'
+      && (actualRelation === 'exact' || actualRelation === 'provider_revision');
     checks.push({
       name: 'hermes_smoke_model_attested',
       ok: Boolean(chatOk && matched),
-      detail: `configured_provider=${configuredProvider || 'missing'} configured_model=${configured || 'missing'} done_events=${donePayloads.length} complete_provider_receipts=${receipts.length} receipt_model_versions=${normalized.length ? normalized.join(',') : 'missing'} receipt_fields=responseId,modelVersion,usageMetadata,finishReason source=done_event_providerReceipt`
+      detail: `configured_provider=${configuredProvider || 'missing'} configured_model=${configured || 'missing'} done_events=${donePayloads.length} complete_provider_receipts=${receipts.length} evidence_requested_models=${requested.length ? requested.join(',') : 'missing'} receipt_model_versions=${normalized.length ? normalized.join(',') : 'missing'} actual_model_relation=${actualRelation} receipt_response_ids=${responseIds.length ? responseIds.join(',') : 'missing'} receipt_fields=responseId,modelVersion,usageMetadata,finishReason source=done_event_providerModelEvidence+providerReceipt evidence_source=${evidenceSources.length === 1 ? evidenceSources[0] : 'missing'}`
     });
   }
   console.log(JSON.stringify(checks));
