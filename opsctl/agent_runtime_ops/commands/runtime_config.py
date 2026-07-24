@@ -37,6 +37,7 @@ from ..domain.openclaw_config import (
     write_openclaw_version_notes,
 )
 from ..domain.runtime_truth import find_gateway_container
+from ..domain.hermes_smoke import run_hermes_http_smoke
 from ..domain.image_specs import image_spec_config_contract, image_spec_selftest_contract
 from ..domain.selftest_contract import CONTRACT_OK_CHECK, run_image_selftest_contract
 from ..profiles import load_profile
@@ -49,6 +50,70 @@ _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,160}$")
 
 # runtime config (model read/write) is supported for these product families.
 _CONFIG_FAMILIES = frozenset({"hermes", "openclaw"})
+
+
+def _detail_fields(detail: str | None) -> dict[str, str]:
+    """Parse the flat, redaction-safe key=value receipt contract emitted by products."""
+    return {
+        key: value
+        for key, value in re.findall(r"(?:^|\s)([A-Za-z][A-Za-z0-9_]*)=([^\s]+)", detail or "")
+    }
+
+
+def _actual_model_relation(configured_ref: str, actual_ref: str) -> str:
+    """Classify only the conservative provider revision form as equivalent."""
+    if not configured_ref or configured_ref == "missing" or not actual_ref or actual_ref == "missing":
+        return "unknown"
+    if actual_ref == configured_ref:
+        return "exact"
+    configured_provider, separator, configured_model = configured_ref.partition("/")
+    actual_provider, actual_separator, actual_model = actual_ref.partition("/")
+    if not separator or not actual_separator or configured_provider != actual_provider:
+        return "different"
+    suffix = actual_model.removeprefix(f"{configured_model}-")
+    if actual_model.startswith(f"{configured_model}-") and re.fullmatch(r"\d{3,}", suffix):
+        return "provider_revision"
+    return "different"
+
+
+def _print_model_attestation(
+    *,
+    slot: str,
+    family: str,
+    configured_ref: str,
+    requested_ref: str,
+    actual_ref: str,
+    actual_relation: str,
+    model_matches_configured: bool | None,
+    response_observed: bool,
+    receipt_present: bool,
+    evidence_source: str,
+    evidence_response_id: str,
+    ok: bool,
+    reason: str,
+) -> int:
+    matches = (
+        "yes" if model_matches_configured is True
+        else "no" if model_matches_configured is False
+        else "unknown"
+    )
+    print(f"target={slot}")
+    print(f"family={family}")
+    print(f"configured_model_ref={configured_ref or 'missing'}")
+    print(f"provider_requested_model_ref={requested_ref or 'missing'}")
+    print(f"actual_model_ref={actual_ref or 'missing'}")
+    print(f"response_observed={'yes' if response_observed else 'no'}")
+    print(f"provider_receipt_present={'yes' if receipt_present else 'no'}")
+    print(f"model_matches_configured={matches}")
+    print(f"actual_model_relation={actual_relation or 'unknown'}")
+    print(f"evidence_source={evidence_source or 'missing'}")
+    print(f"evidence_response_id={evidence_response_id or 'missing'}")
+    print("attestation_mode=isolated_completion")
+    print("customer_session_mutated=no")
+    print(f"reason={reason or 'none'}")
+    print("secret_value_printed=no")
+    print(f"model_attestation_status={'ok' if ok else 'fail'}")
+    return 0 if ok else 1
 
 
 def _gemini_model_catalog(api_key: str) -> list[str]:
@@ -178,6 +243,195 @@ def cmd_runtime_model_catalog(args: argparse.Namespace) -> int:
     print("secret_value_printed=no")
     print("model_catalog_status=ok")
     return 0
+
+
+def cmd_runtime_model_attest(args: argparse.Namespace) -> int:
+    """Run one isolated completion and report the provider-observed model separately from config."""
+    if not is_root():
+        print("error: run as root/admin: sudo /usr/local/bin/opsctl runtime model-attest TARGET", file=sys.stderr)
+        return 2
+    target = str(args.slot)
+    try:
+        desired = _load_config_target(target, args)
+        profile = load_profile(desired.runtime_profile)
+        container, method = find_gateway_container(desired.route, profile)
+        if not container:
+            raise ValueError(f"no running gateway container for {desired.slot}: {method}")
+
+        if desired.family == "hermes":
+            config = read_hermes_config(hermes_config_path(desired.slot))
+            provider_raw, configured_model, _source = current_model(config)
+            provider = runtime_provider_id(provider_raw) if provider_raw else ""
+            configured_ref = (
+                f"{provider or provider_raw}/{configured_model}"
+                if configured_model
+                else "missing"
+            )
+            checks = run_hermes_http_smoke(container, chat_smoke=True, model_attest=True)
+            receipt_check = next(
+                (item for item in checks if item[1] == "hermes_smoke_model_attested"),
+                None,
+            )
+            if receipt_check is None:
+                return _print_model_attestation(
+                    slot=desired.slot,
+                    family=desired.family,
+                    configured_ref=configured_ref,
+                    requested_ref="missing",
+                    actual_ref="missing",
+                    actual_relation="unknown",
+                    model_matches_configured=None,
+                    response_observed=False,
+                    receipt_present=False,
+                    evidence_source="missing",
+                    evidence_response_id="missing",
+                    ok=False,
+                    reason="hermes provider receipt check missing",
+                )
+            check_ok, _name, detail = receipt_check
+            fields = _detail_fields(detail)
+            versions = [
+                item for item in fields.get("receipt_model_versions", "").split(",")
+                if item and item != "missing"
+            ]
+            requested_models = [
+                item for item in fields.get("evidence_requested_models", "").split(",")
+                if item and item != "missing"
+            ]
+            actual_model = versions[0] if len(versions) == 1 else "missing"
+            actual_ref = f"{provider}/{actual_model}" if provider and actual_model != "missing" else "missing"
+            requested_model = requested_models[0] if len(requested_models) == 1 else "missing"
+            requested_ref = (
+                f"{provider}/{requested_model}"
+                if provider and requested_model != "missing" else "missing"
+            )
+            response_observed = int(fields.get("done_events", "0") or "0") > 0
+            receipt_present = int(fields.get("complete_provider_receipts", "0") or "0") > 0
+            response_ids = [
+                item for item in fields.get("receipt_response_ids", "").split(",")
+                if item and item != "missing"
+            ]
+            actual_relation = fields.get(
+                "actual_model_relation", _actual_model_relation(configured_ref, actual_ref)
+            )
+            matches = (
+                requested_ref == configured_ref
+                and actual_relation in {"exact", "provider_revision"}
+            )
+            ok = bool(check_ok and response_observed and receipt_present and matches)
+            reason = (
+                "provider receipt validates the configured request and actual response model"
+                if ok
+                else detail or "hermes provider receipt attestation failed"
+            )
+            return _print_model_attestation(
+                slot=desired.slot,
+                family=desired.family,
+                configured_ref=configured_ref,
+                requested_ref=requested_ref,
+                actual_ref=actual_ref,
+                actual_relation=actual_relation,
+                model_matches_configured=matches if receipt_present else None,
+                response_observed=response_observed,
+                receipt_present=receipt_present,
+                evidence_source=fields.get("evidence_source", "missing"),
+                evidence_response_id=response_ids[0] if len(response_ids) == 1 else "missing",
+                ok=ok,
+                reason=reason,
+            )
+
+        config = read_openclaw_config(openclaw_config_path(desired.slot))
+        _provider, _model, configured_ref, _source = current_openclaw_model(config)
+        selftest_contract = image_spec_selftest_contract(desired.image_spec)
+        if not selftest_contract:
+            raise ValueError("running OpenClaw image is missing selftest contract")
+        checks = run_image_selftest_contract(container, selftest_contract)
+        roundtrip = next(
+            (item for item in checks if item[1] == "selftest_model_roundtrip_ok"),
+            None,
+        )
+        if roundtrip is None:
+            return _print_model_attestation(
+                slot=desired.slot,
+                family=desired.family,
+                configured_ref=configured_ref,
+                requested_ref="missing",
+                actual_ref="missing",
+                actual_relation="unknown",
+                model_matches_configured=None,
+                response_observed=False,
+                receipt_present=False,
+                evidence_source="product_selftest_result_missing",
+                evidence_response_id="missing",
+                ok=False,
+                reason="OpenClaw product did not return the model roundtrip check",
+            )
+        check_ok, _name, detail = roundtrip
+        fields = _detail_fields(detail)
+        requested_ref = fields.get("requested", "missing")
+        response_model = fields.get("response", "missing")
+        receipt_status = fields.get("receipt", "missing")
+        response_observed = bool(check_ok or receipt_status in {"matched", "mismatch", "missing"})
+        actual_model = response_model.removeprefix("models/")
+        configured_provider = configured_ref.partition("/")[0]
+        actual_ref = (
+            f"{configured_provider}/{actual_model}"
+            if configured_provider and actual_model not in {"", "missing", "unavailable"}
+            else "missing"
+        )
+        evidence_source = (
+            "openclaw_google_response.modelVersion"
+            if actual_ref != "missing" and receipt_status in {"matched", "mismatch"}
+            else "missing"
+        )
+        receipt_present = (
+            requested_ref != "missing"
+            and actual_ref != "missing"
+            and evidence_source != "missing"
+        )
+        actual_relation = _actual_model_relation(configured_ref, actual_ref)
+        matches = (
+            requested_ref == configured_ref
+            and actual_relation in {"exact", "provider_revision"}
+            and receipt_status == "matched"
+        )
+        ok = bool(check_ok and response_observed and receipt_present and matches)
+        reason = (
+            "provider receipt validates the configured request and actual response model"
+            if ok
+            else detail or "OpenClaw provider receipt attestation failed"
+        )
+        return _print_model_attestation(
+            slot=desired.slot,
+            family=desired.family,
+            configured_ref=configured_ref,
+            requested_ref=requested_ref,
+            actual_ref=actual_ref,
+            actual_relation=actual_relation,
+            model_matches_configured=matches if receipt_present else None,
+            response_observed=response_observed,
+            receipt_present=receipt_present,
+            evidence_source=evidence_source,
+            evidence_response_id="not_exposed_by_openclaw_selftest",
+            ok=ok,
+            reason=reason,
+        )
+    except Exception as exc:
+        return _print_model_attestation(
+            slot=target,
+            family="unknown",
+            configured_ref="missing",
+            requested_ref="missing",
+            actual_ref="missing",
+            actual_relation="unknown",
+            model_matches_configured=None,
+            response_observed=False,
+            receipt_present=False,
+            evidence_source="missing",
+            evidence_response_id="missing",
+            ok=False,
+            reason=str(exc),
+        )
 
 
 def _attest_openclaw_model_change(desired, container: str) -> tuple[bool, str]:

@@ -15,6 +15,7 @@ from agent_runtime_ops.commands.runtime_config import (
     _gemini_model_catalog,
     cmd_runtime_config_sanitize,
     cmd_runtime_config_status,
+    cmd_runtime_model_attest,
     cmd_runtime_set_model,
     cmd_runtime_version_note,
     runtime_provider_id,
@@ -59,6 +60,252 @@ class RuntimeConfigTests(unittest.TestCase):
     def test_runtime_provider_id_canonicalizes_google_aliases(self) -> None:
         for provider in ("google", "google-ai", "google_ai", "google-gemini", "google_gemini", "gemini"):
             self.assertEqual(runtime_provider_id(provider), "gemini")
+
+    def test_runtime_model_attest_reports_hermes_provider_receipt(self) -> None:
+        output = io.StringIO()
+        desired = SimpleNamespace(
+            slot="oc20", family="hermes", runtime_profile="hermes-customer", route="route"
+        )
+        with (
+            patch("agent_runtime_ops.commands.runtime_config.is_root", return_value=True),
+            patch("agent_runtime_ops.commands.runtime_config._load_config_target", return_value=desired),
+            patch("agent_runtime_ops.commands.runtime_config.load_profile", return_value=SimpleNamespace()),
+            patch("agent_runtime_ops.commands.runtime_config.find_gateway_container", return_value=("gateway", "binding")),
+            patch("agent_runtime_ops.commands.runtime_config.hermes_config_path", return_value=Path("/home/oc20/.hermes/config.yaml")),
+            patch(
+                "agent_runtime_ops.commands.runtime_config.read_hermes_config",
+                return_value={"provider": "gemini", "model": "gemini-3.6-flash"},
+            ),
+            patch(
+                "agent_runtime_ops.commands.runtime_config.run_hermes_http_smoke",
+                return_value=[(
+                    True,
+                    "hermes_smoke_model_attested",
+                    "configured_provider=gemini configured_model=gemini-3.6-flash "
+                    "done_events=1 complete_provider_receipts=1 "
+                    "evidence_requested_models=gemini-3.6-flash "
+                    "receipt_model_versions=gemini-3.6-flash receipt_response_ids=resp-hermes-123 "
+                    "actual_model_relation=exact source=done_event_providerModelEvidence+providerReceipt "
+                    "evidence_source=gemini_response.modelVersion",
+                )],
+            ),
+            contextlib.redirect_stdout(output),
+        ):
+            rc = cmd_runtime_model_attest(
+                argparse.Namespace(slot="oc20", state_root="/srv/openclaw-ops")
+            )
+        text = output.getvalue()
+        self.assertEqual(rc, 0, text)
+        self.assertIn("configured_model_ref=gemini/gemini-3.6-flash", text)
+        self.assertIn("provider_requested_model_ref=gemini/gemini-3.6-flash", text)
+        self.assertIn("actual_model_ref=gemini/gemini-3.6-flash", text)
+        self.assertIn("response_observed=yes", text)
+        self.assertIn("provider_receipt_present=yes", text)
+        self.assertIn("model_matches_configured=yes", text)
+        self.assertIn("evidence_response_id=resp-hermes-123", text)
+        self.assertIn("attestation_mode=isolated_completion", text)
+        self.assertIn("customer_session_mutated=no", text)
+        self.assertIn("model_attestation_status=ok", text)
+
+    def test_runtime_model_attest_accepts_provider_numeric_revision_and_shows_it(self) -> None:
+        output = io.StringIO()
+        desired = SimpleNamespace(
+            slot="oc20", family="hermes", runtime_profile="hermes-customer", route="route"
+        )
+        with (
+            patch("agent_runtime_ops.commands.runtime_config.is_root", return_value=True),
+            patch("agent_runtime_ops.commands.runtime_config._load_config_target", return_value=desired),
+            patch("agent_runtime_ops.commands.runtime_config.load_profile", return_value=SimpleNamespace()),
+            patch("agent_runtime_ops.commands.runtime_config.find_gateway_container", return_value=("gateway", "binding")),
+            patch("agent_runtime_ops.commands.runtime_config.hermes_config_path", return_value=Path("/home/oc20/.hermes/config.yaml")),
+            patch(
+                "agent_runtime_ops.commands.runtime_config.read_hermes_config",
+                return_value={"provider": "gemini", "model": "gemini-3.6-flash"},
+            ),
+            patch(
+                "agent_runtime_ops.commands.runtime_config.run_hermes_http_smoke",
+                return_value=[(
+                    True,
+                    "hermes_smoke_model_attested",
+                    "configured_provider=gemini configured_model=gemini-3.6-flash "
+                    "done_events=1 complete_provider_receipts=1 "
+                    "evidence_requested_models=gemini-3.6-flash "
+                    "receipt_model_versions=gemini-3.6-flash-001 "
+                    "actual_model_relation=provider_revision receipt_response_ids=resp-001 "
+                    "evidence_source=gemini_response.modelVersion",
+                )],
+            ),
+            contextlib.redirect_stdout(output),
+        ):
+            rc = cmd_runtime_model_attest(
+                argparse.Namespace(slot="oc20", state_root="/srv/openclaw-ops")
+            )
+
+        text = output.getvalue()
+        self.assertEqual(rc, 0, text)
+        self.assertIn("configured_model_ref=gemini/gemini-3.6-flash", text)
+        self.assertIn("actual_model_ref=gemini/gemini-3.6-flash-001", text)
+        self.assertIn("actual_model_relation=provider_revision", text)
+        self.assertIn("model_matches_configured=yes", text)
+
+    def test_runtime_model_attest_distinguishes_response_from_missing_receipt(self) -> None:
+        output = io.StringIO()
+        desired = SimpleNamespace(
+            slot="oc20", family="hermes", runtime_profile="hermes-customer", route="route"
+        )
+        with (
+            patch("agent_runtime_ops.commands.runtime_config.is_root", return_value=True),
+            patch("agent_runtime_ops.commands.runtime_config._load_config_target", return_value=desired),
+            patch("agent_runtime_ops.commands.runtime_config.load_profile", return_value=SimpleNamespace()),
+            patch("agent_runtime_ops.commands.runtime_config.find_gateway_container", return_value=("gateway", "binding")),
+            patch("agent_runtime_ops.commands.runtime_config.hermes_config_path", return_value=Path("/home/oc20/.hermes/config.yaml")),
+            patch(
+                "agent_runtime_ops.commands.runtime_config.read_hermes_config",
+                return_value={"provider": "gemini", "model": "gemini-3.6-flash"},
+            ),
+            patch(
+                "agent_runtime_ops.commands.runtime_config.run_hermes_http_smoke",
+                return_value=[(
+                    False,
+                    "hermes_smoke_model_attested",
+                    "configured_provider=gemini configured_model=gemini-3.6-flash "
+                    "done_events=1 complete_provider_receipts=0 receipt_model_versions=missing "
+                    "source=done_event_providerReceipt",
+                )],
+            ),
+            contextlib.redirect_stdout(output),
+        ):
+            rc = cmd_runtime_model_attest(
+                argparse.Namespace(slot="oc20", state_root="/srv/openclaw-ops")
+            )
+        text = output.getvalue()
+        self.assertEqual(rc, 1, text)
+        self.assertIn("response_observed=yes", text)
+        self.assertIn("provider_receipt_present=no", text)
+        self.assertIn("actual_model_ref=missing", text)
+        self.assertIn("model_matches_configured=unknown", text)
+        self.assertIn("model_attestation_status=fail", text)
+
+    def test_runtime_model_attest_refuses_openclaw_selected_model_as_provider_receipt(self) -> None:
+        output = io.StringIO()
+        desired = SimpleNamespace(
+            slot="oc14", family="openclaw", runtime_profile="openclaw-customer",
+            route="route", image_spec=object(),
+        )
+        with (
+            patch("agent_runtime_ops.commands.runtime_config.is_root", return_value=True),
+            patch("agent_runtime_ops.commands.runtime_config._load_config_target", return_value=desired),
+            patch("agent_runtime_ops.commands.runtime_config.load_profile", return_value=SimpleNamespace()),
+            patch("agent_runtime_ops.commands.runtime_config.find_gateway_container", return_value=("gateway", "binding")),
+            patch("agent_runtime_ops.commands.runtime_config.openclaw_config_path", return_value=Path("/home/oc14/.openclaw/openclaw.json")),
+            patch("agent_runtime_ops.commands.runtime_config.read_openclaw_config", return_value={}),
+            patch(
+                "agent_runtime_ops.commands.runtime_config.current_openclaw_model",
+                return_value=("google", "gemini-3.6-flash", "google/gemini-3.6-flash", "agents.defaults.model"),
+            ),
+            patch("agent_runtime_ops.commands.runtime_config.image_spec_selftest_contract", return_value="selftest --json"),
+            patch(
+                "agent_runtime_ops.commands.runtime_config.run_image_selftest_contract",
+                return_value=[(True, "selftest_model_roundtrip_ok", "model=google/gemini-3.6-flash completed")],
+            ),
+            contextlib.redirect_stdout(output),
+        ):
+            rc = cmd_runtime_model_attest(
+                argparse.Namespace(slot="oc14", state_root="/srv/openclaw-ops")
+            )
+        text = output.getvalue()
+        self.assertEqual(rc, 1, text)
+        self.assertIn("response_observed=yes", text)
+        self.assertIn("provider_receipt_present=no", text)
+        self.assertIn("actual_model_ref=missing", text)
+        self.assertIn("evidence_source=missing", text)
+
+    def test_runtime_model_attest_accepts_openclaw_provider_receipt_contract(self) -> None:
+        output = io.StringIO()
+        desired = SimpleNamespace(
+            slot="oc14", family="openclaw", runtime_profile="openclaw-customer",
+            route="route", image_spec=object(),
+        )
+        with (
+            patch("agent_runtime_ops.commands.runtime_config.is_root", return_value=True),
+            patch("agent_runtime_ops.commands.runtime_config._load_config_target", return_value=desired),
+            patch("agent_runtime_ops.commands.runtime_config.load_profile", return_value=SimpleNamespace()),
+            patch("agent_runtime_ops.commands.runtime_config.find_gateway_container", return_value=("gateway", "binding")),
+            patch("agent_runtime_ops.commands.runtime_config.openclaw_config_path", return_value=Path("/home/oc14/.openclaw/openclaw.json")),
+            patch("agent_runtime_ops.commands.runtime_config.read_openclaw_config", return_value={}),
+            patch(
+                "agent_runtime_ops.commands.runtime_config.current_openclaw_model",
+                return_value=("google", "gemini-3.6-flash", "google/gemini-3.6-flash", "agents.defaults.model"),
+            ),
+            patch("agent_runtime_ops.commands.runtime_config.image_spec_selftest_contract", return_value="selftest --json"),
+            patch(
+                "agent_runtime_ops.commands.runtime_config.run_image_selftest_contract",
+                return_value=[
+                    (
+                        True,
+                        "selftest_model_roundtrip_ok",
+                        "requested=google/gemini-3.6-flash "
+                        "response=models/gemini-3.6-flash-001 receipt=matched completed",
+                    ),
+                ],
+            ),
+            contextlib.redirect_stdout(output),
+        ):
+            rc = cmd_runtime_model_attest(
+                argparse.Namespace(slot="oc14", state_root="/srv/openclaw-ops")
+            )
+        text = output.getvalue()
+        self.assertEqual(rc, 0, text)
+        self.assertIn("provider_requested_model_ref=google/gemini-3.6-flash", text)
+        self.assertIn("actual_model_ref=google/gemini-3.6-flash-001", text)
+        self.assertIn("provider_receipt_present=yes", text)
+        self.assertIn("model_matches_configured=yes", text)
+        self.assertIn("actual_model_relation=provider_revision", text)
+        self.assertIn("evidence_source=openclaw_google_response.modelVersion", text)
+        self.assertIn("evidence_response_id=not_exposed_by_openclaw_selftest", text)
+        self.assertIn("model_attestation_status=ok", text)
+
+    def test_runtime_model_attest_rejects_openclaw_provider_model_mismatch(self) -> None:
+        output = io.StringIO()
+        desired = SimpleNamespace(
+            slot="oc14", family="openclaw", runtime_profile="openclaw-customer",
+            route="route", image_spec=object(),
+        )
+        with (
+            patch("agent_runtime_ops.commands.runtime_config.is_root", return_value=True),
+            patch("agent_runtime_ops.commands.runtime_config._load_config_target", return_value=desired),
+            patch("agent_runtime_ops.commands.runtime_config.load_profile", return_value=SimpleNamespace()),
+            patch("agent_runtime_ops.commands.runtime_config.find_gateway_container", return_value=("gateway", "binding")),
+            patch("agent_runtime_ops.commands.runtime_config.openclaw_config_path", return_value=Path("/home/oc14/.openclaw/openclaw.json")),
+            patch("agent_runtime_ops.commands.runtime_config.read_openclaw_config", return_value={}),
+            patch(
+                "agent_runtime_ops.commands.runtime_config.current_openclaw_model",
+                return_value=("google", "gemini-3.6-flash", "google/gemini-3.6-flash", "agents.defaults.model"),
+            ),
+            patch("agent_runtime_ops.commands.runtime_config.image_spec_selftest_contract", return_value="selftest --json"),
+            patch(
+                "agent_runtime_ops.commands.runtime_config.run_image_selftest_contract",
+                return_value=[(
+                    False,
+                    "selftest_model_roundtrip_ok",
+                    "requested=google/gemini-3.6-flash "
+                    "response=models/gemini-3.5-flash receipt=mismatch completion-text",
+                )],
+            ),
+            contextlib.redirect_stdout(output),
+        ):
+            rc = cmd_runtime_model_attest(
+                argparse.Namespace(slot="oc14", state_root="/srv/openclaw-ops")
+            )
+
+        text = output.getvalue()
+        self.assertEqual(rc, 1, text)
+        self.assertIn("response_observed=yes", text)
+        self.assertIn("provider_receipt_present=yes", text)
+        self.assertIn("actual_model_ref=google/gemini-3.5-flash", text)
+        self.assertIn("actual_model_relation=different", text)
+        self.assertIn("model_matches_configured=no", text)
+        self.assertIn("model_attestation_status=fail", text)
 
     def test_runtime_set_model_stores_runtime_provider_id(self) -> None:
         written: dict[str, object] = {}

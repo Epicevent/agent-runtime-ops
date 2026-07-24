@@ -62,7 +62,7 @@ class HermesSmokeTests(unittest.TestCase):
                 {
                     "name": "hermes_smoke_model_attested",
                     "ok": True,
-                    "detail": "configured_provider=gemini configured_model=gemini-3.6-flash done_events=1 complete_provider_receipts=1 receipt_model_versions=gemini-3.6-flash receipt_fields=responseId,modelVersion,usageMetadata,finishReason source=done_event_providerReceipt",
+                    "detail": "configured_provider=gemini configured_model=gemini-3.6-flash done_events=1 complete_provider_receipts=1 evidence_requested_models=gemini-3.6-flash receipt_model_versions=gemini-3.6-flash receipt_response_ids=resp-hermes-123 actual_model_relation=exact receipt_fields=responseId,modelVersion,usageMetadata,finishReason source=done_event_providerModelEvidence+providerReceipt evidence_source=gemini_response.modelVersion",
                 },
             ]
             return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload), stderr="")
@@ -71,11 +71,17 @@ class HermesSmokeTests(unittest.TestCase):
             checks = run_hermes_http_smoke("container123", chat_smoke=False, model_attest=True)
 
         self.assertIn("HERMES_MODEL_ATTEST=1", calls[0])
+        embedded_script = calls[0][-1]
+        self.assertIn("payload.providerModelEvidence", embedded_script)
+        self.assertIn("payload.providerReceipt", embedded_script)
+        self.assertIn("gemini_response.modelVersion", embedded_script)
+        self.assertIn("receipt.responseId === evidence.responseId", embedded_script)
+        self.assertIn("receiptModel === actualModel", embedded_script)
         self.assertIn(
             (
                 True,
                 "hermes_smoke_model_attested",
-                "configured_provider=gemini configured_model=gemini-3.6-flash done_events=1 complete_provider_receipts=1 receipt_model_versions=gemini-3.6-flash receipt_fields=responseId,modelVersion,usageMetadata,finishReason source=done_event_providerReceipt",
+                "configured_provider=gemini configured_model=gemini-3.6-flash done_events=1 complete_provider_receipts=1 evidence_requested_models=gemini-3.6-flash receipt_model_versions=gemini-3.6-flash receipt_response_ids=resp-hermes-123 actual_model_relation=exact receipt_fields=responseId,modelVersion,usageMetadata,finishReason source=done_event_providerModelEvidence+providerReceipt evidence_source=gemini_response.modelVersion",
             ),
             checks,
         )

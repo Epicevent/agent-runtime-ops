@@ -731,9 +731,17 @@ class CliReleaseRolloutTests(unittest.TestCase):
         self.assertIn(" check * --live *", text)
         self.assertIn(" runtime config-sanitize *", text)
         self.assertIn(" runtime model-catalog *", text)
+        self.assertIn(" runtime model-attest *", text)
         self.assertIn(" document-tools status *", text)
         self.assertIn(" recipe apply-dev *", text)
         self.assertIn(" recipe capture-dev *", text)
+
+    def test_runtime_model_attest_is_a_first_class_cli_command(self) -> None:
+        args = build_parser().parse_args(["runtime", "model-attest", "oc20"])
+        self.assertEqual(args.command, "runtime")
+        self.assertEqual(args.runtime_command, "model-attest")
+        self.assertEqual(args.slot, "oc20")
+        self.assertEqual(args.func.__name__, "cmd_runtime_model_attest")
 
     def test_document_tools_baseline_status_requires_hwp_helper_and_aliases(self) -> None:
         data = {
