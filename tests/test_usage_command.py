@@ -5,7 +5,20 @@ from pathlib import Path
 import subprocess
 from unittest.mock import Mock, call, patch
 
-from agent_runtime_ops.commands.usage import collect_target
+from argparse import Namespace
+
+import pytest
+
+from agent_runtime_ops.commands.usage import (
+    DEFAULT_USAGE_API_PRODUCT,
+    DEFAULT_USAGE_DB_DEFAULTS,
+    DEFAULT_USAGE_FX_FILE,
+    DEFAULT_USAGE_PRICE_SCENARIO,
+    DEFAULT_USAGE_PRICING_FILE,
+    _enforce_sudo_usage_artifact_defaults,
+    collect_target,
+)
+from agent_runtime_ops.domain.usage_ledger import UsageContractError
 from agent_runtime_ops.routing import RuntimeBinding
 
 from tests.test_usage_ledger import export_page
@@ -128,3 +141,20 @@ def test_invalid_coverage_fails_before_export_and_never_stores_or_advances() -> 
     assert result["status"] == "failed"
     assert run.call_count == 1
     stored.assert_not_called()
+
+
+def test_sudo_cost_projection_cannot_turn_into_an_arbitrary_root_file_reader(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SUDO_USER", "svcops")
+    args = Namespace(
+        pricing_file=DEFAULT_USAGE_PRICING_FILE,
+        fx_file=DEFAULT_USAGE_FX_FILE,
+        db_defaults_file=DEFAULT_USAGE_DB_DEFAULTS,
+        api_product=DEFAULT_USAGE_API_PRODUCT,
+        price_scenario=DEFAULT_USAGE_PRICE_SCENARIO,
+    )
+    _enforce_sudo_usage_artifact_defaults(args)
+    args.pricing_file = "/etc/shadow"
+    with pytest.raises(UsageContractError, match="installed defaults: pricing_file"):
+        _enforce_sudo_usage_artifact_defaults(args)

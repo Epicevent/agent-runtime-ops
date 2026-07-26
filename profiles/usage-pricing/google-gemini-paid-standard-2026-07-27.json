@@ -1,0 +1,59 @@
+{
+  "schema": "jitech-provider-pricing-catalog/v1",
+  "revision": "2026-07-27.google-gemini-paid-standard",
+  "publishedAt": "2026-07-27T00:00:00Z",
+  "entries": [
+    {
+      "entryId": "google-gemini-3.5-flash-paid-standard-2026-07-21",
+      "provider": "google",
+      "apiProduct": "gemini_developer_api",
+      "actualModel": "gemini-3.5-flash",
+      "serviceTier": "standard",
+      "priceScenario": "paid_standard_list",
+      "currency": "USD",
+      "meteringProfile": "gemini-generate-content-v1",
+      "effectiveFrom": "2026-07-21T00:00:00Z",
+      "effectiveUntil": null,
+      "ratesPerMillion": {
+        "inputNonCached": "1.50",
+        "cacheRead": "0.15",
+        "outputIncludingThinking": "9.00"
+      },
+      "unpricedComponents": [
+        "cache_storage_token_hour",
+        "search_grounding"
+      ],
+      "source": {
+        "url": "https://ai.google.dev/gemini-api/docs/pricing",
+        "checkedAt": "2026-07-27T00:00:00Z",
+        "checkedBy": "OpenAI Codex evidence capture"
+      }
+    },
+    {
+      "entryId": "google-gemini-3.6-flash-paid-standard-2026-07-21",
+      "provider": "google",
+      "apiProduct": "gemini_developer_api",
+      "actualModel": "gemini-3.6-flash",
+      "serviceTier": "standard",
+      "priceScenario": "paid_standard_list",
+      "currency": "USD",
+      "meteringProfile": "gemini-generate-content-v1",
+      "effectiveFrom": "2026-07-21T00:00:00Z",
+      "effectiveUntil": null,
+      "ratesPerMillion": {
+        "inputNonCached": "1.50",
+        "cacheRead": "0.15",
+        "outputIncludingThinking": "7.50"
+      },
+      "unpricedComponents": [
+        "cache_storage_token_hour",
+        "search_grounding"
+      ],
+      "source": {
+        "url": "https://ai.google.dev/gemini-api/docs/pricing",
+        "checkedAt": "2026-07-27T00:00:00Z",
+        "checkedBy": "OpenAI Codex evidence capture"
+      }
+    }
+  ]
+}

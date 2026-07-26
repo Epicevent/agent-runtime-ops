@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import replace
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -23,6 +24,9 @@ from ..domain.usage_ledger import (
     redact_error,
     runtime_binding_digest,
 )
+from ..domain.usage_cost import load_fx_ledger, load_pricing_catalog
+from ..domain.usage_cost_store import project_costs
+from ..domain.usage_fx import refresh_ecb_reference_fx
 from ..domain.usage_store import (
     UsageCollectionBusy,
     acquire_collection_lock,
@@ -35,7 +39,39 @@ from ..domain.usage_store import (
 from ..routing import RuntimeBinding, get_runtime_binding, load_runtime_bindings
 
 
-DEFAULT_USAGE_DB_DEFAULTS = Path("/etc/agent-runtime-ops/usage-writer.cnf")
+DEFAULT_USAGE_DB_DEFAULTS = "/etc/agent-runtime-ops/usage-writer.cnf"
+DEFAULT_USAGE_PRICING_FILE = "/srv/openclaw-ops/usage-pricing/current.json"
+DEFAULT_USAGE_FX_FILE = "/srv/openclaw-ops/usage-pricing/fx-daily.json"
+DEFAULT_USAGE_FX_EVIDENCE_DIR = "/srv/openclaw-ops/usage-pricing/evidence"
+DEFAULT_USAGE_API_PRODUCT = "gemini_developer_api"
+DEFAULT_USAGE_PRICE_SCENARIO = "paid_standard_list"
+
+
+def _enforce_sudo_usage_artifact_defaults(args: argparse.Namespace) -> None:
+    """Do not let a narrow sudo rule become an arbitrary root file reader.
+
+    Root operators may explicitly select alternate fixtures.  A non-root caller
+    entering through sudo (the OPS web lane) may only use the installed,
+    root-owned artifact and credential paths plus the fixed public scenario.
+    """
+
+    if not os.environ.get("SUDO_USER"):
+        return
+    expected = {
+        "pricing_file": str(DEFAULT_USAGE_PRICING_FILE),
+        "fx_file": str(DEFAULT_USAGE_FX_FILE),
+        "db_defaults_file": str(DEFAULT_USAGE_DB_DEFAULTS),
+        "api_product": DEFAULT_USAGE_API_PRODUCT,
+        "price_scenario": DEFAULT_USAGE_PRICE_SCENARIO,
+    }
+    drifted = [
+        name for name, value in expected.items() if str(getattr(args, name)) != value
+    ]
+    if drifted:
+        raise UsageContractError(
+            "sudo usage cost projection only permits installed defaults: "
+            + ",".join(sorted(drifted))
+        )
 
 
 def _failure_stamp(
@@ -317,6 +353,81 @@ def cmd_usage_status(args: argparse.Namespace) -> int:
         print(
             json.dumps(
                 {"status": "failed", "reason": redact_error(exc)}, ensure_ascii=False
+            )
+        )
+        return 1
+
+
+def cmd_usage_cost_estimate(args: argparse.Namespace) -> int:
+    if not is_root():
+        print(
+            "error: run as root/admin: sudo /usr/local/bin/opsctl usage cost-estimate ...",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        _enforce_sudo_usage_artifact_defaults(args)
+        catalog = load_pricing_catalog(Path(args.pricing_file))
+        fx = load_fx_ledger(Path(args.fx_file))
+        factory = mysql_connection_factory(Path(args.db_defaults_file))
+        connection = factory()
+        try:
+            result = project_costs(
+                connection,
+                catalog=catalog,
+                fx=fx,
+                api_product=str(args.api_product),
+                price_scenario=str(args.price_scenario),
+                linux_account=str(args.target or "") or None,
+            )
+        finally:
+            connection.close()
+        print(
+            json.dumps(
+                {
+                    "schema": "jitech-provider-operational-cost-estimate-run/v1",
+                    "status": "ok",
+                    "target": str(args.target or "all"),
+                    "pricingCatalogDigest": catalog.digest,
+                    "referenceFxLedgerDigest": fx.digest,
+                    "apiProduct": str(args.api_product),
+                    "priceScenario": str(args.price_scenario),
+                    **result,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0
+    except Exception as exc:
+        print(
+            json.dumps(
+                {"status": "failed", "reason": redact_error(exc)},
+                ensure_ascii=False,
+            )
+        )
+        return 1
+
+
+def cmd_usage_fx_refresh(args: argparse.Namespace) -> int:
+    if not is_root():
+        print(
+            "error: run as root/admin: sudo /usr/local/bin/opsctl usage fx-refresh",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        result = refresh_ecb_reference_fx(
+            output_path=Path(args.output),
+            evidence_dir=Path(args.evidence_dir),
+            timeout=int(args.timeout),
+        )
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+    except Exception as exc:
+        print(
+            json.dumps(
+                {"status": "failed", "reason": redact_error(exc)},
+                ensure_ascii=False,
             )
         )
         return 1
