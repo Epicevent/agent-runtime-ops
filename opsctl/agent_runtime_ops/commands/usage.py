@@ -139,7 +139,11 @@ def collect_target(
                 raise UsageContractError(
                     f"product_export_failed: {redact_error(detail)}"
                 )
-            page = parse_export_stdout(proc.stdout, expected_after=cursor)
+            page = parse_export_stdout(
+                proc.stdout,
+                expected_after=cursor,
+                expected_family=binding.family,
+            )
 
             binding_after = get_runtime_binding(binding.instance_id, state)
             ensure_binding_unchanged(binding_before, binding_after)

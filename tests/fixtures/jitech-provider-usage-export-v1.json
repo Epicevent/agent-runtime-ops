@@ -9,6 +9,7 @@
     {
       "schema": "jitech-provider-usage-call/v1",
       "ledgerSeq": 1,
+      "producerCoverageDigest": "sha256:1a69bb4a9c8fbc28eddacbf802e422fb76aff164eb363ec61cb1b29685c23c21",
       "callId": "00000000-0000-4000-8000-000000000101",
       "runId": "run-fixture-1",
       "turnId": "turn-fixture-1",
@@ -66,7 +67,37 @@
       "missingReceiptFields": [
         "usage.cacheWrite"
       ],
-      "receiptDigest": "sha256:19bccd536dda5f312e1aa5e676a86fdfaf31adf5d8f084cb16773a7953a8cff3"
+      "receiptDigest": "sha256:d1f3ff90f0f872089db538f8009be250d845f8050d1e13f23bb385915b4b6909"
+    }
+  ],
+  "coverageManifests": [
+    {
+      "schema": "jitech-provider-usage-coverage/v1",
+      "productFamily": "openclaw",
+      "manifestDigest": "sha256:1a69bb4a9c8fbc28eddacbf802e422fb76aff164eb363ec61cb1b29685c23c21",
+      "coverageStatus": "partial",
+      "surfaces": [
+        {
+          "surfaceCode": "codex.app_server",
+          "observationKind": "turn_aggregate",
+          "meterFamily": "tokens",
+          "modelEvidence": "requested_only",
+          "retryObservation": "unavailable",
+          "usageObservation": "provider_reported",
+          "status": "gap",
+          "gapCode": "codex_turn_aggregate_only"
+        },
+        {
+          "surfaceCode": "pi.embedded",
+          "observationKind": "per_call",
+          "meterFamily": "tokens",
+          "modelEvidence": "provider_response",
+          "retryObservation": "physical_attempt",
+          "usageObservation": "provider_reported",
+          "status": "implemented",
+          "gapCode": null
+        }
+      ]
     }
   ]
 }

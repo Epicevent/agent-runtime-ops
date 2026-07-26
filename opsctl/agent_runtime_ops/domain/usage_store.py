@@ -403,12 +403,20 @@ def store_export_page(
         with connection.cursor() as cursor:
             _ensure_cursor_locked(cursor, stamp, page.after)
             _store_coverage_manifest(cursor, stamp=stamp, coverage=coverage)
+            historical_coverage = {
+                item.manifest_digest: item for item in page.coverage_manifests
+            }
+            for item in page.coverage_manifests:
+                _store_coverage_manifest(cursor, stamp=stamp, coverage=item)
             for receipt in page.receipts:
+                receipt_coverage = historical_coverage[
+                    str(receipt["producerCoverageDigest"])
+                ]
                 try:
                     was_inserted = _insert_receipt(
                         cursor,
                         stamp=stamp,
-                        coverage=coverage,
+                        coverage=receipt_coverage,
                         receipt=receipt,
                     )
                 except UsageLedgerConflict as exc:

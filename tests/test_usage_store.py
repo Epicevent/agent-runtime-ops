@@ -216,7 +216,9 @@ class UsageStoreTest(unittest.TestCase):
 
     def test_insert_once_stamps_assignment_and_advances_cursor(self) -> None:
         connection = FakeConnection()
-        page = validate_export(export_page(), expected_after=0)
+        page = validate_export(
+            export_page(), expected_after=0, expected_family="hermes"
+        )
         result = store_export_page(
             connection, stamp=STAMP, coverage=COVERAGE, page=page
         )
@@ -233,7 +235,9 @@ class UsageStoreTest(unittest.TestCase):
 
     def test_same_call_and_digest_is_idempotent(self) -> None:
         connection = FakeConnection()
-        page = validate_export(export_page(), expected_after=0)
+        page = validate_export(
+            export_page(), expected_after=0, expected_family="hermes"
+        )
         store_export_page(connection, stamp=STAMP, coverage=COVERAGE, page=page)
         connection.cursors[STAMP.instance_id]["last_ledger_seq"] = 0
         result = store_export_page(
@@ -244,6 +248,44 @@ class UsageStoreTest(unittest.TestCase):
         self.assertEqual(len(connection.calls), 1)
         self.assertEqual(len(connection.manifests), 1)
 
+    def test_historical_call_keeps_its_manifest_when_current_manifest_changed(
+        self,
+    ) -> None:
+        connection = FakeConnection()
+        page = validate_export(
+            export_page(), expected_after=0, expected_family="hermes"
+        )
+        current_payload = dict(COVERAGE_PAYLOAD)
+        current_payload["surfaces"] = [dict(COVERAGE_PAYLOAD["surfaces"][0])]
+        current_payload["surfaces"][0].update(
+            {
+                "status": "gap",
+                "gapCode": "new_runtime_gap",
+                "modelEvidence": "unavailable",
+                "retryObservation": "unavailable",
+                "usageObservation": "unavailable",
+            }
+        )
+        current_payload["coverageStatus"] = "partial"
+        current_payload["manifestDigest"] = coverage_manifest_digest(current_payload)
+        current = validate_coverage(current_payload, expected_family="hermes")
+
+        store_export_page(connection, stamp=STAMP, coverage=current, page=page)
+
+        stored = connection.calls[(STAMP.instance_id, receipt()["callId"])]
+        historical_digest = page.receipts[0]["producerCoverageDigest"]
+        self.assertEqual(stored["producer_coverage_digest"], historical_digest)
+        self.assertEqual(stored["producer_coverage_status"], "complete")
+        self.assertEqual(
+            connection.cursors[STAMP.instance_id]["producer_coverage_digest"],
+            current.manifest_digest,
+        )
+        self.assertEqual(
+            connection.cursors[STAMP.instance_id]["producer_coverage_status"],
+            "partial",
+        )
+        self.assertEqual(len(connection.manifests), 2)
+
     def test_existing_coverage_digest_with_different_manifest_fails_closed(
         self,
     ) -> None:
@@ -253,7 +295,9 @@ class UsageStoreTest(unittest.TestCase):
             "coverage_status": "complete",
             "manifest_json": "{}",
         }
-        page = validate_export(export_page(), expected_after=0)
+        page = validate_export(
+            export_page(), expected_after=0, expected_family="hermes"
+        )
         with self.assertRaisesRegex(UsageContractError, "different bytes"):
             store_export_page(
                 connection,
@@ -268,7 +312,9 @@ class UsageStoreTest(unittest.TestCase):
         self,
     ) -> None:
         connection = FakeConnection()
-        first = validate_export(export_page(), expected_after=0)
+        first = validate_export(
+            export_page(), expected_after=0, expected_family="hermes"
+        )
         store_export_page(connection, stamp=STAMP, coverage=COVERAGE, page=first)
         connection.cursors[STAMP.instance_id]["last_ledger_seq"] = 0
         changed = receipt()
@@ -276,7 +322,11 @@ class UsageStoreTest(unittest.TestCase):
         from agent_runtime_ops.domain.usage_ledger import receipt_digest
 
         changed["receiptDigest"] = receipt_digest(changed)
-        second = validate_export(export_page(receipts=[changed]), expected_after=0)
+        second = validate_export(
+            export_page(receipts=[changed]),
+            expected_after=0,
+            expected_family="hermes",
+        )
         with self.assertRaises(UsageLedgerConflict):
             store_export_page(connection, stamp=STAMP, coverage=COVERAGE, page=second)
         self.assertEqual(connection.cursors[STAMP.instance_id]["last_ledger_seq"], 0)
@@ -286,11 +336,17 @@ class UsageStoreTest(unittest.TestCase):
 
     def test_same_call_and_digest_at_different_sequence_is_not_idempotent(self) -> None:
         connection = FakeConnection()
-        first = validate_export(export_page(), expected_after=0)
+        first = validate_export(
+            export_page(), expected_after=0, expected_family="hermes"
+        )
         store_export_page(connection, stamp=STAMP, coverage=COVERAGE, page=first)
         connection.cursors[STAMP.instance_id]["last_ledger_seq"] = 0
         replay = receipt(seq=2)
-        page = validate_export(export_page(receipts=[replay], high=2), expected_after=0)
+        page = validate_export(
+            export_page(receipts=[replay], high=2),
+            expected_after=0,
+            expected_family="hermes",
+        )
         with self.assertRaises(UsageLedgerConflict):
             store_export_page(connection, stamp=STAMP, coverage=COVERAGE, page=page)
         self.assertEqual(connection.conflicts[-1]["kind"], "call_id_sequence_mismatch")
@@ -306,7 +362,9 @@ class UsageStoreTest(unittest.TestCase):
     def test_missing_assignment_is_not_attributed_to_current_person(self) -> None:
         connection = FakeConnection()
         connection.assignments = []
-        page = validate_export(export_page(), expected_after=0)
+        page = validate_export(
+            export_page(), expected_after=0, expected_family="hermes"
+        )
         store_export_page(connection, stamp=STAMP, coverage=COVERAGE, page=page)
         stored = connection.calls[(STAMP.instance_id, receipt()["callId"])]
         self.assertIsNone(stored["assigned_mb_id"])
@@ -322,7 +380,11 @@ class UsageStoreTest(unittest.TestCase):
         from agent_runtime_ops.domain.usage_ledger import receipt_digest
 
         row["receiptDigest"] = receipt_digest(row)
-        page = validate_export(export_page(receipts=[row]), expected_after=0)
+        page = validate_export(
+            export_page(receipts=[row]),
+            expected_after=0,
+            expected_family="hermes",
+        )
         store_export_page(connection, stamp=STAMP, coverage=COVERAGE, page=page)
         stored = connection.calls[(STAMP.instance_id, row["callId"])]
         self.assertEqual(stored["started_at"].isoformat(), "2026-07-26T01:00:00")

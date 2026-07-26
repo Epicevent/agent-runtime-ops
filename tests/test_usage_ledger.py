@@ -21,12 +21,17 @@ from agent_runtime_ops.domain.usage_ledger import (
 
 
 def receipt(
-    *, seq: int = 1, call_id: str = "018f8512-7d1a-7a95-a53e-27f0cf9c7b82"
+    *,
+    seq: int = 1,
+    call_id: str = "018f8512-7d1a-7a95-a53e-27f0cf9c7b82",
+    family: str = "hermes",
 ) -> dict:
+    coverage = coverage_payload(family)
     value = {
         "schema": CALL_SCHEMA,
         "ledgerSeq": seq,
         "receiptDigest": "",
+        "producerCoverageDigest": coverage["manifestDigest"],
         "callId": call_id,
         "runId": "run-1",
         "turnId": "turn-1",
@@ -79,10 +84,37 @@ def receipt(
     return value
 
 
+def coverage_payload(family: str = "hermes") -> dict:
+    value = {
+        "schema": "jitech-provider-usage-coverage/v1",
+        "productFamily": family,
+        "manifestDigest": "",
+        "coverageStatus": "complete",
+        "surfaces": [
+            {
+                "surfaceCode": "chat.main",
+                "observationKind": "per_call",
+                "meterFamily": "tokens",
+                "modelEvidence": "provider_response",
+                "retryObservation": "physical_attempt",
+                "usageObservation": "provider_reported",
+                "status": "implemented",
+                "gapCode": None,
+            }
+        ],
+    }
+    value["manifestDigest"] = coverage_manifest_digest(value)
+    return value
+
+
 def export_page(
-    *, after: int = 0, receipts: list[dict] | None = None, high: int | None = None
+    *,
+    after: int = 0,
+    receipts: list[dict] | None = None,
+    high: int | None = None,
+    family: str = "hermes",
 ) -> dict:
-    rows = receipts if receipts is not None else [receipt(seq=after + 1)]
+    rows = receipts if receipts is not None else [receipt(seq=after + 1, family=family)]
     next_cursor = rows[-1]["ledgerSeq"] if rows else after
     high_watermark = next_cursor if high is None else high
     return {
@@ -93,6 +125,7 @@ def export_page(
         "count": len(rows),
         "hasMore": next_cursor < high_watermark,
         "receipts": rows,
+        "coverageManifests": [coverage_payload(family)] if rows else [],
     }
 
 
@@ -110,7 +143,7 @@ class UsageReceiptContractTest(unittest.TestCase):
             Path(__file__).parent / "fixtures" / "jitech-provider-usage-export-v1.json"
         )
         fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
-        page = validate_export(fixture, expected_after=0)
+        page = validate_export(fixture, expected_after=0, expected_family="openclaw")
         self.assertEqual(page.next_cursor, 1)
         self.assertEqual(page.high_watermark, 1)
         self.assertEqual(
@@ -120,9 +153,38 @@ class UsageReceiptContractTest(unittest.TestCase):
     def test_exact_common_receipt_and_export_pass(self) -> None:
         row = receipt()
         self.assertIs(validate_call_receipt(row), row)
-        page = validate_export(export_page(receipts=[row]), expected_after=0)
+        page = validate_export(
+            export_page(receipts=[row]), expected_after=0, expected_family="hermes"
+        )
         self.assertEqual(page.next_cursor, 1)
         self.assertEqual(len(page.receipts), 1)
+        self.assertEqual(
+            page.receipts[0]["producerCoverageDigest"],
+            page.coverage_manifests[0].manifest_digest,
+        )
+
+    def test_export_requires_exact_historical_manifest_set(self) -> None:
+        page = export_page()
+        page["coverageManifests"] = []
+        with self.assertRaisesRegex(UsageContractError, "must exactly match"):
+            validate_export(page, expected_after=0, expected_family="hermes")
+
+        page = export_page()
+        extra = coverage_payload("hermes")
+        extra["surfaces"][0]["surfaceCode"] = "chat.secondary"
+        extra["manifestDigest"] = coverage_manifest_digest(extra)
+        page["coverageManifests"].append(extra)
+        page["coverageManifests"].sort(key=lambda item: item["manifestDigest"])
+        with self.assertRaisesRegex(UsageContractError, "must exactly match"):
+            validate_export(page, expected_after=0, expected_family="hermes")
+
+    def test_empty_export_has_no_historical_manifests(self) -> None:
+        page = validate_export(
+            export_page(receipts=[]),
+            expected_after=0,
+            expected_family="hermes",
+        )
+        self.assertEqual(page.coverage_manifests, ())
 
     def test_unknown_field_fails_closed(self) -> None:
         row = receipt()
@@ -210,19 +272,19 @@ class UsageReceiptContractTest(unittest.TestCase):
     def test_ledger_rollback_is_rejected(self) -> None:
         page = export_page(after=7, receipts=[], high=6)
         with self.assertRaisesRegex(UsageContractError, "moved backwards"):
-            validate_export(page, expected_after=7)
+            validate_export(page, expected_after=7, expected_family="hermes")
 
     def test_has_more_without_cursor_progress_is_rejected(self) -> None:
         page = export_page(after=7, receipts=[], high=8)
         with self.assertRaisesRegex(UsageContractError, "no cursor progress"):
-            validate_export(page, expected_after=7)
+            validate_export(page, expected_after=7, expected_family="hermes")
 
     def test_sequence_must_be_strictly_ascending(self) -> None:
         one = receipt(seq=2, call_id="call-two")
         two = receipt(seq=1, call_id="call-one")
         page = export_page(after=0, receipts=[one, two], high=2)
         with self.assertRaisesRegex(UsageContractError, "unique and ascending"):
-            validate_export(page, expected_after=0)
+            validate_export(page, expected_after=0, expected_family="hermes")
 
     def test_product_adapters_only_select_the_cli_entrypoint(self) -> None:
         self.assertEqual(

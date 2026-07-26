@@ -19,6 +19,7 @@ CALL_KEYS = {
     "schema",
     "ledgerSeq",
     "receiptDigest",
+    "producerCoverageDigest",
     "callId",
     "runId",
     "turnId",
@@ -51,6 +52,7 @@ EXPORT_KEYS = {
     "count",
     "hasMore",
     "receipts",
+    "coverageManifests",
 }
 COVERAGE_KEYS = {
     "schema",
@@ -139,6 +141,7 @@ class ValidatedExport:
     high_watermark: int
     has_more: bool
     receipts: tuple[dict[str, Any], ...]
+    coverage_manifests: tuple[ValidatedCoverage, ...]
 
 
 @dataclass(frozen=True)
@@ -306,6 +309,13 @@ def validate_call_receipt(value: object) -> dict[str, Any]:
         raise UsageContractError(
             "receipt.receiptDigest does not match canonical receipt bytes"
         )
+    producer_coverage_digest = _required_string(
+        receipt["producerCoverageDigest"], "receipt.producerCoverageDigest"
+    )
+    if not HEX_DIGEST_RE.fullmatch(producer_coverage_digest):
+        raise UsageContractError(
+            "receipt.producerCoverageDigest must be sha256:<64 lower-case hex>"
+        )
 
     _required_string(receipt["callId"], "receipt.callId", max_length=128)
     for key in (
@@ -414,7 +424,9 @@ def validate_call_receipt(value: object) -> dict[str, Any]:
     return receipt
 
 
-def validate_export(value: object, *, expected_after: int) -> ValidatedExport:
+def validate_export(
+    value: object, *, expected_after: int, expected_family: str
+) -> ValidatedExport:
     payload = _exact_keys(value, EXPORT_KEYS, "export")
     if payload["schema"] != EXPORT_SCHEMA:
         raise UsageContractError(f"export.schema must be {EXPORT_SCHEMA}")
@@ -440,6 +452,25 @@ def validate_export(value: object, *, expected_after: int) -> ValidatedExport:
             f"export.count mismatch: count={count} receipts={len(raw_receipts)}"
         )
     receipts = tuple(validate_call_receipt(item) for item in raw_receipts)
+    raw_manifests = payload["coverageManifests"]
+    if not isinstance(raw_manifests, list):
+        raise UsageContractError("export.coverageManifests must be an array")
+    coverage_manifests = tuple(
+        validate_coverage(item, expected_family=expected_family)
+        for item in raw_manifests
+    )
+    manifest_digests = [item.manifest_digest for item in coverage_manifests]
+    if manifest_digests != sorted(set(manifest_digests)):
+        raise UsageContractError(
+            "export.coverageManifests manifestDigest must be unique and ascending"
+        )
+    referenced_digests = sorted(
+        {str(item["producerCoverageDigest"]) for item in receipts}
+    )
+    if manifest_digests != referenced_digests:
+        raise UsageContractError(
+            "export.coverageManifests must exactly match receipt producerCoverageDigest values"
+        )
     sequences = [int(item["ledgerSeq"]) for item in receipts]
     if sequences != sorted(set(sequences)):
         raise UsageContractError(
@@ -471,6 +502,7 @@ def validate_export(value: object, *, expected_after: int) -> ValidatedExport:
         high_watermark=high_watermark,
         has_more=expected_has_more,
         receipts=receipts,
+        coverage_manifests=coverage_manifests,
     )
 
 
@@ -597,7 +629,9 @@ def coverage_command(family: str) -> list[str]:
     return [family, "usage-receipts", "coverage", "--json"]
 
 
-def parse_export_stdout(stdout: str, *, expected_after: int) -> ValidatedExport:
+def parse_export_stdout(
+    stdout: str, *, expected_after: int, expected_family: str
+) -> ValidatedExport:
     text = stdout.strip()
     if not text:
         raise UsageContractError("product usage export returned empty stdout")
@@ -607,7 +641,9 @@ def parse_export_stdout(stdout: str, *, expected_after: int) -> ValidatedExport:
         raise UsageContractError(
             "product usage export stdout is not exactly one JSON document"
         ) from exc
-    return validate_export(payload, expected_after=expected_after)
+    return validate_export(
+        payload, expected_after=expected_after, expected_family=expected_family
+    )
 
 
 def parse_coverage_stdout(stdout: str, *, expected_family: str) -> ValidatedCoverage:
