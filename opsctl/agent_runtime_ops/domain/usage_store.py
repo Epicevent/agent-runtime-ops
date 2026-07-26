@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from typing import Any, Mapping
 
 from .usage_ledger import (
@@ -44,6 +45,7 @@ def _fetchone_dict(cursor) -> dict[str, Any] | None:
 def ensure_schema(connection) -> None:
     required = {
         "provider_usage_call",
+        "provider_usage_coverage_manifest",
         "usage_collection_cursor",
         "usage_collection_conflict",
         "slot_assignment_interval",
@@ -51,7 +53,7 @@ def ensure_schema(connection) -> None:
     with connection.cursor() as cursor:
         cursor.execute(
             "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema=DATABASE() AND table_name IN (%s,%s,%s,%s)",
+            "WHERE table_schema=DATABASE() AND table_name IN (%s,%s,%s,%s,%s)",
             tuple(sorted(required)),
         )
         found = {str(row["table_name"]) for row in cursor.fetchall()}
@@ -186,6 +188,70 @@ def _record_conflict(
             f"call={receipt['callId']} seq={receipt['ledgerSeq']}",
             stamp.instance_id,
         ),
+    )
+
+
+def _coverage_payload(coverage: ValidatedCoverage) -> dict[str, Any]:
+    return {
+        "schema": "jitech-provider-usage-coverage/v1",
+        "productFamily": coverage.family,
+        "manifestDigest": coverage.manifest_digest,
+        "coverageStatus": coverage.status,
+        "surfaces": list(coverage.surfaces),
+    }
+
+
+def _store_coverage_manifest(
+    cursor,
+    *,
+    stamp: RuntimeUsageStamp,
+    coverage: ValidatedCoverage,
+) -> None:
+    payload = _coverage_payload(coverage)
+    payload_text = _json_text(payload)
+    cursor.execute(
+        "SELECT product_family, coverage_status, manifest_json "
+        "FROM provider_usage_coverage_manifest WHERE manifest_digest=%s FOR UPDATE",
+        (coverage.manifest_digest,),
+    )
+    existing = _fetchone_dict(cursor)
+    if existing is None:
+        cursor.execute(
+            "INSERT INTO provider_usage_coverage_manifest "
+            "(manifest_digest, product_family, coverage_status, manifest_json, "
+            "first_collected_at, last_collected_at) VALUES (%s,%s,%s,%s,%s,%s)",
+            (
+                coverage.manifest_digest,
+                coverage.family,
+                coverage.status,
+                payload_text,
+                _sql_timestamp(stamp.collected_at),
+                _sql_timestamp(stamp.collected_at),
+            ),
+        )
+        return
+    raw_manifest = existing.get("manifest_json")
+    try:
+        stored_payload = (
+            json.loads(raw_manifest) if isinstance(raw_manifest, str) else raw_manifest
+        )
+        stored_text = _json_text(stored_payload)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise UsageContractError(
+            "stored producer coverage manifest is invalid"
+        ) from exc
+    if (
+        str(existing.get("product_family") or "") != coverage.family
+        or str(existing.get("coverage_status") or "") != coverage.status
+        or stored_text != payload_text
+    ):
+        raise UsageContractError(
+            f"producer coverage digest is bound to different bytes: {coverage.manifest_digest}"
+        )
+    cursor.execute(
+        "UPDATE provider_usage_coverage_manifest SET last_collected_at=%s "
+        "WHERE manifest_digest=%s",
+        (_sql_timestamp(stamp.collected_at), coverage.manifest_digest),
     )
 
 
@@ -336,6 +402,7 @@ def store_export_page(
         connection.begin()
         with connection.cursor() as cursor:
             _ensure_cursor_locked(cursor, stamp, page.after)
+            _store_coverage_manifest(cursor, stamp=stamp, coverage=coverage)
             for receipt in page.receipts:
                 try:
                     was_inserted = _insert_receipt(
@@ -372,15 +439,7 @@ def store_export_page(
                         _sql_timestamp(stamp.collected_at),
                         coverage.status,
                         coverage.manifest_digest,
-                        _json_text(
-                            {
-                                "schema": "jitech-provider-usage-coverage/v1",
-                                "productFamily": coverage.family,
-                                "manifestDigest": coverage.manifest_digest,
-                                "coverageStatus": coverage.status,
-                                "surfaces": list(coverage.surfaces),
-                            }
-                        ),
+                        _json_text(_coverage_payload(coverage)),
                         stamp.wrapper_image,
                         stamp.product_image,
                         stamp.container_id,

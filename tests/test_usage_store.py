@@ -4,6 +4,7 @@ import unittest
 
 from agent_runtime_ops.domain.usage_ledger import (
     RuntimeUsageStamp,
+    UsageContractError,
     UsageLedgerConflict,
     coverage_manifest_digest,
     validate_coverage,
@@ -70,6 +71,21 @@ class FakeCursor:
             self.rows = [] if row is None else [dict(row)]
         elif normalized.startswith("SELECT id, mb_id FROM slot_assignment_interval"):
             self.rows = list(self.connection.assignments)
+        elif normalized.startswith(
+            "SELECT product_family, coverage_status, manifest_json"
+        ):
+            row = self.connection.manifests.get(params[0])
+            self.rows = [] if row is None else [dict(row)]
+        elif normalized.startswith("INSERT INTO provider_usage_coverage_manifest"):
+            self.connection.manifests[params[0]] = {
+                "product_family": params[1],
+                "coverage_status": params[2],
+                "manifest_json": params[3],
+                "first_collected_at": params[4],
+                "last_collected_at": params[5],
+            }
+        elif normalized.startswith("UPDATE provider_usage_coverage_manifest"):
+            self.connection.manifests[params[1]]["last_collected_at"] = params[0]
         elif normalized.startswith("INSERT INTO provider_usage_call"):
             if len(params) != 53:
                 raise AssertionError(f"provider_usage_call parameters={len(params)}")
@@ -129,6 +145,7 @@ class FakeConnection:
         self.cursors: dict[str, dict] = {}
         self.calls: dict[tuple[str, str], dict] = {}
         self.sequences: dict[tuple[str, str, int], dict] = {}
+        self.manifests: dict[str, dict] = {}
         self.assignments: list[dict] = [{"id": 8, "mb_id": "jitech"}]
         self.conflicts: list[dict] = []
         self.transactions: list[str] = []
@@ -208,6 +225,10 @@ class UsageStoreTest(unittest.TestCase):
         self.assertEqual(stored["assigned_mb_id"], "jitech")
         self.assertEqual(stored["assignment_status"], "matched")
         self.assertEqual(connection.cursors[STAMP.instance_id]["last_ledger_seq"], 1)
+        self.assertEqual(
+            connection.manifests[COVERAGE.manifest_digest]["coverage_status"],
+            "complete",
+        )
         self.assertEqual(connection.transactions, ["BEGIN", "COMMIT"])
 
     def test_same_call_and_digest_is_idempotent(self) -> None:
@@ -221,6 +242,27 @@ class UsageStoreTest(unittest.TestCase):
         self.assertEqual(result["inserted"], 0)
         self.assertEqual(result["idempotent"], 1)
         self.assertEqual(len(connection.calls), 1)
+        self.assertEqual(len(connection.manifests), 1)
+
+    def test_existing_coverage_digest_with_different_manifest_fails_closed(
+        self,
+    ) -> None:
+        connection = FakeConnection()
+        connection.manifests[COVERAGE.manifest_digest] = {
+            "product_family": "hermes",
+            "coverage_status": "complete",
+            "manifest_json": "{}",
+        }
+        page = validate_export(export_page(), expected_after=0)
+        with self.assertRaisesRegex(UsageContractError, "different bytes"):
+            store_export_page(
+                connection,
+                stamp=STAMP,
+                coverage=COVERAGE,
+                page=page,
+            )
+        self.assertEqual(connection.transactions, ["BEGIN", "ROLLBACK"])
+        self.assertEqual(connection.calls, {})
 
     def test_same_call_different_digest_commits_conflict_without_cursor_advance(
         self,
