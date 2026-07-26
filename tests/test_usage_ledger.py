@@ -230,6 +230,32 @@ class UsageReceiptContractTest(unittest.TestCase):
         row["receiptDigest"] = receipt_digest(row)
         self.assertIs(validate_call_receipt(row), row)
 
+    def test_generic_provider_accounting_fields_are_allowed_without_content(self) -> None:
+        row = receipt()
+        row["usage"]["rawProviderUsage"] = {
+            "prompt_tokens": 50,
+            "completion_tokens": 7,
+            "total_tokens": 57,
+            "cache_read_input_tokens": 10,
+            "prompt_tokens_details": {
+                "cached_tokens": 10,
+                "audio_tokens": 0,
+            },
+            "service_tier": "standard",
+        }
+        row["receiptDigest"] = receipt_digest(row)
+        self.assertIs(validate_call_receipt(row), row)
+
+    def test_generic_provider_detail_content_is_rejected(self) -> None:
+        row = receipt()
+        row["usage"]["rawProviderUsage"] = {
+            "input_tokens": 50,
+            "input_tokens_details": {"message": "must never be accepted"},
+        }
+        row["receiptDigest"] = receipt_digest(row)
+        with self.assertRaisesRegex(UsageContractError, "non-accounting"):
+            validate_call_receipt(row)
+
     def test_missing_usage_fields_must_exactly_match_null_dimensions(self) -> None:
         row = receipt()
         row["missingUsageFields"] = ["cacheRead"]

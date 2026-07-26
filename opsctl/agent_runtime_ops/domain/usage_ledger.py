@@ -115,14 +115,44 @@ RAW_USAGE_COUNT_KEYS = {
     "thoughtsTokenCount",
     "toolUsePromptTokenCount",
     "totalTokenCount",
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "inputTokens",
+    "outputTokens",
+    "totalTokens",
+    "cacheReadInputTokens",
+    "cacheWriteInputTokens",
 }
-RAW_USAGE_ENUM_KEYS = {"serviceTier", "trafficType"}
+RAW_USAGE_ENUM_KEYS = {"serviceTier", "trafficType", "service_tier"}
 RAW_USAGE_DETAIL_KEYS = {
     "promptTokensDetails",
     "cacheTokensDetails",
     "candidatesTokensDetails",
     "toolUsePromptTokensDetails",
+    "prompt_tokens_details",
+    "completion_tokens_details",
+    "input_tokens_details",
+    "output_tokens_details",
 }
+RAW_USAGE_DETAIL_COUNT_KEYS = {
+    "tokenCount",
+    "cached_tokens",
+    "cache_creation_tokens",
+    "cache_write_tokens",
+    "audio_tokens",
+    "reasoning_tokens",
+    "accepted_prediction_tokens",
+    "rejected_prediction_tokens",
+}
+RAW_USAGE_DETAIL_KEYS_ALLOWED = RAW_USAGE_DETAIL_COUNT_KEYS | {"modality"}
 RAW_USAGE_KEYS = RAW_USAGE_COUNT_KEYS | RAW_USAGE_ENUM_KEYS | RAW_USAGE_DETAIL_KEYS
 
 
@@ -283,16 +313,25 @@ def _validate_accounting_json(
         if key not in value or value[key] is None:
             continue
         details = value[key]
-        if not isinstance(details, list):
-            raise UsageContractError(f"{path}.{key} must be an array")
-        for index, item in enumerate(details):
-            detail = _exact_keys(
-                item, {"modality", "tokenCount"}, f"{path}.{key}[{index}]"
-            )
-            _required_string(
-                detail["modality"], f"{path}.{key}[{index}].modality", max_length=64
-            )
-            _integer(detail["tokenCount"], f"{path}.{key}[{index}].tokenCount")
+        detail_items = details if isinstance(details, list) else [details]
+        if not isinstance(details, (dict, list)):
+            raise UsageContractError(f"{path}.{key} must be an object or array")
+        for index, item in enumerate(detail_items):
+            item_path = f"{path}.{key}[{index}]"
+            if not isinstance(item, dict):
+                raise UsageContractError(f"{item_path} must be an object")
+            unknown_detail = set(item) - RAW_USAGE_DETAIL_KEYS_ALLOWED
+            if unknown_detail:
+                raise UsageContractError(
+                    f"{item_path} has non-accounting fields: {sorted(unknown_detail)}"
+                )
+            if "modality" in item:
+                _required_string(
+                    item["modality"], f"{item_path}.modality", max_length=64
+                )
+            for detail_key in RAW_USAGE_DETAIL_COUNT_KEYS:
+                if detail_key in item:
+                    _integer(item[detail_key], f"{item_path}.{detail_key}")
 
 
 def validate_call_receipt(value: object) -> dict[str, Any]:
