@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import unittest
 
-from agent_runtime_ops.domain.usage_ledger import RuntimeUsageStamp, UsageLedgerConflict, validate_export
+from agent_runtime_ops.domain.usage_ledger import (
+    RuntimeUsageStamp,
+    UsageLedgerConflict,
+    coverage_manifest_digest,
+    validate_coverage,
+    validate_export,
+)
 from agent_runtime_ops.domain.usage_store import (
     UsageCollectionBusy,
     acquire_collection_lock,
@@ -32,42 +38,54 @@ class FakeCursor:
             instance_id = params[0]
             self.connection.cursors.setdefault(
                 instance_id,
-                {"last_ledger_seq": 0, "product_family": params[3], "last_status": "never"},
+                {
+                    "last_ledger_seq": 0,
+                    "product_family": params[3],
+                    "last_status": "never",
+                },
             )
         elif normalized.startswith("SELECT GET_LOCK"):
             self.rows = [{"acquired": self.connection.lock_acquired}]
         elif normalized.startswith("SELECT last_ledger_seq, product_family"):
             row = self.connection.cursors.get(params[0])
             self.rows = [] if row is None else [dict(row)]
-        elif normalized.startswith("SELECT receipt_digest, product_ledger_seq FROM provider_usage_call"):
+        elif normalized.startswith(
+            "SELECT receipt_digest, product_ledger_seq FROM provider_usage_call"
+        ):
             row = self.connection.calls.get((params[0], params[1]))
             self.rows = (
                 []
                 if row is None
-                else [{
-                    "receipt_digest": row["receipt_digest"],
-                    "product_ledger_seq": row["product_ledger_seq"],
-                }]
+                else [
+                    {
+                        "receipt_digest": row["receipt_digest"],
+                        "product_ledger_seq": row["product_ledger_seq"],
+                    }
+                ]
             )
-        elif normalized.startswith("SELECT receipt_digest, call_id FROM provider_usage_call"):
+        elif normalized.startswith(
+            "SELECT receipt_digest, call_id FROM provider_usage_call"
+        ):
             row = self.connection.sequences.get((params[0], params[1], params[2]))
             self.rows = [] if row is None else [dict(row)]
         elif normalized.startswith("SELECT id, mb_id FROM slot_assignment_interval"):
             self.rows = list(self.connection.assignments)
         elif normalized.startswith("INSERT INTO provider_usage_call"):
-            if len(params) != 51:
+            if len(params) != 53:
                 raise AssertionError(f"provider_usage_call parameters={len(params)}")
             row = {
                 "runtime_instance_id": params[0],
                 "product_family": params[3],
                 "product_ledger_seq": params[10],
                 "receipt_digest": params[11],
-                "call_id": params[12],
-                "started_at": params[22],
-                "assigned_mb_id": params[47],
-                "assignment_status": params[48],
+                "producer_coverage_status": params[12],
+                "producer_coverage_digest": params[13],
+                "call_id": params[14],
+                "started_at": params[24],
+                "assigned_mb_id": params[49],
+                "assignment_status": params[50],
             }
-            self.connection.calls[(params[0], params[12])] = row
+            self.connection.calls[(params[0], params[14])] = row
             self.connection.sequences[(params[0], params[3], params[10])] = row
         elif normalized.startswith("UPDATE usage_collection_cursor SET linux_account"):
             row = self.connection.cursors[params[-1]]
@@ -76,6 +94,9 @@ class FakeCursor:
                     "last_ledger_seq": params[4],
                     "product_family": self.connection.family,
                     "last_status": "ok",
+                    "producer_coverage_status": params[8],
+                    "producer_coverage_digest": params[9],
+                    "producer_coverage_manifest": params[10],
                 }
             )
         elif normalized.startswith("INSERT INTO usage_collection_conflict"):
@@ -88,7 +109,9 @@ class FakeCursor:
                     "observed": params[6],
                 }
             )
-        elif normalized.startswith("UPDATE usage_collection_cursor SET last_status='conflict'"):
+        elif normalized.startswith(
+            "UPDATE usage_collection_cursor SET last_status='conflict'"
+        ):
             self.connection.cursors[params[-1]]["last_status"] = "conflict"
         else:
             raise AssertionError(f"unexpected SQL: {normalized}")
@@ -139,9 +162,35 @@ STAMP = RuntimeUsageStamp(
     collected_at="2026-07-26T01:00:00Z",
 )
 
+COVERAGE_PAYLOAD = {
+    "schema": "jitech-provider-usage-coverage/v1",
+    "productFamily": "hermes",
+    "manifestDigest": "",
+    "coverageStatus": "complete",
+    "surfaces": [
+        {
+            "surfaceCode": "chat.main",
+            "observationKind": "per_call",
+            "meterFamily": "tokens",
+            "modelEvidence": "provider_response",
+            "retryObservation": "physical_attempt",
+            "usageObservation": "provider_reported",
+            "status": "implemented",
+            "gapCode": None,
+        }
+    ],
+}
+COVERAGE_PAYLOAD["manifestDigest"] = coverage_manifest_digest(COVERAGE_PAYLOAD)
+COVERAGE = validate_coverage(
+    COVERAGE_PAYLOAD,
+    expected_family="hermes",
+)
+
 
 class UsageStoreTest(unittest.TestCase):
-    def test_instance_collection_lock_is_connection_scoped_and_fail_closed(self) -> None:
+    def test_instance_collection_lock_is_connection_scoped_and_fail_closed(
+        self,
+    ) -> None:
         connection = FakeConnection()
         acquire_collection_lock(connection, STAMP.instance_id)
         connection.lock_acquired = 0
@@ -151,7 +200,9 @@ class UsageStoreTest(unittest.TestCase):
     def test_insert_once_stamps_assignment_and_advances_cursor(self) -> None:
         connection = FakeConnection()
         page = validate_export(export_page(), expected_after=0)
-        result = store_export_page(connection, stamp=STAMP, page=page)
+        result = store_export_page(
+            connection, stamp=STAMP, coverage=COVERAGE, page=page
+        )
         self.assertEqual(result, {"inserted": 1, "idempotent": 0, "nextCursor": 1})
         stored = connection.calls[(STAMP.instance_id, receipt()["callId"])]
         self.assertEqual(stored["assigned_mb_id"], "jitech")
@@ -162,17 +213,21 @@ class UsageStoreTest(unittest.TestCase):
     def test_same_call_and_digest_is_idempotent(self) -> None:
         connection = FakeConnection()
         page = validate_export(export_page(), expected_after=0)
-        store_export_page(connection, stamp=STAMP, page=page)
+        store_export_page(connection, stamp=STAMP, coverage=COVERAGE, page=page)
         connection.cursors[STAMP.instance_id]["last_ledger_seq"] = 0
-        result = store_export_page(connection, stamp=STAMP, page=page)
+        result = store_export_page(
+            connection, stamp=STAMP, coverage=COVERAGE, page=page
+        )
         self.assertEqual(result["inserted"], 0)
         self.assertEqual(result["idempotent"], 1)
         self.assertEqual(len(connection.calls), 1)
 
-    def test_same_call_different_digest_commits_conflict_without_cursor_advance(self) -> None:
+    def test_same_call_different_digest_commits_conflict_without_cursor_advance(
+        self,
+    ) -> None:
         connection = FakeConnection()
         first = validate_export(export_page(), expected_after=0)
-        store_export_page(connection, stamp=STAMP, page=first)
+        store_export_page(connection, stamp=STAMP, coverage=COVERAGE, page=first)
         connection.cursors[STAMP.instance_id]["last_ledger_seq"] = 0
         changed = receipt()
         changed["actual"]["responseId"] = "different"
@@ -181,37 +236,43 @@ class UsageStoreTest(unittest.TestCase):
         changed["receiptDigest"] = receipt_digest(changed)
         second = validate_export(export_page(receipts=[changed]), expected_after=0)
         with self.assertRaises(UsageLedgerConflict):
-            store_export_page(connection, stamp=STAMP, page=second)
+            store_export_page(connection, stamp=STAMP, coverage=COVERAGE, page=second)
         self.assertEqual(connection.cursors[STAMP.instance_id]["last_ledger_seq"], 0)
-        self.assertEqual(connection.cursors[STAMP.instance_id]["last_status"], "conflict")
+        self.assertEqual(
+            connection.cursors[STAMP.instance_id]["last_status"], "conflict"
+        )
 
     def test_same_call_and_digest_at_different_sequence_is_not_idempotent(self) -> None:
         connection = FakeConnection()
         first = validate_export(export_page(), expected_after=0)
-        store_export_page(connection, stamp=STAMP, page=first)
+        store_export_page(connection, stamp=STAMP, coverage=COVERAGE, page=first)
         connection.cursors[STAMP.instance_id]["last_ledger_seq"] = 0
         replay = receipt(seq=2)
         page = validate_export(export_page(receipts=[replay], high=2), expected_after=0)
         with self.assertRaises(UsageLedgerConflict):
-            store_export_page(connection, stamp=STAMP, page=page)
+            store_export_page(connection, stamp=STAMP, coverage=COVERAGE, page=page)
         self.assertEqual(connection.conflicts[-1]["kind"], "call_id_sequence_mismatch")
         self.assertEqual(connection.cursors[STAMP.instance_id]["last_ledger_seq"], 0)
         self.assertEqual(len(connection.conflicts), 1)
         self.assertEqual(connection.transactions[-2:], ["BEGIN", "COMMIT"])
         with self.assertRaisesRegex(UsageLedgerConflict, "unresolved conflict"):
             read_cursor(connection, STAMP)
-        self.assertEqual(connection.cursors[STAMP.instance_id]["last_status"], "conflict")
+        self.assertEqual(
+            connection.cursors[STAMP.instance_id]["last_status"], "conflict"
+        )
 
     def test_missing_assignment_is_not_attributed_to_current_person(self) -> None:
         connection = FakeConnection()
         connection.assignments = []
         page = validate_export(export_page(), expected_after=0)
-        store_export_page(connection, stamp=STAMP, page=page)
+        store_export_page(connection, stamp=STAMP, coverage=COVERAGE, page=page)
         stored = connection.calls[(STAMP.instance_id, receipt()["callId"])]
         self.assertIsNone(stored["assigned_mb_id"])
         self.assertEqual(stored["assignment_status"], "unavailable")
 
-    def test_offset_timestamp_is_normalized_to_utc_before_assignment_and_storage(self) -> None:
+    def test_offset_timestamp_is_normalized_to_utc_before_assignment_and_storage(
+        self,
+    ) -> None:
         connection = FakeConnection()
         row = receipt()
         row["startedAt"] = "2026-07-26T10:00:00+09:00"
@@ -220,7 +281,7 @@ class UsageStoreTest(unittest.TestCase):
 
         row["receiptDigest"] = receipt_digest(row)
         page = validate_export(export_page(receipts=[row]), expected_after=0)
-        store_export_page(connection, stamp=STAMP, page=page)
+        store_export_page(connection, stamp=STAMP, coverage=COVERAGE, page=page)
         stored = connection.calls[(STAMP.instance_id, row["callId"])]
         self.assertEqual(stored["started_at"].isoformat(), "2026-07-26T01:00:00")
 

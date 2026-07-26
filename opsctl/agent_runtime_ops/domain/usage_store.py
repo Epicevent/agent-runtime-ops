@@ -7,6 +7,7 @@ from .usage_ledger import (
     RuntimeUsageStamp,
     UsageContractError,
     UsageLedgerConflict,
+    ValidatedCoverage,
     ValidatedExport,
     canonical_json_bytes,
     redact_error,
@@ -55,7 +56,9 @@ def ensure_schema(connection) -> None:
         )
         found = {str(row["table_name"]) for row in cursor.fetchall()}
     if found != required:
-        raise UsageContractError(f"usage DB schema incomplete: missing={sorted(required - found)}")
+        raise UsageContractError(
+            f"usage DB schema incomplete: missing={sorted(required - found)}"
+        )
 
 
 def acquire_collection_lock(connection, instance_id: str) -> None:
@@ -66,7 +69,9 @@ def acquire_collection_lock(connection, instance_id: str) -> None:
         cursor.execute("SELECT GET_LOCK(%s, 0) AS acquired", (lock_name,))
         row = _fetchone_dict(cursor)
     if row is None or int(row.get("acquired") or 0) != 1:
-        raise UsageCollectionBusy(f"usage collection already running: instance={instance_id}")
+        raise UsageCollectionBusy(
+            f"usage collection already running: instance={instance_id}"
+        )
 
 
 def read_cursor(connection, stamp: RuntimeUsageStamp) -> int:
@@ -90,7 +95,9 @@ def read_cursor(connection, stamp: RuntimeUsageStamp) -> int:
     return int(row["last_ledger_seq"])
 
 
-def _ensure_cursor_locked(cursor, stamp: RuntimeUsageStamp, expected_after: int) -> None:
+def _ensure_cursor_locked(
+    cursor, stamp: RuntimeUsageStamp, expected_after: int
+) -> None:
     cursor.execute(
         "INSERT IGNORE INTO usage_collection_cursor "
         "(runtime_instance_id, linux_account, public_host, product_family, runtime_class, "
@@ -117,10 +124,14 @@ def _ensure_cursor_locked(cursor, stamp: RuntimeUsageStamp, expected_after: int)
         raise UsageContractError("usage cursor product family changed")
     actual = int(row["last_ledger_seq"])
     if actual != expected_after:
-        raise UsageContractError(f"usage cursor raced: expected={expected_after} actual={actual}")
+        raise UsageContractError(
+            f"usage cursor raced: expected={expected_after} actual={actual}"
+        )
 
 
-def _assignment_for_call(cursor, linux_account: str, started_at: datetime) -> tuple[int | None, str | None, str]:
+def _assignment_for_call(
+    cursor, linux_account: str, started_at: datetime
+) -> tuple[int | None, str | None, str]:
     cursor.execute(
         "SELECT id, mb_id FROM slot_assignment_interval "
         "WHERE agent_id=%s AND effective_from<=%s "
@@ -132,7 +143,9 @@ def _assignment_for_call(cursor, linux_account: str, started_at: datetime) -> tu
     if not rows:
         return None, None, "unavailable"
     if len(rows) != 1:
-        raise UsageContractError(f"overlapping assignment intervals for {linux_account} at {started_at.isoformat()}")
+        raise UsageContractError(
+            f"overlapping assignment intervals for {linux_account} at {started_at.isoformat()}"
+        )
     row = rows[0]
     if not isinstance(row, dict):
         raise UsageContractError("usage DB cursor must return dictionary rows")
@@ -176,7 +189,13 @@ def _record_conflict(
     )
 
 
-def _insert_receipt(cursor, *, stamp: RuntimeUsageStamp, receipt: Mapping[str, Any]) -> bool:
+def _insert_receipt(
+    cursor,
+    *,
+    stamp: RuntimeUsageStamp,
+    coverage: ValidatedCoverage,
+    receipt: Mapping[str, Any],
+) -> bool:
     cursor.execute(
         "SELECT receipt_digest, product_ledger_seq FROM provider_usage_call "
         "WHERE runtime_instance_id=%s AND call_id=%s FOR UPDATE",
@@ -186,7 +205,9 @@ def _insert_receipt(cursor, *, stamp: RuntimeUsageStamp, receipt: Mapping[str, A
     if existing is not None:
         existing_digest = str(existing["receipt_digest"])
         existing_sequence = int(existing["product_ledger_seq"])
-        if existing_digest == receipt["receiptDigest"] and existing_sequence == int(receipt["ledgerSeq"]):
+        if existing_digest == receipt["receiptDigest"] and existing_sequence == int(
+            receipt["ledgerSeq"]
+        ):
             return False
         conflict_kind = (
             "call_id_sequence_mismatch"
@@ -224,23 +245,24 @@ def _insert_receipt(cursor, *, stamp: RuntimeUsageStamp, receipt: Mapping[str, A
 
     started_at = _sql_timestamp(str(receipt["startedAt"]))
     completed_at = _sql_timestamp(str(receipt["completedAt"]))
-    interval_id, mb_id, assignment_status = _assignment_for_call(cursor, stamp.linux_account, started_at)
+    interval_id, mb_id, assignment_status = _assignment_for_call(
+        cursor, stamp.linux_account, started_at
+    )
     usage = receipt["usage"]
     actual = receipt["actual"]
     cursor.execute(
         "INSERT INTO provider_usage_call "
         "(runtime_instance_id, linux_account, public_host, product_family, runtime_class, "
         "runtime_binding_digest, wrapper_image, product_image, ops_repo_commit, container_id, "
-        "product_ledger_seq, receipt_digest, call_id, run_id, turn_id, request_id, session_id, "
+        "product_ledger_seq, receipt_digest, producer_coverage_status, producer_coverage_digest, "
+        "call_id, run_id, turn_id, request_id, session_id, "
         "trigger_kind, attempt, retry_of, fallback_parent, fallback_index, started_at, completed_at, "
         "call_status, configured_provider, configured_model, requested_provider, requested_model, "
         "actual_provider, actual_model, response_id, evidence_source, input_total, input_non_cached, "
         "cache_read, cache_write, output_candidates, reasoning_thinking, tool_use_prompt, "
         "provider_reported_total, service_tier, usage_coverage, receipt_coverage, finish_reason, "
         "error_category, assignment_interval_id, assigned_mb_id, assignment_status, receipt_json, collected_at) "
-        "VALUES ("
-        + ",".join(["%s"] * 51)
-        + ")",
+        "VALUES (" + ",".join(["%s"] * 53) + ")",
         (
             stamp.instance_id,
             stamp.linux_account,
@@ -254,6 +276,8 @@ def _insert_receipt(cursor, *, stamp: RuntimeUsageStamp, receipt: Mapping[str, A
             stamp.container_id,
             receipt["ledgerSeq"],
             receipt["receiptDigest"],
+            coverage.status,
+            coverage.manifest_digest,
             receipt["callId"],
             receipt["runId"],
             receipt["turnId"],
@@ -302,6 +326,7 @@ def store_export_page(
     connection,
     *,
     stamp: RuntimeUsageStamp,
+    coverage: ValidatedCoverage,
     page: ValidatedExport,
 ) -> dict[str, int]:
     inserted = 0
@@ -313,7 +338,12 @@ def store_export_page(
             _ensure_cursor_locked(cursor, stamp, page.after)
             for receipt in page.receipts:
                 try:
-                    was_inserted = _insert_receipt(cursor, stamp=stamp, receipt=receipt)
+                    was_inserted = _insert_receipt(
+                        cursor,
+                        stamp=stamp,
+                        coverage=coverage,
+                        receipt=receipt,
+                    )
                 except UsageLedgerConflict as exc:
                     pending_conflict = exc
                     break
@@ -327,6 +357,8 @@ def store_export_page(
                     "runtime_class=%s, runtime_binding_digest=%s, last_ledger_seq=%s, "
                     "last_high_watermark=%s, last_success_at=%s, last_attempt_at=%s, "
                     "last_status='ok', last_error_code=NULL, last_error_detail=NULL, "
+                    "producer_coverage_status=%s, producer_coverage_digest=%s, "
+                    "producer_coverage_manifest=%s, "
                     "wrapper_image=%s, product_image=%s, container_id=%s "
                     "WHERE runtime_instance_id=%s",
                     (
@@ -338,6 +370,17 @@ def store_export_page(
                         page.high_watermark,
                         _sql_timestamp(stamp.collected_at),
                         _sql_timestamp(stamp.collected_at),
+                        coverage.status,
+                        coverage.manifest_digest,
+                        _json_text(
+                            {
+                                "schema": "jitech-provider-usage-coverage/v1",
+                                "productFamily": coverage.family,
+                                "manifestDigest": coverage.manifest_digest,
+                                "coverageStatus": coverage.status,
+                                "surfaces": list(coverage.surfaces),
+                            }
+                        ),
                         stamp.wrapper_image,
                         stamp.product_image,
                         stamp.container_id,
@@ -351,7 +394,11 @@ def store_export_page(
         raise
     if pending_conflict is not None:
         raise pending_conflict
-    return {"inserted": inserted, "idempotent": idempotent, "nextCursor": page.next_cursor}
+    return {
+        "inserted": inserted,
+        "idempotent": idempotent,
+        "nextCursor": page.next_cursor,
+    }
 
 
 def record_collection_failure(
@@ -396,7 +443,9 @@ def record_collection_failure(
         raise
 
 
-def list_collection_status(connection, *, linux_account: str | None = None) -> list[dict[str, Any]]:
+def list_collection_status(
+    connection, *, linux_account: str | None = None
+) -> list[dict[str, Any]]:
     sql = (
         "SELECT runtime_instance_id, linux_account, public_host, product_family, runtime_class, "
         "last_ledger_seq, last_high_watermark, last_success_at, last_attempt_at, last_status, "

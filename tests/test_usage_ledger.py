@@ -8,15 +8,21 @@ from agent_runtime_ops.domain.usage_ledger import (
     CALL_SCHEMA,
     EXPORT_SCHEMA,
     UsageContractError,
+    coverage_command,
+    coverage_manifest_digest,
     export_command,
+    parse_coverage_stdout,
     receipt_digest,
     redact_error,
     validate_call_receipt,
+    validate_coverage,
     validate_export,
 )
 
 
-def receipt(*, seq: int = 1, call_id: str = "018f8512-7d1a-7a95-a53e-27f0cf9c7b82") -> dict:
+def receipt(
+    *, seq: int = 1, call_id: str = "018f8512-7d1a-7a95-a53e-27f0cf9c7b82"
+) -> dict:
     value = {
         "schema": CALL_SCHEMA,
         "ledgerSeq": seq,
@@ -73,7 +79,9 @@ def receipt(*, seq: int = 1, call_id: str = "018f8512-7d1a-7a95-a53e-27f0cf9c7b8
     return value
 
 
-def export_page(*, after: int = 0, receipts: list[dict] | None = None, high: int | None = None) -> dict:
+def export_page(
+    *, after: int = 0, receipts: list[dict] | None = None, high: int | None = None
+) -> dict:
     rows = receipts if receipts is not None else [receipt(seq=after + 1)]
     next_cursor = rows[-1]["ledgerSeq"] if rows else after
     high_watermark = next_cursor if high is None else high
@@ -89,13 +97,25 @@ def export_page(*, after: int = 0, receipts: list[dict] | None = None, high: int
 
 
 class UsageReceiptContractTest(unittest.TestCase):
+    def coverage_fixture(self) -> dict:
+        path = (
+            Path(__file__).parent
+            / "fixtures"
+            / "jitech-provider-usage-coverage-v1.json"
+        )
+        return json.loads(path.read_text(encoding="utf-8"))
+
     def test_exact_product_fixture_matches_common_contract(self) -> None:
-        fixture_path = Path(__file__).parent / "fixtures" / "jitech-provider-usage-export-v1.json"
+        fixture_path = (
+            Path(__file__).parent / "fixtures" / "jitech-provider-usage-export-v1.json"
+        )
         fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
         page = validate_export(fixture, expected_after=0)
         self.assertEqual(page.next_cursor, 1)
         self.assertEqual(page.high_watermark, 1)
-        self.assertEqual(page.receipts[0]["receiptDigest"], receipt_digest(page.receipts[0]))
+        self.assertEqual(
+            page.receipts[0]["receiptDigest"], receipt_digest(page.receipts[0])
+        )
 
     def test_exact_common_receipt_and_export_pass(self) -> None:
         row = receipt()
@@ -159,7 +179,9 @@ class UsageReceiptContractTest(unittest.TestCase):
         row = receipt()
         row["missingReceiptFields"] = ["usage.cacheWrite", "bogus.path"]
         row["receiptDigest"] = receipt_digest(row)
-        with self.assertRaisesRegex(UsageContractError, "inconsistent with applicable null evidence"):
+        with self.assertRaisesRegex(
+            UsageContractError, "inconsistent with applicable null evidence"
+        ):
             validate_call_receipt(row)
 
     def test_unknown_trigger_and_non_success_error_are_exact_receipt_gaps(self) -> None:
@@ -173,7 +195,9 @@ class UsageReceiptContractTest(unittest.TestCase):
         validate_call_receipt(row)
         row["missingReceiptFields"] = ["usage.cacheWrite"]
         row["receiptDigest"] = receipt_digest(row)
-        with self.assertRaisesRegex(UsageContractError, "inconsistent with applicable null evidence"):
+        with self.assertRaisesRegex(
+            UsageContractError, "inconsistent with applicable null evidence"
+        ):
             validate_call_receipt(row)
 
     def test_fallback_requires_positive_index(self) -> None:
@@ -209,6 +233,55 @@ class UsageReceiptContractTest(unittest.TestCase):
             export_command("openclaw", after=9, limit=500),
             ["openclaw", "usage-receipts", "export", "--after", "9", "--limit", "500"],
         )
+        self.assertEqual(
+            coverage_command("hermes"),
+            ["hermes", "usage-receipts", "coverage", "--json"],
+        )
+
+    def test_coverage_manifest_fixture_is_exact_and_partial(self) -> None:
+        payload = self.coverage_fixture()
+        result = validate_coverage(payload, expected_family="openclaw")
+        self.assertEqual(result.status, "partial")
+        self.assertEqual(result.manifest_digest, coverage_manifest_digest(payload))
+        self.assertEqual(
+            [item["surfaceCode"] for item in result.surfaces],
+            ["codex.app_server", "pi.embedded"],
+        )
+        parsed = parse_coverage_stdout(json.dumps(payload), expected_family="openclaw")
+        self.assertEqual(parsed, result)
+
+    def test_coverage_manifest_rejects_digest_order_and_false_complete(self) -> None:
+        payload = self.coverage_fixture()
+        payload["manifestDigest"] = "sha256:" + "0" * 64
+        with self.assertRaises(UsageContractError):
+            validate_coverage(payload, expected_family="openclaw")
+
+        payload = self.coverage_fixture()
+        payload["surfaces"] = list(reversed(payload["surfaces"]))
+        payload["manifestDigest"] = coverage_manifest_digest(payload)
+        with self.assertRaises(UsageContractError):
+            validate_coverage(payload, expected_family="openclaw")
+
+        payload = self.coverage_fixture()
+        payload["coverageStatus"] = "complete"
+        payload["manifestDigest"] = coverage_manifest_digest(payload)
+        with self.assertRaises(UsageContractError):
+            validate_coverage(payload, expected_family="openclaw")
+
+    def test_coverage_manifest_requires_gap_code_only_for_nonimplemented_surface(
+        self,
+    ) -> None:
+        payload = self.coverage_fixture()
+        payload["surfaces"][0]["gapCode"] = None
+        payload["manifestDigest"] = coverage_manifest_digest(payload)
+        with self.assertRaises(UsageContractError):
+            validate_coverage(payload, expected_family="openclaw")
+
+        payload = self.coverage_fixture()
+        payload["surfaces"][1]["gapCode"] = "should_not_exist"
+        payload["manifestDigest"] = coverage_manifest_digest(payload)
+        with self.assertRaises(UsageContractError):
+            validate_coverage(payload, expected_family="openclaw")
 
     def test_error_redaction_does_not_repeat_credentials(self) -> None:
         output = redact_error("Authorization: BearerValue password=hunter2 token=abc")
@@ -216,10 +289,16 @@ class UsageReceiptContractTest(unittest.TestCase):
         self.assertNotIn("hunter2", output)
         self.assertNotIn("token=abc", output)
 
-    def test_writer_credential_loader_contract_is_single_fd_and_root_owned(self) -> None:
-        source = (Path(__file__).parents[1] / "opsctl" / "agent_runtime_ops" / "domain" / "usage_ledger.py").read_text(
-            encoding="utf-8"
-        )
+    def test_writer_credential_loader_contract_is_single_fd_and_root_owned(
+        self,
+    ) -> None:
+        source = (
+            Path(__file__).parents[1]
+            / "opsctl"
+            / "agent_runtime_ops"
+            / "domain"
+            / "usage_ledger.py"
+        ).read_text(encoding="utf-8")
         self.assertIn("os.O_NOFOLLOW", source)
         self.assertIn("os.fstat(fd)", source)
         self.assertIn("info.st_uid != 0", source)
@@ -227,9 +306,15 @@ class UsageReceiptContractTest(unittest.TestCase):
         self.assertIn("info.st_nlink != 1", source)
         self.assertIn('os.fdopen(fd, "r", encoding="utf-8")', source)
 
-    def test_install_contract_enables_three_minute_collector_and_scoped_sudoers(self) -> None:
-        install_text = (Path(__file__).parents[1] / "install.sh").read_text(encoding="utf-8")
-        lock_text = (Path(__file__).parents[1] / "requirements.lock").read_text(encoding="utf-8")
+    def test_install_contract_enables_three_minute_collector_and_scoped_sudoers(
+        self,
+    ) -> None:
+        install_text = (Path(__file__).parents[1] / "install.sh").read_text(
+            encoding="utf-8"
+        )
+        lock_text = (Path(__file__).parents[1] / "requirements.lock").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("OnUnitInactiveSec=3min", install_text)
         self.assertIn("ConditionPathExists=$USAGE_DB_DEFAULTS_FILE", install_text)
         self.assertIn("systemctl enable --now", install_text)
@@ -244,7 +329,10 @@ class UsageReceiptContractTest(unittest.TestCase):
         self.assertIn("NOPASSWD: %s usage collect *", install_text)
         self.assertNotIn("password=", install_text)
         self.assertIn("PyMySQL==1.1.2", lock_text)
-        self.assertIn("e6b1d89711dd51f8f74b1631fe08f039e7d76cf67a42a323d3178f0f25762ed9", lock_text)
+        self.assertIn(
+            "e6b1d89711dd51f8f74b1631fe08f039e7d76cf67a42a323d3178f0f25762ed9",
+            lock_text,
+        )
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ from ..routing import RuntimeBinding
 
 CALL_SCHEMA = "jitech-provider-usage-call/v1"
 EXPORT_SCHEMA = "jitech-provider-usage-export/v1"
+COVERAGE_SCHEMA = "jitech-provider-usage-coverage/v1"
 
 CALL_KEYS = {
     "schema",
@@ -42,7 +43,32 @@ CALL_KEYS = {
     "finishReason",
     "errorCategory",
 }
-EXPORT_KEYS = {"schema", "after", "nextCursor", "highWatermark", "count", "hasMore", "receipts"}
+EXPORT_KEYS = {
+    "schema",
+    "after",
+    "nextCursor",
+    "highWatermark",
+    "count",
+    "hasMore",
+    "receipts",
+}
+COVERAGE_KEYS = {
+    "schema",
+    "productFamily",
+    "manifestDigest",
+    "coverageStatus",
+    "surfaces",
+}
+COVERAGE_SURFACE_KEYS = {
+    "surfaceCode",
+    "observationKind",
+    "meterFamily",
+    "modelEvidence",
+    "retryObservation",
+    "usageObservation",
+    "status",
+    "gapCode",
+}
 MODEL_KEYS = {"provider", "model"}
 ACTUAL_KEYS = {"provider", "model", "responseId", "evidenceSource"}
 USAGE_FIELD_ORDER = (
@@ -71,6 +97,13 @@ SUCCEEDED_EVIDENCE_FIELDS = (
 TRIGGERS = {"user", "cron", "heartbeat", "manual", "memory", "overflow", "unknown"}
 STATUSES = {"succeeded", "failed", "interrupted", "cancelled"}
 COVERAGES = {"complete", "partial", "unavailable"}
+PRODUCT_FAMILIES = {"hermes", "openclaw"}
+SURFACE_OBSERVATION_KINDS = {"per_call", "turn_aggregate", "request_only"}
+SURFACE_METER_FAMILIES = {"tokens", "image", "audio", "characters", "search", "other"}
+SURFACE_MODEL_EVIDENCE = {"provider_response", "requested_only", "unavailable"}
+SURFACE_RETRY_OBSERVATION = {"physical_attempt", "logical_call_only", "unavailable"}
+SURFACE_USAGE_OBSERVATION = {"provider_reported", "request_observed", "unavailable"}
+SURFACE_STATUSES = {"implemented", "partial", "gap"}
 HEX_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 MAX_RAW_USAGE_BYTES = 64 * 1024
 RAW_USAGE_COUNT_KEYS = {
@@ -109,6 +142,14 @@ class ValidatedExport:
 
 
 @dataclass(frozen=True)
+class ValidatedCoverage:
+    family: str
+    manifest_digest: str
+    status: str
+    surfaces: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
 class RuntimeUsageStamp:
     instance_id: str
     linux_account: str
@@ -141,7 +182,13 @@ def sha256_digest(value: Any) -> str:
 
 
 def receipt_digest(receipt: Mapping[str, Any]) -> str:
-    return sha256_digest({key: value for key, value in receipt.items() if key not in {"ledgerSeq", "receiptDigest"}})
+    return sha256_digest(
+        {
+            key: value
+            for key, value in receipt.items()
+            if key not in {"ledgerSeq", "receiptDigest"}
+        }
+    )
 
 
 def runtime_binding_digest(binding: RuntimeBinding) -> str:
@@ -155,7 +202,9 @@ def _exact_keys(value: object, expected: set[str], path: str) -> dict[str, Any]:
     if actual != expected:
         missing = sorted(expected - actual)
         extra = sorted(actual - expected)
-        raise UsageContractError(f"{path} keys mismatch: missing={missing} extra={extra}")
+        raise UsageContractError(
+            f"{path} keys mismatch: missing={missing} extra={extra}"
+        )
     return value
 
 
@@ -210,7 +259,9 @@ def _coverage_from_missing(missing: list[str], expected_count: int) -> str:
     return "unavailable" if len(missing) == expected_count else "partial"
 
 
-def _validate_accounting_json(value: object, path: str = "usage.rawProviderUsage") -> None:
+def _validate_accounting_json(
+    value: object, path: str = "usage.rawProviderUsage"
+) -> None:
     encoded = canonical_json_bytes(value)
     if len(encoded) > MAX_RAW_USAGE_BYTES:
         raise UsageContractError(f"{path} exceeds {MAX_RAW_USAGE_BYTES} bytes")
@@ -232,8 +283,12 @@ def _validate_accounting_json(value: object, path: str = "usage.rawProviderUsage
         if not isinstance(details, list):
             raise UsageContractError(f"{path}.{key} must be an array")
         for index, item in enumerate(details):
-            detail = _exact_keys(item, {"modality", "tokenCount"}, f"{path}.{key}[{index}]")
-            _required_string(detail["modality"], f"{path}.{key}[{index}].modality", max_length=64)
+            detail = _exact_keys(
+                item, {"modality", "tokenCount"}, f"{path}.{key}[{index}]"
+            )
+            _required_string(
+                detail["modality"], f"{path}.{key}[{index}].modality", max_length=64
+            )
             _integer(detail["tokenCount"], f"{path}.{key}[{index}].tokenCount")
 
 
@@ -244,21 +299,38 @@ def validate_call_receipt(value: object) -> dict[str, Any]:
     _integer(receipt["ledgerSeq"], "receipt.ledgerSeq", minimum=1)
     digest = _required_string(receipt["receiptDigest"], "receipt.receiptDigest")
     if not HEX_DIGEST_RE.fullmatch(digest):
-        raise UsageContractError("receipt.receiptDigest must be sha256:<64 lower-case hex>")
+        raise UsageContractError(
+            "receipt.receiptDigest must be sha256:<64 lower-case hex>"
+        )
     if digest != receipt_digest(receipt):
-        raise UsageContractError("receipt.receiptDigest does not match canonical receipt bytes")
+        raise UsageContractError(
+            "receipt.receiptDigest does not match canonical receipt bytes"
+        )
 
     _required_string(receipt["callId"], "receipt.callId", max_length=128)
-    for key in ("runId", "turnId", "requestId", "sessionId", "retryOf", "fallbackParent", "finishReason", "errorCategory"):
+    for key in (
+        "runId",
+        "turnId",
+        "requestId",
+        "sessionId",
+        "retryOf",
+        "fallbackParent",
+        "finishReason",
+        "errorCategory",
+    ):
         _nullable_string(receipt[key], f"receipt.{key}", max_length=128)
     if receipt["trigger"] not in TRIGGERS:
         raise UsageContractError(f"receipt.trigger must be one of {sorted(TRIGGERS)}")
     _integer(receipt["attempt"], "receipt.attempt", minimum=1)
     fallback_index = _integer(receipt["fallbackIndex"], "receipt.fallbackIndex")
     if receipt["fallbackParent"] is None and fallback_index != 0:
-        raise UsageContractError("receipt.fallbackIndex must be 0 when fallbackParent is null")
+        raise UsageContractError(
+            "receipt.fallbackIndex must be 0 when fallbackParent is null"
+        )
     if receipt["fallbackParent"] is not None and fallback_index == 0:
-        raise UsageContractError("receipt.fallbackIndex must be positive when fallbackParent is set")
+        raise UsageContractError(
+            "receipt.fallbackIndex must be positive when fallbackParent is set"
+        )
     started = _timestamp(receipt["startedAt"], "receipt.startedAt")
     completed = _timestamp(receipt["completedAt"], "receipt.completedAt")
     if completed < started:
@@ -282,22 +354,32 @@ def validate_call_receipt(value: object) -> dict[str, Any]:
     if usage["rawProviderUsage"] is not None:
         _validate_accounting_json(usage["rawProviderUsage"])
 
-    missing_usage = _string_list(receipt["missingUsageFields"], "receipt.missingUsageFields")
-    missing_receipt = _string_list(receipt["missingReceiptFields"], "receipt.missingReceiptFields")
+    missing_usage = _string_list(
+        receipt["missingUsageFields"], "receipt.missingUsageFields"
+    )
+    missing_receipt = _string_list(
+        receipt["missingReceiptFields"], "receipt.missingReceiptFields"
+    )
     expected_missing_usage = [key for key in USAGE_FIELD_ORDER if usage[key] is None]
     if missing_usage != expected_missing_usage:
         raise UsageContractError(
             "receipt.missingUsageFields must exactly name null usage fields: "
             f"expected={expected_missing_usage} actual={missing_usage}"
         )
-    expected_usage_coverage = _coverage_from_missing(missing_usage, len(USAGE_FIELD_ORDER))
+    expected_usage_coverage = _coverage_from_missing(
+        missing_usage, len(USAGE_FIELD_ORDER)
+    )
     if receipt["usageCoverage"] != expected_usage_coverage:
         raise UsageContractError(
             f"receipt.usageCoverage must be {expected_usage_coverage} for missingUsageFields"
         )
 
-    expected_missing_receipt = [key for key in RECEIPT_IDENTITY_FIELDS if receipt[key] is None]
-    expected_receipt_field_count = len(RECEIPT_IDENTITY_FIELDS) + 1 + len(USAGE_FIELD_ORDER)
+    expected_missing_receipt = [
+        key for key in RECEIPT_IDENTITY_FIELDS if receipt[key] is None
+    ]
+    expected_receipt_field_count = (
+        len(RECEIPT_IDENTITY_FIELDS) + 1 + len(USAGE_FIELD_ORDER)
+    )
     if receipt["trigger"] == "unknown":
         expected_missing_receipt.append("trigger")
     if receipt["status"] == "succeeded":
@@ -338,30 +420,44 @@ def validate_export(value: object, *, expected_after: int) -> ValidatedExport:
         raise UsageContractError(f"export.schema must be {EXPORT_SCHEMA}")
     after = _integer(payload["after"], "export.after")
     if after != expected_after:
-        raise UsageContractError(f"export.after mismatch: expected={expected_after} actual={after}")
+        raise UsageContractError(
+            f"export.after mismatch: expected={expected_after} actual={after}"
+        )
     next_cursor = _integer(payload["nextCursor"], "export.nextCursor")
     high_watermark = _integer(payload["highWatermark"], "export.highWatermark")
     count = _integer(payload["count"], "export.count")
     if not isinstance(payload["hasMore"], bool):
         raise UsageContractError("export.hasMore must be boolean")
     if high_watermark < after:
-        raise UsageContractError(f"product ledger moved backwards: after={after} highWatermark={high_watermark}")
+        raise UsageContractError(
+            f"product ledger moved backwards: after={after} highWatermark={high_watermark}"
+        )
     raw_receipts = payload["receipts"]
     if not isinstance(raw_receipts, list):
         raise UsageContractError("export.receipts must be an array")
     if count != len(raw_receipts):
-        raise UsageContractError(f"export.count mismatch: count={count} receipts={len(raw_receipts)}")
+        raise UsageContractError(
+            f"export.count mismatch: count={count} receipts={len(raw_receipts)}"
+        )
     receipts = tuple(validate_call_receipt(item) for item in raw_receipts)
     sequences = [int(item["ledgerSeq"]) for item in receipts]
     if sequences != sorted(set(sequences)):
-        raise UsageContractError("export.receipts ledgerSeq must be unique and ascending")
+        raise UsageContractError(
+            "export.receipts ledgerSeq must be unique and ascending"
+        )
     if sequences and sequences[0] <= after:
-        raise UsageContractError("export.receipts contains a sequence at or before export.after")
+        raise UsageContractError(
+            "export.receipts contains a sequence at or before export.after"
+        )
     if sequences and sequences[-1] > high_watermark:
-        raise UsageContractError("export.receipts contains a sequence above highWatermark")
+        raise UsageContractError(
+            "export.receipts contains a sequence above highWatermark"
+        )
     expected_next = sequences[-1] if sequences else after
     if next_cursor != expected_next:
-        raise UsageContractError(f"export.nextCursor mismatch: expected={expected_next} actual={next_cursor}")
+        raise UsageContractError(
+            f"export.nextCursor mismatch: expected={expected_next} actual={next_cursor}"
+        )
     expected_has_more = next_cursor < high_watermark
     if payload["hasMore"] != expected_has_more:
         raise UsageContractError(
@@ -378,6 +474,103 @@ def validate_export(value: object, *, expected_after: int) -> ValidatedExport:
     )
 
 
+def coverage_manifest_digest(value: Mapping[str, Any]) -> str:
+    return sha256_digest(
+        {key: item for key, item in value.items() if key != "manifestDigest"}
+    )
+
+
+def validate_coverage(value: object, *, expected_family: str) -> ValidatedCoverage:
+    payload = _exact_keys(value, COVERAGE_KEYS, "coverage")
+    if payload["schema"] != COVERAGE_SCHEMA:
+        raise UsageContractError(f"coverage.schema must be {COVERAGE_SCHEMA}")
+    family = _required_string(
+        payload["productFamily"], "coverage.productFamily", max_length=32
+    )
+    if family not in PRODUCT_FAMILIES:
+        raise UsageContractError(
+            f"coverage.productFamily must be one of {sorted(PRODUCT_FAMILIES)}"
+        )
+    if family != expected_family:
+        raise UsageContractError(
+            f"coverage.productFamily mismatch: expected={expected_family} actual={family}"
+        )
+    manifest_digest = _required_string(
+        payload["manifestDigest"], "coverage.manifestDigest"
+    )
+    if not HEX_DIGEST_RE.fullmatch(manifest_digest):
+        raise UsageContractError(
+            "coverage.manifestDigest must be sha256:<64 lower-case hex>"
+        )
+    expected_digest = coverage_manifest_digest(payload)
+    if manifest_digest != expected_digest:
+        raise UsageContractError(
+            "coverage.manifestDigest does not match canonical manifest bytes"
+        )
+    status = _required_string(
+        payload["coverageStatus"], "coverage.coverageStatus", max_length=16
+    )
+    if status not in {"complete", "partial"}:
+        raise UsageContractError("coverage.coverageStatus must be complete or partial")
+    raw_surfaces = payload["surfaces"]
+    if not isinstance(raw_surfaces, list) or not raw_surfaces:
+        raise UsageContractError("coverage.surfaces must be a non-empty array")
+    surfaces: list[dict[str, Any]] = []
+    codes: list[str] = []
+    for index, raw_surface in enumerate(raw_surfaces):
+        path = f"coverage.surfaces[{index}]"
+        surface = _exact_keys(raw_surface, COVERAGE_SURFACE_KEYS, path)
+        code = _required_string(
+            surface["surfaceCode"], f"{path}.surfaceCode", max_length=128
+        )
+        codes.append(code)
+        enum_fields = {
+            "observationKind": SURFACE_OBSERVATION_KINDS,
+            "meterFamily": SURFACE_METER_FAMILIES,
+            "modelEvidence": SURFACE_MODEL_EVIDENCE,
+            "retryObservation": SURFACE_RETRY_OBSERVATION,
+            "usageObservation": SURFACE_USAGE_OBSERVATION,
+            "status": SURFACE_STATUSES,
+        }
+        for field, allowed in enum_fields.items():
+            item = _required_string(surface[field], f"{path}.{field}", max_length=32)
+            if item not in allowed:
+                raise UsageContractError(
+                    f"{path}.{field} must be one of {sorted(allowed)}"
+                )
+        gap_code = _nullable_string(
+            surface["gapCode"], f"{path}.gapCode", max_length=128
+        )
+        if surface["status"] == "implemented" and gap_code is not None:
+            raise UsageContractError(
+                f"{path}.gapCode must be null when status=implemented"
+            )
+        if surface["status"] != "implemented" and gap_code is None:
+            raise UsageContractError(
+                f"{path}.gapCode is required when status is not implemented"
+            )
+        surfaces.append(surface)
+    if codes != sorted(set(codes)):
+        raise UsageContractError(
+            "coverage.surfaces surfaceCode must be unique and ascending"
+        )
+    expected_status = (
+        "complete"
+        if all(item["status"] == "implemented" for item in surfaces)
+        else "partial"
+    )
+    if status != expected_status:
+        raise UsageContractError(
+            f"coverage.coverageStatus must be {expected_status} for surface statuses"
+        )
+    return ValidatedCoverage(
+        family=family,
+        manifest_digest=manifest_digest,
+        status=status,
+        surfaces=tuple(surfaces),
+    )
+
+
 def export_command(family: str, *, after: int, limit: int) -> list[str]:
     _integer(after, "after")
     _integer(limit, "limit", minimum=1)
@@ -387,7 +580,21 @@ def export_command(family: str, *, after: int, limit: int) -> list[str]:
         entry = "openclaw"
     else:
         raise UsageContractError(f"unsupported usage export family: {family}")
-    return [entry, "usage-receipts", "export", "--after", str(after), "--limit", str(limit)]
+    return [
+        entry,
+        "usage-receipts",
+        "export",
+        "--after",
+        str(after),
+        "--limit",
+        str(limit),
+    ]
+
+
+def coverage_command(family: str) -> list[str]:
+    if family not in PRODUCT_FAMILIES:
+        raise UsageContractError(f"unsupported usage coverage family: {family}")
+    return [family, "usage-receipts", "coverage", "--json"]
 
 
 def parse_export_stdout(stdout: str, *, expected_after: int) -> ValidatedExport:
@@ -397,17 +604,38 @@ def parse_export_stdout(stdout: str, *, expected_after: int) -> ValidatedExport:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise UsageContractError("product usage export stdout is not exactly one JSON document") from exc
+        raise UsageContractError(
+            "product usage export stdout is not exactly one JSON document"
+        ) from exc
     return validate_export(payload, expected_after=expected_after)
 
 
+def parse_coverage_stdout(stdout: str, *, expected_family: str) -> ValidatedCoverage:
+    text = stdout.strip()
+    if not text:
+        raise UsageContractError("product usage coverage returned empty stdout")
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise UsageContractError(
+            "product usage coverage stdout is not exactly one JSON document"
+        ) from exc
+    return validate_coverage(payload, expected_family=expected_family)
+
+
 def now_rfc3339() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return (
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    )
 
 
 def redact_error(text: object, *, limit: int = 512) -> str:
     value = str(text or "").replace("\r", " ").replace("\n", " ").strip()
-    value = re.sub(r"(?i)(authorization|bearer|password|api[_-]?key|token)\s*[:=]\s*[^\s,;]+", r"\1=[REDACTED]", value)
+    value = re.sub(
+        r"(?i)(authorization|bearer|password|api[_-]?key|token)\s*[:=]\s*[^\s,;]+",
+        r"\1=[REDACTED]",
+        value,
+    )
     return value[:limit]
 
 
@@ -419,7 +647,9 @@ def build_runtime_stamp(
     collected_at: str | None = None,
 ) -> RuntimeUsageStamp:
     if truth.get("truth_status") != "ok":
-        raise UsageContractError(f"live runtime truth is not ok: {truth.get('truth_status')}")
+        raise UsageContractError(
+            f"live runtime truth is not ok: {truth.get('truth_status')}"
+        )
     if str(truth.get("instance_id") or "") != binding.instance_id:
         raise UsageContractError("live runtime instance_id does not match binding")
     if str(truth.get("family") or "") != binding.family:
@@ -468,7 +698,9 @@ def load_mysql_defaults(path: Path) -> dict[str, object]:
         try:
             fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
         except OSError as exc:
-            raise UsageContractError(f"cannot safely open usage DB defaults file: {path}") from exc
+            raise UsageContractError(
+                f"cannot safely open usage DB defaults file: {path}"
+            ) from exc
         try:
             info = os.fstat(fd)
             if (
@@ -489,7 +721,9 @@ def load_mysql_defaults(path: Path) -> dict[str, object]:
                 os.close(fd)
     else:
         if path.is_symlink() or not path.is_file():
-            raise UsageContractError(f"usage DB defaults file must be a regular file: {path}")
+            raise UsageContractError(
+                f"usage DB defaults file must be a regular file: {path}"
+            )
         parser.read(path, encoding="utf-8")
     if not parser.has_section("client"):
         raise UsageContractError("usage DB defaults file is missing [client]")
@@ -524,7 +758,9 @@ def mysql_connection_factory(defaults_path: Path) -> ConnectionFactory:
             import pymysql
             from pymysql.cursors import DictCursor
         except ImportError as exc:  # pragma: no cover - install contract
-            raise UsageContractError("PyMySQL is required for the central usage ledger") from exc
+            raise UsageContractError(
+                "PyMySQL is required for the central usage ledger"
+            ) from exc
         return pymysql.connect(**config, cursorclass=DictCursor)
 
     return connect
