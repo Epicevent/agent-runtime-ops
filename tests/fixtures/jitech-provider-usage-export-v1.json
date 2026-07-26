@@ -1,0 +1,72 @@
+{
+  "schema": "jitech-provider-usage-export/v1",
+  "after": 0,
+  "nextCursor": 1,
+  "highWatermark": 1,
+  "count": 1,
+  "hasMore": false,
+  "receipts": [
+    {
+      "schema": "jitech-provider-usage-call/v1",
+      "ledgerSeq": 1,
+      "callId": "00000000-0000-4000-8000-000000000101",
+      "runId": "run-fixture-1",
+      "turnId": "turn-fixture-1",
+      "requestId": "request-fixture-1",
+      "sessionId": "session-fixture-1",
+      "trigger": "user",
+      "attempt": 1,
+      "retryOf": null,
+      "fallbackParent": null,
+      "fallbackIndex": 0,
+      "startedAt": "1970-01-01T00:00:01.000Z",
+      "completedAt": "1970-01-01T00:00:02.000Z",
+      "status": "succeeded",
+      "configured": {
+        "provider": "google",
+        "model": "gemini-3.6-flash"
+      },
+      "requested": {
+        "provider": "google",
+        "model": "gemini-3.6-flash"
+      },
+      "actual": {
+        "provider": "google",
+        "model": "gemini-3.6-flash-001",
+        "responseId": "response-fixture-1",
+        "evidenceSource": "gemini_response.modelVersion"
+      },
+      "usage": {
+        "inputTotal": 100,
+        "inputNonCached": 80,
+        "cacheRead": 20,
+        "cacheWrite": null,
+        "outputCandidates": 10,
+        "reasoningThinking": 4,
+        "toolUsePrompt": 5,
+        "providerReportedTotal": 119,
+        "serviceTier": "STANDARD",
+        "rawProviderUsage": {
+          "promptTokenCount": 100,
+          "cachedContentTokenCount": 20,
+          "candidatesTokenCount": 10,
+          "thoughtsTokenCount": 4,
+          "toolUsePromptTokenCount": 5,
+          "totalTokenCount": 119,
+          "serviceTier": "STANDARD"
+        }
+      },
+      "usageCoverage": "partial",
+      "missingUsageFields": [
+        "cacheWrite"
+      ],
+      "finishReason": "STOP",
+      "errorCategory": null,
+      "receiptCoverage": "partial",
+      "missingReceiptFields": [
+        "usage.cacheWrite"
+      ],
+      "receiptDigest": "sha256:19bccd536dda5f312e1aa5e676a86fdfaf31adf5d8f084cb16773a7953a8cff3"
+    }
+  ]
+}

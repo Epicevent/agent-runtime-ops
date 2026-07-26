@@ -95,6 +95,7 @@ from .commands.runtime_config import (
 from .commands.runtime_truth import cmd_runtime_truth
 from .commands.status import cmd_plan, cmd_status
 from .commands.update import cmd_self_update, cmd_update_approve, cmd_update_status
+from .commands.usage import cmd_usage_collect, cmd_usage_status
 from .commands.image import cmd_image_approve, cmd_image_status
 from .commands.config import cmd_config_validate, cmd_config_migrate
 from .paths import DEFAULT_STATE_ROOT
@@ -620,6 +621,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="send an isolated chat and require provider response modelVersion to match configured model",
     )
     checklist_pack.set_defaults(func=cmd_checklist_pack)
+
+    usage = sub.add_parser("usage", help="collect and inspect content-free provider usage receipts")
+    usage_sub = usage.add_subparsers(dest="usage_command", required=True)
+    usage_collect = usage_sub.add_parser("collect", help="incrementally collect verified product receipts")
+    usage_collect.add_argument("target", nargs="?", metavar="TARGET")
+    usage_collect.add_argument("--all", action="store_true")
+    usage_collect.add_argument("--limit", type=int, default=500, choices=range(1, 501), metavar="1..500")
+    usage_collect.add_argument("--max-pages", type=int, default=20, choices=range(1, 101), metavar="1..100")
+    usage_collect.add_argument("--db-defaults-file", default="/etc/agent-runtime-ops/usage-writer.cnf")
+    usage_collect.set_defaults(func=cmd_usage_collect)
+    usage_status = usage_sub.add_parser("status", help="show collection cursor and failure state")
+    usage_status.add_argument("target", nargs="?", metavar="TARGET")
+    usage_status.add_argument("--db-defaults-file", default="/etc/agent-runtime-ops/usage-writer.cnf")
+    usage_status.set_defaults(func=cmd_usage_status)
 
     return parser
 
