@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -177,7 +178,7 @@ def _directory_flags() -> int:
 
 def _file_flags() -> int:
     flags = os.O_RDONLY
-    for name in ("O_NOFOLLOW", "O_CLOEXEC"):
+    for name in ("O_NOFOLLOW", "O_CLOEXEC", "O_NONBLOCK"):
         flags |= int(getattr(os, name, 0))
     return flags
 
@@ -414,40 +415,67 @@ def _default_docker_runner(
 
     buffers = {"stdout": bytearray(), "stderr": bytearray()}
     overflow = threading.Event()
+    drain_errors: list[BaseException] = []
+    threads: list[threading.Thread] = []
 
     def drain(name: str, stream: Any) -> None:
-        while True:
-            chunk = stream.read(64 * 1024)
-            if not chunk:
-                return
-            buffers[name].extend(chunk)
-            if len(buffers[name]) > output_limit:
-                overflow.set()
+        try:
+            while True:
+                chunk = stream.read(64 * 1024)
+                if not chunk:
+                    return
+                buffers[name].extend(chunk)
+                if len(buffers[name]) > output_limit:
+                    overflow.set()
+                    with suppress(OSError):
+                        proc.kill()
+                    return
+        except BaseException as exc:
+            drain_errors.append(exc)
+            with suppress(OSError):
                 proc.kill()
-                return
 
-    threads = [
-        threading.Thread(target=drain, args=("stdout", proc.stdout), daemon=True),
-        threading.Thread(target=drain, args=("stderr", proc.stderr), daemon=True),
-    ]
-    for thread in threads:
-        thread.start()
     try:
-        returncode = proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        proc.kill()
-        proc.wait()
+        threads = [
+            threading.Thread(target=drain, args=("stdout", proc.stdout), daemon=True),
+            threading.Thread(target=drain, args=("stderr", proc.stderr), daemon=True),
+        ]
+        for thread in threads:
+            thread.start()
+        try:
+            returncode = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            with suppress(OSError):
+                proc.kill()
+            with suppress(OSError, subprocess.TimeoutExpired):
+                proc.wait(timeout=1)
+            raise ArtifactProbeError("docker_timeout") from exc
         for thread in threads:
             thread.join(timeout=1)
-        raise ArtifactProbeError("docker_timeout") from exc
-    for thread in threads:
-        thread.join(timeout=1)
-    if any(thread.is_alive() for thread in threads):
-        proc.kill()
-        raise ArtifactProbeError("docker_output_drain_failed")
-    if overflow.is_set():
-        raise ArtifactProbeError("docker_output_limit")
-    return CommandResult(returncode, bytes(buffers["stdout"]), bytes(buffers["stderr"]))
+        if any(thread.is_alive() for thread in threads):
+            with suppress(OSError):
+                proc.kill()
+            raise ArtifactProbeError("docker_output_drain_failed")
+        if overflow.is_set():
+            raise ArtifactProbeError("docker_output_limit")
+        if drain_errors:
+            raise ArtifactProbeError("docker_output_drain_failed")
+        return CommandResult(
+            returncode, bytes(buffers["stdout"]), bytes(buffers["stderr"])
+        )
+    finally:
+        with suppress(Exception):
+            if proc.poll() is None:
+                proc.kill()
+        with suppress(Exception):
+            proc.wait(timeout=1)
+        for stream in (proc.stdout, proc.stderr):
+            if stream is not None:
+                with suppress(Exception):
+                    stream.close()
+        for thread in threads:
+            with suppress(RuntimeError):
+                thread.join(timeout=1)
 
 
 def _checked_docker_run(runner: DockerCommandRunner, argv: list[str]) -> CommandResult:

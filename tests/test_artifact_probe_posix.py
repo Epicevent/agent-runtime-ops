@@ -4,11 +4,13 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import time
 import unittest
 
 from agent_runtime_ops.domain.artifact_probe import (
     ArtifactProbeError,
     CommandResult,
+    OsSyscalls,
     probe_kwrag_product_artifact,
 )
 
@@ -113,6 +115,36 @@ class PosixArtifactProbeTests(unittest.TestCase):
                 probe_kwrag_product_artifact(
                     REVISION, build_root=root, docker_runner=docker_runner
                 )
+
+    def test_regular_file_swapped_to_fifo_before_open_does_not_block(self) -> None:
+        class SwapToFifoSyscalls(OsSyscalls):
+            swapped = False
+
+            def stat(
+                self, path: str, *, dir_fd: int, follow_symlinks: bool
+            ) -> os.stat_result:
+                value = super().stat(
+                    path, dir_fd=dir_fd, follow_symlinks=follow_symlinks
+                )
+                if not self.swapped and path == "build-metadata.json":
+                    os.unlink(path, dir_fd=dir_fd)
+                    os.mkfifo(path, mode=0o600, dir_fd=dir_fd)
+                    self.swapped = True
+                return value
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, _ = self._root(Path(tmp))
+            started = time.monotonic()
+            with self.assertRaisesRegex(
+                ArtifactProbeError, "artifact_(toctou|not_regular)"
+            ):
+                probe_kwrag_product_artifact(
+                    REVISION,
+                    build_root=root,
+                    syscalls=SwapToFifoSyscalls(),
+                    docker_runner=docker_runner,
+                )
+            self.assertLess(time.monotonic() - started, 1.0)
 
 
 if __name__ == "__main__":

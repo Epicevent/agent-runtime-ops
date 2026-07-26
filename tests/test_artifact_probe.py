@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import gc
 import io
 import json
 import os
 from pathlib import Path
 import stat
 import sys
+import warnings
 from types import SimpleNamespace
 from types import ModuleType
 import unittest
@@ -320,6 +322,7 @@ class ArtifactProbeTests(unittest.TestCase):
             ),
             patch.object(artifact_probe_module.os, "O_NOFOLLOW", 0x020000, create=True),
             patch.object(artifact_probe_module.os, "O_CLOEXEC", 0x040000, create=True),
+            patch.object(artifact_probe_module.os, "O_NONBLOCK", 0x080000, create=True),
         ):
             probe_kwrag_product_artifact(
                 REVISION,
@@ -330,7 +333,48 @@ class ArtifactProbeTests(unittest.TestCase):
         root_call, child_call, file_call = syscalls.open_calls[:3]
         self.assertEqual(root_call[1] & 0x070000, 0x070000)
         self.assertEqual(child_call[1] & 0x070000, 0x070000)
-        self.assertEqual(file_call[1] & 0x060000, 0x060000)
+        self.assertEqual(file_call[1] & 0x0E0000, 0x0E0000)
+
+    def test_regular_file_replaced_by_fifo_before_open_is_rejected_nonblocking(
+        self,
+    ) -> None:
+        class SwapForFifoSyscalls(FakeSyscalls):
+            swapped = False
+
+            def open(
+                self,
+                path: str | Path,
+                flags: int,
+                *,
+                dir_fd: int | None = None,
+            ) -> int:
+                if (
+                    not self.swapped
+                    and dir_fd is not None
+                    and str(path) == "build-metadata.json"
+                ):
+                    parent = self.fds[dir_fd][0]
+                    parent.children[str(path)] = Node("fifo")
+                    self.swapped = True
+                return super().open(path, flags, dir_fd=dir_fd)
+
+        syscalls = SwapForFifoSyscalls(valid_root())
+        with patch.object(
+            artifact_probe_module.os, "O_NONBLOCK", 0x080000, create=True
+        ):
+            with self.assertRaisesRegex(
+                ArtifactProbeError, "artifact_(toctou|not_regular)"
+            ):
+                probe_kwrag_product_artifact(
+                    REVISION,
+                    build_root=Path("/fixture/image-builds"),
+                    syscalls=syscalls,
+                    docker_runner=FakeDocker(),
+                )
+        file_open = next(
+            call for call in syscalls.open_calls if call[0] == "build-metadata.json"
+        )
+        self.assertEqual(file_open[1] & 0x080000, 0x080000)
 
     def test_descriptor_presence_is_observed_without_becoming_a_verdict(self) -> None:
         payload = run_probe(valid_root(descriptor=True))
@@ -495,22 +539,131 @@ class ArtifactProbeTests(unittest.TestCase):
             run_probe(valid_root(), duplicate_ancestor)
 
     def test_production_subprocess_runner_enforces_timeout_and_stream_cap(self) -> None:
-        with self.assertRaisesRegex(ArtifactProbeError, "docker_output_limit"):
-            _default_docker_runner(
-                [
-                    sys.executable,
-                    "-c",
-                    "import sys;sys.stdout.buffer.write(b'x'*4096);sys.stdout.flush()",
-                ],
+        real_popen = artifact_probe_module.subprocess.Popen
+        processes = []
+
+        def recording_popen(*args, **kwargs):
+            process = real_popen(*args, **kwargs)
+            processes.append(process)
+            return process
+
+        with (
+            warnings.catch_warnings(),
+            patch.object(
+                artifact_probe_module.subprocess,
+                "Popen",
+                side_effect=recording_popen,
+            ),
+        ):
+            warnings.simplefilter("error", ResourceWarning)
+            result = _default_docker_runner(
+                [sys.executable, "-c", "print('ok')"],
                 timeout=5,
                 output_limit=1024,
             )
-        with self.assertRaisesRegex(ArtifactProbeError, "docker_timeout"):
-            _default_docker_runner(
-                [sys.executable, "-c", "import time;time.sleep(2)"],
-                timeout=0.05,
-                output_limit=1024,
-            )
+            self.assertEqual(result.returncode, 0)
+            with self.assertRaisesRegex(ArtifactProbeError, "docker_output_limit"):
+                _default_docker_runner(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import sys;sys.stdout.buffer.write(b'x'*4096);sys.stdout.flush()",
+                    ],
+                    timeout=5,
+                    output_limit=1024,
+                )
+            with self.assertRaisesRegex(ArtifactProbeError, "docker_timeout"):
+                _default_docker_runner(
+                    [sys.executable, "-c", "import time;time.sleep(2)"],
+                    timeout=0.05,
+                    output_limit=1024,
+                )
+            gc.collect()
+
+        self.assertEqual(len(processes), 3)
+        for process in processes:
+            self.assertTrue(process.stdout.closed)
+            self.assertTrue(process.stderr.closed)
+
+    def test_subprocess_runner_closes_streams_when_drain_fails(self) -> None:
+        class Pipe:
+            def __init__(self, *, fail: bool = False) -> None:
+                self.fail = fail
+                self.closed = False
+
+            def read(self, size: int) -> bytes:
+                if self.fail:
+                    raise OSError("fixture drain failure")
+                return b""
+
+            def close(self) -> None:
+                self.closed = True
+
+        class Process:
+            def __init__(self) -> None:
+                self.stdout = Pipe(fail=True)
+                self.stderr = Pipe()
+                self.returncode: int | None = None
+
+            def wait(self, timeout: float | None = None) -> int:
+                self.returncode = 1
+                return 1
+
+            def poll(self) -> int | None:
+                return self.returncode
+
+            def kill(self) -> None:
+                self.returncode = -9
+
+        process = Process()
+        with patch.object(
+            artifact_probe_module.subprocess, "Popen", return_value=process
+        ):
+            with self.assertRaisesRegex(
+                ArtifactProbeError, "docker_output_drain_failed"
+            ):
+                _default_docker_runner(
+                    ["docker", "image", "inspect", CANDIDATE],
+                    timeout=1,
+                    output_limit=1024,
+                )
+        self.assertTrue(process.stdout.closed)
+        self.assertTrue(process.stderr.closed)
+
+    def test_subprocess_runner_closes_streams_when_thread_start_raises(self) -> None:
+        real_popen = artifact_probe_module.subprocess.Popen
+        processes = []
+
+        def recording_popen(*args, **kwargs):
+            process = real_popen(*args, **kwargs)
+            processes.append(process)
+            return process
+
+        with (
+            warnings.catch_warnings(),
+            patch.object(
+                artifact_probe_module.subprocess,
+                "Popen",
+                side_effect=recording_popen,
+            ),
+            patch.object(
+                artifact_probe_module.threading.Thread,
+                "start",
+                side_effect=RuntimeError("fixture start failure"),
+            ),
+        ):
+            warnings.simplefilter("error", ResourceWarning)
+            with self.assertRaisesRegex(RuntimeError, "fixture start failure"):
+                _default_docker_runner(
+                    [sys.executable, "-c", "import time;time.sleep(2)"],
+                    timeout=5,
+                    output_limit=1024,
+                )
+            gc.collect()
+
+        self.assertEqual(len(processes), 1)
+        self.assertTrue(processes[0].stdout.closed)
+        self.assertTrue(processes[0].stderr.closed)
 
     def test_cli_dispatch_emits_json_and_requires_root(self) -> None:
         args = argparse.Namespace(scope="kwrag-product", revision=REVISION)
