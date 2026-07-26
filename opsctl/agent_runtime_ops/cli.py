@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 
 from .commands.admin import cmd_admin_create_image_dev, cmd_admin_serve
+from .commands.artifact import cmd_artifact_probe
 from .commands.apache import cmd_apache_set_host, cmd_apache_status
 from .commands.apply import cmd_apply, cmd_rollback
 from .commands.binding import (
@@ -98,6 +99,14 @@ from .commands.update import cmd_self_update, cmd_update_approve, cmd_update_sta
 from .commands.image import cmd_image_approve, cmd_image_status
 from .commands.config import cmd_config_validate, cmd_config_migrate
 from .paths import DEFAULT_STATE_ROOT
+from .domain.artifact_probe import ArtifactProbeError, validate_revision
+
+
+def _artifact_revision(value: str) -> str:
+    try:
+        return validate_revision(value)
+    except ArtifactProbeError as exc:
+        raise argparse.ArgumentTypeError("revision must be exactly 40 lowercase hexadecimal characters") from exc
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="opsctl")
@@ -130,6 +139,13 @@ def build_parser() -> argparse.ArgumentParser:
     image_approve.set_defaults(func=cmd_image_approve)
     image_status = image_sub.add_parser("status")
     image_status.set_defaults(func=cmd_image_status)
+
+    artifact = sub.add_parser("artifact", help="bounded read-only protected-host artifact observations")
+    artifact_sub = artifact.add_subparsers(dest="artifact_command", required=True)
+    artifact_probe = artifact_sub.add_parser("probe", help="observe one allowlisted local artifact scope")
+    artifact_probe.add_argument("scope", choices=["kwrag-product"])
+    artifact_probe.add_argument("--revision", required=True, type=_artifact_revision)
+    artifact_probe.set_defaults(func=cmd_artifact_probe)
 
     config = sub.add_parser("config")
     config_sub = config.add_subparsers(dest="config_command", required=True)
