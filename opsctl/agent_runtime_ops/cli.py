@@ -96,6 +96,18 @@ from .commands.runtime_config import (
 from .commands.runtime_truth import cmd_runtime_truth
 from .commands.status import cmd_plan, cmd_status
 from .commands.update import cmd_self_update, cmd_update_approve, cmd_update_status
+from .commands.usage import (
+    DEFAULT_USAGE_API_PRODUCT,
+    DEFAULT_USAGE_DB_DEFAULTS,
+    DEFAULT_USAGE_FX_EVIDENCE_DIR,
+    DEFAULT_USAGE_FX_FILE,
+    DEFAULT_USAGE_PRICE_SCENARIO,
+    DEFAULT_USAGE_PRICING_FILE,
+    cmd_usage_collect,
+    cmd_usage_cost_estimate,
+    cmd_usage_fx_refresh,
+    cmd_usage_status,
+)
 from .commands.image import cmd_image_approve, cmd_image_status
 from .commands.config import cmd_config_validate, cmd_config_migrate
 from .paths import DEFAULT_STATE_ROOT
@@ -636,6 +648,60 @@ def build_parser() -> argparse.ArgumentParser:
         help="send an isolated chat and require provider response modelVersion to match configured model",
     )
     checklist_pack.set_defaults(func=cmd_checklist_pack)
+
+    usage = sub.add_parser("usage", help="collect and inspect content-free provider usage receipts")
+    usage_sub = usage.add_subparsers(dest="usage_command", required=True)
+    usage_collect = usage_sub.add_parser("collect", help="incrementally collect verified product receipts")
+    usage_collect.add_argument("target", nargs="?", metavar="TARGET")
+    usage_collect.add_argument("--all", action="store_true")
+    usage_collect.add_argument("--limit", type=int, default=500, choices=range(1, 501), metavar="1..500")
+    usage_collect.add_argument("--max-pages", type=int, default=20, choices=range(1, 101), metavar="1..100")
+    usage_collect.add_argument("--db-defaults-file", default="/etc/agent-runtime-ops/usage-writer.cnf")
+    usage_collect.set_defaults(func=cmd_usage_collect)
+    usage_status = usage_sub.add_parser("status", help="show collection cursor and failure state")
+    usage_status.add_argument("target", nargs="?", metavar="TARGET")
+    usage_status.add_argument("--db-defaults-file", default="/etc/agent-runtime-ops/usage-writer.cnf")
+    usage_status.set_defaults(func=cmd_usage_status)
+    usage_cost = usage_sub.add_parser(
+        "cost-estimate",
+        help="estimate provider usage in KRW using a non-billing daily reference FX rate",
+    )
+    usage_cost.add_argument("target", nargs="?", metavar="TARGET")
+    usage_cost.add_argument(
+        "--pricing-file",
+        default=str(DEFAULT_USAGE_PRICING_FILE),
+    )
+    usage_cost.add_argument(
+        "--fx-file",
+        default=str(DEFAULT_USAGE_FX_FILE),
+    )
+    usage_cost.add_argument(
+        "--api-product",
+        default=DEFAULT_USAGE_API_PRODUCT,
+    )
+    usage_cost.add_argument(
+        "--price-scenario",
+        default=DEFAULT_USAGE_PRICE_SCENARIO,
+    )
+    usage_cost.add_argument(
+        "--db-defaults-file",
+        default=str(DEFAULT_USAGE_DB_DEFAULTS),
+    )
+    usage_cost.set_defaults(func=cmd_usage_cost_estimate)
+    usage_fx = usage_sub.add_parser(
+        "fx-refresh",
+        help="refresh the auditable daily ECB USD/KRW reference ledger",
+    )
+    usage_fx.add_argument(
+        "--output",
+        default=str(DEFAULT_USAGE_FX_FILE),
+    )
+    usage_fx.add_argument(
+        "--evidence-dir",
+        default=str(DEFAULT_USAGE_FX_EVIDENCE_DIR),
+    )
+    usage_fx.add_argument("--timeout", type=int, default=30, choices=range(5, 121))
+    usage_fx.set_defaults(func=cmd_usage_fx_refresh)
 
     return parser
 

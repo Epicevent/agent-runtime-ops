@@ -1,0 +1,28 @@
+{
+  "schema": "jitech-provider-usage-coverage/v1",
+  "productFamily": "openclaw",
+  "manifestDigest": "sha256:1a69bb4a9c8fbc28eddacbf802e422fb76aff164eb363ec61cb1b29685c23c21",
+  "coverageStatus": "partial",
+  "surfaces": [
+    {
+      "surfaceCode": "codex.app_server",
+      "observationKind": "turn_aggregate",
+      "meterFamily": "tokens",
+      "modelEvidence": "requested_only",
+      "retryObservation": "unavailable",
+      "usageObservation": "provider_reported",
+      "status": "gap",
+      "gapCode": "codex_turn_aggregate_only"
+    },
+    {
+      "surfaceCode": "pi.embedded",
+      "observationKind": "per_call",
+      "meterFamily": "tokens",
+      "modelEvidence": "provider_response",
+      "retryObservation": "physical_attempt",
+      "usageObservation": "provider_reported",
+      "status": "implemented",
+      "gapCode": null
+    }
+  ]
+}
