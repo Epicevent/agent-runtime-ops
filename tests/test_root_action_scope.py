@@ -65,6 +65,16 @@ class RootActionTypedCoreScopeTests(unittest.TestCase):
         self.assertNotIn("rootact =", pyproject)
         self.assertNotIn("root-action =", pyproject)
 
+    def test_checks_run_posix_listener_and_root_ownership_contracts(self) -> None:
+        checks = Path(".github/workflows/checks.yml").read_text(encoding="utf-8")
+        self.assertIn("python -m pytest -q tests -k root_action", checks)
+        self.assertIn(
+            "tests/test_root_action_listener_posix.py::"
+            "test_production_projection_permissions_are_root_trusted_group_only",
+            checks,
+        )
+        self.assertIn('sudo "$(command -v python)" -m pytest -q', checks)
+
 
 if __name__ == "__main__":
     unittest.main()
