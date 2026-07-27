@@ -98,7 +98,9 @@ def _validate_event_fields(event_id: str, occurred_at: str) -> None:
     if not isinstance(event_id, str) or _SAFE_ID_RE.fullmatch(event_id) is None:
         raise StateTransitionError("event_id must be a safe identifier")
     if not isinstance(occurred_at, str) or _TIMESTAMP_RE.fullmatch(occurred_at) is None:
-        raise StateTransitionError("occurred_at must be an RFC3339 UTC second timestamp")
+        raise StateTransitionError(
+            "occurred_at must be an RFC3339 UTC second timestamp"
+        )
     try:
         datetime.strptime(occurred_at, "%Y-%m-%dT%H:%M:%SZ")
     except ValueError as exc:
@@ -212,9 +214,11 @@ def apply_transition(record: JobRecord, event: TransitionEvent) -> JobRecord:
         raise StateTransitionError("transition kind must be a TransitionKind")
     if event.outcome is not None and not isinstance(event.outcome, TerminalOutcome):
         raise StateTransitionError("transition outcome must be a TerminalOutcome")
-    if isinstance(event.expected_revision, bool) or not isinstance(
-        event.expected_revision, int
-    ) or event.expected_revision < 0:
+    if (
+        isinstance(event.expected_revision, bool)
+        or not isinstance(event.expected_revision, int)
+        or event.expected_revision < 0
+    ):
         raise StateTransitionError("expected_revision must be a non-negative integer")
     if event.job_id != record.job_id or event.job_digest != record.job_digest:
         raise StateTransitionError("transition job identity mismatch")
@@ -229,9 +233,13 @@ def apply_transition(record: JobRecord, event: TransitionEvent) -> JobRecord:
 
     if event.kind is TransitionKind.CLAIM_EXECUTION:
         if record.state is not JobState.PENDING or record.execution_count != 0:
-            raise ReplayBlocked("execution has already been claimed or the job is closed")
+            raise ReplayBlocked(
+                "execution has already been claimed or the job is closed"
+            )
         if event.outcome is not None or event.reason_code is not None:
-            raise StateTransitionError("execution claim cannot carry an outcome or reason")
+            raise StateTransitionError(
+                "execution claim cannot carry an outcome or reason"
+            )
         return _next(
             record,
             event,

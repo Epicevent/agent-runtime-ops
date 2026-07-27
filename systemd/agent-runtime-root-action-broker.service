@@ -1,0 +1,24 @@
+[Unit]
+Description=Agent Runtime root-action trusted submission and publication broker
+After=local-fs.target
+ConditionPathIsDirectory=@@CURRENT_LINK@@
+
+[Service]
+Type=simple
+User=root
+Group=root
+UMask=0027
+ExecStart=@@CURRENT_LINK@@/.venv/bin/python -m agent_runtime_ops.root_actions.service
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/agent-runtime-ops/root-actions /run/agent-runtime-ops
+RestrictAddressFamilies=AF_UNIX
+RuntimeDirectory=agent-runtime-ops
+RuntimeDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target

@@ -95,6 +95,14 @@ from .commands.runtime_config import (
     cmd_runtime_version_note,
 )
 from .commands.runtime_truth import cmd_runtime_truth
+from .commands.root_action import (
+    cmd_root_action_retrieve,
+    cmd_root_action_submit,
+    cmd_root_action_wait,
+    broker_timeout_arg,
+    poll_interval_arg,
+    wait_timeout_arg,
+)
 from .commands.status import cmd_plan, cmd_status
 from .commands.update import cmd_self_update, cmd_update_approve, cmd_update_status
 from .commands.usage import (
@@ -159,6 +167,39 @@ def build_parser() -> argparse.ArgumentParser:
     artifact_probe.add_argument("scope", choices=["kwrag-product"])
     artifact_probe.add_argument("--revision", required=True, type=_artifact_revision)
     artifact_probe.set_defaults(func=cmd_artifact_probe)
+
+    root_action = sub.add_parser(
+        "root-action",
+        help="submit and retrieve an identity-bound typed root action",
+    )
+    root_action_sub = root_action.add_subparsers(
+        dest="root_action_command", required=True
+    )
+    root_action_submit = root_action_sub.add_parser("submit")
+    manifest_source = root_action_submit.add_mutually_exclusive_group(required=True)
+    manifest_source.add_argument("--manifest-file")
+    manifest_source.add_argument("--manifest-stdin", action="store_true")
+    root_action_submit.add_argument("--wait", action="store_true")
+    root_action_submit.add_argument("--broker-timeout", type=broker_timeout_arg, default=5.0)
+    root_action_submit.add_argument("--wait-timeout", type=wait_timeout_arg, default=900.0)
+    root_action_submit.add_argument("--poll-interval", type=poll_interval_arg, default=0.25)
+    root_action_submit.set_defaults(func=cmd_root_action_submit)
+
+    def add_root_action_handle(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument("--job-id", required=True)
+        parser.add_argument("--job-digest", required=True)
+        parser.add_argument("--request-id", required=True)
+        parser.add_argument("--reply-target", required=True)
+
+    root_action_retrieve = root_action_sub.add_parser("retrieve")
+    add_root_action_handle(root_action_retrieve)
+    root_action_retrieve.add_argument("--broker-timeout", type=broker_timeout_arg, default=5.0)
+    root_action_retrieve.set_defaults(func=cmd_root_action_retrieve)
+    root_action_wait = root_action_sub.add_parser("wait")
+    add_root_action_handle(root_action_wait)
+    root_action_wait.add_argument("--wait-timeout", type=wait_timeout_arg, default=900.0)
+    root_action_wait.add_argument("--poll-interval", type=poll_interval_arg, default=0.25)
+    root_action_wait.set_defaults(func=cmd_root_action_wait)
 
     config = sub.add_parser("config")
     config_sub = config.add_subparsers(dest="config_command", required=True)

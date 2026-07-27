@@ -11,25 +11,30 @@ from typing import Any
 
 RECEIPT_SCHEMA = "agent-runtime-root-action-receipt/v1"
 MAX_RECEIPT_BYTES = 512 * 1024
-_BASE_KEYS = {
+MAX_RAW_RECEIPT_BYTES = 8 * 1024 * 1024
+_COMMON_KEYS = {
     "schema",
     "kind",
     "job_id",
     "job_digest",
     "operation_id",
+    "request_id",
+    "reply_target",
     "terminal_outcome",
+}
+_RAW_BASE_KEYS = _COMMON_KEYS | {
     "raw_receipt_digest",
 }
-_PUBLIC_KEYS = _BASE_KEYS | {
+_PUBLIC_KEYS = _RAW_BASE_KEYS | {
     "started_at",
     "ended_at",
     "exit_code",
     "removed_lines",
     "result",
 }
-_QUARANTINE_KEYS = _BASE_KEYS | {"quarantine_id", "reason_code"}
-_UNKNOWN_KEYS = _BASE_KEYS | {"last_known_at", "reason_code"}
-_TERMINAL_NOTICE_KEYS = _BASE_KEYS | {"reason_code"}
+_QUARANTINE_KEYS = _RAW_BASE_KEYS | {"quarantine_id", "reason_code"}
+_UNKNOWN_KEYS = _RAW_BASE_KEYS | {"last_known_at", "reason_code"}
+_TERMINAL_NOTICE_KEYS = _COMMON_KEYS | {"reason_code"}
 _RESULT_KEYS = {"status", "facts"}
 _FACT_KEYS = {"name", "value"}
 _SAFE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}")
@@ -50,6 +55,8 @@ class ReceiptArtifact:
     job_id: str
     job_digest: str
     operation_id: str
+    request_id: str
+    reply_target: str
     receipt_digest: str
     canonical_receipt: bytes
 
@@ -72,13 +79,34 @@ class RawReceiptReference:
 
 
 @dataclass(frozen=True)
+class RawReceiptArtifact:
+    reference: RawReceiptReference
+    raw_bytes: bytes
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.raw_bytes, bytes)
+            or not self.raw_bytes
+            or len(self.raw_bytes) > MAX_RAW_RECEIPT_BYTES
+        ):
+            raise ReceiptValidationError(
+                "raw receipt byte length is outside the allowed range"
+            )
+        digest = "sha256:" + hashlib.sha256(self.raw_bytes).hexdigest()
+        if self.reference.raw_receipt_digest != digest:
+            raise ReceiptValidationError("raw receipt digest mismatch")
+
+
+@dataclass(frozen=True)
 class QuarantineRecord:
     raw_reference: RawReceiptReference
     notice: ReceiptArtifact
 
     def __post_init__(self) -> None:
         if self.notice.kind != "quarantined":
-            raise ReceiptValidationError("quarantine record requires a quarantine notice")
+            raise ReceiptValidationError(
+                "quarantine record requires a quarantine notice"
+            )
         value = self.notice.receipt_copy()
         if (
             self.raw_reference.job_id != self.notice.job_id
@@ -86,6 +114,30 @@ class QuarantineRecord:
             or self.raw_reference.raw_receipt_digest != value["raw_receipt_digest"]
         ):
             raise ReceiptValidationError("quarantine raw/public identity mismatch")
+
+
+def seal_raw_receipt(
+    *,
+    job_id: str,
+    job_digest: str,
+    root_storage_id: str,
+    raw_bytes: bytes,
+) -> RawReceiptArtifact:
+    if (
+        not isinstance(raw_bytes, bytes)
+        or not raw_bytes
+        or len(raw_bytes) > MAX_RAW_RECEIPT_BYTES
+    ):
+        raise ReceiptValidationError(
+            "raw receipt byte length is outside the allowed range"
+        )
+    reference = RawReceiptReference(
+        job_id=job_id,
+        job_digest=job_digest,
+        raw_receipt_digest="sha256:" + hashlib.sha256(raw_bytes).hexdigest(),
+        root_storage_id=root_storage_id,
+    )
+    return RawReceiptArtifact(reference=reference, raw_bytes=raw_bytes)
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -147,13 +199,16 @@ def _timestamp(value: Any, field: str) -> str:
     return text
 
 
-def _validate_common(value: dict[str, Any]) -> None:
+def _validate_common(value: dict[str, Any], *, raw_receipt: bool = True) -> None:
     if value["schema"] != RECEIPT_SCHEMA:
         raise ReceiptValidationError("receipt.schema is not supported")
     _safe_id(value["job_id"], "job_id")
     _digest(value["job_digest"], "job_digest")
     _safe_id(value["operation_id"], "operation_id")
-    _digest(value["raw_receipt_digest"], "raw_receipt_digest")
+    _safe_id(value["request_id"], "request_id")
+    _safe_id(value["reply_target"], "reply_target")
+    if raw_receipt:
+        _digest(value["raw_receipt_digest"], "raw_receipt_digest")
 
 
 def _validate_public(value: dict[str, Any]) -> None:
@@ -173,7 +228,9 @@ def _validate_public(value: dict[str, Any]) -> None:
     _safe_id(result["status"], "result.status")
     facts = result["facts"]
     if not isinstance(facts, list) or len(facts) > 128:
-        raise ReceiptValidationError("result.facts must be a list with at most 128 items")
+        raise ReceiptValidationError(
+            "result.facts must be a list with at most 128 items"
+        )
     names: list[str] = []
     for index, raw_fact in enumerate(facts):
         fact = _exact(raw_fact, _FACT_KEYS, f"result.facts[{index}]")
@@ -187,7 +244,9 @@ def _validate_quarantine(value: dict[str, Any]) -> None:
     _exact(value, _QUARANTINE_KEYS, "quarantine receipt")
     _validate_common(value)
     if value["terminal_outcome"] not in {"succeeded", "failed"}:
-        raise ReceiptValidationError("quarantine receipt has an invalid terminal_outcome")
+        raise ReceiptValidationError(
+            "quarantine receipt has an invalid terminal_outcome"
+        )
     _safe_id(value["quarantine_id"], "quarantine_id")
     _safe_id(value["reason_code"], "reason_code")
 
@@ -203,7 +262,7 @@ def _validate_unknown(value: dict[str, Any]) -> None:
 
 def _validate_terminal_notice(value: dict[str, Any]) -> None:
     _exact(value, _TERMINAL_NOTICE_KEYS, "terminal notice")
-    _validate_common(value)
+    _validate_common(value, raw_receipt=False)
     if value["terminal_outcome"] not in {
         "rejected",
         "expired",
@@ -240,14 +299,19 @@ def seal_receipt(raw: bytes) -> ReceiptArtifact:
         json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         + "\n"
     ).encode("utf-8")
-    receipt_digest = "sha256:" + hashlib.sha256(
-        b"agent-runtime-root-action-receipt/v1\x00" + canonical
-    ).hexdigest()
+    receipt_digest = (
+        "sha256:"
+        + hashlib.sha256(
+            b"agent-runtime-root-action-receipt/v1\x00" + canonical
+        ).hexdigest()
+    )
     return ReceiptArtifact(
         kind=kind,
         job_id=value["job_id"],
         job_digest=value["job_digest"],
         operation_id=value["operation_id"],
+        request_id=value["request_id"],
+        reply_target=value["reply_target"],
         receipt_digest=receipt_digest,
         canonical_receipt=canonical,
     )

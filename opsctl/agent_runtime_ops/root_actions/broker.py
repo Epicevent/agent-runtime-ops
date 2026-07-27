@@ -1,18 +1,29 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+import secrets
+import json
 from typing import Any, Protocol, runtime_checkable
 
+from .admission import LineageFailurePolicy
 from .contracts import SealedJob, seal_typed_manifest
+from .execution import (
+    DEFAULT_EXECUTION_POLICIES,
+    ExecutionPolicyRegistry,
+    OperationAvailability,
+)
 from .projection import (
     canonical_history_bytes,
     canonical_status_bytes,
     history_projection,
     status_projection,
 )
-from .receipts import ReceiptArtifact
-from .state import JobRecord
-from .storage import RootActionStore, StorageNotFound
+from .receipts import RECEIPT_SCHEMA, ReceiptArtifact, seal_receipt
+from .public_projection import build_public_projection
+from .state import JobRecord, TerminalOutcome, TransitionEvent, TransitionKind
+from .storage import RootActionStore, StorageConflict, StorageNotFound
+from .submission import BrokerPeerIdentity, SubmissionPolicy
 
 
 class BrokerContractError(ValueError):
@@ -34,6 +45,43 @@ class PublicProjectionBundle:
     job_digest: str
     status_bytes: bytes
     history_bytes: bytes
+    projection_digest: str
+    projection_bytes: bytes
+
+
+@runtime_checkable
+class BrokerEventSource(Protocol):
+    """Trusted broker-owned source of audit event identity and time."""
+
+    def next_event(self) -> tuple[str, str]: ...
+
+
+class SystemBrokerEventSource:
+    def next_event(self) -> tuple[str, str]:
+        event_id = "event-" + secrets.token_hex(16)
+        occurred_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return event_id, occurred_at
+
+
+@runtime_checkable
+class BrokerProjectionClock(Protocol):
+    """Read-time clock, deliberately separate from admission event time."""
+
+    def now(self) -> str: ...
+
+
+class SystemBrokerProjectionClock:
+    def now(self) -> str:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@runtime_checkable
+class PublicProjectionSink(Protocol):
+    def publish(self, bundle: PublicProjectionBundle) -> None: ...
+
+    def publish_catalog(
+        self, bundles: tuple[PublicProjectionBundle, ...]
+    ) -> None: ...
 
 
 @runtime_checkable
@@ -57,32 +105,149 @@ class TypedRootActionBroker:
     public read model shared by the broker and OPS web.
     """
 
-    def __init__(self, store: RootActionStore) -> None:
+    def __init__(
+        self,
+        store: RootActionStore,
+        *,
+        events: BrokerEventSource | None = None,
+        public_sink: PublicProjectionSink | None = None,
+        policies: ExecutionPolicyRegistry = DEFAULT_EXECUTION_POLICIES,
+        submission_policy: SubmissionPolicy,
+        lineage_failure_policy: LineageFailurePolicy = LineageFailurePolicy(),
+        projection_clock: BrokerProjectionClock | None = None,
+    ) -> None:
         self._store = store
+        self._events = events or SystemBrokerEventSource()
+        self._public_sink = public_sink
+        self._policies = policies
+        self._submission_policy = submission_policy
+        self._lineage_failure_policy = lineage_failure_policy
+        self._projection_clock = projection_clock or SystemBrokerProjectionClock()
+        self._last_publication_error: str | None = None
 
     def submit(
         self,
         raw_manifest: bytes,
         *,
-        event_id: str,
-        occurred_at: str,
+        peer: BrokerPeerIdentity,
     ) -> SubmittedJob:
         job = seal_typed_manifest(raw_manifest)
-        record = self._store.seal_pending(
+        try:
+            existing = self._store.read_sealed(job.job_id)
+        except StorageNotFound:
+            existing = None
+        if existing is not None:
+            return self._recover_idempotent(job, peer=peer)
+        event_id, occurred_at = self._events.next_event()
+        submission = self._submission_policy.authorize(
             job,
-            event_id=event_id,
-            occurred_at=occurred_at,
+            peer=peer,
+            broker_received_at=occurred_at,
         )
-        return SubmittedJob(
+        policy = self._policies.policy(job.operation_id)
+        if policy.operation_version != job.operation_version:
+            raise BrokerContractError("execution policy version mismatch")
+        if policy.availability is not OperationAvailability.ENABLED:
+            close_event_id, close_time = self._events.next_event()
+            close_event = TransitionEvent(
+                event_id=close_event_id,
+                job_id=job.job_id,
+                job_digest=job.job_digest,
+                expected_revision=0,
+                kind=TransitionKind.CLOSE_PENDING,
+                occurred_at=close_time,
+                outcome=TerminalOutcome.REJECTED,
+                reason_code=policy.reason_code,
+            )
+            notice = seal_receipt(
+                json.dumps(
+                    {
+                        "schema": RECEIPT_SCHEMA,
+                        "kind": "terminal_notice",
+                        "job_id": job.job_id,
+                        "job_digest": job.job_digest,
+                        "operation_id": job.operation_id,
+                        "request_id": job.request_id,
+                        "reply_target": job.reply_target,
+                        "terminal_outcome": "rejected",
+                        "reason_code": policy.reason_code,
+                    },
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            )
+            try:
+                record = self._store.seal_rejected(
+                    job,
+                    pending_event_id=event_id,
+                    pending_occurred_at=occurred_at,
+                    close_event=close_event,
+                    notice=notice,
+                    submission=submission,
+                    limits=self._submission_policy.limits,
+                )
+            except StorageConflict as exc:
+                try:
+                    return self._recover_idempotent(job, peer=peer)
+                except StorageNotFound:
+                    raise exc
+        else:
+            circuit_event_id, circuit_time = self._events.next_event()
+            circuit_event = TransitionEvent(
+                event_id=circuit_event_id,
+                job_id=job.job_id,
+                job_digest=job.job_digest,
+                expected_revision=0,
+                kind=TransitionKind.CLOSE_PENDING,
+                occurred_at=circuit_time,
+                outcome=TerminalOutcome.PRESTART_FAILED,
+                reason_code=self._lineage_failure_policy.circuit_reason_code,
+            )
+            circuit_notice = seal_receipt(
+                json.dumps(
+                    {
+                        "schema": RECEIPT_SCHEMA,
+                        "kind": "terminal_notice",
+                        "job_id": job.job_id,
+                        "job_digest": job.job_digest,
+                        "operation_id": job.operation_id,
+                        "request_id": job.request_id,
+                        "reply_target": job.reply_target,
+                        "terminal_outcome": "prestart_failed",
+                        "reason_code": self._lineage_failure_policy.circuit_reason_code,
+                    },
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            )
+            try:
+                record, _admission = self._store.seal_with_lineage_admission(
+                    job,
+                    pending_event_id=event_id,
+                    pending_occurred_at=occurred_at,
+                    circuit_event=circuit_event,
+                    circuit_notice=circuit_notice,
+                    submission=submission,
+                    limits=self._submission_policy.limits,
+                    failure_policy=self._lineage_failure_policy,
+                )
+            except StorageConflict as exc:
+                try:
+                    return self._recover_idempotent(job, peer=peer)
+                except StorageNotFound:
+                    raise exc
+        submitted = SubmittedJob(
             job_id=job.job_id,
             job_digest=job.job_digest,
-            status=status_projection(job, record),
+            status=self._status_projection(
+                job, record, self._read_optional_receipt(job)
+            ),
         )
+        self._repair_public_best_effort(job.job_id)
+        return submitted
 
     def status(self, job_id: str) -> dict[str, Any]:
         job, record = self._read_job_and_record(job_id)
         receipt = self._read_optional_receipt(job)
-        return status_projection(job, record, receipt)
+        return self._status_projection(job, record, receipt)
 
     def history(self, job_id: str) -> dict[str, Any]:
         job = self._store.read_sealed(job_id)
@@ -90,12 +255,72 @@ class TypedRootActionBroker:
 
     def public_projection(self, job_id: str) -> PublicProjectionBundle:
         job = self._store.read_sealed(job_id)
+        receipt = self._read_optional_receipt(job)
+        status_bytes = canonical_status_bytes(
+            self._status_projection(job, self._store.read_record(job_id), receipt)
+        )
+        history_bytes = canonical_history_bytes(
+            history_projection(job, self._store.read_ledger(job_id))
+        )
+        artifact = build_public_projection(
+            job_id=job.job_id,
+            job_digest=job.job_digest,
+            status_bytes=status_bytes,
+            history_bytes=history_bytes,
+            receipt=receipt,
+        )
         return PublicProjectionBundle(
             job_id=job.job_id,
             job_digest=job.job_digest,
-            status_bytes=canonical_status_bytes(self.status(job_id)),
-            history_bytes=canonical_history_bytes(self.history(job_id)),
+            status_bytes=status_bytes,
+            history_bytes=history_bytes,
+            projection_digest=artifact.projection_digest,
+            projection_bytes=artifact.canonical_bytes,
         )
+
+    def requester_projection(
+        self,
+        *,
+        peer: BrokerPeerIdentity,
+        job_id: str,
+        job_digest: str,
+        request_id: str,
+        reply_target: str,
+    ) -> PublicProjectionBundle:
+        """Return only the submitting identity's exactly bound public result."""
+
+        metadata = self._store.submission_metadata(job_id)
+        if metadata.peer_uid != peer.uid or metadata.peer_gid != peer.gid:
+            raise StorageNotFound(job_id)
+        job = self._store.read_sealed(job_id)
+        if (
+            job.job_digest != job_digest
+            or job.request_id != request_id
+            or job.reply_target != reply_target
+        ):
+            raise StorageNotFound(job_id)
+        return self.public_projection(job_id)
+
+    def publish_public(self, job_id: str) -> PublicProjectionBundle:
+        bundle = self.public_projection(job_id)
+        if self._public_sink is not None:
+            self._public_sink.publish(bundle)
+        return bundle
+
+    def reconcile_public(self) -> tuple[PublicProjectionBundle, ...]:
+        """Rebuild every derived public file from root-owned authority.
+
+        This is startup/crash recovery, not an execution or approval action.
+        """
+
+        bundles = tuple(
+            self.publish_public(job_id) for job_id in self._store.list_job_ids()
+        )
+        if self._public_sink is not None and hasattr(
+            self._public_sink, "publish_catalog"
+        ):
+            self._public_sink.publish_catalog(bundles)
+        return bundles
 
     def receipt(self, job_id: str, job_digest: str) -> ReceiptArtifact:
         if not isinstance(job_digest, str):
@@ -115,3 +340,62 @@ class TypedRootActionBroker:
             return self._store.retrieve(job.job_id, job.job_digest)
         except StorageNotFound:
             return None
+
+    def _status_projection(
+        self,
+        job: SealedJob,
+        record: JobRecord,
+        receipt: ReceiptArtifact | None,
+    ) -> dict[str, Any]:
+        summary = self._store.lineage_summary(
+            job.lineage_id,
+            measured_at=self._projection_clock.now(),
+            policy=self._lineage_failure_policy,
+        )
+        return status_projection(job, record, receipt, summary)
+
+    def _publish_catalog(self) -> None:
+        if self._public_sink is None or not hasattr(
+            self._public_sink, "publish_catalog"
+        ):
+            return
+        bundles = tuple(
+            self.public_projection(job_id) for job_id in self._store.list_job_ids()
+        )
+        self._public_sink.publish_catalog(bundles)
+
+    def _repair_public_best_effort(self, job_id: str) -> None:
+        try:
+            self.publish_public(job_id)
+            self._publish_catalog()
+        except Exception as exc:
+            self._last_publication_error = type(exc).__name__
+        else:
+            self._last_publication_error = None
+
+    def _recover_idempotent(
+        self,
+        job: SealedJob,
+        *,
+        peer: BrokerPeerIdentity,
+    ) -> SubmittedJob:
+        existing = self._store.read_sealed(job.job_id)
+        metadata = self._store.submission_metadata(job.job_id)
+        if (
+            existing != job
+            or metadata.peer_uid != peer.uid
+            or metadata.peer_gid != peer.gid
+        ):
+            raise BrokerContractError("conflicting job retry is blocked")
+        record = self._store.read_record(job.job_id)
+        submitted = SubmittedJob(
+            job_id=job.job_id,
+            job_digest=job.job_digest,
+            status=self._status_projection(
+                job,
+                record,
+                self._read_optional_receipt(job),
+            ),
+        )
+        self._repair_public_best_effort(job.job_id)
+        return submitted

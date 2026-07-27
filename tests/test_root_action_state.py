@@ -6,7 +6,10 @@ import unittest
 
 from agent_runtime_ops.root_actions import seal_typed_manifest
 from agent_runtime_ops.root_actions.local_fixture import LocalRootActionFixture
-from agent_runtime_ops.root_actions.projection import ProjectionError, history_projection
+from agent_runtime_ops.root_actions.projection import (
+    ProjectionError,
+    history_projection,
+)
 from agent_runtime_ops.root_actions.state import (
     JobState,
     ReplayBlocked,
@@ -187,9 +190,7 @@ class RootActionStateMachineTests(unittest.TestCase):
         with self.assertRaisesRegex(StateTransitionError, "counter invariant"):
             self.store.create_pending(forged_count)
 
-        forged_record_outcome = replace(
-            self.pending, terminal_outcome="succeeded"
-        )
+        forged_record_outcome = replace(self.pending, terminal_outcome="succeeded")
         with self.assertRaisesRegex(StateTransitionError, "must be a TerminalOutcome"):
             self.store.create_pending(forged_record_outcome)  # type: ignore[arg-type]
 
@@ -266,7 +267,9 @@ class RootActionStateMachineTests(unittest.TestCase):
         )
         history = history_projection(self.job, self.store.read_ledger(self.job.job_id))
         self.assertEqual(history["job_digest"], self.job.job_digest)
-        self.assertEqual([item["record_revision"] for item in history["events"]], [0, 1])
+        self.assertEqual(
+            [item["record_revision"] for item in history["events"]], [0, 1]
+        )
 
         entries = list(self.store.read_ledger(self.job.job_id))
         entries[1] = replace(entries[1], record_revision=3)

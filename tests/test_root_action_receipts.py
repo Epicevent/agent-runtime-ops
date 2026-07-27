@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import replace
 import unittest
 
@@ -13,6 +14,7 @@ from agent_runtime_ops.root_actions.receipts import (
     RECEIPT_SCHEMA,
     ReceiptValidationError,
     seal_receipt,
+    seal_raw_receipt,
 )
 from agent_runtime_ops.root_actions.state import (
     TerminalOutcome,
@@ -23,7 +25,8 @@ from agent_runtime_ops.root_actions.storage import StorageConflict, StorageNotFo
 from tests.test_root_action_contracts import encoded, valid_manifest
 
 
-RAW_DIGEST = "sha256:" + "b" * 64
+RAW_BYTES = b'{"stdout":"bounded fixture","stderr":"","exit_code":0}\n'
+RAW_DIGEST = "sha256:" + hashlib.sha256(RAW_BYTES).hexdigest()
 
 
 def public_receipt(job) -> dict[str, object]:
@@ -33,6 +36,8 @@ def public_receipt(job) -> dict[str, object]:
         "job_id": job.job_id,
         "job_digest": job.job_digest,
         "operation_id": job.operation_id,
+        "request_id": job.request_id,
+        "reply_target": job.reply_target,
         "terminal_outcome": "succeeded",
         "raw_receipt_digest": RAW_DIGEST,
         "started_at": "2026-07-27T05:00:01Z",
@@ -88,20 +93,24 @@ class RootActionReceiptTests(unittest.TestCase):
         )
 
     def _put_raw(self) -> RawReceiptReference:
-        reference = RawReceiptReference(
+        artifact = seal_raw_receipt(
             job_id=self.job.job_id,
             job_digest=self.job.job_digest,
-            raw_receipt_digest=RAW_DIGEST,
             root_storage_id="raw-receipt-001",
+            raw_bytes=RAW_BYTES,
         )
-        self.store.put_raw_if_absent(reference)
-        return reference
+        self.store.put_raw_if_absent(artifact)
+        return artifact.reference
 
     def test_public_receipt_is_full_and_retrieved_by_exact_job_identity(self) -> None:
         self._terminal()
         self._put_raw()
         artifact = seal_receipt(receipt_bytes(public_receipt(self.job)))
         self.store.publish_if_absent(artifact)
+        self.assertEqual(
+            self.store.read_raw_root_only(self.job.job_id).raw_bytes,
+            RAW_BYTES,
+        )
         retrieved = self.store.retrieve(self.job.job_id, self.job.job_digest)
         self.assertEqual(retrieved.canonical_receipt, artifact.canonical_receipt)
         view = status_projection(
@@ -115,7 +124,9 @@ class RootActionReceiptTests(unittest.TestCase):
     def test_partial_public_receipt_is_rejected_not_sanitized(self) -> None:
         value = public_receipt(self.job)
         value["removed_lines"] = 1
-        with self.assertRaisesRegex(ReceiptValidationError, "cannot contain removed lines"):
+        with self.assertRaisesRegex(
+            ReceiptValidationError, "cannot contain removed lines"
+        ):
             seal_receipt(receipt_bytes(value))
 
     def test_receipt_time_interval_must_be_real_and_forward(self) -> None:
@@ -136,6 +147,8 @@ class RootActionReceiptTests(unittest.TestCase):
             "job_id": self.job.job_id,
             "job_digest": self.job.job_digest,
             "operation_id": self.job.operation_id,
+            "request_id": self.job.request_id,
+            "reply_target": self.job.reply_target,
             "terminal_outcome": "succeeded",
             "raw_receipt_digest": RAW_DIGEST,
             "quarantine_id": "quarantine-001",
@@ -200,16 +213,20 @@ class RootActionReceiptTests(unittest.TestCase):
             "job_id": self.job.job_id,
             "job_digest": self.job.job_digest,
             "operation_id": self.job.operation_id,
+            "request_id": self.job.request_id,
+            "reply_target": self.job.reply_target,
             "terminal_outcome": "expired",
-            "raw_receipt_digest": RAW_DIGEST,
             "reason_code": "pending-ttl-expired",
         }
         artifact = seal_receipt(receipt_bytes(value))
-        self._put_raw()
         self.store.publish_if_absent(artifact)
         view = status_projection(self.job, terminal, artifact)
         self.assertEqual(view["state"]["execution_count"], 0)
         self.assertEqual(view["receipt"]["kind"], "terminal_notice")
+
+        contaminated = dict(value, raw_receipt_digest=RAW_DIGEST)
+        with self.assertRaisesRegex(ReceiptValidationError, "field set mismatch"):
+            seal_receipt(receipt_bytes(contaminated))
 
     def test_unknown_state_requires_whole_unknown_notice(self) -> None:
         self.store.compare_and_append(
@@ -239,6 +256,8 @@ class RootActionReceiptTests(unittest.TestCase):
             "job_id": self.job.job_id,
             "job_digest": self.job.job_digest,
             "operation_id": self.job.operation_id,
+            "request_id": self.job.request_id,
+            "reply_target": self.job.reply_target,
             "terminal_outcome": None,
             "raw_receipt_digest": RAW_DIGEST,
             "last_known_at": "2026-07-27T05:00:02Z",
@@ -247,7 +266,9 @@ class RootActionReceiptTests(unittest.TestCase):
         artifact = seal_receipt(receipt_bytes(value))
         self._put_raw()
         self.store.publish_if_absent(artifact)
-        self.assertEqual(status_projection(self.job, unknown, artifact)["receipt"]["kind"], "unknown")
+        self.assertEqual(
+            status_projection(self.job, unknown, artifact)["receipt"]["kind"], "unknown"
+        )
 
     def test_failed_quarantine_publish_does_not_leave_a_partial_index(self) -> None:
         value = {
@@ -256,6 +277,8 @@ class RootActionReceiptTests(unittest.TestCase):
             "job_id": self.job.job_id,
             "job_digest": self.job.job_digest,
             "operation_id": self.job.operation_id,
+            "request_id": self.job.request_id,
+            "reply_target": self.job.reply_target,
             "terminal_outcome": "succeeded",
             "raw_receipt_digest": RAW_DIGEST,
             "quarantine_id": "quarantine-atomic",

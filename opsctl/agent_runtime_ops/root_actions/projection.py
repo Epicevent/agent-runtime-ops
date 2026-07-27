@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from .admission import LineageSummary
 from .contracts import SealedJob
 from .receipts import ReceiptArtifact, ReceiptValidationError, seal_receipt
 from .state import (
@@ -30,6 +31,7 @@ def status_projection(
     job: SealedJob,
     record: JobRecord,
     receipt: ReceiptArtifact | None = None,
+    lineage_summary: LineageSummary | None = None,
 ) -> dict[str, Any]:
     validate_record(record)
     if record.job_id != job.job_id or record.job_digest != job.job_digest:
@@ -45,6 +47,8 @@ def status_projection(
             receipt.job_id != job.job_id
             or receipt.job_digest != job.job_digest
             or receipt.operation_id != job.operation_id
+            or receipt.request_id != job.request_id
+            or receipt.reply_target != job.reply_target
         ):
             raise ProjectionError("receipt job identity mismatch")
         if record.state not in {JobState.TERMINAL, JobState.UNKNOWN}:
@@ -55,7 +59,9 @@ def status_projection(
             raise ProjectionError("terminal state cannot expose an unknown receipt")
         receipt_value = receipt.receipt_copy()
         expected_outcome = (
-            record.terminal_outcome.value if record.terminal_outcome is not None else None
+            record.terminal_outcome.value
+            if record.terminal_outcome is not None
+            else None
         )
         if receipt_value["terminal_outcome"] != expected_outcome:
             raise ProjectionError("receipt terminal outcome mismatch")
@@ -90,6 +96,17 @@ def status_projection(
             "reason_code": record.reason_code,
             "last_changed_at": record.last_changed_at,
         },
+        "lineage_24h": (
+            {
+                "availability": "measured",
+                **lineage_summary.projection(),
+            }
+            if lineage_summary is not None
+            else {
+                "availability": "unavailable",
+                "reason": "root_owned_ledger_summary_not_supplied",
+            }
+        ),
         "receipt": (
             {
                 "kind": receipt.kind,
@@ -141,7 +158,9 @@ def history_projection(
                 or entry.terminal_outcome is not None
                 or entry.reason_code is not None
             ):
-                raise ProjectionError("history does not begin with sealed pending state")
+                raise ProjectionError(
+                    "history does not begin with sealed pending state"
+                )
             try:
                 prior_record = initial_record(
                     job, event_id=entry.event_id, occurred_at=entry.occurred_at

@@ -3,8 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
+from .admission import (
+    LineageFailurePolicy,
+    LineageSummary,
+    SubmissionAdmission,
+)
 from .contracts import SealedJob
-from .receipts import QuarantineRecord, RawReceiptReference, ReceiptArtifact
+from .receipts import QuarantineRecord, RawReceiptArtifact, ReceiptArtifact
 from .state import JobRecord, TransitionEvent
 
 
@@ -14,6 +19,22 @@ class StorageConflict(RuntimeError):
 
 class StorageNotFound(KeyError):
     """The requested immutable job, state, or receipt is absent."""
+
+
+@dataclass(frozen=True)
+class SubmissionMetadata:
+    peer_uid: int
+    peer_gid: int
+    peer_pid: int
+    broker_received_at: str
+
+
+@dataclass(frozen=True)
+class SubmissionLimits:
+    max_open_per_uid: int = 8
+    max_open_per_lineage: int = 1
+    max_jobs_per_uid_window: int = 32
+    window_seconds: int = 3600
 
 
 @dataclass(frozen=True)
@@ -80,6 +101,18 @@ class RootOwnedSpool(Protocol):
 
     def read_sealed(self, job_id: str) -> SealedJob: ...
 
+    def list_job_ids(self) -> tuple[str, ...]: ...
+
+    def submission_metadata(self, job_id: str) -> SubmissionMetadata: ...
+
+    def lineage_summary(
+        self,
+        lineage_id: str,
+        *,
+        measured_at: str,
+        policy: LineageFailurePolicy = LineageFailurePolicy(),
+    ) -> LineageSummary: ...
+
 
 @runtime_checkable
 class AppendOnlyLedger(Protocol):
@@ -98,9 +131,9 @@ class AppendOnlyLedger(Protocol):
 class RootOwnedRawReceiptStore(Protocol):
     """Root-only full forensic receipt references; never a status projection source."""
 
-    def put_raw_if_absent(self, reference: RawReceiptReference) -> None: ...
+    def put_raw_if_absent(self, artifact: RawReceiptArtifact) -> None: ...
 
-    def read_raw_root_only(self, job_id: str) -> RawReceiptReference: ...
+    def read_raw_root_only(self, job_id: str) -> RawReceiptArtifact: ...
 
 
 @runtime_checkable
@@ -133,5 +166,40 @@ class RootActionStore(
     """Atomic composition boundary for a future root-owned backend."""
 
     def seal_pending(
-        self, job: SealedJob, *, event_id: str, occurred_at: str
+        self,
+        job: SealedJob,
+        *,
+        event_id: str,
+        occurred_at: str,
+        submission: SubmissionMetadata | None = None,
+        limits: SubmissionLimits = SubmissionLimits(),
     ) -> JobRecord: ...
+
+    def seal_rejected(
+        self,
+        job: SealedJob,
+        *,
+        pending_event_id: str,
+        pending_occurred_at: str,
+        close_event: TransitionEvent,
+        notice: ReceiptArtifact,
+        submission: SubmissionMetadata,
+        limits: SubmissionLimits = SubmissionLimits(),
+    ) -> JobRecord:
+        """Atomically seal a disabled request, rejection, and terminal notice."""
+        ...
+
+    def seal_with_lineage_admission(
+        self,
+        job: SealedJob,
+        *,
+        pending_event_id: str,
+        pending_occurred_at: str,
+        circuit_event: TransitionEvent,
+        circuit_notice: ReceiptArtifact,
+        submission: SubmissionMetadata,
+        limits: SubmissionLimits = SubmissionLimits(),
+        failure_policy: LineageFailurePolicy = LineageFailurePolicy(),
+    ) -> tuple[JobRecord, SubmissionAdmission]:
+        """Atomically admit pending work or close it at the lineage circuit."""
+        ...

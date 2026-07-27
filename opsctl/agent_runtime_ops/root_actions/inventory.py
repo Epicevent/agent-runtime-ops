@@ -49,6 +49,7 @@ class InventoryCoverage:
 
 def load_historical_inventory() -> dict[str, Any]:
     resource = files(__package__).joinpath("historical_inventory_v1.json")
+
     def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
         value: dict[str, Any] = {}
         for key, item in pairs:
@@ -56,12 +57,15 @@ def load_historical_inventory() -> dict[str, Any]:
                 raise InventoryValidationError(f"duplicate inventory key: {key}")
             value[key] = item
         return value
+
     try:
         value = json.loads(
             resource.read_text(encoding="utf-8"), object_pairs_hook=unique_object
         )
     except (OSError, json.JSONDecodeError) as exc:
-        raise InventoryValidationError("historical inventory is not readable JSON") from exc
+        raise InventoryValidationError(
+            "historical inventory is not readable JSON"
+        ) from exc
     if not isinstance(value, dict):
         raise InventoryValidationError("historical inventory must be an object")
     return value
@@ -98,17 +102,26 @@ def validate_inventory_coverage(
         except RegistryValidationError as exc:
             raise InventoryValidationError(str(exc)) from exc
         if operation_id in family_counts:
-            raise InventoryValidationError(f"duplicate inventory family: {operation_id}")
+            raise InventoryValidationError(
+                f"duplicate inventory family: {operation_id}"
+            )
         actions = family["actions"]
         if not isinstance(actions, list) or not actions:
             raise InventoryValidationError(f"inventory family is empty: {operation_id}")
-        if any(not isinstance(name, str) or _ACTION_RE.fullmatch(name) is None for name in actions):
-            raise InventoryValidationError(f"invalid action filename in family: {operation_id}")
+        if any(
+            not isinstance(name, str) or _ACTION_RE.fullmatch(name) is None
+            for name in actions
+        ):
+            raise InventoryValidationError(
+                f"invalid action filename in family: {operation_id}"
+            )
         family_counts[operation_id] = len(actions)
         action_names.extend(actions)
 
     if len(set(action_names)) != len(action_names):
-        raise InventoryValidationError("historical inventory contains duplicate actions")
+        raise InventoryValidationError(
+            "historical inventory contains duplicate actions"
+        )
     if len(action_names) != EXPECTED_HISTORICAL_ACTION_COUNT:
         raise InventoryValidationError(
             f"historical inventory count mismatch expected={EXPECTED_HISTORICAL_ACTION_COUNT} "
@@ -119,12 +132,14 @@ def validate_inventory_coverage(
             f"historical family counts mismatch expected={EXPECTED_FAMILY_COUNTS} "
             f"actual={family_counts}"
         )
-    if set(family_counts) != set(registry.operation_ids):
-        raise InventoryValidationError("registry and historical inventory operation sets differ")
+    if not set(family_counts).issubset(set(registry.operation_ids)):
+        raise InventoryValidationError(
+            "historical inventory family is missing from the manifest registry"
+        )
     return InventoryCoverage(
         actual_count=len(action_names),
         family_counts=tuple(sorted(family_counts.items())),
-        operation_ids=registry.operation_ids,
+        operation_ids=tuple(sorted(family_counts)),
     )
 
 

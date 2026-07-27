@@ -53,6 +53,12 @@ def valid_manifest() -> dict[str, object]:
             "targets": ["KWRAG candidate receipt"],
             "changes": ["No persistent state is intended."],
             "recovery": ["No rollback is needed for the read-only operation."],
+            "risk_delta": {
+                "baseline": "No root action is executed.",
+                "added": [],
+                "removed": [],
+                "maximum_consequence": "Read-only observation can fail without host mutation.",
+            },
         },
     }
 
@@ -83,12 +89,16 @@ class RootActionManifestContractTests(unittest.TestCase):
             with self.subTest(field=field):
                 value = valid_manifest()
                 value[field] = "forbidden"
-                with self.assertRaisesRegex(ManifestValidationError, "field set mismatch"):
+                with self.assertRaisesRegex(
+                    ManifestValidationError, "field set mismatch"
+                ):
                     seal_typed_manifest(encoded(value))
 
         value = valid_manifest()
         value["parameters"]["shell"] = "/bin/bash"  # type: ignore[index]
-        with self.assertRaisesRegex(ManifestValidationError, "parameters field set mismatch"):
+        with self.assertRaisesRegex(
+            ManifestValidationError, "parameters field set mismatch"
+        ):
             seal_typed_manifest(encoded(value))
 
     def test_duplicate_json_key_is_rejected_before_canonicalization(self) -> None:
@@ -120,10 +130,12 @@ class RootActionManifestContractTests(unittest.TestCase):
         sealed = seal_typed_manifest(encoded(value))
         self.assertEqual(sealed.job_id, value["job_id"])
 
-    def test_registry_projection_is_exact_and_contains_no_executor_surface(self) -> None:
+    def test_registry_projection_is_exact_and_contains_no_executor_surface(
+        self,
+    ) -> None:
         projection = DEFAULT_REGISTRY.projection()
         self.assertEqual(projection["schema"], REGISTRY_VERSION)
-        self.assertEqual(len(projection["operations"]), 7)
+        self.assertEqual(len(projection["operations"]), 8)
         forbidden = {"command", "argv", "path", "env", "payload", "shell"}
         for operation in projection["operations"]:
             self.assertFalse(forbidden & set(operation["parameters"]))
@@ -141,8 +153,9 @@ class RootActionManifestContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ManifestValidationError, "must be null"):
             seal_typed_manifest(encoded(value))
 
-    def test_all_seven_registered_parameter_contracts_have_valid_examples(self) -> None:
+    def test_all_registered_parameter_contracts_have_valid_examples(self) -> None:
         examples = {
+            "artifact.probe_kwrag_product": {"revision": "c" * 40},
             "audit.verify": {
                 "target_identity": "kwrag-candidate",
                 "expected_schema": "kwrag-receipt-v1",

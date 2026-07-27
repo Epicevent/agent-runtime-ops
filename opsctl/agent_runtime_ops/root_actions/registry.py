@@ -53,11 +53,7 @@ class ParameterRule:
                 raise RegistryValidationError(f"{field} exceeds its maximum")
             return
         if self.kind in {"identifier_list", "digest_list"}:
-            if (
-                not isinstance(value, list)
-                or not value
-                or len(value) > self.max_items
-            ):
+            if not isinstance(value, list) or not value or len(value) > self.max_items:
                 raise RegistryValidationError(
                     f"{field} must be a non-empty list with at most {self.max_items} items"
                 )
@@ -172,7 +168,9 @@ class OperationRegistry:
     def projection(self) -> dict[str, Any]:
         return {
             "schema": REGISTRY_VERSION,
-            "operations": [self._specs[key].projection() for key in sorted(self._specs)],
+            "operations": [
+                self._specs[key].projection() for key in sorted(self._specs)
+            ],
         }
 
 
@@ -182,6 +180,11 @@ def _rule(kind: str, **kwargs: Any) -> ParameterRule:
 
 DEFAULT_REGISTRY = OperationRegistry(
     (
+        OperationSpec(
+            "artifact.probe_kwrag_product",
+            1,
+            (("revision", _rule("revision")),),
+        ),
         OperationSpec(
             "audit.verify",
             1,

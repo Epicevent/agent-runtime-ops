@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 
+from agent_runtime_ops.root_actions import BrokerPeerIdentity, SubmissionPolicy
 from agent_runtime_ops.root_actions.broker import TypedRootActionBroker
 from agent_runtime_ops.root_actions.local_fixture import LocalRootActionFixture
 from agent_runtime_ops.root_actions.registry import REGISTRY_VERSION
@@ -15,7 +16,7 @@ def manifest(*, job_id: str = "job-broker-1") -> bytes:
             "schema": "agent-runtime-root-action-manifest/v1",
             "registry_version": REGISTRY_VERSION,
             "job_id": job_id,
-            "operation_id": "audit.verify",
+            "operation_id": "artifact.probe_kwrag_product",
             "operation_version": 1,
             "request": {
                 "request_id": "request-broker-1",
@@ -24,10 +25,7 @@ def manifest(*, job_id: str = "job-broker-1") -> bytes:
                 "submitted_at": "2026-07-27T08:00:00Z",
             },
             "parameters": {
-                "target_identity": "kwrag-candidate",
-                "expected_schema": "kwrag-proof-v1",
-                "freshness_seconds": 300,
-                "allowlisted_fields": ["source_revision", "artifact_digest"],
+                "revision": "1" * 40,
             },
             "expected_pre_state": {"kind": "none", "digest": None},
             "review": {
@@ -46,23 +44,67 @@ def manifest(*, job_id: str = "job-broker-1") -> bytes:
                 "targets": ["kwrag candidate proof"],
                 "changes": ["No persistent change"],
                 "recovery": ["No rollback is required for a read-only operation"],
+                "risk_delta": {
+                    "baseline": "The artifact is not observed by this job.",
+                    "added": [],
+                    "removed": [],
+                    "maximum_consequence": "The bounded observation may fail closed.",
+                },
             },
         },
         ensure_ascii=False,
     ).encode("utf-8")
 
 
+TEST_PEER = BrokerPeerIdentity(uid=1002, gid=1002, pid=4242)
+TEST_SUBMISSION_POLICY = SubmissionPolicy(
+    allowed_uids=frozenset({1002}),
+    allowed_gids=frozenset(),
+)
+
+
+class FixedEvents:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def next_event(self) -> tuple[str, str]:
+        self.calls += 1
+        return f"event-sealed-{self.calls}", f"2026-07-27T08:00:0{self.calls}Z"
+
+
+class FixedProjectionClock:
+    def now(self) -> str:
+        return "2026-07-27T08:00:02Z"
+
+
+class CapturingSink:
+    def __init__(self) -> None:
+        self.bundles = []
+
+    def publish(self, bundle) -> None:
+        self.bundles.append(bundle)
+
+
+class FailingSink:
+    def publish(self, bundle) -> None:
+        raise OSError("projection storage unavailable")
+
+
 class TypedRootActionBrokerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.store = LocalRootActionFixture()
-        self.broker = TypedRootActionBroker(self.store)
+        self.events = FixedEvents()
+        self.sink = CapturingSink()
+        self.broker = TypedRootActionBroker(
+            self.store,
+            events=self.events,
+            public_sink=self.sink,
+            projection_clock=FixedProjectionClock(),
+            submission_policy=TEST_SUBMISSION_POLICY,
+        )
 
     def test_submit_seals_pending_and_projects_exact_public_status(self) -> None:
-        submitted = self.broker.submit(
-            manifest(),
-            event_id="event-sealed-1",
-            occurred_at="2026-07-27T08:00:01Z",
-        )
+        submitted = self.broker.submit(manifest(), peer=TEST_PEER)
         self.assertEqual(submitted.job_id, "job-broker-1")
         self.assertEqual(submitted.status["state"]["name"], "pending")
         self.assertEqual(
@@ -71,39 +113,28 @@ class TypedRootActionBrokerTests(unittest.TestCase):
         )
         self.assertEqual(self.broker.status(submitted.job_id), submitted.status)
         history = self.broker.history(submitted.job_id)
-        self.assertEqual([row["action"] for row in history["events"]], ["sealed_pending"])
-
-    def test_duplicate_job_id_does_not_replace_the_first_sealed_job(self) -> None:
-        first = self.broker.submit(
-            manifest(),
-            event_id="event-sealed-1",
-            occurred_at="2026-07-27T08:00:01Z",
+        self.assertEqual(
+            [row["action"] for row in history["events"]], ["sealed_pending"]
         )
-        with self.assertRaisesRegex(StorageConflict, "already sealed"):
-            self.broker.submit(
-                manifest(),
-                event_id="event-sealed-2",
-                occurred_at="2026-07-27T08:00:02Z",
-            )
+        self.assertEqual(len(self.sink.bundles), 1)
+        self.assertEqual(self.sink.bundles[0].job_digest, submitted.job_digest)
+
+    def test_exact_duplicate_is_idempotent_and_does_not_replace_sealed_job(self) -> None:
+        first = self.broker.submit(manifest(), peer=TEST_PEER)
+        second = self.broker.submit(manifest(), peer=TEST_PEER)
+        self.assertEqual(second, first)
         self.assertEqual(self.broker.status(first.job_id), first.status)
+        self.assertEqual(len(self.store.read_ledger(first.job_id)), 1)
 
     def test_receipt_lookup_is_bound_to_exact_job_digest(self) -> None:
-        submitted = self.broker.submit(
-            manifest(),
-            event_id="event-sealed-1",
-            occurred_at="2026-07-27T08:00:01Z",
-        )
+        submitted = self.broker.submit(manifest(), peer=TEST_PEER)
         with self.assertRaises(StorageNotFound):
             self.broker.receipt("job-broker-1", "sha256:" + "0" * 64)
         with self.assertRaises(StorageNotFound):
             self.broker.receipt("job-missing", submitted.job_digest)
 
     def test_public_projection_is_canonical_and_identity_bound(self) -> None:
-        submitted = self.broker.submit(
-            manifest(),
-            event_id="event-sealed-1",
-            occurred_at="2026-07-27T08:00:01Z",
-        )
+        submitted = self.broker.submit(manifest(), peer=TEST_PEER)
         bundle = self.broker.public_projection(submitted.job_id)
         self.assertEqual(bundle.job_id, submitted.job_id)
         self.assertEqual(bundle.job_digest, submitted.job_digest)
@@ -121,6 +152,67 @@ class TypedRootActionBrokerTests(unittest.TestCase):
         self.assertFalse(hasattr(self.broker, "approve"))
         self.assertFalse(hasattr(self.broker, "dispatch"))
         self.assertFalse(hasattr(self.broker, "execute"))
+
+    def test_submitter_cannot_supply_audit_event_identity_or_time(self) -> None:
+        with self.assertRaises(TypeError):
+            self.broker.submit(  # type: ignore[call-arg]
+                manifest(job_id="job-forged-event"),
+                peer=TEST_PEER,
+                event_id="event-from-submitter",
+                occurred_at="2026-07-27T00:00:00Z",
+            )
+
+    def test_disabled_historical_family_is_rejected_without_execution(self) -> None:
+        value = json.loads(manifest(job_id="job-disabled-network"))
+        value["operation_id"] = "kwrag.network_ensure"
+        value["parameters"] = {
+            "network_plan_digest": "sha256:" + "a" * 64,
+            "expected_state": "absent",
+            "expected_identity_digest": None,
+        }
+        submitted = self.broker.submit(
+            json.dumps(value).encode("utf-8"), peer=TEST_PEER
+        )
+        self.assertEqual(submitted.status["state"]["name"], "terminal")
+        self.assertEqual(submitted.status["state"]["execution_count"], 0)
+        self.assertEqual(
+            submitted.status["state"]["reason_code"],
+            "disabled_by_product_boundary",
+        )
+        self.assertEqual(submitted.status["receipt"]["kind"], "terminal_notice")
+        self.assertEqual(
+            [row["action"] for row in self.broker.history(submitted.job_id)["events"]],
+            ["sealed_pending", "close_pending"],
+        )
+
+    def test_public_projection_failure_is_recoverable_from_authoritative_store(
+        self,
+    ) -> None:
+        failing = TypedRootActionBroker(
+            self.store,
+            events=self.events,
+            public_sink=FailingSink(),
+            projection_clock=FixedProjectionClock(),
+            submission_policy=TEST_SUBMISSION_POLICY,
+        )
+        submitted = failing.submit(
+            manifest(job_id="job-projection-recovery"), peer=TEST_PEER
+        )
+        self.assertEqual(submitted.job_id, "job-projection-recovery")
+        self.assertEqual(self.store.list_job_ids(), ("job-projection-recovery",))
+
+        recovered_sink = CapturingSink()
+        recovered = TypedRootActionBroker(
+            self.store,
+            events=self.events,
+            public_sink=recovered_sink,
+            projection_clock=FixedProjectionClock(),
+            submission_policy=TEST_SUBMISSION_POLICY,
+        ).reconcile_public()
+        self.assertEqual(
+            [item.job_id for item in recovered], ["job-projection-recovery"]
+        )
+        self.assertEqual(len(recovered_sink.bundles), 1)
 
 
 if __name__ == "__main__":

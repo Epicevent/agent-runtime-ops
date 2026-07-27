@@ -25,9 +25,17 @@ def inventory_names(value: dict[str, object]) -> set[str]:
 
 class RootActionHistoricalInventoryTests(unittest.TestCase):
     def test_frozen_inventory_has_exact_59_action_registry_coverage(self) -> None:
-        self.assertEqual(INVENTORY_COVERAGE.actual_count, EXPECTED_HISTORICAL_ACTION_COUNT)
+        self.assertEqual(
+            INVENTORY_COVERAGE.actual_count, EXPECTED_HISTORICAL_ACTION_COUNT
+        )
         self.assertEqual(dict(INVENTORY_COVERAGE.family_counts), EXPECTED_FAMILY_COUNTS)
         self.assertEqual(len(inventory_names(HISTORICAL_INVENTORY)), 59)
+        self.assertEqual(
+            set(INVENTORY_COVERAGE.operation_ids), set(EXPECTED_FAMILY_COUNTS)
+        )
+        self.assertNotIn(
+            "artifact.probe_kwrag_product", INVENTORY_COVERAGE.operation_ids
+        )
 
     def test_missing_and_duplicate_actions_are_caught(self) -> None:
         missing = copy.deepcopy(HISTORICAL_INVENTORY)
@@ -40,7 +48,9 @@ class RootActionHistoricalInventoryTests(unittest.TestCase):
         with self.assertRaisesRegex(InventoryValidationError, "duplicate actions"):
             validate_inventory_coverage(duplicate)
 
-    def test_local_frozen_evidence_matches_packaged_membership_when_available(self) -> None:
+    def test_local_frozen_evidence_matches_packaged_membership_when_available(
+        self,
+    ) -> None:
         evidence = (
             Path.home()
             / "Documents"
@@ -58,7 +68,9 @@ class RootActionHistoricalInventoryTests(unittest.TestCase):
         }
         self.assertEqual(evidence_names, inventory_names(HISTORICAL_INVENTORY))
 
-    def test_local_cutoff_universe_matches_packaged_membership_when_available(self) -> None:
+    def test_local_cutoff_universe_matches_packaged_membership_when_available(
+        self,
+    ) -> None:
         source_root = (
             Path.home() / "Documents" / "kakao rag" / ".artifacts" / "root-actions"
         )

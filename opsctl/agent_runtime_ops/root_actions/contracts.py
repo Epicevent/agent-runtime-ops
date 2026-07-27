@@ -31,7 +31,15 @@ _TOP_LEVEL_KEYS = {
 }
 _REQUEST_KEYS = {"request_id", "lineage_id", "reply_target", "submitted_at"}
 _PRE_STATE_KEYS = {"kind", "digest"}
-_REVIEW_KEYS = {"purpose", "premises", "targets", "changes", "recovery"}
+_REVIEW_KEYS = {
+    "purpose",
+    "premises",
+    "targets",
+    "changes",
+    "recovery",
+    "risk_delta",
+}
+_RISK_DELTA_KEYS = {"baseline", "added", "removed", "maximum_consequence"}
 _PREMISE_KEYS = {"claim", "basis", "anchor", "falsifier"}
 _ANCHOR_KEYS = {"source", "quote"}
 _SAFE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}")
@@ -80,7 +88,9 @@ def _parse_manifest(raw: bytes) -> dict[str, Any]:
     if not isinstance(raw, bytes):
         raise ManifestValidationError("manifest input must be bytes")
     if not raw or len(raw) > MAX_MANIFEST_BYTES:
-        raise ManifestValidationError("manifest byte length is outside the allowed range")
+        raise ManifestValidationError(
+            "manifest byte length is outside the allowed range"
+        )
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -132,7 +142,9 @@ def _safe_id(value: Any, field: str) -> str:
 def _safe_timestamp(value: Any, field: str) -> str:
     text = _safe_text(value, field, maximum=20)
     if _TIMESTAMP_RE.fullmatch(text) is None:
-        raise ManifestValidationError(f"{field} must be an RFC3339 UTC second timestamp")
+        raise ManifestValidationError(
+            f"{field} must be an RFC3339 UTC second timestamp"
+        )
     try:
         datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ")
     except ValueError as exc:
@@ -145,6 +157,15 @@ def _safe_timestamp(value: Any, field: str) -> str:
 def _text_list(value: Any, field: str) -> list[str]:
     if not isinstance(value, list) or not value or len(value) > 32:
         raise ManifestValidationError(f"{field} must contain 1 to 32 items")
+    result = [_safe_text(item, f"{field}[{index}]") for index, item in enumerate(value)]
+    if len(set(result)) != len(result):
+        raise ManifestValidationError(f"{field} must not contain duplicates")
+    return result
+
+
+def _optional_text_list(value: Any, field: str) -> list[str]:
+    if not isinstance(value, list) or len(value) > 32:
+        raise ManifestValidationError(f"{field} must contain 0 to 32 items")
     result = [_safe_text(item, f"{field}[{index}]") for index, item in enumerate(value)]
     if len(set(result)) != len(result):
         raise ManifestValidationError(f"{field} must not contain duplicates")
@@ -165,8 +186,12 @@ def _validate_premises(value: Any) -> None:
         _safe_text(premise["falsifier"], f"review.premises[{index}].falsifier")
         anchor = premise["anchor"]
         if basis in {"user_authority", "direct_observation"}:
-            anchor_value = _exact_keys(anchor, _ANCHOR_KEYS, f"review.premises[{index}].anchor")
-            _safe_text(anchor_value["source"], f"review.premises[{index}].anchor.source")
+            anchor_value = _exact_keys(
+                anchor, _ANCHOR_KEYS, f"review.premises[{index}].anchor"
+            )
+            _safe_text(
+                anchor_value["source"], f"review.premises[{index}].anchor.source"
+            )
             _safe_text(anchor_value["quote"], f"review.premises[{index}].anchor.quote")
         elif basis == "unknown":
             if anchor is not None:
@@ -174,8 +199,12 @@ def _validate_premises(value: Any) -> None:
                     f"review.premises[{index}].anchor must be null when basis is unknown"
                 )
         elif anchor is not None:
-            anchor_value = _exact_keys(anchor, _ANCHOR_KEYS, f"review.premises[{index}].anchor")
-            _safe_text(anchor_value["source"], f"review.premises[{index}].anchor.source")
+            anchor_value = _exact_keys(
+                anchor, _ANCHOR_KEYS, f"review.premises[{index}].anchor"
+            )
+            _safe_text(
+                anchor_value["source"], f"review.premises[{index}].anchor.source"
+            )
             _safe_text(anchor_value["quote"], f"review.premises[{index}].anchor.quote")
 
 
@@ -219,6 +248,14 @@ def _validate_manifest(value: dict[str, Any], registry: OperationRegistry) -> No
     _text_list(review["targets"], "review.targets")
     _text_list(review["changes"], "review.changes")
     _text_list(review["recovery"], "review.recovery")
+    risk = _exact_keys(review["risk_delta"], _RISK_DELTA_KEYS, "review.risk_delta")
+    _safe_text(risk["baseline"], "review.risk_delta.baseline")
+    _optional_text_list(risk["added"], "review.risk_delta.added")
+    _optional_text_list(risk["removed"], "review.risk_delta.removed")
+    _safe_text(
+        risk["maximum_consequence"],
+        "review.risk_delta.maximum_consequence",
+    )
 
     try:
         registry.validate(
@@ -243,9 +280,12 @@ def seal_typed_manifest(
     value = _parse_manifest(raw)
     _validate_manifest(value, registry)
     canonical = canonical_manifest_bytes(value)
-    digest = "sha256:" + hashlib.sha256(
-        b"agent-runtime-root-action-job/v1\x00" + canonical
-    ).hexdigest()
+    digest = (
+        "sha256:"
+        + hashlib.sha256(
+            b"agent-runtime-root-action-job/v1\x00" + canonical
+        ).hexdigest()
+    )
     request = value["request"]
     return SealedJob(
         job_id=value["job_id"],

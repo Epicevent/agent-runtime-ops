@@ -4,6 +4,7 @@ import ast
 from pathlib import Path
 import unittest
 
+from agent_runtime_ops.root_actions.endpoint import RootActionBrokerEndpoint
 from agent_runtime_ops.root_actions.local_fixture import LocalRootActionFixture
 from agent_runtime_ops.root_actions.storage import (
     ROOT_OWNED_STORAGE_CONTRACTS,
@@ -12,9 +13,13 @@ from agent_runtime_ops.root_actions.storage import (
 
 
 class RootActionTypedCoreScopeTests(unittest.TestCase):
-    def test_storage_contracts_name_each_root_owned_area_and_read_boundary(self) -> None:
+    def test_storage_contracts_name_each_root_owned_area_and_read_boundary(
+        self,
+    ) -> None:
         by_area = {contract.area: contract for contract in ROOT_OWNED_STORAGE_CONTRACTS}
-        self.assertEqual(by_area.keys(), {"spool", "ledger", "raw_receipt", "quarantine"})
+        self.assertEqual(
+            by_area.keys(), {"spool", "ledger", "raw_receipt", "quarantine"}
+        )
         self.assertTrue(all(item.required_owner == "root" for item in by_area.values()))
         self.assertEqual(by_area["raw_receipt"].public_read_surface, "none")
         self.assertEqual(
@@ -26,7 +31,6 @@ class RootActionTypedCoreScopeTests(unittest.TestCase):
         root = Path("opsctl/agent_runtime_ops/root_actions")
         forbidden_modules = {
             "subprocess",
-            "socket",
             "http",
             "pam",
             "fastapi",
@@ -43,6 +47,19 @@ class RootActionTypedCoreScopeTests(unittest.TestCase):
                 elif isinstance(node, ast.ImportFrom) and node.module:
                     imported.add(node.module.split(".", 1)[0])
         self.assertEqual(imported & forbidden_modules, set())
+        socket_importers = {
+            path.name
+            for path in root.glob("*.py")
+            if "socket" in path.read_text(encoding="utf-8")
+        }
+        self.assertEqual(socket_importers, {"client.py", "listener.py", "service.py"})
+        endpoint_source = (root / "endpoint.py").read_text(encoding="utf-8")
+        self.assertNotIn("dispatch", endpoint_source.lower())
+        self.assertNotIn("handler.run", endpoint_source)
+        self.assertEqual(
+            RootActionBrokerEndpoint.ALLOWED_METHODS,
+            frozenset({"submit", "retrieve"}),
+        )
 
         pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
         self.assertNotIn("rootact =", pyproject)
