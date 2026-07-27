@@ -35,6 +35,7 @@ class FakeCursor:
     def execute(self, sql: str, params: tuple = ()) -> None:
         normalized = " ".join(sql.split())
         self.connection.trace.append(normalized.split(" ", 3)[0:3])
+        self.connection.sql_statements.append(normalized)
         self.rows = []
         if normalized.startswith(
             "SELECT TABLE_NAME AS table_name FROM information_schema.tables"
@@ -168,6 +169,7 @@ class FakeConnection:
         self.conflicts: list[dict] = []
         self.transactions: list[str] = []
         self.trace: list[object] = []
+        self.sql_statements: list[str] = []
         self.lock_acquired = 1
 
     def cursor(self) -> FakeCursor:
@@ -254,6 +256,38 @@ class UsageStoreTest(unittest.TestCase):
             "complete",
         )
         self.assertEqual(connection.transactions, ["BEGIN", "COMMIT"])
+
+    def test_append_only_call_queries_do_not_require_update_privilege(self) -> None:
+        connection = FakeConnection()
+        page = validate_export(
+            export_page(), expected_after=0, expected_family="hermes"
+        )
+
+        store_export_page(connection, stamp=STAMP, coverage=COVERAGE, page=page)
+
+        call_reads = [
+            sql
+            for sql in connection.sql_statements
+            if "FROM provider_usage_call" in sql
+        ]
+        self.assertEqual(len(call_reads), 2)
+        self.assertTrue(all("FOR UPDATE" not in sql for sql in call_reads))
+        self.assertFalse(
+            any(sql.startswith("UPDATE provider_usage_call") for sql in connection.sql_statements)
+        )
+        self.assertTrue(
+            any(
+                "FROM usage_collection_cursor" in sql and "FOR UPDATE" in sql
+                for sql in connection.sql_statements
+            )
+        )
+        self.assertTrue(
+            any(
+                "FROM provider_usage_coverage_manifest" in sql
+                and "FOR UPDATE" in sql
+                for sql in connection.sql_statements
+            )
+        )
 
     def test_same_call_and_digest_is_idempotent(self) -> None:
         connection = FakeConnection()
