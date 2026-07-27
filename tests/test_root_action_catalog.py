@@ -4,6 +4,7 @@ from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -71,6 +72,32 @@ def bundles(count: int):
 
 def page_map(artifact) -> dict[str, bytes]:
     return {path: raw for path, _digest, raw in artifact.pages}
+
+
+def test_committed_catalog_fixtures_are_exact_producer_output() -> None:
+    fixtures = Path(__file__).parent / "fixtures"
+    projection = (fixtures / "root_action_public_projection_v1.json").read_bytes()
+    expected_catalog = (fixtures / "root_action_public_catalog_v1.json").read_bytes()
+    expected_page = (fixtures / "root_action_public_catalog_page_v1.json").read_bytes()
+
+    artifact = build_public_catalog(
+        [SimpleNamespace(projection_bytes=projection)],
+        authority_job_count=2050,
+    )
+
+    assert artifact.catalog_bytes == expected_catalog
+    assert len(artifact.pages) == 1
+    page_path, page_digest, page_bytes = artifact.pages[0]
+    assert page_path == (
+        "catalog-generations/generation-0d2a4dab8728b6aa093787636cdfd0ef/"
+        "page-00000001.json"
+    )
+    assert page_digest == (
+        "sha256:3fe27051e1ab04dcb9d5b544400de4dd43e1ba07000e3c517528c646ef5fb9df"
+    )
+    assert page_bytes == expected_page
+    validated = validate_public_catalog(expected_catalog, {page_path: expected_page})
+    assert validated.catalog_digest == artifact.catalog_digest
 
 
 def canonical(value: dict) -> bytes:

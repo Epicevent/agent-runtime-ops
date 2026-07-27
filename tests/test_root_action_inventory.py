@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 import unittest
 
+from agent_runtime_ops.root_actions.catalog import build_public_catalog
 from agent_runtime_ops.root_actions.inventory import (
     EXPECTED_FAMILY_COUNTS,
     EXPECTED_HISTORICAL_ACTION_COUNT,
@@ -36,6 +37,14 @@ class RootActionHistoricalInventoryTests(unittest.TestCase):
         self.assertNotIn(
             "artifact.probe_kwrag_product", INVENTORY_COVERAGE.operation_ids
         )
+
+    def test_historical_inventory_never_seeds_operational_job_catalog(self) -> None:
+        self.assertEqual(len(inventory_names(HISTORICAL_INVENTORY)), 59)
+        catalog = build_public_catalog((), authority_job_count=0)
+        self.assertEqual(catalog.pages, ())
+        self.assertIn(b'"authority_job_count":0', catalog.catalog_bytes)
+        self.assertIn(b'"listed_job_count":0', catalog.catalog_bytes)
+        self.assertNotIn(b'"authority_job_count":59', catalog.catalog_bytes)
 
     def test_missing_and_duplicate_actions_are_caught(self) -> None:
         missing = copy.deepcopy(HISTORICAL_INVENTORY)
