@@ -16,7 +16,6 @@ from agent_runtime_ops.root_actions import (
 from agent_runtime_ops.root_actions.local_fixture import LocalRootActionFixture
 from tests.test_root_action_broker import (
     FixedEvents,
-    FixedProjectionClock,
     TEST_PEER,
     TEST_SUBMISSION_POLICY,
     manifest,
@@ -39,7 +38,6 @@ class RootActionPublicProjectionTests(unittest.TestCase):
             self.store,
             events=FixedEvents(),
             public_sink=self.publisher,
-            projection_clock=FixedProjectionClock(),
             submission_policy=TEST_SUBMISSION_POLICY,
         )
 

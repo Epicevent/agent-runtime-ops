@@ -21,7 +21,7 @@ from agent_runtime_ops.root_actions import (
 from agent_runtime_ops.root_actions.protocol import BrokerProtocolError, submit_request
 from agent_runtime_ops.root_actions.public_projection import AtomicPublicProjectionPublisher
 from agent_runtime_ops.root_actions.local_fixture import LocalRootActionFixture
-from tests.test_root_action_admission import Events, MutableProjectionClock, manifest
+from tests.test_root_action_admission import Events, manifest
 
 
 pytestmark = pytest.mark.skipif(
@@ -39,7 +39,6 @@ def root_broker() -> TypedRootActionBroker:
                 ("event-listener-circuit", "2026-07-27T12:00:01Z"),
             ]
         ),
-        projection_clock=MutableProjectionClock("2026-07-27T12:00:01Z"),
         submission_policy=SubmissionPolicy(
             allowed_uids=frozenset({os.getuid()}),
             allowed_gids=frozenset({os.getgid()}),

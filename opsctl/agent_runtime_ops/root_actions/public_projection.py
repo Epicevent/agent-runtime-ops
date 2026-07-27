@@ -155,10 +155,18 @@ class AtomicPublicProjectionPublisher:
         else:
             self._publish_portable(artifact)
 
-    def publish_catalog(self, bundles: tuple[Any, ...]) -> None:
+    def publish_catalog(
+        self,
+        bundles: tuple[Any, ...],
+        *,
+        authority_job_count: int | None = None,
+    ) -> None:
         from .catalog import build_public_catalog
 
-        artifact = build_public_catalog(bundles)
+        artifact = build_public_catalog(
+            bundles,
+            authority_job_count=authority_job_count,
+        )
         generations = self.root / "catalog-generations"
         generation = generations / artifact.generation
         if self._posix:

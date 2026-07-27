@@ -165,7 +165,7 @@ def test_publication_failure_and_broker_restart_do_not_lose_submission() -> None
         def publish(self, _bundle) -> None:
             return None
 
-        def publish_catalog(self, _bundles) -> None:
+        def publish_catalog(self, _bundles, *, authority_job_count=None) -> None:
             raise OSError("catalog unavailable")
 
     store = LocalRootActionFixture()

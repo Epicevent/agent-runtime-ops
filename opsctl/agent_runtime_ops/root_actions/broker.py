@@ -26,6 +26,9 @@ from .storage import RootActionStore, StorageConflict, StorageNotFound
 from .submission import BrokerPeerIdentity, SubmissionPolicy
 
 
+PUBLIC_CATALOG_JOB_LIMIT = 2048
+
+
 class BrokerContractError(ValueError):
     """A caller attempted to cross the typed broker boundary incorrectly."""
 
@@ -64,23 +67,14 @@ class SystemBrokerEventSource:
 
 
 @runtime_checkable
-class BrokerProjectionClock(Protocol):
-    """Read-time clock, deliberately separate from admission event time."""
-
-    def now(self) -> str: ...
-
-
-class SystemBrokerProjectionClock:
-    def now(self) -> str:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-@runtime_checkable
 class PublicProjectionSink(Protocol):
     def publish(self, bundle: PublicProjectionBundle) -> None: ...
 
     def publish_catalog(
-        self, bundles: tuple[PublicProjectionBundle, ...]
+        self,
+        bundles: tuple[PublicProjectionBundle, ...],
+        *,
+        authority_job_count: int | None = None,
     ) -> None: ...
 
 
@@ -114,7 +108,6 @@ class TypedRootActionBroker:
         policies: ExecutionPolicyRegistry = DEFAULT_EXECUTION_POLICIES,
         submission_policy: SubmissionPolicy,
         lineage_failure_policy: LineageFailurePolicy = LineageFailurePolicy(),
-        projection_clock: BrokerProjectionClock | None = None,
     ) -> None:
         self._store = store
         self._events = events or SystemBrokerEventSource()
@@ -122,7 +115,6 @@ class TypedRootActionBroker:
         self._policies = policies
         self._submission_policy = submission_policy
         self._lineage_failure_policy = lineage_failure_policy
-        self._projection_clock = projection_clock or SystemBrokerProjectionClock()
         self._last_publication_error: str | None = None
 
     def submit(
@@ -316,10 +308,7 @@ class TypedRootActionBroker:
         bundles = tuple(
             self.publish_public(job_id) for job_id in self._store.list_job_ids()
         )
-        if self._public_sink is not None and hasattr(
-            self._public_sink, "publish_catalog"
-        ):
-            self._public_sink.publish_catalog(bundles)
+        self._publish_catalog()
         return bundles
 
     def receipt(self, job_id: str, job_digest: str) -> ReceiptArtifact:
@@ -349,7 +338,7 @@ class TypedRootActionBroker:
     ) -> dict[str, Any]:
         summary = self._store.lineage_summary(
             job.lineage_id,
-            measured_at=self._projection_clock.now(),
+            measured_at=record.last_changed_at,
             policy=self._lineage_failure_policy,
         )
         return status_projection(job, record, receipt, summary)
@@ -359,10 +348,14 @@ class TypedRootActionBroker:
             self._public_sink, "publish_catalog"
         ):
             return
-        bundles = tuple(
-            self.public_projection(job_id) for job_id in self._store.list_job_ids()
+        job_ids, authority_count = self._store.catalog_job_ids(
+            limit=PUBLIC_CATALOG_JOB_LIMIT
         )
-        self._public_sink.publish_catalog(bundles)
+        bundles = tuple(self.public_projection(job_id) for job_id in job_ids)
+        self._public_sink.publish_catalog(
+            bundles,
+            authority_job_count=authority_count,
+        )
 
     def _repair_public_best_effort(self, job_id: str) -> None:
         try:

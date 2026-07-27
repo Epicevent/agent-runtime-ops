@@ -103,6 +103,10 @@ class RootOwnedSpool(Protocol):
 
     def list_job_ids(self) -> tuple[str, ...]: ...
 
+    def catalog_job_ids(self, *, limit: int) -> tuple[tuple[str, ...], int]:
+        """Newest state-change IDs plus the full root-authority count."""
+        ...
+
     def submission_metadata(self, job_id: str) -> SubmissionMetadata: ...
 
     def lineage_summary(

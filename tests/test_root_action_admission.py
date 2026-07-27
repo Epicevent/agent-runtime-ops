@@ -33,14 +33,6 @@ class Events:
         return next(self.values)
 
 
-class MutableProjectionClock:
-    def __init__(self, now: str) -> None:
-        self.value = now
-
-    def now(self) -> str:
-        return self.value
-
-
 class MemoryPublicSink:
     def __init__(self) -> None:
         self.bundles = {}
@@ -49,7 +41,7 @@ class MemoryPublicSink:
     def publish(self, bundle) -> None:
         self.bundles[bundle.job_id] = bundle
 
-    def publish_catalog(self, bundles) -> None:
+    def publish_catalog(self, bundles, *, authority_job_count=None) -> None:
         self.catalogs.append(bundles)
 
 
@@ -143,7 +135,6 @@ def broker(store: LocalRootActionFixture) -> TypedRootActionBroker:
             allowed_uids=frozenset({PEER.uid}),
             allowed_gids=frozenset({PEER.gid}),
         ),
-        projection_clock=MutableProjectionClock("2026-07-27T12:00:01Z"),
     )
 
 
@@ -229,11 +220,10 @@ def test_other_lineage_and_failures_outside_24h_do_not_trip_circuit() -> None:
         assert submitted.status["state"]["name"] == "pending"
 
 
-def test_read_time_lineage_window_ages_out_without_state_transition_and_republishes() -> None:
+def test_public_lineage_snapshot_is_immutable_without_state_transition() -> None:
     store = LocalRootActionFixture()
     add_terminal(store, "job-failure-one", received_at="2026-07-27T10:00:00Z")
     add_terminal(store, "job-failure-two", received_at="2026-07-27T11:00:00Z")
-    clock = MutableProjectionClock("2026-07-27T12:00:01Z")
     sink = MemoryPublicSink()
     root_broker = TypedRootActionBroker(
         store,
@@ -244,7 +234,6 @@ def test_read_time_lineage_window_ages_out_without_state_transition_and_republis
             ]
         ),
         public_sink=sink,
-        projection_clock=clock,
         submission_policy=SubmissionPolicy(
             allowed_uids=frozenset({PEER.uid}),
             allowed_gids=frozenset({PEER.gid}),
@@ -262,7 +251,8 @@ def test_read_time_lineage_window_ages_out_without_state_transition_and_republis
         "availability": "measured",
         "lineage_id": "lineage-a",
         "measured_at": "2026-07-27T12:00:01Z",
-        "measurement_semantics": "root_ledger_window_ending_at_measured_at",
+        "measurement_semantics": "immutable_root_ledger_window_ending_at_measured_at",
+        "snapshot_basis": "state_last_changed_at",
         "source": "root_owned_ledger",
         "submission_count": 3,
         "technical_failure_count": 2,
@@ -277,13 +267,11 @@ def test_read_time_lineage_window_ages_out_without_state_transition_and_republis
         "window_seconds": 86400,
     }
 
-    clock.value = "2026-07-28T12:00:02Z"
     root_broker.reconcile_public()
     after = sink.bundles[submitted.job_id]
     after_status = json.loads(after.status_bytes)
-    assert after_status["lineage_24h"]["measured_at"] == clock.value
-    assert after_status["lineage_24h"]["technical_failure_count"] == 0
-    assert after_status["lineage_24h"]["submission_count"] == 0
-    assert after.projection_digest != before.projection_digest
+    assert after_status["lineage_24h"]["measured_at"] == before_record.last_changed_at
+    assert after.projection_digest == before.projection_digest
+    assert after.projection_bytes == before.projection_bytes
     assert store.read_record(submitted.job_id) == before_record
     assert sink.catalogs[-1]

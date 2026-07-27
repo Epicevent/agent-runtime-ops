@@ -267,6 +267,20 @@ class LocalRootActionFixture:
         with self._lock:
             return tuple(sorted(self._jobs))
 
+    def catalog_job_ids(self, *, limit: int) -> tuple[tuple[str, ...], int]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("catalog job limit must be a positive integer")
+        with self._lock:
+            ordered = sorted(
+                self._records,
+                key=lambda job_id: (
+                    self._records[job_id].last_changed_at,
+                    job_id,
+                ),
+                reverse=True,
+            )
+            return tuple(ordered[:limit]), len(ordered)
+
     def submission_metadata(self, job_id: str) -> SubmissionMetadata:
         with self._lock:
             try:

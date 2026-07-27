@@ -115,6 +115,7 @@ def build_public_catalog(
     bundles: Iterable[Any],
     *,
     page_size: int = PUBLIC_CATALOG_PAGE_SIZE,
+    authority_job_count: int | None = None,
 ) -> PublicCatalogArtifact:
     if isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= 256:
         raise PublicProjectionError("public catalog page size is invalid")
@@ -152,6 +153,14 @@ def build_public_catalog(
     )
     generation = "generation-" + generation_digest.removeprefix("sha256:")[:32]
     total_jobs = len(entries)
+    if authority_job_count is None:
+        authority_job_count = total_jobs
+    if (
+        isinstance(authority_job_count, bool)
+        or not isinstance(authority_job_count, int)
+        or authority_job_count < total_jobs
+    ):
+        raise PublicProjectionError("public catalog authority count is invalid")
     total_pages = (total_jobs + page_size - 1) // page_size
     pages: list[tuple[str, str, bytes]] = []
     page_refs: list[dict[str, Any]] = []
@@ -189,6 +198,9 @@ def build_public_catalog(
         "page_size": page_size,
         "total_pages": total_pages,
         "total_jobs": total_jobs,
+        "authority_job_count": authority_job_count,
+        "listed_job_count": total_jobs,
+        "truncated": authority_job_count > total_jobs,
         "pages": page_refs,
         "retention": {
             "root_authority": "permanent",
@@ -225,6 +237,9 @@ def validate_public_catalog(
         "page_size",
         "total_pages",
         "total_jobs",
+        "authority_job_count",
+        "listed_job_count",
+        "truncated",
         "pages",
         "retention",
         "catalog_digest",
@@ -254,6 +269,15 @@ def validate_public_catalog(
         or isinstance(catalog["total_jobs"], bool)
         or not isinstance(catalog["total_jobs"], int)
         or catalog["total_jobs"] < 0
+        or isinstance(catalog["authority_job_count"], bool)
+        or not isinstance(catalog["authority_job_count"], int)
+        or catalog["authority_job_count"] < catalog["total_jobs"]
+        or isinstance(catalog["listed_job_count"], bool)
+        or catalog["listed_job_count"] != catalog["total_jobs"]
+        or not isinstance(catalog["truncated"], bool)
+        or catalog["truncated"] != (
+            catalog["authority_job_count"] > catalog["listed_job_count"]
+        )
         or not isinstance(catalog["pages"], list)
         or len(catalog["pages"]) != catalog["total_pages"]
         or not isinstance(catalog["generation"], str)

@@ -18,6 +18,7 @@ from agent_runtime_ops.root_actions.local_fixture import LocalRootActionFixture
 from agent_runtime_ops.root_actions.public_projection import (
     AtomicPublicProjectionPublisher,
     PublicProjectionError,
+    validate_public_projection,
 )
 from agent_runtime_ops.root_actions.storage import SubmissionLimits
 from tests.test_root_action_admission import manifest
@@ -267,3 +268,63 @@ def test_catalog_rejects_arbitrary_entry_key_and_boolean_count() -> None:
     clean["pages"][0]["entry_count"] = True
     with pytest.raises(PublicProjectionError, match="page reference"):
         validate_public_catalog(resign_catalog(clean), page_map(artifact))
+
+
+def test_new_submission_keeps_prior_projection_bytes_and_catalog_digest_aligned(
+    tmp_path: Path,
+) -> None:
+    publisher = AtomicPublicProjectionPublisher(
+        tmp_path,
+        create=True,
+        required_uid=None,
+        required_gid=None,
+        require_posix=False,
+    )
+    store = LocalRootActionFixture()
+    broker = TypedRootActionBroker(
+        store,
+        events=CounterEvents(),
+        public_sink=publisher,
+        submission_policy=SubmissionPolicy(
+            allowed_uids=frozenset({PEER.uid}),
+            allowed_gids=frozenset({PEER.gid}),
+            limits=SubmissionLimits(
+                max_open_per_uid=4,
+                max_open_per_lineage=1,
+                max_jobs_per_uid_window=4,
+                window_seconds=3600,
+            ),
+        ),
+    )
+    first = broker.submit(manifest_for(1), peer=PEER)
+    first_path = tmp_path / first.job_id / "projection.json"
+    first_bytes = first_path.read_bytes()
+    first_digest = validate_public_projection(first_bytes).projection_digest
+
+    broker.submit(manifest_for(2), peer=PEER)
+
+    assert first_path.read_bytes() == first_bytes
+    catalog_raw = (tmp_path / "catalog.json").read_bytes()
+    catalog = json.loads(catalog_raw)
+    pages = {
+        reference["path"]: (tmp_path / reference["path"]).read_bytes()
+        for reference in catalog["pages"]
+    }
+    validated = validate_public_catalog(catalog_raw, pages)
+    entries = [
+        entry
+        for _path, _digest, raw in validated.pages
+        for entry in json.loads(raw)["entries"]
+    ]
+    first_entry = next(entry for entry in entries if entry["job_id"] == first.job_id)
+    assert first_entry["projection_digest"] == first_digest
+
+
+def test_catalog_reports_bounded_listing_coverage_truthfully() -> None:
+    artifact = build_public_catalog(bundles(3), authority_job_count=5000)
+    catalog = json.loads(artifact.catalog_bytes)
+    assert catalog["authority_job_count"] == 5000
+    assert catalog["listed_job_count"] == 3
+    assert catalog["total_jobs"] == 3
+    assert catalog["truncated"] is True
+    validate_public_catalog(artifact.catalog_bytes, page_map(artifact))

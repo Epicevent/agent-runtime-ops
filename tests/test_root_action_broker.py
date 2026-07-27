@@ -4,7 +4,10 @@ import json
 import unittest
 
 from agent_runtime_ops.root_actions import BrokerPeerIdentity, SubmissionPolicy
-from agent_runtime_ops.root_actions.broker import TypedRootActionBroker
+from agent_runtime_ops.root_actions.broker import (
+    PUBLIC_CATALOG_JOB_LIMIT,
+    TypedRootActionBroker,
+)
 from agent_runtime_ops.root_actions.local_fixture import LocalRootActionFixture
 from agent_runtime_ops.root_actions.registry import REGISTRY_VERSION
 from agent_runtime_ops.root_actions.storage import StorageConflict, StorageNotFound
@@ -72,11 +75,6 @@ class FixedEvents:
         return f"event-sealed-{self.calls}", f"2026-07-27T08:00:0{self.calls}Z"
 
 
-class FixedProjectionClock:
-    def now(self) -> str:
-        return "2026-07-27T08:00:02Z"
-
-
 class CapturingSink:
     def __init__(self) -> None:
         self.bundles = []
@@ -90,6 +88,26 @@ class FailingSink:
         raise OSError("projection storage unavailable")
 
 
+class BoundedCatalogStore(LocalRootActionFixture):
+    def __init__(self) -> None:
+        super().__init__()
+        self.observed_limit = None
+
+    def catalog_job_ids(self, *, limit: int):
+        self.observed_limit = limit
+        ids, _count = super().catalog_job_ids(limit=limit)
+        return ids, 5000
+
+
+class CatalogCoverageSink(CapturingSink):
+    def __init__(self) -> None:
+        super().__init__()
+        self.catalog = None
+
+    def publish_catalog(self, bundles, *, authority_job_count=None) -> None:
+        self.catalog = (bundles, authority_job_count)
+
+
 class TypedRootActionBrokerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.store = LocalRootActionFixture()
@@ -99,7 +117,6 @@ class TypedRootActionBrokerTests(unittest.TestCase):
             self.store,
             events=self.events,
             public_sink=self.sink,
-            projection_clock=FixedProjectionClock(),
             submission_policy=TEST_SUBMISSION_POLICY,
         )
 
@@ -147,6 +164,22 @@ class TypedRootActionBrokerTests(unittest.TestCase):
             submitted.job_digest,
         )
 
+    def test_catalog_rebuild_fetches_only_explicit_bounded_recent_ids(self) -> None:
+        store = BoundedCatalogStore()
+        sink = CatalogCoverageSink()
+        broker = TypedRootActionBroker(
+            store,
+            events=FixedEvents(),
+            public_sink=sink,
+            submission_policy=TEST_SUBMISSION_POLICY,
+        )
+        broker.submit(manifest(), peer=TEST_PEER)
+        self.assertEqual(store.observed_limit, PUBLIC_CATALOG_JOB_LIMIT)
+        self.assertIsNotNone(sink.catalog)
+        bundles, authority_count = sink.catalog
+        self.assertEqual(len(bundles), 1)
+        self.assertEqual(authority_count, 5000)
+
     def test_public_broker_exposes_no_authentication_or_dispatch_surface(self) -> None:
         self.assertFalse(hasattr(self.broker, "authenticate"))
         self.assertFalse(hasattr(self.broker, "approve"))
@@ -192,7 +225,6 @@ class TypedRootActionBrokerTests(unittest.TestCase):
             self.store,
             events=self.events,
             public_sink=FailingSink(),
-            projection_clock=FixedProjectionClock(),
             submission_policy=TEST_SUBMISSION_POLICY,
         )
         submitted = failing.submit(
@@ -206,7 +238,6 @@ class TypedRootActionBrokerTests(unittest.TestCase):
             self.store,
             events=self.events,
             public_sink=recovered_sink,
-            projection_clock=FixedProjectionClock(),
             submission_policy=TEST_SUBMISSION_POLICY,
         ).reconcile_public()
         self.assertEqual(

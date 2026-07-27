@@ -78,7 +78,8 @@ class LineageSummary:
         return {
             "lineage_id": self.lineage_id,
             "measured_at": self.measured_at,
-            "measurement_semantics": "root_ledger_window_ending_at_measured_at",
+            "measurement_semantics": "immutable_root_ledger_window_ending_at_measured_at",
+            "snapshot_basis": "state_last_changed_at",
             "window_seconds": self.window_seconds,
             "source": self.source,
             "submission_count": self.submission_count,

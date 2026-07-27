@@ -170,7 +170,24 @@ class PosixRootActionStore:
             rows = connection.execute(
                 "SELECT job_id FROM root_action_jobs ORDER BY job_id"
             ).fetchall()
-        return tuple(row["job_id"] for row in rows)
+            return tuple(row["job_id"] for row in rows)
+
+    def catalog_job_ids(self, *, limit: int) -> tuple[tuple[str, ...], int]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("catalog job limit must be a positive integer")
+        with self._connect() as connection:
+            authority_count = connection.execute(
+                "SELECT COUNT(*) FROM root_action_records"
+            ).fetchone()[0]
+            rows = connection.execute(
+                """
+                SELECT job_id FROM root_action_records
+                ORDER BY last_changed_at DESC, job_id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return tuple(row["job_id"] for row in rows), authority_count
 
     def submission_metadata(self, job_id: str) -> SubmissionMetadata:
         with self._connect() as connection:
