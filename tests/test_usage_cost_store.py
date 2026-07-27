@@ -7,11 +7,30 @@ from agent_runtime_ops.domain.usage_cost import (
     validate_fx_ledger,
     validate_pricing_catalog,
 )
-from agent_runtime_ops.domain.usage_cost_store import project_costs
+from agent_runtime_ops.domain.usage_cost_store import (
+    COST_PROJECTION_LOCK_NAME,
+    UsageCostProjectionBusy,
+    project_costs,
+)
 from agent_runtime_ops.domain.usage_ledger import UsageContractError
 
 from tests.test_usage_cost import fx, pricing
 from tests.test_usage_ledger import receipt
+
+
+class FakeNamedLocks:
+    def __init__(self) -> None:
+        self.owner: FakeConnection | None = None
+
+    def acquire(self, connection: "FakeConnection") -> int:
+        if self.owner is None or self.owner is connection:
+            self.owner = connection
+            return 1
+        return 0
+
+    def close(self, connection: "FakeConnection") -> None:
+        if self.owner is connection:
+            self.owner = None
 
 
 class FakeCursor:
@@ -29,7 +48,29 @@ class FakeCursor:
         normalized = " ".join(sql.split())
         self.connection.trace.append((normalized, params))
         self.rows = []
-        if normalized.startswith(
+        append_only_tables = {
+            "usage_pricing_catalog_revision",
+            "usage_reference_fx_ledger_revision",
+            "provider_usage_cost_estimate",
+        }
+        referenced_append_only = next(
+            (table for table in append_only_tables if table in normalized), None
+        )
+        if self.connection.enforce_select_insert_only and referenced_append_only:
+            if " FOR UPDATE" in normalized:
+                raise PermissionError(
+                    1142,
+                    f"SELECT with locking clause denied on {referenced_append_only}",
+                )
+            if normalized.startswith(("UPDATE ", "DELETE ")):
+                raise PermissionError(
+                    1142, f"mutation denied on {referenced_append_only}"
+                )
+        if normalized.startswith("SELECT GET_LOCK"):
+            self.rows = [
+                {"acquired": self.connection.named_locks.acquire(self.connection)}
+            ]
+        elif normalized.startswith(
             "SELECT TABLE_NAME AS table_name FROM information_schema.tables"
         ):
             self.rows = [
@@ -50,7 +91,10 @@ class FakeCursor:
             self.rows = [] if row is None else [dict(row)]
         elif normalized.startswith("INSERT INTO usage_"):
             table = normalized.split("INSERT INTO ", 1)[1].split(" ", 1)[0]
-            self.connection.revisions[(table, params[0])] = {"artifact_json": params[4]}
+            identity = (table, params[0])
+            if identity in self.connection.revisions:
+                raise AssertionError("duplicate revision identity reached INSERT")
+            self.connection.revisions[identity] = {"artifact_json": params[4]}
         elif normalized.startswith("SELECT id, runtime_instance_id"):
             rows = list(self.connection.calls)
             if "WHERE c.linux_account=%s" in normalized:
@@ -89,7 +133,12 @@ class FakeCursor:
 
 
 class FakeConnection:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        named_locks: FakeNamedLocks | None = None,
+        enforce_select_insert_only: bool = False,
+    ) -> None:
         row = receipt()
         row["actual"].update(
             {
@@ -118,6 +167,8 @@ class FakeConnection:
         ]
         self.revisions: dict[tuple, dict] = {}
         self.estimates: dict[tuple, dict] = {}
+        self.named_locks = named_locks or FakeNamedLocks()
+        self.enforce_select_insert_only = enforce_select_insert_only
         self.trace: list[tuple] = []
         self.transactions: list[str] = []
 
@@ -133,8 +184,137 @@ class FakeConnection:
     def rollback(self):
         self.transactions.append("ROLLBACK")
 
+    def close(self):
+        self.named_locks.close(self)
+
 
 class UsageCostStoreTest(unittest.TestCase):
+    def test_select_insert_only_fixture_rejects_locking_read(self) -> None:
+        connection = FakeConnection(enforce_select_insert_only=True)
+
+        with self.assertRaisesRegex(PermissionError, "locking clause denied"):
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT artifact_json FROM usage_pricing_catalog_revision "
+                    "WHERE artifact_digest=%s FOR UPDATE",
+                    ("sha256:fixture",),
+                )
+
+    def test_select_insert_only_writer_projects_and_replays(self) -> None:
+        connection = FakeConnection(enforce_select_insert_only=True)
+        catalog = validate_pricing_catalog(pricing())
+        ledger = validate_fx_ledger(fx())
+
+        first = project_costs(
+            connection,
+            catalog=catalog,
+            fx=ledger,
+            api_product="gemini_developer_api",
+            price_scenario="paid_standard_list",
+        )
+        second = project_costs(
+            connection,
+            catalog=catalog,
+            fx=ledger,
+            api_product="gemini_developer_api",
+            price_scenario="paid_standard_list",
+        )
+
+        self.assertEqual(
+            first, {"inserted": 1, "idempotent": 0, "settledSkipped": 0}
+        )
+        self.assertEqual(
+            second, {"inserted": 0, "idempotent": 1, "settledSkipped": 0}
+        )
+        self.assertTrue(all(" FOR UPDATE" not in sql for sql, _ in connection.trace))
+        self.assertFalse(
+            any(sql.startswith(("UPDATE ", "DELETE ")) for sql, _ in connection.trace)
+        )
+
+    def test_cost_lock_serializes_connections_and_preserves_duplicate(self) -> None:
+        named_locks = FakeNamedLocks()
+        first_connection = FakeConnection(named_locks=named_locks)
+        second_connection = FakeConnection(named_locks=named_locks)
+        second_connection.calls = first_connection.calls
+        second_connection.revisions = first_connection.revisions
+        second_connection.estimates = first_connection.estimates
+        catalog = validate_pricing_catalog(pricing())
+        ledger = validate_fx_ledger(fx())
+
+        first = project_costs(
+            first_connection,
+            catalog=catalog,
+            fx=ledger,
+            api_product="gemini_developer_api",
+            price_scenario="paid_standard_list",
+        )
+        with self.assertRaisesRegex(
+            UsageCostProjectionBusy, "usage cost projection already running"
+        ):
+            project_costs(
+                second_connection,
+                catalog=catalog,
+                fx=ledger,
+                api_product="gemini_developer_api",
+                price_scenario="paid_standard_list",
+            )
+
+        self.assertEqual(
+            first, {"inserted": 1, "idempotent": 0, "settledSkipped": 0}
+        )
+        self.assertEqual(second_connection.transactions, [])
+        self.assertEqual(len(first_connection.estimates), 1)
+        first_connection.close()
+        replay = project_costs(
+            second_connection,
+            catalog=catalog,
+            fx=ledger,
+            api_product="gemini_developer_api",
+            price_scenario="paid_standard_list",
+        )
+        self.assertEqual(
+            replay, {"inserted": 0, "idempotent": 1, "settledSkipped": 0}
+        )
+        self.assertEqual(len(first_connection.estimates), 1)
+        lock_reads = [
+            params
+            for sql, params in first_connection.trace + second_connection.trace
+            if sql.startswith("SELECT GET_LOCK")
+        ]
+        self.assertTrue(lock_reads)
+        self.assertTrue(
+            all(params == (COST_PROJECTION_LOCK_NAME,) for params in lock_reads)
+        )
+        self.assertLessEqual(len(COST_PROJECTION_LOCK_NAME.encode("utf-8")), 64)
+
+    def test_revision_digests_remain_bound_to_exact_bytes(self) -> None:
+        catalog = validate_pricing_catalog(pricing())
+        ledger = validate_fx_ledger(fx())
+        identities = (
+            ("usage_pricing_catalog_revision", catalog.digest),
+            ("usage_reference_fx_ledger_revision", ledger.digest),
+        )
+        for table, digest in identities:
+            with self.subTest(table=table):
+                connection = FakeConnection()
+                project_costs(
+                    connection,
+                    catalog=catalog,
+                    fx=ledger,
+                    api_product="gemini_developer_api",
+                    price_scenario="paid_standard_list",
+                )
+                connection.revisions[(table, digest)]["artifact_json"] = "{}"
+                with self.assertRaisesRegex(UsageContractError, "different bytes"):
+                    project_costs(
+                        connection,
+                        catalog=catalog,
+                        fx=ledger,
+                        api_product="gemini_developer_api",
+                        price_scenario="paid_standard_list",
+                    )
+                self.assertEqual(connection.transactions[-2:], ["BEGIN", "ROLLBACK"])
+
     def test_insert_once_then_exact_replay_is_idempotent(self) -> None:
         connection = FakeConnection()
         catalog = validate_pricing_catalog(pricing())
