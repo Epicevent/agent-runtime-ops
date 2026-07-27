@@ -262,9 +262,12 @@ def _insert_receipt(
     coverage: ValidatedCoverage,
     receipt: Mapping[str, Any],
 ) -> bool:
+    # provider_usage_call is append-only and its writer intentionally has no
+    # UPDATE privilege.  The connection-scoped per-instance named lock already
+    # serializes collectors; database UNIQUE keys remain the final race guard.
     cursor.execute(
         "SELECT receipt_digest, product_ledger_seq FROM provider_usage_call "
-        "WHERE runtime_instance_id=%s AND call_id=%s FOR UPDATE",
+        "WHERE runtime_instance_id=%s AND call_id=%s",
         (stamp.instance_id, receipt["callId"]),
     )
     existing = _fetchone_dict(cursor)
@@ -293,7 +296,7 @@ def _insert_receipt(
 
     cursor.execute(
         "SELECT receipt_digest, call_id FROM provider_usage_call "
-        "WHERE runtime_instance_id=%s AND product_family=%s AND product_ledger_seq=%s FOR UPDATE",
+        "WHERE runtime_instance_id=%s AND product_family=%s AND product_ledger_seq=%s",
         (stamp.instance_id, stamp.family, receipt["ledgerSeq"]),
     )
     by_sequence = _fetchone_dict(cursor)
