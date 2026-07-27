@@ -13,6 +13,7 @@ from agent_runtime_ops.domain.usage_ledger import (
 from agent_runtime_ops.domain.usage_store import (
     UsageCollectionBusy,
     acquire_collection_lock,
+    ensure_schema,
     read_cursor,
     store_export_page,
 )
@@ -35,7 +36,24 @@ class FakeCursor:
         normalized = " ".join(sql.split())
         self.connection.trace.append(normalized.split(" ", 3)[0:3])
         self.rows = []
-        if normalized.startswith("INSERT IGNORE INTO usage_collection_cursor"):
+        if normalized.startswith(
+            "SELECT TABLE_NAME AS table_name FROM information_schema.tables"
+        ):
+            self.rows = [
+                {"table_name": "provider_usage_call"},
+                {"table_name": "provider_usage_coverage_manifest"},
+                {"table_name": "usage_collection_cursor"},
+                {"table_name": "usage_collection_conflict"},
+                {"table_name": "slot_assignment_interval"},
+            ]
+        elif normalized.startswith(
+            "SELECT table_name FROM information_schema.tables"
+        ):
+            # MySQL exposes the unaliased information_schema column using its
+            # canonical uppercase name.  This branch is the production bug's
+            # catch fixture: callers that omit the explicit alias fail.
+            self.rows = [{"TABLE_NAME": "provider_usage_call"}]
+        elif normalized.startswith("INSERT IGNORE INTO usage_collection_cursor"):
             instance_id = params[0]
             self.connection.cursors.setdefault(
                 instance_id,
@@ -205,6 +223,10 @@ COVERAGE = validate_coverage(
 
 
 class UsageStoreTest(unittest.TestCase):
+    def test_schema_probe_aliases_mysql_information_schema_column(self) -> None:
+        connection = FakeConnection()
+        ensure_schema(connection)
+
     def test_instance_collection_lock_is_connection_scoped_and_fail_closed(
         self,
     ) -> None:

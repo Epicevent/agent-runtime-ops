@@ -23,7 +23,7 @@ def ensure_cost_schema(connection) -> None:
     }
     with connection.cursor() as cursor:
         cursor.execute(
-            "SELECT table_name FROM information_schema.tables "
+            "SELECT TABLE_NAME AS table_name FROM information_schema.tables "
             "WHERE table_schema=DATABASE() AND table_name IN (%s,%s,%s)",
             tuple(sorted(required)),
         )

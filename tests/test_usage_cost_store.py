@@ -29,12 +29,21 @@ class FakeCursor:
         normalized = " ".join(sql.split())
         self.connection.trace.append((normalized, params))
         self.rows = []
-        if normalized.startswith("SELECT table_name FROM information_schema.tables"):
+        if normalized.startswith(
+            "SELECT TABLE_NAME AS table_name FROM information_schema.tables"
+        ):
             self.rows = [
                 {"table_name": "usage_pricing_catalog_revision"},
                 {"table_name": "usage_reference_fx_ledger_revision"},
                 {"table_name": "provider_usage_cost_estimate"},
             ]
+        elif normalized.startswith(
+            "SELECT table_name FROM information_schema.tables"
+        ):
+            # MySQL returns TABLE_NAME for an unaliased information_schema
+            # field.  Keep this catch fixture so a regression cannot be hidden
+            # by a lowercase-only fake cursor again.
+            self.rows = [{"TABLE_NAME": "provider_usage_cost_estimate"}]
         elif normalized.startswith("SELECT artifact_json FROM usage_"):
             table = normalized.split(" FROM ", 1)[1].split(" ", 1)[0]
             row = self.connection.revisions.get((table, params[0]))
