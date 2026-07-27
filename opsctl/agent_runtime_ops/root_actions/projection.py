@@ -110,6 +110,15 @@ def canonical_status_bytes(value: dict[str, Any]) -> bytes:
     ).encode("utf-8")
 
 
+def canonical_history_bytes(value: dict[str, Any]) -> bytes:
+    if value.get("schema") != HISTORY_SCHEMA:
+        raise ProjectionError("history projection schema mismatch")
+    return (
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    ).encode("utf-8")
+
+
 def history_projection(
     job: SealedJob, entries: tuple[LedgerEntry, ...]
 ) -> dict[str, Any]:

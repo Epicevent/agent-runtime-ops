@@ -10,6 +10,12 @@ from .contracts import (
     SealedJob,
     seal_typed_manifest,
 )
+from .broker import (
+    PublicProjectionBundle,
+    PublicRootActionReader,
+    SubmittedJob,
+    TypedRootActionBroker,
+)
 from .inventory import INVENTORY_COVERAGE
 from .registry import DEFAULT_REGISTRY, REGISTRY_VERSION
 
@@ -19,6 +25,10 @@ __all__ = [
     "MANIFEST_SCHEMA",
     "ManifestValidationError",
     "REGISTRY_VERSION",
+    "PublicRootActionReader",
+    "PublicProjectionBundle",
     "SealedJob",
+    "SubmittedJob",
+    "TypedRootActionBroker",
     "seal_typed_manifest",
 ]
