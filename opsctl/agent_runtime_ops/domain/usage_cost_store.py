@@ -7,12 +7,32 @@ from .usage_cost import DailyReferenceFxLedger, PricingCatalog, project_call_cos
 from .usage_ledger import UsageContractError, canonical_json_bytes
 
 
+COST_PROJECTION_LOCK_NAME = "jitech-usage-cost"
+
+
+class UsageCostProjectionBusy(UsageContractError):
+    pass
+
+
 def _json_text(value: object) -> str:
     return canonical_json_bytes(value).decode("utf-8")
 
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _acquire_cost_projection_lock(connection) -> None:
+    lock_name = COST_PROJECTION_LOCK_NAME
+    if len(lock_name.encode("utf-8")) > 64:
+        raise UsageContractError("usage cost projection lock name exceeds MySQL limit")
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT GET_LOCK(%s, 0) AS acquired", (lock_name,))
+        row = cursor.fetchone()
+    if row is None or int(row.get("acquired") or 0) != 1:
+        raise UsageCostProjectionBusy("usage cost projection already running")
+    # The command owns this connection and closes it after project_costs;
+    # MySQL releases the named lock with that connection on every exit path.
 
 
 def ensure_cost_schema(connection) -> None:
@@ -51,8 +71,11 @@ def _store_revision(
     }:
         raise UsageContractError("invalid revision table")
     payload_text = _json_text(payload)
+    # Revision tables are append-only and their writer intentionally has no
+    # UPDATE privilege.  The connection-scoped cost lock serializes projectors;
+    # each table's artifact_digest primary key remains the final race guard.
     cursor.execute(
-        f"SELECT artifact_json FROM {table} WHERE artifact_digest=%s FOR UPDATE",
+        f"SELECT artifact_json FROM {table} WHERE artifact_digest=%s",
         (digest,),
     )
     existing = cursor.fetchone()
@@ -80,6 +103,7 @@ def project_costs(
     linux_account: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, int]:
+    _acquire_cost_projection_lock(connection)
     ensure_cost_schema(connection)
     projected_at = now or _utc_now()
     inserted = 0
@@ -139,11 +163,14 @@ def project_costs(
                     api_product=api_product,
                     price_scenario=price_scenario,
                 )
+                # Estimates are immutable and their writer has SELECT/INSERT
+                # only.  The cost lock serializes projectors; the composite
+                # projection-identity UNIQUE key remains the final race guard.
                 cursor.execute(
                     "SELECT estimate_digest, estimate_json FROM provider_usage_cost_estimate "
                     "WHERE provider_usage_call_id=%s AND pricing_catalog_digest=%s "
                     "AND reference_fx_ledger_digest=%s AND api_product=%s "
-                    "AND price_scenario=%s FOR UPDATE",
+                    "AND price_scenario=%s",
                     (
                         row["id"],
                         catalog.digest,
