@@ -424,11 +424,12 @@ class UsageReceiptContractTest(unittest.TestCase):
         self.assertIn('die "usage cost timer is not active"', install_text)
         self.assertIn('die "usage FX timer is not active"', install_text)
         self.assertNotIn("password=", install_text)
-        self.assertIn("PyMySQL==1.1.2", lock_text)
+        self.assertIn("PyMySQL[rsa]==1.1.2", lock_text)
         self.assertIn(
             "e6b1d89711dd51f8f74b1631fe08f039e7d76cf67a42a323d3178f0f25762ed9",
             lock_text,
         )
+        self.assertIn("cryptography==49.0.0", lock_text)
 
 
 if __name__ == "__main__":
