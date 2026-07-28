@@ -162,9 +162,12 @@ def _response(
 ) -> dict[str, Any]:
     value = _parse_cli_result(run, error_type=server.tool_error)
     public_run = {**run, "stdout": ""}
-    ok = run["returncode"] == 0 and value["result"] == "ok"
     reason = value.get("reason_code")
-    outcome_unknown = reason == "outcome_unknown_recovery_needed"
+    outcome_unknown = (
+        value.get("state") == "unknown"
+        or reason == "outcome_unknown_recovery_needed"
+    )
+    ok = run["returncode"] == 0 and value["result"] == "ok" and not outcome_unknown
     retryable = retry_on_timeout and reason == "terminal_receipt_polling_timed_out"
     handle = value.get("handle") or fallback_handle
     next_action = None

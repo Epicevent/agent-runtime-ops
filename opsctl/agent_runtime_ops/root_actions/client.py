@@ -172,16 +172,10 @@ class RootActionBrokerClient:
         ):
             raise RootActionClientError("poll bounds must be positive")
         deadline = time.monotonic() + timeout_seconds
-        observed_unknown = False
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                reason = (
-                    "outcome_unknown_recovery_needed"
-                    if observed_unknown
-                    else "terminal_receipt_polling_timed_out"
-                )
-                raise RootActionClientError(reason)
+                raise RootActionClientError("terminal_receipt_polling_timed_out")
             projection = self.retrieve(
                 handle,
                 timeout_seconds=min(remaining, 5.0),
@@ -215,7 +209,7 @@ class RootActionBrokerClient:
                     )
                 if state == "terminal":
                     return projection, artifact
-                observed_unknown = True
+                return projection, artifact
             time.sleep(min(interval_seconds, max(0.0, remaining)))
 
     def _exchange(self, frame: bytes, *, timeout_seconds: float) -> dict[str, Any]:

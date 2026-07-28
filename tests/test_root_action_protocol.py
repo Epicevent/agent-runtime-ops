@@ -355,7 +355,7 @@ def test_authorization_protocol_rejects_ambiguous_or_unbounded_fields(
         parse_request_frame(frame)
 
 
-def test_unknown_is_not_complete_and_reconciled_terminal_can_complete() -> None:
+def test_unknown_notice_returns_immediately_without_polling_for_reconciliation() -> None:
     from agent_runtime_ops.root_actions.local_fixture import LocalRootActionFixture
 
     store = LocalRootActionFixture()
@@ -367,13 +367,6 @@ def test_unknown_is_not_complete_and_reconciled_terminal_can_complete() -> None:
         request_method = json.loads(frame[4:])["method"]
         if request_method == "retrieve":
             retrieve_count += 1
-            if retrieve_count == 2:
-                transition_terminal(
-                    store,
-                    "job-unknown-reconcile",
-                    outcome=TerminalOutcome.SUCCEEDED,
-                )
-                publish_public_receipt(store, "job-unknown-reconcile")
         return endpoint.handle(frame, peer=PEER)
 
     client = RootActionBrokerClient(transport=transport)
@@ -428,9 +421,10 @@ def test_unknown_is_not_complete_and_reconciled_terminal_can_complete() -> None:
     )
     projection, receipt = client.poll_terminal(
         handle,
-        timeout_seconds=0.3,
+        timeout_seconds=30,
         interval_seconds=0.01,
     )
-    assert retrieve_count >= 2
-    assert projection["status"]["state"]["terminal_outcome"] == "succeeded"
-    assert receipt.kind == "public"
+    assert retrieve_count == 1
+    assert projection["status"]["state"]["name"] == "unknown"
+    assert projection["status"]["state"]["terminal_outcome"] is None
+    assert receipt.kind == "unknown"

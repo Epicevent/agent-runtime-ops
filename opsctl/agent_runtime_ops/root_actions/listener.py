@@ -192,7 +192,12 @@ class RootActionUnixListener:
             peer = self._peer_identity(connection)
             frame = self._read_one_frame(connection)
             response = self.endpoint.handle(frame, peer=peer)
-            connection.sendall(response)
+            try:
+                connection.sendall(response)
+            except OSError:
+                # The request may already have committed. A client that resets
+                # before reading its response must not terminate the broker.
+                return
 
     def serve_forever(self, stop: threading.Event | None = None) -> None:
         if self._socket is None:

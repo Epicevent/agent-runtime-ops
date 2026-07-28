@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import socket
 import stat
+import struct
 import threading
 
 import pytest
@@ -130,6 +131,43 @@ def test_listener_rejects_multiple_frames_on_one_connection(tmp_path: Path) -> N
     listener.close()
     assert len(errors) == 1
     assert isinstance(errors[0], BrokerProtocolError)
+
+
+def test_client_reset_during_response_does_not_escape_listener(tmp_path: Path) -> None:
+    handled = threading.Event()
+    release = threading.Event()
+
+    class BlockingEndpoint:
+        def handle(self, _frame: bytes, *, peer: BrokerPeerIdentity) -> bytes:
+            assert peer.uid == os.getuid()
+            handled.set()
+            assert release.wait(timeout=3)
+            return b"response-after-commit"
+
+    socket_path = tmp_path / "runtime" / "broker.sock"
+    listener = RootActionUnixListener(
+        BlockingEndpoint(),
+        socket_path=socket_path,
+        required_uid=os.getuid(),
+        trusted_gid=os.getgid(),
+        create_parent=True,
+    )
+    listener.open()
+    errors: list[BaseException] = []
+    thread = serve_one(listener, errors)
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.connect(str(socket_path))
+    client.sendall(submit_request(manifest("job-reset-before-response")))
+    client.shutdown(socket.SHUT_WR)
+    assert handled.wait(timeout=3)
+    client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+    client.close()
+    release.set()
+    thread.join(timeout=3)
+    listener.close()
+
+    assert not thread.is_alive()
+    assert errors == []
 
 
 def test_production_projection_permissions_are_root_trusted_group_only(

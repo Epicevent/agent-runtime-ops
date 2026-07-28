@@ -5,7 +5,9 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
+from agent_runtime_ops.mcp.handlers import root_action as root_action_handler
 from agent_runtime_ops.mcp.registry import HANDLERS
 from agent_runtime_ops.mcp.runner import CommandResult
 from agent_runtime_ops.mcp.specs import list_tool_specs
@@ -931,6 +933,36 @@ class McpServerTests(unittest.TestCase):
         self.assertEqual(payload["handle"], handle)
         self.assertIn("Stop polling", payload["next_action"])
         self.assertNotIn("Call root_action_wait again", payload["next_action"])
+
+    def test_observed_unknown_projection_is_not_reported_as_success_or_retryable(self) -> None:
+        _result, handle = root_action_cli_result()
+        unknown_result = {
+            "schema": "agent-runtime-root-action-cli-result/v1",
+            "result": "ok",
+            "handle": handle,
+            "state": "unknown",
+            "reason_code": "worker_lost",
+        }
+        server = McpServer(runner=FakeRunner(), opsctl="opsctl", sudo="sudo")
+        run = server._run(["opsctl", "root-action", "wait"])
+
+        with patch.object(
+            root_action_handler,
+            "_parse_cli_result",
+            return_value=unknown_result,
+        ):
+            payload = root_action_handler._response(
+                server,
+                run,
+                mutated=False,
+                retry_on_timeout=True,
+            )
+
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["retryable"])
+        self.assertTrue(payload["recovery_required"])
+        self.assertEqual(payload["handle"], handle)
+        self.assertIn("Stop polling", payload["next_action"])
 
     def test_root_action_submit_transport_failure_exposes_derived_recovery_handle(self) -> None:
         error_result = {
