@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -8,6 +9,8 @@ from agent_runtime_ops.mcp.registry import HANDLERS
 from agent_runtime_ops.mcp.runner import CommandResult
 from agent_runtime_ops.mcp.specs import list_tool_specs
 from agent_runtime_ops.mcp_server import McpServer
+from agent_runtime_ops.root_actions.contracts import seal_typed_manifest
+from tests.test_root_action_admission import manifest as root_action_manifest
 
 
 class FakeRunner:
@@ -40,6 +43,48 @@ def call_tool(server: McpServer, name: str, arguments: dict[str, object] | None 
     return call_tool_result(server, name, arguments)["structuredContent"]
 
 
+def root_action_cli_result(*, terminal: bool = False) -> tuple[dict[str, object], dict[str, str]]:
+    job = seal_typed_manifest(root_action_manifest("job-mcp"))
+    handle = {
+        "job_id": job.job_id,
+        "job_digest": job.job_digest,
+        "request_id": job.request_id,
+        "reply_target": job.reply_target,
+    }
+    state = "terminal" if terminal else "pending"
+    outcome = "succeeded" if terminal else None
+    reason = "completed" if terminal else None
+    receipt = {"kind": "terminal_notice", "request_id": job.request_id} if terminal else None
+    projection_digest = "sha256:" + "b" * 64
+    projection = {
+        "job_id": job.job_id,
+        "job_digest": job.job_digest,
+        "projection_digest": projection_digest,
+        "status": {
+            "state": {
+                "name": state,
+                "terminal_outcome": outcome,
+                "reason_code": reason,
+            }
+        },
+        "receipt": receipt,
+    }
+    return (
+        {
+            "schema": "agent-runtime-root-action-cli-result/v1",
+            "result": "ok",
+            "handle": handle,
+            "observed_projection_digest": projection_digest,
+            "state": state,
+            "terminal_outcome": outcome,
+            "reason_code": reason,
+            "receipt": receipt,
+            "projection": projection,
+        },
+        handle,
+    )
+
+
 class McpServerTests(unittest.TestCase):
     def test_initialize_and_tools_list(self) -> None:
         server = McpServer(runner=FakeRunner(), opsctl="opsctl", sudo="sudo")
@@ -60,6 +105,8 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("runtime binding", response["result"]["instructions"])
         self.assertIn("live image truth", response["result"]["instructions"])
         self.assertIn("runtime_class", response["result"]["instructions"])
+        self.assertIn("root_action_wait", response["result"]["instructions"])
+        self.assertIn("Never ask the user to poll", response["result"]["instructions"])
 
         tools = server.handle_message({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
         names = {item["name"] for item in tools["result"]["tools"]}
@@ -100,6 +147,11 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("handoff_value_command", names)
         self.assertIn("heartbeat_status", names)
         self.assertIn("heartbeat_disable", names)
+        self.assertIn("root_action_submit", names)
+        self.assertIn("root_action_retrieve", names)
+        self.assertIn("root_action_wait", names)
+        self.assertNotIn("root_action_approve", names)
+        self.assertNotIn("root_action_auth_bootstrap", names)
         self.assertIn("nas_remove", names)
         self.assertIn("nas_credential_status", names)
         target_check_tool = next(item for item in tools["result"]["tools"] if item["name"] == "target_check")
@@ -708,6 +760,152 @@ class McpServerTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertFalse(payload["mutated"])
         self.assertEqual(payload["next_action"], f"sudo opsctl update approve {target}")
+
+    def test_root_action_submit_passes_only_canonical_typed_manifest_on_stdin(self) -> None:
+        result, handle = root_action_cli_result()
+        runner = FakeRunner([(0, json.dumps(result), "")])
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        manifest_value = json.loads(root_action_manifest("job-mcp"))
+
+        payload = call_tool(server, "root_action_submit", {"manifest": manifest_value})
+
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["mutated"])
+        self.assertFalse(payload["retryable"])
+        self.assertFalse(payload["recovery_required"])
+        self.assertEqual(payload["acceptance_state"], "accepted")
+        self.assertEqual(payload["handle"], handle)
+        self.assertEqual(payload["stdout"], "")
+        self.assertEqual(payload["results"][0]["stdout"], "")
+        self.assertEqual(payload["root_action"], result)
+        self.assertIn("root_action_wait", payload["next_action"])
+        self.assertEqual(
+            runner.calls[0]["argv"],
+            ["opsctl", "root-action", "submit", "--manifest-stdin"],
+        )
+        sealed = seal_typed_manifest(root_action_manifest("job-mcp"))
+        self.assertEqual(
+            runner.calls[0]["input_text"], sealed.canonical_manifest.decode("utf-8")
+        )
+        self.assertNotIn("sudo", payload["commands"][0])
+
+    def test_root_action_retrieve_uses_complete_identity_bound_handle(self) -> None:
+        result, handle = root_action_cli_result(terminal=True)
+        runner = FakeRunner([(0, json.dumps(result), "")])
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+
+        payload = call_tool(server, "root_action_retrieve", {"handle": handle})
+
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["mutated"])
+        self.assertEqual(payload["root_action"]["state"], "terminal")
+        self.assertEqual(
+            runner.calls[0]["argv"],
+            [
+                "opsctl",
+                "root-action",
+                "retrieve",
+                "--job-id",
+                handle["job_id"],
+                "--job-digest",
+                handle["job_digest"],
+                "--request-id",
+                handle["request_id"],
+                "--reply-target",
+                handle["reply_target"],
+            ],
+        )
+
+    def test_root_action_wait_timeout_is_agent_retryable_with_same_handle(self) -> None:
+        _result, handle = root_action_cli_result()
+        timeout_result = {
+            "schema": "agent-runtime-root-action-cli-result/v1",
+            "result": "error",
+            "reason_code": "terminal_receipt_polling_timed_out",
+            "handle": handle,
+        }
+        runner = FakeRunner([(2, json.dumps(timeout_result), "")])
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+
+        payload = call_tool(
+            server,
+            "root_action_wait",
+            {
+                "handle": handle,
+                "wait_timeout_seconds": 10,
+                "poll_interval_seconds": 1,
+            },
+        )
+
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["mutated"])
+        self.assertTrue(payload["retryable"])
+        self.assertFalse(payload["recovery_required"])
+        self.assertEqual(payload["acceptance_state"], "accepted")
+        self.assertEqual(payload["handle"], handle)
+        self.assertIn("Do not ask the user", payload["next_action"])
+        self.assertEqual(runner.calls[0]["timeout"], 20)
+        self.assertEqual(
+            runner.calls[0]["argv"][-4:],
+            ["--wait-timeout", "10.0", "--poll-interval", "1.0"],
+        )
+
+    def test_root_action_submit_transport_failure_exposes_derived_recovery_handle(self) -> None:
+        error_result = {
+            "schema": "agent-runtime-root-action-cli-result/v1",
+            "result": "error",
+            "reason_code": "root_action_submission_failed_closed",
+        }
+        runner = FakeRunner([(2, json.dumps(error_result), "")])
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        manifest_value = json.loads(root_action_manifest("job-mcp"))
+        job = seal_typed_manifest(root_action_manifest("job-mcp"))
+
+        payload = call_tool(server, "root_action_submit", {"manifest": manifest_value})
+
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["mutated"])
+        self.assertFalse(payload["retryable"])
+        self.assertTrue(payload["recovery_required"])
+        self.assertEqual(payload["acceptance_state"], "unknown")
+        self.assertEqual(
+            payload["handle"],
+            {
+                "job_id": job.job_id,
+                "job_digest": job.job_digest,
+                "request_id": job.request_id,
+                "reply_target": job.reply_target,
+            },
+        )
+        self.assertIn("root_action_retrieve", payload["next_action"])
+        self.assertIn("Never change the digest", payload["next_action"])
+
+    def test_root_action_tools_reject_untyped_or_incomplete_inputs_before_opsctl(self) -> None:
+        runner = FakeRunner()
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+
+        malformed_submit = call_tool_result(
+            server,
+            "root_action_submit",
+            {"manifest": {"operation_id": "kwrag.network_ensure"}},
+        )
+        malformed_wait = call_tool_result(
+            server,
+            "root_action_wait",
+            {"handle": {"job_id": "job-only"}},
+        )
+        invalid_handle = root_action_cli_result()[1]
+        invalid_handle["job_digest"] = "not-a-digest"
+        malformed_retrieve = call_tool_result(
+            server,
+            "root_action_retrieve",
+            {"handle": invalid_handle},
+        )
+
+        self.assertTrue(malformed_submit["isError"])
+        self.assertTrue(malformed_wait["isError"])
+        self.assertTrue(malformed_retrieve["isError"])
+        self.assertEqual(runner.calls, [])
 
     def test_legacy_release_state_tools_are_not_public_mcp_tools(self) -> None:
         server = McpServer(runner=FakeRunner(), opsctl="opsctl", sudo="sudo")

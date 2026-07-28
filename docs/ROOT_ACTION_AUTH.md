@@ -67,6 +67,22 @@ the canonical sanitized status, immutable history, and terminal receipt. A
 local source test, successful registration, valid assertion, or claimed job is
 not an operational E2E receipt.
 
+The installed agent MCP exposes only `root_action_submit`,
+`root_action_retrieve`, and `root_action_wait`. Submit revalidates the exact
+typed manifest and returns the complete four-field recovery handle (`job_id`,
+`job_digest`, `request_id`, and `reply_target`). It does not approve or execute. Retrieve is a
+read-only snapshot. Wait polls for a bounded interval and returns either the
+identity-bound terminal receipt or the unchanged retryable handle. The agent
+that submitted the request must keep calling wait itself; the user is never
+asked to run a root shell, wait in a terminal, or carry output back. No MCP
+authentication, enrollment, approval, arbitrary-shell, or generic privileged
+command is exposed.
+
+If the submit response is lost, the MCP adapter returns the handle derived from
+the already sealed manifest with `acceptance_state=unknown`. The requester must
+retrieve that exact handle before considering any new submission; it may not
+change the digest or create a second execution attempt as a recovery shortcut.
+
 ## Installation inputs and fail-closed startup
 
 The root service reads `/etc/agent-runtime-ops/root-action-webauthn.env`. It is

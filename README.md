@@ -171,7 +171,9 @@ Install activates:
 ```
 
 The MCP server wraps `opsctl` with structured tools for agents. It does not approve updates and does
-not accept raw secret values.
+not accept raw secret values. Its typed root-action tools may submit an exact registry-validated
+manifest and recover the bound sanitized projection/receipt, but they cannot authenticate, enroll a
+credential, approve, dispatch an arbitrary shell, or bypass OPS WebAuthn review.
 
 Smoke checks:
 

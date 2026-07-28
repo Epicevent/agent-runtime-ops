@@ -1,6 +1,6 @@
 ---
 name: agent-runtime-ops
-description: Operate the agent-runtime-ops repository and the svcops server runtime. Use when Codex is asked to inspect, update, deploy, verify, or troubleshoot opsctl, runtime profiles, dev/customer targets, runtime secrets such as Gemini keys, NAS mount workflows, self-update approvals, or the agent-runtime-ops MCP server.
+description: Operate the agent-runtime-ops repository and the svcops server runtime. Use when Codex is asked to inspect, update, deploy, verify, or troubleshoot opsctl, runtime profiles, dev/customer targets, typed root-action requests and receipt recovery, runtime secrets such as Gemini keys, NAS mount workflows, self-update approvals, or the agent-runtime-ops MCP server.
 ---
 
 # Agent Runtime Ops
@@ -43,6 +43,12 @@ state must still be read from MCP, `opsctl`, the installed repo, or the live ser
 - Do not put customer state, NAS passwords, API keys, gateway tokens, or real target assignment details
   in the repo.
 - Do not pass raw secret values in MCP tool arguments. Use allowed files or terminal stdin.
+- A root-action request is not an approval. Submit only an exact typed manifest, preserve its complete
+  identity-bound handle, and keep the original request active while the user reviews and approves it
+  in OPS. The agent, not the user, must call `root_action_wait` until the terminal sanitized receipt is
+  recovered. Never ask the user to run a root shell, poll status, or carry output back.
+- Root-action authentication and approval remain browser-only WebAuthn operations. There is no MCP
+  approval, credential enrollment, arbitrary shell, or generic privileged command tool.
 - Preserve the safety boundaries in `references/safety.md`; do not replace them with broad secret
   discovery commands or external historical tool bundles.
 
@@ -54,6 +60,7 @@ Read the named section from `references/runbooks.md` when the task matches:
 - Operating account Codex/Gemini CLI: "Operating Agent Surface"
 - Install or update: "Deploy an Approved Repo Update"
 - MCP registration or smoke test: "MCP Setup and Smoke Test"
+- Exact typed root request, OPS review, and automatic receipt recovery: "Typed Root Action and Receipt Recovery"
 - Runtime target diagnosis: "Check a Runtime Binding"
 - Router, public host, or subdomain diagnosis/change: "Binding and Public Host Diagnosis"
 - Runtime image deployment from wrapper/product digests, including Hermes `dev-hermes-img` and `oc20`: "Image Rollout"

@@ -148,6 +148,70 @@ ssh svcops "printf '%s\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize
 
 The server must write only valid MCP JSON-RPC messages to stdout.
 
+## Typed Root Action and Receipt Recovery
+
+Use this flow only for an operation that the installed executable root-action registry marks enabled.
+The historical inventory is evidence, not an executable menu. `kwrag.network_ensure` is hard denied by
+the product boundary and must never be translated into another operation, shell command, or handler.
+
+Construct one `agent-runtime-root-action-manifest/v1` object with:
+
+- a fresh unique job, request, and lineage identity;
+- the current request/task identity as `request.reply_target`;
+- a fresh UTC-second `submitted_at`;
+- the exact enabled operation id/version and typed parameters;
+- the expected pre-state plus evidence-backed purpose, premises and falsifiers, targets, changes,
+  recovery, and risk delta.
+
+Submit it with the MCP tool:
+
+```text
+root_action_submit {"manifest": EXACT_TYPED_MANIFEST_OBJECT}
+```
+
+Submission creates only a pending sealed job. It does not authenticate, approve, dispatch, or execute.
+Preserve all four fields of the returned handle without editing them:
+
+```text
+job_id + job_digest + request_id + reply_target
+```
+
+If submit returns `acceptance_state=unknown`, the handle is deterministically derived from the sealed
+manifest so the agent can recover safely. Call `root_action_retrieve` with that handle before doing
+anything else. Never resubmit, change the digest, or invent a replacement job merely because the
+submission response was lost.
+
+The exact browser review is:
+
+```text
+https://ops.ji-tech.co.kr/root-actions?job=JOB_ID
+```
+
+The user reviews the rendered digest, impact, pre-state, recovery, and risk delta and approves only in
+that OPS page with a UV-required registered passkey. The read-only OPS session token is not approval.
+There is intentionally no MCP approval or credential-enrollment tool.
+
+After submission, the agent owns waiting and receipt recovery:
+
+```text
+root_action_wait {"handle": COMPLETE_UNCHANGED_HANDLE}
+```
+
+The tool waits for a bounded interval. If it returns `retryable=true` with
+`terminal_receipt_polling_timed_out` or `outcome_unknown_recovery_needed`, call `root_action_wait` again
+with the same unchanged handle. Do not ask the user to poll, run a root shell, wait in a terminal, or
+paste output. `root_action_retrieve` is a read-only single snapshot for diagnosis; it does not replace
+continued receipt recovery.
+
+Stop only on an identity-bound terminal receipt, an explicit user cancellation before approval, or a
+real invariant/availability failure requiring a decision. A failed, rejected, expired, canceled, or
+prestart-failed terminal receipt is a recovered outcome, not permission to resubmit. An unknown notice
+must retain the same recovery handle and must never be converted into a second execution attempt.
+
+Before reporting success, verify that the returned handle, projection digest, terminal state, and
+receipt all belong to the original job digest and reply target. Report sanitized terminal facts; raw
+root output remains root-only.
+
 ## Check a Runtime Binding
 
 Preferred MCP tool:
