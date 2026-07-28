@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+from pathlib import Path
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -88,17 +89,35 @@ def _status_output(*, fstab_text: str, is_root: bool, cron_rc: int = 0, cron_out
 
 
 class StatusBootSectionTest(unittest.TestCase):
+    def test_degraded_contract_fixture_matches_exact_producer_output(self) -> None:
+        code, out = _status_output(fstab_text="", is_root=True)
+        fixture = (
+            Path(__file__).parent / "fixtures" / "nas-view-status-v1-degraded.txt"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(code, 1)
+        self.assertEqual(out, fixture)
+
     def test_all_persistent_passes(self) -> None:
         code, out = _status_output(fstab_text=FSTAB_OK, is_root=True)
         self.assertEqual(code, 0, out)
+        self.assertIn("view_status_schema=agent-runtime-nas-view-status/v1", out)
         self.assertIn("boot_fstab_entries=1/1", out)
         self.assertIn("boot_restore_cron=yes", out)
+        self.assertIn("view_status=ok", out)
+        self.assertIn("view_exit_code=0", out)
+        self.assertIn("view_status_issues_json=[]", out)
+        self.assertIn("view_observation_gaps_json=[]", out)
+        self.assertTrue(out.rstrip().endswith("view_snapshot_complete=yes"), out)
 
     def test_missing_fstab_entry_fails(self) -> None:
         code, out = _status_output(fstab_text="", is_root=True)
         self.assertEqual(code, 1)
         self.assertIn("boot_fstab_entries=0/1", out)
         self.assertIn("boot_fstab_missing=oc1", out)
+        self.assertIn("view_status=degraded", out)
+        self.assertIn("view_exit_code=1", out)
+        self.assertIn('view_status_issues_json=["boot_fstab_missing"]', out)
+        self.assertTrue(out.rstrip().endswith("view_snapshot_complete=yes"), out)
 
     def test_missing_cron_fails(self) -> None:
         code, out = _status_output(fstab_text=FSTAB_OK, is_root=True, cron_rc=1, cron_out="")
@@ -109,6 +128,7 @@ class StatusBootSectionTest(unittest.TestCase):
         code, out = _status_output(fstab_text=FSTAB_OK, is_root=False)
         self.assertEqual(code, 0, out)
         self.assertIn("boot_restore_cron=unknown_requires_root", out)
+        self.assertIn('view_observation_gaps_json=["boot_restore_requires_root"]', out)
 
     def test_no_failed_units_reports_zero(self) -> None:
         code, out = _status_output(fstab_text=FSTAB_OK, is_root=True)
@@ -127,6 +147,7 @@ class StatusBootSectionTest(unittest.TestCase):
         code, out = _status_output(fstab_text=FSTAB_OK, is_root=True, failed_units=([], "systemctl missing"))
         self.assertEqual(code, 0, out)
         self.assertIn("failed_cifs_mount_units=unknown", out)
+        self.assertIn('view_observation_gaps_json=["failed_cifs_mount_units_unavailable"]', out)
 
     def test_all_managed_entries_mounted(self) -> None:
         code, out = _status_output(fstab_text=FSTAB_OK, is_root=True)
@@ -162,6 +183,9 @@ class StatusBootSectionTest(unittest.TestCase):
         self.assertIn("view_1_healthy=yes", out)
         self.assertIn("managed_fstab_mounted=1/2", out)
         self.assertIn("managed_fstab_unmounted=/srv/kw-nas/slots/oc9/master", out)
+        self.assertIn("view_status=degraded", out)
+        self.assertIn('view_status_issues_json=["managed_fstab_unmounted"]', out)
+        self.assertTrue(out.rstrip().endswith("view_snapshot_complete=yes"), out)
 
 
 if __name__ == "__main__":

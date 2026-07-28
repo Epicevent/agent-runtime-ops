@@ -57,11 +57,14 @@ class Corpus:
     name: str
     entry_name: str          # /home/{slot}/nas_docs/{entry_name}
     layout: str              # "kakao_package" | "granted_paths"
+    master_contract: str = "policy_or_per_slot"
 
 
 CORPORA: dict[str, Corpus] = {
     "kakao-work": Corpus(PRIMARY_CORPUS, "kw", "kakao_package"),
-    "hanpass_groupware": Corpus("groupware", "groupware", "granted_paths"),
+    "hanpass_groupware": Corpus(
+        "groupware", "groupware", "granted_paths", "shared_policy_required"
+    ),
     "whatsapp": Corpus("whatsapp", "whatsapp", "whatsapp_author"),
 }
 

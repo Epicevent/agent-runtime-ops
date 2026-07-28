@@ -16,6 +16,7 @@ from agent_runtime_ops.commands.nas_view import (
     _apply_binds,
     cmd_nas_view_assign,
     cmd_nas_view_detach,
+    cmd_nas_view_preflight,
     cmd_nas_view_status,
     cmd_nas_view_catalog,
     _kakao_catalog,
@@ -189,6 +190,49 @@ class NasViewDomainTests(unittest.TestCase):
 
 
 class NasViewCliTests(unittest.TestCase):
+    def test_preflight_can_defer_new_view_but_blocks_destructive_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "state"
+            root.mkdir()
+            write_state(root)
+            credential = Path(tmp) / "corpus.cred"
+            credential.write_text("present", encoding="utf-8")
+
+            def run(require_content_ready: bool) -> tuple[int, str]:
+                output = io.StringIO()
+                with (
+                    patch("agent_runtime_ops.commands.nas_view._is_root", return_value=True),
+                    patch("agent_runtime_ops.commands.nas_view._findmnt_one", return_value=(1, "", [])),
+                    patch(
+                        "agent_runtime_ops.commands.nas_view.shared_master_for_share",
+                        return_value=None,
+                    ),
+                    patch(
+                        "agent_runtime_ops.commands.nas_view.root_credential_path",
+                        return_value=credential,
+                    ),
+                    contextlib.redirect_stdout(output),
+                ):
+                    rc = cmd_nas_view_preflight(
+                        argparse.Namespace(
+                            state_root=str(root),
+                            slot="oc3",
+                            user_id="7521796",
+                            share="//192.168.0.222/kakao-work",
+                            path=[],
+                            require_content_ready=require_content_ready,
+                        )
+                    )
+                return rc, output.getvalue()
+
+            new_rc, new_out = run(False)
+            replace_rc, replace_out = run(True)
+
+        self.assertEqual(new_rc, 0, new_out)
+        self.assertIn("content_validation=deferred_until_per_slot_mount", new_out)
+        self.assertEqual(replace_rc, 1)
+        self.assertIn("reason=content_validation_incomplete", replace_out)
+
     def _assign(self, root: Path, master: Path, binds: list[tuple[Path, Path, bool]]) -> tuple[int, str]:
         def fake_bind_ro(source: Path, target: Path, *, recursive: bool = False) -> tuple[bool, str]:
             binds.append((source, target, recursive))
