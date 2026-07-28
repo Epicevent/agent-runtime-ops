@@ -3,7 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def test_install_places_fixed_root_action_contract_without_activation_or_new_sudo() -> None:
+def test_install_places_fixed_root_action_contract_without_activation_or_new_sudo() -> (
+    None
+):
     install = Path("install.sh").read_text(encoding="utf-8")
     start = install.index("install_root_action_broker_contract()")
     end = install.index("\n}\n", start) + 3
@@ -22,7 +24,8 @@ def test_install_places_fixed_root_action_contract_without_activation_or_new_sud
     assert 'install -o root -g root -m 0644 "$unit_tmp"' in function
     assert 'current_path="$install_root_real/current"' in function
     assert '[[ "$current_path" =~ ^/[A-Za-z0-9._/-]+$ ]]' in function
-    assert 'sed "s|@@CURRENT_LINK@@|$current_path|g"' in function
+    assert '-e "s|@@CURRENT_LINK@@|$current_path|g"' in function
+    assert '-e "s|@@RELEASE_DIR@@|$release_dir|g"' in function
     assert "systemctl enable" not in function
     assert "systemctl start" not in function
     assert "systemctl restart" not in function
@@ -38,10 +41,14 @@ def test_service_is_root_owned_webauthn_broker_and_uses_fixed_paths() -> None:
     )
     assert "User=root" in unit
     assert "agent_runtime_ops.root_actions.service" in unit
-    assert "ReadWritePaths=/var/lib/agent-runtime-ops/root-actions /run/agent-runtime-ops" in unit
+    assert (
+        "ReadWritePaths=/var/lib/agent-runtime-ops/root-actions /run/agent-runtime-ops"
+        in unit
+    )
     assert "RestrictAddressFamilies=AF_UNIX" in unit
     assert "RuntimeDirectory=agent-runtime-ops" in unit
     assert "EnvironmentFile=/etc/agent-runtime-ops/root-action-webauthn.env" in unit
+    assert "Environment=AGENT_RUNTIME_OPS_RELEASE=@@RELEASE_DIR@@" in unit
     assert "ConditionPathIsFile=/etc/agent-runtime-ops/root-action-webauthn.env" in unit
     assert "PAM" not in unit
     assert "sudo" not in unit.lower()
@@ -52,11 +59,16 @@ def test_custom_install_root_materializes_a_functional_absolute_unit_path() -> N
         encoding="utf-8"
     )
     custom_current = "/srv/jitech-agent-runtime/current"
-    materialized = template.replace("@@CURRENT_LINK@@", custom_current)
+    custom_release = "/srv/jitech-agent-runtime/releases/tested"
+    materialized = template.replace("@@CURRENT_LINK@@", custom_current).replace(
+        "@@RELEASE_DIR@@", custom_release
+    )
     assert f"ConditionPathIsDirectory={custom_current}" in materialized
     assert (
         f"ExecStart={custom_current}/.venv/bin/python "
         "-m agent_runtime_ops.root_actions.service"
     ) in materialized
     assert "@@CURRENT_LINK@@" not in materialized
+    assert "@@RELEASE_DIR@@" not in materialized
+    assert f"Environment=AGENT_RUNTIME_OPS_RELEASE={custom_release}" in materialized
     assert "/opt/agent-runtime-ops/current" not in template

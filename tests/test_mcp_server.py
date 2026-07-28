@@ -10,6 +10,7 @@ from agent_runtime_ops.mcp.runner import CommandResult
 from agent_runtime_ops.mcp.specs import list_tool_specs
 from agent_runtime_ops.mcp_server import McpServer
 from agent_runtime_ops.root_actions.contracts import seal_typed_manifest
+from agent_runtime_ops.root_actions.public_projection import build_public_projection
 from tests.test_root_action_admission import manifest as root_action_manifest
 
 
@@ -54,21 +55,47 @@ def root_action_cli_result(*, terminal: bool = False) -> tuple[dict[str, object]
     state = "terminal" if terminal else "pending"
     outcome = "succeeded" if terminal else None
     reason = "completed" if terminal else None
-    receipt = {"kind": "terminal_notice", "request_id": job.request_id} if terminal else None
-    projection_digest = "sha256:" + "b" * 64
-    projection = {
-        "job_id": job.job_id,
-        "job_digest": job.job_digest,
-        "projection_digest": projection_digest,
-        "status": {
-            "state": {
-                "name": state,
-                "terminal_outcome": outcome,
-                "reason_code": reason,
-            }
-        },
-        "receipt": receipt,
-    }
+    receipt = None
+    fixture = json.loads(
+        (Path(__file__).parent / "fixtures" / "root_action_public_projection_v1.json")
+        .read_text(encoding="utf-8")
+    )
+    status = fixture["status"]
+    history = fixture["history"]
+    status["job"]["job_id"] = job.job_id
+    status["job"]["job_digest"] = job.job_digest
+    status["job"]["request_id"] = job.request_id
+    status["job"]["reply_target"] = job.reply_target
+    status["state"].update(
+        {
+            "name": state,
+            "terminal_outcome": outcome,
+            "reason_code": reason,
+        }
+    )
+    history["job_id"] = job.job_id
+    history["job_digest"] = job.job_digest
+
+    def canonical(value: dict[str, object]) -> bytes:
+        return (
+            json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+
+    artifact = build_public_projection(
+        job_id=job.job_id,
+        job_digest=job.job_digest,
+        status_bytes=canonical(status),
+        history_bytes=canonical(history),
+        receipt=None,
+    )
+    projection_digest = artifact.projection_digest
+    projection = json.loads(artifact.canonical_bytes)
     return (
         {
             "schema": "agent-runtime-root-action-cli-result/v1",
@@ -814,6 +841,32 @@ class McpServerTests(unittest.TestCase):
                 "--reply-target",
                 handle["reply_target"],
             ],
+        )
+
+    def test_root_action_projection_redaction_cannot_invalidate_embedded_digest(
+        self,
+    ) -> None:
+        result, handle = root_action_cli_result()
+        result["projection"]["status"]["job"]["review"]["purpose"] = (
+            "api_key=untrusted-projection-value"
+        )
+        runner = FakeRunner([(0, json.dumps(result), "")])
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+
+        response = call_tool_result(
+            server,
+            "root_action_retrieve",
+            {"handle": handle},
+        )
+
+        self.assertTrue(response["isError"])
+        self.assertIn(
+            "root-action CLI projection is invalid",
+            response["structuredContent"]["next_action"],
+        )
+        self.assertNotIn(
+            "untrusted-projection-value",
+            json.dumps(response, ensure_ascii=False),
         )
 
     def test_root_action_wait_timeout_is_agent_retryable_with_same_handle(self) -> None:

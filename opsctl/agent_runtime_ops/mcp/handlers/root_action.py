@@ -11,6 +11,10 @@ from ...root_actions.contracts import (
     canonical_manifest_bytes,
     seal_typed_manifest,
 )
+from ...root_actions.public_projection import (
+    PublicProjectionError,
+    validate_public_projection,
+)
 from .. import validation as v
 
 
@@ -84,12 +88,17 @@ def _handle_argv(handle: dict[str, str]) -> list[str]:
     ]
 
 
-def _parse_cli_result(run: dict[str, Any], *, error_type: type[Exception]) -> dict[str, Any]:
+def _parse_cli_result(
+    run: dict[str, Any], *, error_type: type[Exception]
+) -> dict[str, Any]:
     try:
         value = json.loads(run["stdout"])
     except (KeyError, TypeError, json.JSONDecodeError) as exc:
         raise error_type("root-action CLI did not return one JSON result") from exc
-    if not isinstance(value, dict) or value.get("schema") != ROOT_ACTION_CLI_RESULT_SCHEMA:
+    if (
+        not isinstance(value, dict)
+        or value.get("schema") != ROOT_ACTION_CLI_RESULT_SCHEMA
+    ):
         raise error_type("root-action CLI result schema is invalid")
     result = value.get("result")
     if result == "ok":
@@ -99,12 +108,26 @@ def _parse_cli_result(run: dict[str, Any], *, error_type: type[Exception]) -> di
         projection = value["projection"]
         if not isinstance(projection, dict):
             raise error_type("root-action CLI projection is invalid")
+        projection_bytes = (
+            json.dumps(
+                projection,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+        try:
+            verified_projection = validate_public_projection(projection_bytes)
+        except (TypeError, ValueError, PublicProjectionError) as exc:
+            raise error_type("root-action CLI projection is invalid") from exc
         status = projection.get("status")
         state = status.get("state") if isinstance(status, dict) else None
         if (
-            projection.get("job_id") != handle["job_id"]
-            or projection.get("job_digest") != handle["job_digest"]
-            or projection.get("projection_digest") != value["observed_projection_digest"]
+            verified_projection.job_id != handle["job_id"]
+            or verified_projection.job_digest != handle["job_digest"]
+            or verified_projection.projection_digest
+            != value["observed_projection_digest"]
             or not isinstance(state, dict)
             or state.get("name") != value["state"]
             or state.get("terminal_outcome") != value["terminal_outcome"]
@@ -140,14 +163,10 @@ def _response(
     public_run = {**run, "stdout": ""}
     ok = run["returncode"] == 0 and value["result"] == "ok"
     reason = value.get("reason_code")
-    retryable = (
-        retry_on_timeout
-        and reason
-        in {
-            "terminal_receipt_polling_timed_out",
-            "outcome_unknown_recovery_needed",
-        }
-    )
+    retryable = retry_on_timeout and reason in {
+        "terminal_receipt_polling_timed_out",
+        "outcome_unknown_recovery_needed",
+    }
     handle = value.get("handle") or fallback_handle
     next_action = None
     if submission_acceptance_unknown:

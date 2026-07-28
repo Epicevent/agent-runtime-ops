@@ -34,9 +34,19 @@ class CommandRecorder:
         return subprocess.CompletedProcess(
             command,
             1 if self.fail_at == len(self.commands) else 0,
-            stdout="not exposed",
+            stdout="4242\n" if command[1] == "show" else "",
             stderr="not exposed",
         )
+
+
+def activation_runtime(tmp_path: Path) -> dict[str, object]:
+    release = tmp_path / "release-under-test"
+    return {
+        "expected_release": release,
+        "read_running_environment": lambda pid: (
+            f"AGENT_RUNTIME_OPS_RELEASE={release}\0MAINPID={pid}\0".encode("utf-8")
+        ),
+    }
 
 
 @pytest.mark.parametrize(
@@ -69,12 +79,15 @@ def test_activation_creates_root_only_policy_and_runs_exact_systemd_sequence(
         expected_owner_uid=os.getuid() if hasattr(os, "getuid") else 0,
         enforce_posix_permissions=os.name == "posix",
         run_command=recorder,
+        **activation_runtime(tmp_path),
     )
     raw = env_path.read_text(encoding="utf-8")
     assert "ROOT_ACTION_WEBAUTHN_RP_ID=ops.ji-tech.co.kr\n" in raw
     assert "ROOT_ACTION_WEBAUTHN_ORIGINS=https://ops.ji-tech.co.kr\n" in raw
     user_id_line = next(
-        line for line in raw.splitlines() if line.startswith("ROOT_ACTION_WEBAUTHN_USER_ID=")
+        line
+        for line in raw.splitlines()
+        if line.startswith("ROOT_ACTION_WEBAUTHN_USER_ID=")
     )
     assert len(user_id_line.split("=", 1)[1]) == 64
     if os.name == "posix":
@@ -85,13 +98,25 @@ def test_activation_creates_root_only_policy_and_runs_exact_systemd_sequence(
     assert user_id_line.split("=", 1)[1] not in json.dumps(result)
     assert recorder.commands == [
         ("systemctl", "daemon-reload"),
-        ("systemctl", "enable", "--now", ROOT_ACTION_BROKER_SERVICE),
+        ("systemctl", "enable", ROOT_ACTION_BROKER_SERVICE),
+        ("systemctl", "restart", ROOT_ACTION_BROKER_SERVICE),
         ("systemctl", "is-enabled", "--quiet", ROOT_ACTION_BROKER_SERVICE),
         ("systemctl", "is-active", "--quiet", ROOT_ACTION_BROKER_SERVICE),
+        (
+            "systemctl",
+            "show",
+            "--property=MainPID",
+            "--value",
+            ROOT_ACTION_BROKER_SERVICE,
+        ),
     ]
+    assert result["restart_performed"] is True
+    assert result["running_release"] == str(tmp_path / "release-under-test")
 
 
-def test_activation_is_idempotent_but_refuses_policy_replacement(tmp_path: Path) -> None:
+def test_activation_is_idempotent_but_refuses_policy_replacement(
+    tmp_path: Path,
+) -> None:
     parent = tmp_path / "agent-runtime-ops"
     parent.mkdir(mode=0o700)
     env_path = parent / "root-action-webauthn.env"
@@ -102,6 +127,7 @@ def test_activation_is_idempotent_but_refuses_policy_replacement(tmp_path: Path)
         expected_owner_uid=owner,
         enforce_posix_permissions=os.name == "posix",
         run_command=CommandRecorder(),
+        **activation_runtime(tmp_path),
     )
     original = env_path.read_bytes()
     second = activate_root_action_broker(
@@ -110,6 +136,7 @@ def test_activation_is_idempotent_but_refuses_policy_replacement(tmp_path: Path)
         expected_owner_uid=owner,
         enforce_posix_permissions=os.name == "posix",
         run_command=CommandRecorder(),
+        **activation_runtime(tmp_path),
     )
     assert env_path.read_bytes() == original
     assert second["environment_created"] is False
@@ -124,6 +151,7 @@ def test_activation_is_idempotent_but_refuses_policy_replacement(tmp_path: Path)
             expected_owner_uid=owner,
             enforce_posix_permissions=os.name == "posix",
             run_command=CommandRecorder(),
+            **activation_runtime(tmp_path),
         )
 
 
@@ -140,8 +168,28 @@ def test_activation_reports_systemd_failure_without_exposing_output(
             expected_owner_uid=os.getuid() if hasattr(os, "getuid") else 0,
             enforce_posix_permissions=os.name == "posix",
             run_command=CommandRecorder(fail_at=2),
+            **activation_runtime(tmp_path),
         )
     assert env_path.exists()
+
+
+def test_activation_fails_if_running_process_is_not_the_installed_release(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "agent-runtime-ops"
+    parent.mkdir(mode=0o700)
+    with pytest.raises(RootActionActivationError, match="not running"):
+        activate_root_action_broker(
+            CONFIG,
+            env_path=parent / "root-action-webauthn.env",
+            expected_owner_uid=os.getuid() if hasattr(os, "getuid") else 0,
+            enforce_posix_permissions=os.name == "posix",
+            run_command=CommandRecorder(),
+            expected_release=tmp_path / "expected-release",
+            read_running_environment=lambda _pid: (
+                b"AGENT_RUNTIME_OPS_RELEASE=/opt/agent-runtime-ops/releases/old\0"
+            ),
+        )
 
 
 def test_cli_activation_requires_root_and_emits_only_bounded_receipt(
@@ -172,6 +220,8 @@ def test_cli_activation_requires_root_and_emits_only_bounded_receipt(
             "service": ROOT_ACTION_BROKER_SERVICE,
             "enabled": True,
             "active": True,
+            "restart_performed": True,
+            "running_release": "/opt/agent-runtime-ops/releases/tested",
         },
     )
     assert cmd_root_action_auth_activate(args) == 0

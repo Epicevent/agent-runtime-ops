@@ -305,8 +305,11 @@ install_root_action_broker_contract() {
   install -d -o root -g "$ROOT_ACTION_TRUSTED_ACCOUNT" -m 0750 "$ROOT_ACTION_PUBLIC_ROOT"
   install -d -o root -g "$ROOT_ACTION_TRUSTED_ACCOUNT" -m 0750 "$ROOT_ACTION_RUNTIME_ROOT"
   unit_tmp="$(mktemp)"
-  sed "s|@@CURRENT_LINK@@|$current_path|g" "$unit_source" >"$unit_tmp"
-  ! grep -q '@@CURRENT_LINK@@' "$unit_tmp" \
+  sed \
+    -e "s|@@CURRENT_LINK@@|$current_path|g" \
+    -e "s|@@RELEASE_DIR@@|$release_dir|g" \
+    "$unit_source" >"$unit_tmp"
+  ! grep -Eq '@@(CURRENT_LINK|RELEASE_DIR)@@' "$unit_tmp" \
     || die "root-action broker unit placeholder was not fully materialized"
   install -o root -g root -m 0644 "$unit_tmp" "$ROOT_ACTION_BROKER_SERVICE_FILE"
   rm -f "$unit_tmp"

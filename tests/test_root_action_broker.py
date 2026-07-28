@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
+import threading
+import time
 import unittest
 
 from agent_runtime_ops.root_actions import BrokerPeerIdentity, SubmissionPolicy
@@ -10,7 +13,12 @@ from agent_runtime_ops.root_actions.broker import (
 )
 from agent_runtime_ops.root_actions.local_fixture import LocalRootActionFixture
 from agent_runtime_ops.root_actions.registry import REGISTRY_VERSION
-from agent_runtime_ops.root_actions.storage import StorageConflict, StorageNotFound
+from agent_runtime_ops.root_actions.state import (
+    TerminalOutcome,
+    TransitionEvent,
+    TransitionKind,
+)
+from agent_runtime_ops.root_actions.storage import StorageNotFound
 
 
 def manifest(*, job_id: str = "job-broker-1") -> bytes:
@@ -108,6 +116,38 @@ class CatalogCoverageSink(CapturingSink):
         self.catalog = (bundles, authority_job_count)
 
 
+class ConcurrentPublicationSink(CapturingSink):
+    def __init__(self) -> None:
+        super().__init__()
+        self._guard = threading.Lock()
+        self.active = 0
+        self.maximum_active = 0
+
+    def _enter(self) -> None:
+        with self._guard:
+            self.active += 1
+            self.maximum_active = max(self.maximum_active, self.active)
+        time.sleep(0.01)
+
+    def _leave(self) -> None:
+        with self._guard:
+            self.active -= 1
+
+    def publish(self, bundle) -> None:
+        self._enter()
+        try:
+            super().publish(bundle)
+        finally:
+            self._leave()
+
+    def publish_catalog(self, bundles, *, authority_job_count=None) -> None:
+        self._enter()
+        try:
+            self.catalog = (bundles, authority_job_count)
+        finally:
+            self._leave()
+
+
 class TypedRootActionBrokerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.store = LocalRootActionFixture()
@@ -136,7 +176,9 @@ class TypedRootActionBrokerTests(unittest.TestCase):
         self.assertEqual(len(self.sink.bundles), 1)
         self.assertEqual(self.sink.bundles[0].job_digest, submitted.job_digest)
 
-    def test_exact_duplicate_is_idempotent_and_does_not_replace_sealed_job(self) -> None:
+    def test_exact_duplicate_is_idempotent_and_does_not_replace_sealed_job(
+        self,
+    ) -> None:
         first = self.broker.submit(manifest(), peer=TEST_PEER)
         second = self.broker.submit(manifest(), peer=TEST_PEER)
         self.assertEqual(second, first)
@@ -244,6 +286,87 @@ class TypedRootActionBrokerTests(unittest.TestCase):
             [item.job_id for item in recovered], ["job-projection-recovery"]
         )
         self.assertEqual(len(recovered_sink.bundles), 1)
+
+    def test_stale_projection_cannot_overwrite_a_newer_public_revision(self) -> None:
+        submitted = self.broker.submit(
+            manifest(job_id="job-stale-publication"), peer=TEST_PEER
+        )
+        job = self.store.read_sealed(submitted.job_id)
+        self.store.compare_and_append(
+            TransitionEvent(
+                event_id="event-claim-stale-publication",
+                job_id=job.job_id,
+                job_digest=job.job_digest,
+                expected_revision=0,
+                kind=TransitionKind.CLAIM_EXECUTION,
+                occurred_at="2026-07-27T08:00:08Z",
+            )
+        )
+        stale = self.broker.public_projection(submitted.job_id)
+        self.store.compare_and_append(
+            TransitionEvent(
+                event_id="event-complete-stale-publication",
+                job_id=job.job_id,
+                job_digest=job.job_digest,
+                expected_revision=1,
+                kind=TransitionKind.COMPLETE_EXECUTION,
+                occurred_at="2026-07-27T08:00:09Z",
+                outcome=TerminalOutcome.SUCCEEDED,
+                reason_code="exit-zero",
+            )
+        )
+
+        current = self.broker.repair_public_best_effort(submitted.job_id)
+        publication_count = len(self.sink.bundles)
+        repaired = self.broker._repair_public_best_effort(
+            submitted.job_id,
+            bundle=stale,
+        )
+
+        self.assertEqual(json.loads(current.status_bytes)["state"]["revision"], 2)
+        self.assertEqual(repaired.projection_digest, current.projection_digest)
+        self.assertEqual(len(self.sink.bundles), publication_count)
+        self.assertEqual(
+            json.loads(self.sink.bundles[-1].status_bytes)["state"]["revision"],
+            2,
+        )
+
+    def test_projection_and_catalog_publication_are_serialized(self) -> None:
+        sink = ConcurrentPublicationSink()
+        broker = TypedRootActionBroker(
+            self.store,
+            events=self.events,
+            public_sink=sink,
+            submission_policy=TEST_SUBMISSION_POLICY,
+        )
+        broker.submit(manifest(job_id="job-serialized-one"), peer=TEST_PEER)
+        second_manifest = json.loads(manifest(job_id="job-serialized-two"))
+        second_manifest["request"]["lineage_id"] = "lineage-serialized-two"
+        broker.submit(json.dumps(second_manifest).encode("utf-8"), peer=TEST_PEER)
+        for index, job_id in enumerate(
+            ("job-serialized-one", "job-serialized-two"), start=1
+        ):
+            job = self.store.read_sealed(job_id)
+            self.store.compare_and_append(
+                TransitionEvent(
+                    event_id=f"event-claim-serialized-{index}",
+                    job_id=job.job_id,
+                    job_digest=job.job_digest,
+                    expected_revision=0,
+                    kind=TransitionKind.CLAIM_EXECUTION,
+                    occurred_at=f"2026-07-27T08:00:{8 + index:02d}Z",
+                )
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [
+                pool.submit(broker.repair_public_best_effort, job_id)
+                for job_id in ("job-serialized-one", "job-serialized-two")
+            ]
+            for future in futures:
+                future.result(timeout=5)
+
+        self.assertEqual(sink.maximum_active, 1)
 
 
 if __name__ == "__main__":

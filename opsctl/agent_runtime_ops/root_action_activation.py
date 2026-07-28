@@ -8,17 +8,18 @@ import re
 import secrets
 import stat
 import subprocess
+import sys
 import tempfile
 from typing import Callable, Sequence
 from urllib.parse import urlsplit
 
 
-ROOT_ACTION_WEBAUTHN_ENV = Path(
-    "/etc/agent-runtime-ops/root-action-webauthn.env"
-)
+ROOT_ACTION_WEBAUTHN_ENV = Path("/etc/agent-runtime-ops/root-action-webauthn.env")
 ROOT_ACTION_BROKER_SERVICE = "agent-runtime-root-action-broker.service"
 ROOT_ACTION_RP_NAME = "JI TECH root action"
 ROOT_ACTION_ACTIVATION_SCHEMA = "agent-runtime-root-action-activation/v1"
+ROOT_ACTION_RUNNING_RELEASE_ENV = "AGENT_RUNTIME_OPS_RELEASE"
+ROOT_ACTION_PROCESS_ENV_MAX_BYTES = 64 * 1024
 _ENV_KEYS = {
     "ROOT_ACTION_WEBAUTHN_RP_ID",
     "ROOT_ACTION_WEBAUTHN_ORIGINS",
@@ -42,7 +43,9 @@ class RootActionActivationConfig:
 
     def __post_init__(self) -> None:
         if self.rp_id != self.rp_id.lower() or not _DOMAIN_RE.fullmatch(self.rp_id):
-            raise RootActionActivationError("rp_id must be a canonical lowercase domain")
+            raise RootActionActivationError(
+                "rp_id must be a canonical lowercase domain"
+            )
         parsed = urlsplit(self.origin)
         if (
             parsed.scheme != "https"
@@ -61,6 +64,7 @@ class RootActionActivationConfig:
 
 
 RunCommand = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
+ReadRunningEnvironment = Callable[[int], bytes]
 
 
 def _run_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
@@ -68,10 +72,43 @@ def _run_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
         list(argv),
         check=False,
         stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
     )
+
+
+def _read_running_environment(pid: int) -> bytes:
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        raise RootActionActivationError("root-action broker MainPID is invalid")
+    try:
+        with Path(f"/proc/{pid}/environ").open("rb") as stream:
+            raw = stream.read(ROOT_ACTION_PROCESS_ENV_MAX_BYTES + 1)
+    except OSError as exc:
+        raise RootActionActivationError(
+            "root-action broker running release could not be verified"
+        ) from exc
+    if not raw or len(raw) > ROOT_ACTION_PROCESS_ENV_MAX_BYTES:
+        raise RootActionActivationError(
+            "root-action broker running release could not be verified"
+        )
+    return raw
+
+
+def _installed_release() -> Path:
+    try:
+        release = Path(sys.prefix).resolve(strict=True).parent
+    except OSError as exc:
+        raise RootActionActivationError(
+            "installed root-action release could not be resolved"
+        ) from exc
+    if not release.is_absolute() or any(
+        ord(character) < 0x20 or ord(character) == 0x7F for character in str(release)
+    ):
+        raise RootActionActivationError(
+            "installed root-action release could not be resolved"
+        )
+    return release
 
 
 def _parse_env(raw: bytes) -> dict[str, str]:
@@ -97,9 +134,7 @@ def _parse_env(raw: bytes) -> dict[str, str]:
         values[key] = value
     if set(values) != _ENV_KEYS:
         raise RootActionActivationError("existing WebAuthn environment is invalid")
-    if not re.fullmatch(
-        r"[0-9a-f]{64}", values["ROOT_ACTION_WEBAUTHN_USER_ID"]
-    ):
+    if not re.fullmatch(r"[0-9a-f]{64}", values["ROOT_ACTION_WEBAUTHN_USER_ID"]):
         raise RootActionActivationError("existing WebAuthn environment is invalid")
     return values
 
@@ -134,16 +169,11 @@ def _verify_parent(
     parent.mkdir(mode=0o755, parents=True, exist_ok=True)
     metadata = parent.lstat()
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-        raise RootActionActivationError(
-            "WebAuthn environment directory is not trusted"
-        )
+        raise RootActionActivationError("WebAuthn environment directory is not trusted")
     if enforce_posix_permissions and (
-        metadata.st_uid != expected_owner_uid
-        or stat.S_IMODE(metadata.st_mode) & 0o022
+        metadata.st_uid != expected_owner_uid or stat.S_IMODE(metadata.st_mode) & 0o022
     ):
-        raise RootActionActivationError(
-            "WebAuthn environment directory is not trusted"
-        )
+        raise RootActionActivationError("WebAuthn environment directory is not trusted")
 
 
 def _read_existing(
@@ -162,8 +192,7 @@ def _read_existing(
             "existing WebAuthn environment ownership or mode is invalid"
         )
     if enforce_posix_permissions and (
-        metadata.st_uid != expected_owner_uid
-        or stat.S_IMODE(metadata.st_mode) != 0o600
+        metadata.st_uid != expected_owner_uid or stat.S_IMODE(metadata.st_mode) != 0o600
     ):
         raise RootActionActivationError(
             "existing WebAuthn environment ownership or mode is invalid"
@@ -238,6 +267,8 @@ def activate_root_action_broker(
     expected_owner_uid: int = 0,
     enforce_posix_permissions: bool = True,
     run_command: RunCommand = _run_command,
+    expected_release: Path | None = None,
+    read_running_environment: ReadRunningEnvironment = _read_running_environment,
 ) -> dict[str, object]:
     existing_user_id = _read_existing(
         env_path,
@@ -252,18 +283,51 @@ def activate_root_action_broker(
         expected_owner_uid=expected_owner_uid,
         enforce_posix_permissions=enforce_posix_permissions,
     )
+    release = (
+        Path(expected_release) if expected_release is not None else _installed_release()
+    )
+    if not release.is_absolute():
+        raise RootActionActivationError("expected root-action release is invalid")
     commands = [
         ("systemctl", "daemon-reload"),
-        ("systemctl", "enable", "--now", ROOT_ACTION_BROKER_SERVICE),
+        ("systemctl", "enable", ROOT_ACTION_BROKER_SERVICE),
+        ("systemctl", "restart", ROOT_ACTION_BROKER_SERVICE),
         ("systemctl", "is-enabled", "--quiet", ROOT_ACTION_BROKER_SERVICE),
         ("systemctl", "is-active", "--quiet", ROOT_ACTION_BROKER_SERVICE),
+        (
+            "systemctl",
+            "show",
+            "--property=MainPID",
+            "--value",
+            ROOT_ACTION_BROKER_SERVICE,
+        ),
     ]
+    main_pid: int | None = None
     for command in commands:
         completed = run_command(command)
         if completed.returncode != 0:
             raise RootActionActivationError(
                 "root-action broker activation failed closed"
             )
+        if command[1] == "show":
+            stdout = completed.stdout
+            if not isinstance(stdout, str) or not re.fullmatch(
+                r"[1-9][0-9]{0,9}\n?", stdout
+            ):
+                raise RootActionActivationError("root-action broker MainPID is invalid")
+            main_pid = int(stdout.strip())
+    if main_pid is None:
+        raise RootActionActivationError("root-action broker MainPID is invalid")
+    raw_environment = read_running_environment(main_pid)
+    if not isinstance(raw_environment, bytes):
+        raise RootActionActivationError(
+            "root-action broker running release could not be verified"
+        )
+    marker = f"{ROOT_ACTION_RUNNING_RELEASE_ENV}={release}".encode("utf-8")
+    if marker not in raw_environment.split(b"\x00"):
+        raise RootActionActivationError(
+            "root-action broker is not running the installed release"
+        )
     return {
         "schema": ROOT_ACTION_ACTIVATION_SCHEMA,
         "rp_id": config.rp_id,
@@ -275,4 +339,6 @@ def activate_root_action_broker(
         "service": ROOT_ACTION_BROKER_SERVICE,
         "enabled": True,
         "active": True,
+        "restart_performed": True,
+        "running_release": str(release),
     }

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import secrets
 import json
+import threading
 from typing import Any, Protocol, runtime_checkable
 
 from .admission import LineageFailurePolicy
@@ -116,7 +117,9 @@ class TypedRootActionBroker:
         self._submission_policy = submission_policy
         self._lineage_failure_policy = lineage_failure_policy
         self._last_publication_error: str | None = None
+        self._publication_lock = threading.RLock()
         self._published_projection_digests: dict[str, str] = {}
+        self._published_projection_revisions: dict[str, int] = {}
 
     def submit(
         self,
@@ -293,14 +296,15 @@ class TypedRootActionBroker:
         ):
             raise StorageNotFound(job_id)
         bundle = self.public_projection(job_id)
-        self._repair_public_best_effort(job_id, bundle=bundle)
-        return bundle
+        return self._repair_public_best_effort(job_id, bundle=bundle)
 
     def publish_public(self, job_id: str) -> PublicProjectionBundle:
-        bundle = self.public_projection(job_id)
-        if self._public_sink is not None:
-            self._public_sink.publish(bundle)
-        return bundle
+        with self._publication_lock:
+            bundle = self.public_projection(job_id)
+            if self._public_sink is not None:
+                self._public_sink.publish(bundle)
+            self._remember_publication(bundle)
+            return bundle
 
     def repair_public_best_effort(self, job_id: str) -> PublicProjectionBundle:
         """Build the authoritative projection and repair its derived copy.
@@ -311,8 +315,7 @@ class TypedRootActionBroker:
         """
 
         bundle = self.public_projection(job_id)
-        self._repair_public_best_effort(job_id, bundle=bundle)
-        return bundle
+        return self._repair_public_best_effort(job_id, bundle=bundle)
 
     def reconcile_public(self) -> tuple[PublicProjectionBundle, ...]:
         """Rebuild every derived public file from root-owned authority.
@@ -320,13 +323,17 @@ class TypedRootActionBroker:
         This is startup/crash recovery, not an execution or approval action.
         """
 
-        bundles = tuple(
-            self.publish_public(job_id) for job_id in self._store.list_job_ids()
-        )
-        self._publish_catalog()
-        for bundle in bundles:
-            self._remember_publication(bundle)
-        return bundles
+        with self._publication_lock:
+            bundles = tuple(
+                self.public_projection(job_id) for job_id in self._store.list_job_ids()
+            )
+            if self._public_sink is not None:
+                for bundle in bundles:
+                    self._public_sink.publish(bundle)
+            self._publish_catalog()
+            for bundle in bundles:
+                self._remember_publication(bundle)
+            return bundles
 
     def receipt(self, job_id: str, job_digest: str) -> ReceiptArtifact:
         if not isinstance(job_digest, str):
@@ -379,30 +386,52 @@ class TypedRootActionBroker:
         job_id: str,
         *,
         bundle: PublicProjectionBundle | None = None,
-    ) -> None:
-        try:
-            if bundle is None:
+    ) -> PublicProjectionBundle:
+        with self._publication_lock:
+            current_revision = self._store.read_record(job_id).revision
+            if bundle is None or self._bundle_revision(bundle) != current_revision:
                 bundle = self.public_projection(job_id)
+            revision = self._bundle_revision(bundle)
+            published_revision = self._published_projection_revisions.get(job_id, -1)
+            if revision < published_revision:
+                return self.public_projection(job_id)
             if (
-                self._published_projection_digests.get(job_id)
+                revision == published_revision
+                and self._published_projection_digests.get(job_id)
                 == bundle.projection_digest
             ):
-                return
-            if self._public_sink is not None:
-                self._public_sink.publish(bundle)
-            self._publish_catalog()
-        except Exception as exc:
-            self._last_publication_error = type(exc).__name__
-        else:
-            self._last_publication_error = None
-            self._remember_publication(bundle)
+                return bundle
+            try:
+                if self._public_sink is not None:
+                    self._public_sink.publish(bundle)
+                self._publish_catalog()
+            except Exception as exc:
+                self._last_publication_error = type(exc).__name__
+            else:
+                self._last_publication_error = None
+                self._remember_publication(bundle)
+            return bundle
+
+    @staticmethod
+    def _bundle_revision(bundle: PublicProjectionBundle) -> int:
+        try:
+            revision = json.loads(bundle.status_bytes)["state"]["revision"]
+        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise BrokerContractError("public projection revision is invalid") from exc
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+            raise BrokerContractError("public projection revision is invalid")
+        return revision
 
     def _remember_publication(self, bundle: PublicProjectionBundle) -> None:
+        revision = self._bundle_revision(bundle)
         self._published_projection_digests.pop(bundle.job_id, None)
+        self._published_projection_revisions.pop(bundle.job_id, None)
         self._published_projection_digests[bundle.job_id] = bundle.projection_digest
+        self._published_projection_revisions[bundle.job_id] = revision
         while len(self._published_projection_digests) > PUBLIC_CATALOG_JOB_LIMIT:
             oldest = next(iter(self._published_projection_digests))
             del self._published_projection_digests[oldest]
+            self._published_projection_revisions.pop(oldest, None)
 
     def _recover_idempotent(
         self,
