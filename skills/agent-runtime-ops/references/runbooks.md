@@ -198,10 +198,11 @@ root_action_wait {"handle": COMPLETE_UNCHANGED_HANDLE}
 ```
 
 The tool waits for a bounded interval. If it returns `retryable=true` with
-`terminal_receipt_polling_timed_out` or `outcome_unknown_recovery_needed`, call `root_action_wait` again
-with the same unchanged handle. Do not ask the user to poll, run a root shell, wait in a terminal, or
-paste output. `root_action_retrieve` is a read-only single snapshot for diagnosis; it does not replace
-continued receipt recovery.
+`terminal_receipt_polling_timed_out`, call `root_action_wait` again with the same unchanged handle. An
+identity-bound `unknown` notice is returned immediately with `retryable=false`: stop polling and keep
+the handle and notice as recovery evidence. Do not ask the user to poll, run a root shell, wait in a
+terminal, or paste output. `root_action_retrieve` is a read-only single snapshot for diagnosis; it does
+not replace continued receipt recovery.
 
 Stop only on an identity-bound terminal receipt, an explicit user cancellation before approval, or a
 real invariant/availability failure requiring a decision. A failed, rejected, expired, canceled, or

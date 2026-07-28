@@ -11,6 +11,7 @@ import pytest
 from agent_runtime_ops.root_actions.authorization import (
     ApprovalRecord,
     BootstrapSession,
+    BootstrapState,
     CeremonyPurpose,
     CeremonyState,
     CredentialRole,
@@ -175,7 +176,7 @@ def test_initial_bootstrap_cannot_be_recreated_after_consumption() -> None:
             store.create_auth_bootstrap(second)
 
 
-def test_initial_bootstrap_cannot_be_recreated_after_expiration() -> None:
+def test_initial_bootstrap_allows_one_pre_enrollment_response_loss_recovery() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         store = make_store(Path(temporary) / "root-actions")
         first = BootstrapSession(
@@ -193,9 +194,46 @@ def test_initial_bootstrap_cannot_be_recreated_after_expiration() -> None:
             expires_at="2026-07-28T03:10:00Z",
             remaining_registrations=1,
         )
+        store.create_auth_bootstrap(second)
+
+        assert store.read_auth_bootstrap(first.bootstrap_id).state is BootstrapState.EXPIRED
+        assert store.read_auth_bootstrap(second.bootstrap_id) == second
+        third = BootstrapSession(
+            bootstrap_id="bootstrap-third",
+            token_digest=bootstrap_token_digest(bytes.fromhex("65" * 32)),
+            issued_at="2026-07-28T04:00:00Z",
+            expires_at="2026-07-28T04:10:00Z",
+            remaining_registrations=1,
+        )
+        with pytest.raises(StorageConflict, match="initial bootstrap"):
+            store.create_auth_bootstrap(third)
+
+
+def test_initial_bootstrap_reissue_is_blocked_after_registration_ceremony() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        store = make_store(Path(temporary) / "root-actions")
+        first = BootstrapSession(
+            bootstrap_id="bootstrap-with-ceremony",
+            token_digest=bootstrap_token_digest(bytes.fromhex("66" * 32)),
+            issued_at=ISSUED,
+            expires_at=BOOTSTRAP_EXPIRES,
+            remaining_registrations=1,
+        )
+        store.create_auth_bootstrap(first)
+        store.issue_registration_ceremony(
+            token_digest=first.token_digest,
+            ceremony=make_registration(bootstrap_id=first.bootstrap_id),
+        )
+        replacement = BootstrapSession(
+            bootstrap_id="bootstrap-after-ceremony",
+            token_digest=bootstrap_token_digest(bytes.fromhex("67" * 32)),
+            issued_at="2026-07-28T02:00:00Z",
+            expires_at="2026-07-28T02:10:00Z",
+            remaining_registrations=1,
+        )
 
         with pytest.raises(StorageConflict, match="initial bootstrap"):
-            store.create_auth_bootstrap(second)
+            store.create_auth_bootstrap(replacement)
 
 
 def pending_job(store: PosixRootActionStore):

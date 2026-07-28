@@ -800,10 +800,32 @@ class PosixRootActionStore:
         if session.state is not BootstrapState.ISSUED:
             raise StorageConflict("new bootstrap session must be issued")
         with self._transaction() as connection:
-            if connection.execute(
-                "SELECT 1 FROM root_action_auth_bootstrap LIMIT 1"
-            ).fetchone() is not None:
-                raise StorageConflict("initial bootstrap has already been created")
+            existing = connection.execute(
+                "SELECT bootstrap_id, state FROM root_action_auth_bootstrap "
+                "ORDER BY issued_at, bootstrap_id"
+            ).fetchall()
+            if existing:
+                has_credential = connection.execute(
+                    "SELECT 1 FROM root_action_auth_credentials LIMIT 1"
+                ).fetchone()
+                has_ceremony = connection.execute(
+                    "SELECT 1 FROM root_action_auth_ceremonies LIMIT 1"
+                ).fetchone()
+                if (
+                    len(existing) != 1
+                    or has_credential is not None
+                    or has_ceremony is not None
+                    or existing[0]["state"] == BootstrapState.CONSUMED.value
+                ):
+                    raise StorageConflict("initial bootstrap has already been created")
+                # Kernel root gets one bounded recovery if the first response
+                # was lost before any enrollment ceremony began.  Invalidate
+                # the unseen token before issuing its sole replacement.
+                connection.execute(
+                    "UPDATE root_action_auth_bootstrap SET state='expired' "
+                    "WHERE bootstrap_id=? AND state IN ('issued', 'expired')",
+                    (existing[0]["bootstrap_id"],),
+                )
             self._execute_insert(
                 connection,
                 """
