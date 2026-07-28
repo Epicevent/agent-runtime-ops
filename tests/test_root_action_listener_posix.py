@@ -170,6 +170,39 @@ def test_client_reset_during_response_does_not_escape_listener(tmp_path: Path) -
     assert errors == []
 
 
+def test_client_reset_during_request_read_does_not_escape_listener(tmp_path: Path) -> None:
+    socket_path = tmp_path / "runtime" / "broker.sock"
+    listener = RootActionUnixListener(
+        RootActionBrokerEndpoint(root_broker()),
+        socket_path=socket_path,
+        required_uid=os.getuid(),
+        trusted_gid=os.getgid(),
+        create_parent=True,
+    )
+    listener.open()
+    errors: list[BaseException] = []
+    thread = serve_one(listener, errors)
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.connect(str(socket_path))
+    client.sendall(b"\x00")
+    client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+    client.close()
+    thread.join(timeout=3)
+
+    assert not thread.is_alive()
+    assert errors == []
+
+    thread = serve_one(listener, errors)
+    handle, projection = RootActionBrokerClient(socket_path=socket_path).submit(
+        manifest("job-after-read-reset")
+    )
+    thread.join(timeout=3)
+    listener.close()
+    assert errors == []
+    assert handle.job_id == "job-after-read-reset"
+    assert projection["status"]["state"]["name"] == "pending"
+
+
 def test_production_projection_permissions_are_root_trusted_group_only(
     tmp_path: Path,
 ) -> None:

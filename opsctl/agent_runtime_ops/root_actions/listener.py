@@ -188,15 +188,16 @@ class RootActionUnixListener:
             raise RootActionListenerError("broker listener is not open")
         connection, _ = self._socket.accept()
         with connection:
-            connection.settimeout(2.0)
-            peer = self._peer_identity(connection)
-            frame = self._read_one_frame(connection)
-            response = self.endpoint.handle(frame, peer=peer)
             try:
+                connection.settimeout(2.0)
+                peer = self._peer_identity(connection)
+                frame = self._read_one_frame(connection)
+                response = self.endpoint.handle(frame, peer=peer)
                 connection.sendall(response)
             except OSError:
-                # The request may already have committed. A client that resets
-                # before reading its response must not terminate the broker.
+                # A reset or timeout belongs to this accepted connection.  It
+                # must not terminate the broker whether it happens before the
+                # full frame arrives or after the request has committed.
                 return
 
     def serve_forever(self, stop: threading.Event | None = None) -> None:
