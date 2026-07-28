@@ -846,6 +846,27 @@ class McpServerTests(unittest.TestCase):
             ],
         )
 
+    def test_root_action_failed_retrieve_does_not_claim_submission_was_accepted(self) -> None:
+        _result, handle = root_action_cli_result()
+        error_result = {
+            "schema": "agent-runtime-root-action-cli-result/v1",
+            "result": "error",
+            "reason_code": "root_action_retrieval_failed_closed",
+            "handle": handle,
+        }
+        runner = FakeRunner([(2, json.dumps(error_result), "")])
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+
+        payload = call_tool(server, "root_action_retrieve", {"handle": handle})
+
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["mutated"])
+        self.assertEqual(payload["acceptance_state"], "unknown")
+        self.assertTrue(payload["recovery_required"])
+        self.assertEqual(payload["handle"], handle)
+        self.assertIn("Submission acceptance is unknown", payload["next_action"])
+        self.assertIn("Never change the digest", payload["next_action"])
+
     def test_root_action_projection_redaction_cannot_invalidate_embedded_digest(
         self,
     ) -> None:

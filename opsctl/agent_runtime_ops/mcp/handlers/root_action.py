@@ -159,6 +159,7 @@ def _response(
     retry_on_timeout: bool = False,
     fallback_handle: dict[str, str] | None = None,
     submission_acceptance_unknown: bool = False,
+    require_projection_for_acceptance: bool = False,
 ) -> dict[str, Any]:
     value = _parse_cli_result(run, error_type=server.tool_error)
     public_run = {**run, "stdout": ""}
@@ -167,11 +168,14 @@ def _response(
         value.get("state") == "unknown"
         or reason == "outcome_unknown_recovery_needed"
     )
+    acceptance_unknown = submission_acceptance_unknown or (
+        require_projection_for_acceptance and value["result"] != "ok"
+    )
     ok = run["returncode"] == 0 and value["result"] == "ok" and not outcome_unknown
     retryable = retry_on_timeout and reason == "terminal_receipt_polling_timed_out"
     handle = value.get("handle") or fallback_handle
     next_action = None
-    if submission_acceptance_unknown:
+    if acceptance_unknown:
         next_action = (
             "Submission acceptance is unknown. Call root_action_retrieve with the derived "
             "unchanged handle before considering any new submission. Never change the digest "
@@ -202,10 +206,10 @@ def _response(
             "root_action": value,
             "handle": handle,
             "retryable": retryable,
-            "recovery_required": submission_acceptance_unknown or outcome_unknown,
+            "recovery_required": acceptance_unknown or outcome_unknown,
             "acceptance_state": (
                 "unknown"
-                if submission_acceptance_unknown
+                if acceptance_unknown
                 else "accepted"
                 if value["result"] == "ok" or value.get("handle") is not None
                 else "not_observed"
@@ -299,7 +303,7 @@ def submit(server, args: dict[str, Any]) -> dict[str, Any]:
             argv=argv,
             handle=derived_handle,
         )
-    accepted = value["result"] == "ok" or value.get("handle") is not None
+    accepted = value["result"] == "ok"
     return _response(
         server,
         run,
@@ -316,7 +320,12 @@ def retrieve(server, args: dict[str, Any]) -> dict[str, Any]:
         [server.opsctl, "root-action", "retrieve", *_handle_argv(handle)],
         timeout=15,
     )
-    return _response(server, run, mutated=False)
+    return _response(
+        server,
+        run,
+        mutated=False,
+        require_projection_for_acceptance=True,
+    )
 
 
 def wait(server, args: dict[str, Any]) -> dict[str, Any]:
