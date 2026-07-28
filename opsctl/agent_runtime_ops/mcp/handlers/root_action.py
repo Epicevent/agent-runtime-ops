@@ -162,6 +162,12 @@ def _response(
     require_projection_for_acceptance: bool = False,
 ) -> dict[str, Any]:
     value = _parse_cli_result(run, error_type=server.tool_error)
+    if (
+        value["result"] == "error"
+        and value.get("handle") is None
+        and fallback_handle is not None
+    ):
+        value = {**value, "handle": fallback_handle}
     public_run = {**run, "stdout": ""}
     reason = value.get("reason_code")
     outcome_unknown = (
@@ -320,6 +326,14 @@ def submit(server, args: dict[str, Any]) -> dict[str, Any]:
             argv=argv,
             handle=derived_handle,
         )
+    echoed_handle = value.get("handle")
+    if echoed_handle is not None and echoed_handle != derived_handle:
+        return _submission_recovery_response(
+            server,
+            run=run,
+            argv=argv,
+            handle=derived_handle,
+        )
     accepted = value["result"] == "ok"
     return _response(
         server,
@@ -403,17 +417,52 @@ def wait(server, args: dict[str, Any]) -> dict[str, Any]:
         maximum=MAX_MCP_POLL_INTERVAL_SECONDS,
         error_type=server.tool_error,
     )
-    run = server._run(
-        [
-            server.opsctl,
-            "root-action",
-            "wait",
-            *_handle_argv(handle),
-            "--wait-timeout",
-            str(wait_timeout),
-            "--poll-interval",
-            str(poll_interval),
-        ],
-        timeout=math.ceil(wait_timeout) + 10,
+    argv = [
+        server.opsctl,
+        "root-action",
+        "wait",
+        *_handle_argv(handle),
+        "--wait-timeout",
+        str(wait_timeout),
+        "--poll-interval",
+        str(poll_interval),
+    ]
+    try:
+        run = server._run(
+            argv,
+            timeout=math.ceil(wait_timeout) + 10,
+        )
+    except Exception:
+        return _acceptance_recovery_response(
+            server,
+            run=None,
+            argv=argv,
+            handle=handle,
+            reason_code="root_action_retrieval_result_unavailable",
+        )
+    try:
+        value = _parse_cli_result(run, error_type=server.tool_error)
+    except Exception:
+        return _acceptance_recovery_response(
+            server,
+            run=run,
+            argv=argv,
+            handle=handle,
+            reason_code="root_action_retrieval_result_unavailable",
+        )
+    echoed_handle = value.get("handle")
+    if echoed_handle is not None and echoed_handle != handle:
+        return _acceptance_recovery_response(
+            server,
+            run=run,
+            argv=argv,
+            handle=handle,
+            reason_code="root_action_retrieval_result_unavailable",
+        )
+    return _response(
+        server,
+        run,
+        mutated=False,
+        retry_on_timeout=True,
+        fallback_handle=handle,
     )
-    return _response(server, run, mutated=False, retry_on_timeout=True)

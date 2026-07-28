@@ -47,8 +47,10 @@ def call_tool(server: McpServer, name: str, arguments: dict[str, object] | None 
     return call_tool_result(server, name, arguments)["structuredContent"]
 
 
-def root_action_cli_result(*, terminal: bool = False) -> tuple[dict[str, object], dict[str, str]]:
-    job = seal_typed_manifest(root_action_manifest("job-mcp"))
+def root_action_cli_result(
+    *, terminal: bool = False, job_id: str = "job-mcp"
+) -> tuple[dict[str, object], dict[str, str]]:
+    job = seal_typed_manifest(root_action_manifest(job_id))
     handle = {
         "job_id": job.job_id,
         "job_digest": job.job_digest,
@@ -819,6 +821,31 @@ class McpServerTests(unittest.TestCase):
         )
         self.assertNotIn("sudo", payload["commands"][0])
 
+    def test_root_action_submit_rejects_success_for_different_sealed_job(self) -> None:
+        crossed_result, _crossed_handle = root_action_cli_result(job_id="job-crossed")
+        runner = FakeRunner([(0, json.dumps(crossed_result), "")])
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        manifest_value = json.loads(root_action_manifest("job-mcp"))
+        expected = seal_typed_manifest(root_action_manifest("job-mcp"))
+        expected_handle = {
+            "job_id": expected.job_id,
+            "job_digest": expected.job_digest,
+            "request_id": expected.request_id,
+            "reply_target": expected.reply_target,
+        }
+
+        payload = call_tool(server, "root_action_submit", {"manifest": manifest_value})
+
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["acceptance_state"], "unknown")
+        self.assertTrue(payload["recovery_required"])
+        self.assertEqual(payload["handle"], expected_handle)
+        self.assertEqual(payload["root_action"]["handle"], expected_handle)
+        self.assertEqual(
+            payload["root_action"]["reason_code"],
+            "root_action_submission_result_unavailable",
+        )
+
     def test_root_action_retrieve_uses_complete_identity_bound_handle(self) -> None:
         result, handle = root_action_cli_result(terminal=True)
         runner = FakeRunner([(0, json.dumps(result), "")])
@@ -955,7 +982,6 @@ class McpServerTests(unittest.TestCase):
             "schema": "agent-runtime-root-action-cli-result/v1",
             "result": "error",
             "reason_code": "terminal_receipt_polling_timed_out",
-            "handle": handle,
         }
         runner = FakeRunner([(2, json.dumps(timeout_result), "")])
         server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
@@ -976,12 +1002,73 @@ class McpServerTests(unittest.TestCase):
         self.assertFalse(payload["recovery_required"])
         self.assertEqual(payload["acceptance_state"], "accepted")
         self.assertEqual(payload["handle"], handle)
+        self.assertEqual(payload["root_action"]["handle"], handle)
         self.assertIn("Do not ask the user", payload["next_action"])
         self.assertEqual(runner.calls[0]["timeout"], 20)
         self.assertEqual(
             runner.calls[0]["argv"][-4:],
             ["--wait-timeout", "10.0", "--poll-interval", "1.0"],
         )
+
+    def test_root_action_wait_rejects_mismatched_echoed_handle(self) -> None:
+        _result, handle = root_action_cli_result()
+        _other_result, other_handle = root_action_cli_result(job_id="job-wait-other")
+        error_result = {
+            "schema": "agent-runtime-root-action-cli-result/v1",
+            "result": "error",
+            "reason_code": "terminal_receipt_polling_timed_out",
+            "handle": other_handle,
+        }
+        runner = FakeRunner([(2, json.dumps(error_result), "")])
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+
+        payload = call_tool(server, "root_action_wait", {"handle": handle})
+
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["acceptance_state"], "unknown")
+        self.assertTrue(payload["recovery_required"])
+        self.assertFalse(payload["retryable"])
+        self.assertEqual(payload["handle"], handle)
+        self.assertEqual(payload["root_action"]["handle"], handle)
+        self.assertEqual(
+            payload["root_action"]["reason_code"],
+            "root_action_retrieval_result_unavailable",
+        )
+
+    def test_root_action_wait_unavailable_output_preserves_input_handle(self) -> None:
+        class TimeoutRunner(FakeRunner):
+            def run(
+                self,
+                argv: list[str],
+                *,
+                input_text: str | None = None,
+                timeout: int = 60,
+            ) -> CommandResult:
+                self.calls.append(
+                    {"argv": argv, "input_text": input_text, "timeout": timeout}
+                )
+                raise subprocess.TimeoutExpired(argv, timeout)
+
+        _result, handle = root_action_cli_result()
+        runners = (
+            TimeoutRunner(),
+            FakeRunner([(2, "{", "truncated")]),
+        )
+        for runner in runners:
+            with self.subTest(runner=type(runner).__name__):
+                server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+                payload = call_tool(server, "root_action_wait", {"handle": handle})
+
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["acceptance_state"], "unknown")
+                self.assertTrue(payload["recovery_required"])
+                self.assertFalse(payload["retryable"])
+                self.assertEqual(payload["handle"], handle)
+                self.assertEqual(payload["root_action"]["handle"], handle)
+                self.assertEqual(
+                    payload["root_action"]["reason_code"],
+                    "root_action_retrieval_result_unavailable",
+                )
 
     def test_root_action_wait_unknown_outcome_stops_polling_and_requires_recovery(self) -> None:
         _result, handle = root_action_cli_result()
