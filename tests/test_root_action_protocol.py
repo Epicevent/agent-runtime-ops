@@ -53,6 +53,18 @@ def make_broker(store, *, sink=None) -> TypedRootActionBroker:
     )
 
 
+class CapturePublicSink:
+    def __init__(self) -> None:
+        self.bundles = []
+        self.catalogs = []
+
+    def publish(self, bundle) -> None:
+        self.bundles.append(bundle)
+
+    def publish_catalog(self, bundles, *, authority_job_count=None) -> None:
+        self.catalogs.append((bundles, authority_job_count))
+
+
 def transition_terminal(store, job_id: str, *, outcome: TerminalOutcome) -> None:
     job = store.read_sealed(job_id)
     record = store.read_record(job_id)
@@ -190,13 +202,18 @@ def test_submit_to_terminal_receipt_auto_retrieve_and_binding_controls() -> None
     from agent_runtime_ops.root_actions.local_fixture import LocalRootActionFixture
 
     store = LocalRootActionFixture()
-    broker = make_broker(store)
+    sink = CapturePublicSink()
+    broker = make_broker(store, sink=sink)
     endpoint = RootActionBrokerEndpoint(broker)
     client = RootActionBrokerClient(
         transport=lambda frame, _timeout: endpoint.handle(frame, peer=PEER)
     )
     handle, initial_projection = client.submit(manifest("job-auto-retrieve"))
     initial_digest = initial_projection["projection_digest"]
+    pending_publish_count = len(sink.bundles)
+    client.retrieve(handle)
+    client.retrieve(handle)
+    assert len(sink.bundles) == pending_publish_count
     transition_terminal(store, handle.job_id, outcome=TerminalOutcome.SUCCEEDED)
     publish_public_receipt(store, handle.job_id)
 
@@ -213,6 +230,15 @@ def test_submit_to_terminal_receipt_auto_retrieve_and_binding_controls() -> None
         {"name": "verified", "value": "true"}
     ]
     assert b"private complete output" not in json.dumps(projection).encode()
+    published = json.loads(sink.bundles[-1].projection_bytes)
+    assert len(sink.bundles) == pending_publish_count + 1
+    assert published["projection_digest"] == projection["projection_digest"]
+    assert published["status"]["state"]["name"] == "terminal"
+    catalog_bundles, authority_count = sink.catalogs[-1]
+    assert authority_count == 1
+    assert [item.projection_digest for item in catalog_bundles] == [
+        projection["projection_digest"]
+    ]
 
     with pytest.raises(RootActionClientError):
         client.retrieve(replace(handle, reply_target="reply-wrong"))

@@ -116,6 +116,7 @@ class TypedRootActionBroker:
         self._submission_policy = submission_policy
         self._lineage_failure_policy = lineage_failure_policy
         self._last_publication_error: str | None = None
+        self._published_projection_digests: dict[str, str] = {}
 
     def submit(
         self,
@@ -291,7 +292,9 @@ class TypedRootActionBroker:
             or job.reply_target != reply_target
         ):
             raise StorageNotFound(job_id)
-        return self.public_projection(job_id)
+        bundle = self.public_projection(job_id)
+        self._repair_public_best_effort(job_id, bundle=bundle)
+        return bundle
 
     def publish_public(self, job_id: str) -> PublicProjectionBundle:
         bundle = self.public_projection(job_id)
@@ -309,6 +312,8 @@ class TypedRootActionBroker:
             self.publish_public(job_id) for job_id in self._store.list_job_ids()
         )
         self._publish_catalog()
+        for bundle in bundles:
+            self._remember_publication(bundle)
         return bundles
 
     def receipt(self, job_id: str, job_digest: str) -> ReceiptArtifact:
@@ -357,14 +362,35 @@ class TypedRootActionBroker:
             authority_job_count=authority_count,
         )
 
-    def _repair_public_best_effort(self, job_id: str) -> None:
+    def _repair_public_best_effort(
+        self,
+        job_id: str,
+        *,
+        bundle: PublicProjectionBundle | None = None,
+    ) -> None:
         try:
-            self.publish_public(job_id)
+            if bundle is None:
+                bundle = self.public_projection(job_id)
+            if (
+                self._published_projection_digests.get(job_id)
+                == bundle.projection_digest
+            ):
+                return
+            if self._public_sink is not None:
+                self._public_sink.publish(bundle)
             self._publish_catalog()
         except Exception as exc:
             self._last_publication_error = type(exc).__name__
         else:
             self._last_publication_error = None
+            self._remember_publication(bundle)
+
+    def _remember_publication(self, bundle: PublicProjectionBundle) -> None:
+        self._published_projection_digests.pop(bundle.job_id, None)
+        self._published_projection_digests[bundle.job_id] = bundle.projection_digest
+        while len(self._published_projection_digests) > PUBLIC_CATALOG_JOB_LIMIT:
+            oldest = next(iter(self._published_projection_digests))
+            del self._published_projection_digests[oldest]
 
     def _recover_idempotent(
         self,
