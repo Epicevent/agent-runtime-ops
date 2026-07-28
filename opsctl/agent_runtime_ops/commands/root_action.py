@@ -17,6 +17,7 @@ from ..root_actions.client import (
 )
 from ..root_actions.contracts import MAX_MANIFEST_BYTES, ManifestValidationError
 from ..root_actions.protocol import MAX_BROKER_RESPONSE_BYTES
+from ..root_action_preflight import root_action_preflight
 
 
 ROOT_ACTION_CLI_RESULT_SCHEMA = "agent-runtime-root-action-cli-result/v1"
@@ -196,3 +197,8 @@ def cmd_root_action_wait(args: argparse.Namespace) -> int:
         }:
             reason = "root_action_retrieval_failed_closed"
         return _emit_error(reason, recovery_handle=handle)
+
+
+def cmd_root_action_preflight(_args: argparse.Namespace) -> int:
+    _emit(root_action_preflight())
+    return 0
