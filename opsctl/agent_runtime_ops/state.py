@@ -78,6 +78,23 @@ def image_spec_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         image_spec["components"] = {str(key): str(value) for key, value in components.items()}
     if image_recipe_data:
         image_spec["image_recipe"] = image_recipe_data
+    retrieval_contract = recipe_data.get("retrieval_contract")
+    retrieval_binding = recipe_data.get("retrieval_binding")
+    if isinstance(retrieval_contract, dict):
+        image_spec["retrieval_contract"] = retrieval_contract
+    if isinstance(retrieval_binding, dict):
+        image_spec["retrieval_binding"] = retrieval_binding
+    image_spec["retrieval_component_digest"] = str(
+        manifest.get("retrieval_component_digest") or ""
+    )
+    image_spec["retrieval_enabled"] = manifest.get("retrieval_enabled") is True
+    image_spec["retrieval_binding_digest"] = str(
+        manifest.get("retrieval_binding_digest") or recipe_data.get("retrieval_binding_digest") or ""
+    )
+    if "retrieval_binding" in image_spec:
+        from .domain.retrieval_contract import validate_bound_retrieval_spec
+
+        validate_bound_retrieval_spec(image_spec)
     return image_spec
 
 

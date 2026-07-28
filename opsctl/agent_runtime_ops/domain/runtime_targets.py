@@ -7,9 +7,16 @@ from ..routing import get_runtime_binding
 from ..state import RuntimeTarget
 from .image_specs import IMAGE_ROLLOUT_IMAGE_NAME, image_spec_from_direct_images, image_spec_recipe
 from .runtime_truth import live_runtime_truth
+from .retrieval_contract import bind_retrieval_intent
 
 
-def desired_from_direct_images(slot: str, image_spec: dict, state_root: Path):
+def desired_from_direct_images(
+    slot: str,
+    image_spec: dict,
+    state_root: Path,
+    *,
+    retrieval_enabled: bool = False,
+):
     binding = get_runtime_binding(slot, state_root)
     runtime_class = binding.runtime_class
     image_recipe = image_spec_recipe(image_spec)
@@ -27,6 +34,14 @@ def desired_from_direct_images(slot: str, image_spec: dict, state_root: Path):
         )
     if family != binding.family:
         raise ValueError(f"binding image family mismatch: image={family} binding={binding.family}")
+    image_spec = bind_retrieval_intent(
+        image_spec,
+        instance_id=binding.instance_id,
+        family=family,
+        runtime_profile_digest=profile.digest,
+        container_nas_root=str(profile.metadata.get("container_nas_root") or ""),
+        enabled=retrieval_enabled,
+    )
     desired = RuntimeTarget(
         target=binding.linux_account,
         family=family,
@@ -47,4 +62,7 @@ def desired_from_live_image_truth(slot: str, state_root: Path):
     wrapper_image = str(truth.get("wrapper_image") or "")
     product_image = str(truth.get("product_image") or "")
     image_spec = image_spec_from_direct_images(wrapper_image, product_image)
-    return desired_from_direct_images(slot, image_spec, state_root)
+    enabled = truth.get("retrieval_enabled") == "true"
+    return desired_from_direct_images(
+        slot, image_spec, state_root, retrieval_enabled=enabled
+    )

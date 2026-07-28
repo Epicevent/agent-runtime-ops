@@ -36,6 +36,7 @@ from .runtime_paths import (
     state_manifest_path,
 )
 from .runtime_truth import find_gateway_container
+from .retrieval_contract import run_retrieval_status_probe
 from .workspace_guidance import ensure_runtime_workspace_guidance
 
 
@@ -245,6 +246,34 @@ def apply_desired_slot(
         print(f"rollback_reason={reason}")
         append_action_log(state_root, action_name, desired.slot, desired.slot, "fail", f"live_failed={failed}")
         return 1
+
+    if isinstance(desired.image_spec.get("retrieval_contract"), dict):
+        container, lookup = find_gateway_container(desired.route, profile)
+        try:
+            if not container:
+                raise ValueError(f"container lookup failed: {lookup}")
+            retrieval_status = run_retrieval_status_probe(
+                container, desired.image_spec
+            )
+            if retrieval_status is None:
+                raise ValueError("embedded retrieval verifier is unavailable")
+        except Exception as exc:
+            ok, reason = restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
+            print("apply_status=fail")
+            print(f"reason=retrieval_postcondition_failed:{exc}")
+            print(f"rollback_status={'ok' if ok else 'fail'}")
+            print(f"rollback_reason={reason}")
+            append_action_log(
+                state_root,
+                action_name,
+                desired.slot,
+                desired.slot,
+                "fail",
+                "retrieval_postcondition_failed",
+            )
+            return 1
+        for key in sorted(retrieval_status):
+            print(f"retrieval_{key}={retrieval_status[key]}")
 
     for index, delay_seconds in enumerate(FINAL_WORKSPACE_GUIDANCE_STABILIZE_DELAYS_SECONDS, start=1):
         if delay_seconds > 0:

@@ -10,10 +10,6 @@ from .apache_route_checks import apache_route_checks
 from .common import container_name, run_text
 from .image_specs import (
     IMAGE_RECIPE_SCHEMA,
-    image_spec_recipe_tokens,
-    label_map_from_labels,
-    profile_customer_surface,
-    profile_runtime_contract,
     recipe_label,
 )
 
@@ -179,6 +175,19 @@ def live_image_truth_from_info(binding: RuntimeBinding, info: dict, apache_route
         "health_endpoints": recipe_label(labels, "health.endpoints"),
         "health_endpoints_json": recipe_label(labels, "health.endpoints.json"),
         "ops_repo_commit": recipe_label(labels, "ops-repo-commit"),
+        "retrieval_schema": recipe_label(labels, "retrieval.schema"),
+        "retrieval_transport": recipe_label(labels, "retrieval.transport"),
+        "retrieval_default_enabled": recipe_label(labels, "retrieval.default-enabled"),
+        "retrieval_enabled": str(labels.get("agent-runtime.retrieval-enabled") or ""),
+        "retrieval_component_digest": str(
+            labels.get("agent-runtime.retrieval-component-digest") or ""
+        ),
+        "retrieval_binding_digest": str(
+            labels.get("agent-runtime.retrieval-binding-digest") or ""
+        ),
+        "retrieval_resource_profile_digest": str(
+            labels.get("agent-runtime.retrieval-resource-profile-digest") or ""
+        ),
     }
 
 
@@ -244,6 +253,21 @@ def live_runtime_truth(slot: str, state_root: Path) -> tuple[dict[str, str], lis
                 f"label={labels.get('agent-runtime.linux-account') or labels.get('agent-runtime.slot') or 'missing'} binding={binding.linux_account}",
             ),
             local_canonical_recipe_check_from_truth(truth),
+            (
+                not truth.get("retrieval_schema")
+                or truth.get("retrieval_enabled") in {"true", "false"},
+                "truth_retrieval_enabled_declared",
+                truth.get("retrieval_enabled") or "capability_absent",
+            ),
+            (
+                truth.get("retrieval_enabled") != "true"
+                or (
+                    truth.get("retrieval_schema") == "jitech-embedded-retrieval/v1"
+                    and truth.get("retrieval_transport") == "in_process"
+                ),
+                "truth_retrieval_in_process_when_enabled",
+                truth.get("retrieval_transport") or "capability_missing",
+            ),
         ]
     )
     return truth, checks

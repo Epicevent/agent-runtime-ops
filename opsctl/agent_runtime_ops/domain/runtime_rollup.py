@@ -38,6 +38,10 @@ def runtime_manifest_rollup(state_root: Path, slots: list[str], family: str) -> 
     recipe_digests: list[str] = []
     wrapper_images: list[str] = []
     product_images: list[str] = []
+    retrieval_enabled_targets: list[str] = []
+    retrieval_disabled_targets: list[str] = []
+    retrieval_component_digests: list[str] = []
+    retrieval_binding_digests: list[str] = []
     for item in rows:
         recipe = item.get("recipe")
         recipe_name = ""
@@ -53,6 +57,14 @@ def runtime_manifest_rollup(state_root: Path, slots: list[str], family: str) -> 
             wrapper_images.append(str(item.get("wrapper_image")))
         if item.get("product_image"):
             product_images.append(str(item.get("product_image")))
+        if item.get("retrieval_enabled") is True:
+            retrieval_enabled_targets.append(item_target(item))
+        else:
+            retrieval_disabled_targets.append(item_target(item))
+        if item.get("retrieval_component_digest"):
+            retrieval_component_digests.append(str(item.get("retrieval_component_digest")))
+        if item.get("retrieval_binding_digest"):
+            retrieval_binding_digests.append(str(item.get("retrieval_binding_digest")))
 
     return {
         "count": len(rows),
@@ -65,4 +77,8 @@ def runtime_manifest_rollup(state_root: Path, slots: list[str], family: str) -> 
         "product_images": sorted(set(product_images)),
         "canonical_recipe_names": sorted(set(recipes)),
         "canonical_recipe_digests": sorted(set(recipe_digests)),
+        "retrieval_enabled_targets": sorted(retrieval_enabled_targets),
+        "retrieval_disabled_targets": sorted(retrieval_disabled_targets),
+        "retrieval_component_digests": sorted(set(retrieval_component_digests)),
+        "retrieval_binding_digests": sorted(set(retrieval_binding_digests)),
     }

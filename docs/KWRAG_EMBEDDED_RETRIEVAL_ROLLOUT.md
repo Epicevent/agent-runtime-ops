@@ -1,0 +1,84 @@
+# Embedded KWRAG rollout contract
+
+Status: local source contract. This document does not select a product family, target,
+backend, invocation policy, or customer rollout.
+
+KWRAG v1 executes inside the existing Hermes/OpenClaw product process. The existing
+wrapper + product image tuple remains authoritative. A third running image, sidecar,
+host port, product network, central corpus service, token projection, arbitrary path,
+or generic shell is not part of this contract.
+
+## Image capability labels
+
+Both the product image and its wrapper image MUST carry the same values under
+`com.epicevent.agent-runtime.retrieval.`:
+
+| suffix | value |
+| --- | --- |
+| `schema` | `jitech-embedded-retrieval/v1` |
+| `component-digest` | digest of the exact vendored wheel/component bytes |
+| `contract-digest` | digest of the product-owned in-process consumer contract |
+| `component-manifest-digest` | digest of the exact component build manifest |
+| `source-archive-digest` | digest of the exact KWRAG source archive |
+| `source-revision` | 40-character lower-case source revision |
+| `transport` | `in_process` |
+| `default-enabled` | `false` |
+| `host-port-count` | `0` |
+| `nas-read-only` | `true` |
+| `resource.json` | canonical JSON resource declaration below |
+| `verify-command.json` | JSON argv for the product-owned content-free verifier |
+
+The resource object has the exact keys
+`cpuReservationMillicores`, `gpuAccess`, `memoryReservationBytes`,
+`pidsReservation`, and `profileDigest`. `profileDigest` is the canonical SHA-256 of
+the other four fields. `gpuAccess` is `none` or `shared_stateless`.
+
+These values are a reviewable resource envelope, not Docker resource enforcement and
+not proof that a target host has enough headroom. The product verifier must return
+`within_declared_reservation` or `unavailable`; a bounded canary must separately
+measure live host/container headroom before promotion.
+
+The verifier argv is image-attested, contains no shell, and accepts no query, path,
+backend, network, grant, projection, or credential argument from the operator.
+
+## Target binding
+
+`opsctl` computes `agent-runtime-retrieval-binding/v1` from the immutable instance ID,
+family, runtime profile digest, container NAS root, enabled flag, component/contract/
+resource digests, `transport=in_process`, `hostPortCount=0`, and `mountReadOnly=true`.
+Its canonical SHA-256 is `retrieval_binding_digest`.
+
+The runtime manifest and container receive:
+
+- `retrieval_component_digest`
+- `retrieval_enabled` (default `false`)
+- `retrieval_binding_digest`
+- the complete content-free retrieval capability and binding objects in the private
+  runtime manifest recipe
+
+The same intent is projected to the container as `JITECH_RETRIEVAL_*` environment
+values and `agent-runtime.retrieval-*` labels. NAS contents and paths outside the
+canonical container NAS root are never projected.
+
+## Approval, verification, rollback
+
+Production enablement requires both the existing exact product/wrapper image approvals
+and a separate `jitech-retrieval-component-approval/v1` record bound to family,
+product image digest, component/contract/manifest/source-archive/resource digests, and source revision.
+Dev-owned image canaries remain pre-approval validation surfaces.
+
+The verifier returns exact `jitech-embedded-retrieval-status/v1` JSON. Allowed facts are
+component/binding/resource digests, consumer health, host-port count, read-only mount,
+resource/GPU status, operation/result/consumption receipt digests, linkage status, and
+revocation status. Raw query, result, prompt, NAS content/name, credential, and provider
+material are forbidden by exact-key validation.
+
+An enabled status requires healthy consumer state and complete operation -> result ->
+consumption linkage, `resourceStatus=within_declared_reservation`, and a GPU observation
+matching the declared profile. A disabled status requires no receipt digests,
+`resourceStatus=unavailable`, `gpuAccessStatus=none`, and
+`revocationStatus=complete`. Apply/canary fails and restores the previous tuple if this
+postcondition fails. Rollback rechecks the restored tuple and reports the content-free
+disable/revocation observation when the restored tuple carries the capability.
+
+Public KWRAG v1 schemas are not changed by this OPS-private rollout contract.

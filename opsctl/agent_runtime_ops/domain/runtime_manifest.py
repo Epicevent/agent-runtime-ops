@@ -50,6 +50,9 @@ def manifest_payload(
         "wrapper_image_digest": digest_from_image_ref(wrapper_image),
         "product_image": product_image,
         "product_image_digest": digest_from_image_ref(product_image),
+        "retrieval_component_digest": desired.image_spec.get("retrieval_component_digest") or "",
+        "retrieval_enabled": desired.image_spec.get("retrieval_enabled") is True,
+        "retrieval_binding_digest": desired.image_spec.get("retrieval_binding_digest") or "",
         "recipe": image_spec_recipe_payload(desired.image_spec),
         "compose_sha256": rendered.sha256,
         "compose_path": str(compose_path),
@@ -67,6 +70,16 @@ def desired_from_runtime_manifest(slot: str, state_root: Path):
     if profile.metadata.get("slot_class") != target.runtime_class:
         raise ValueError(
             f"runtime manifest profile runtime_class mismatch: profile={profile.metadata.get('slot_class')} manifest={target.runtime_class}"
+        )
+    if "retrieval_binding" in target.image_spec:
+        from .retrieval_contract import validate_retrieval_target_binding
+
+        validate_retrieval_target_binding(
+            target.image_spec,
+            instance_id=target.route.instance_id,
+            family=target.family,
+            runtime_profile_digest=profile.digest,
+            container_nas_root=str(profile.metadata.get("container_nas_root") or ""),
         )
     return target, profile
 
@@ -96,6 +109,9 @@ def write_slot_manifest(
         f"ops_repo_commit={_installed_source_commit()}",
         f"wrapper_image={desired.image_spec.get('wrapper_image')}",
         f"product_image={desired.image_spec.get('product_image')}",
+        f"retrieval_component_digest={desired.image_spec.get('retrieval_component_digest') or ''}",
+        f"retrieval_enabled={'true' if desired.image_spec.get('retrieval_enabled') is True else 'false'}",
+        f"retrieval_binding_digest={desired.image_spec.get('retrieval_binding_digest') or ''}",
         f"recipe_mode={recipe_tokens['recipe_mode']}",
         f"product_component={recipe_tokens['product_component']}",
         f"wrapper_image_digest={desired.image_spec.get('digest')}",
@@ -188,6 +204,37 @@ def desired_from_manifest(slot: str, manifest: dict, state_root: Path):
         "product_digest": manifest.get("product_image_digest"),
         "mode": "wrapped_product_image",
     }
+    recipe = manifest.get("recipe")
+    if isinstance(recipe, dict):
+        retrieval_contract = recipe.get("retrieval_contract")
+        retrieval_binding = recipe.get("retrieval_binding")
+        if isinstance(retrieval_contract, dict):
+            image_spec["retrieval_contract"] = retrieval_contract
+        if isinstance(retrieval_binding, dict):
+            image_spec["retrieval_binding"] = retrieval_binding
+    image_spec["retrieval_component_digest"] = str(
+        manifest.get("retrieval_component_digest") or ""
+    )
+    image_spec["retrieval_enabled"] = manifest.get("retrieval_enabled") is True
+    image_spec["retrieval_binding_digest"] = str(
+        manifest.get("retrieval_binding_digest") or ""
+    )
+    if "retrieval_binding" in image_spec:
+        from .retrieval_contract import validate_bound_retrieval_spec
+
+        validate_bound_retrieval_spec(image_spec)
+    route = get_runtime_binding(target, state_root)
+    profile = load_profile(str(manifest.get("runtime_profile") or ""))
+    if "retrieval_binding" in image_spec:
+        from .retrieval_contract import validate_retrieval_target_binding
+
+        validate_retrieval_target_binding(
+            image_spec,
+            instance_id=route.instance_id,
+            family=family,
+            runtime_profile_digest=profile.digest,
+            container_nas_root=str(profile.metadata.get("container_nas_root") or ""),
+        )
     return RuntimeTarget(
         target=target,
         family=family,
@@ -195,5 +242,5 @@ def desired_from_manifest(slot: str, manifest: dict, state_root: Path):
         image_name=str(image_spec["image_name"]),
         image_spec=image_spec,
         runtime_profile=str(manifest.get("runtime_profile") or ""),
-        route=get_runtime_binding(target, state_root),
+        route=route,
     )

@@ -15,6 +15,7 @@ from ..domain.common import OPERATOR_ACCOUNTS as _OPERATOR_ACCOUNTS
 from ..domain.common import state_root as _state_root
 from ..domain.image_specs import (
     IMAGE_ROLLOUT_IMAGE_NAME,
+    digest_from_image_ref,
     image_spec_from_direct_images,
     image_spec_recipe_payload,
     profile_runtime_contract,
@@ -25,6 +26,7 @@ from ..domain.runtime_apply import apply_desired_slot as _apply_desired_slot
 from ..domain.runtime_checks import run_live_slot_checks as _run_live_slot_checks
 from ..domain.runtime_checks import run_static_slot_checks as _run_static_slot_checks
 from ..domain.runtime_rollup import runtime_manifest_rollup
+from ..domain.retrieval_contract import retrieval_contract_is_approved, retrieval_env
 from ..domain.runtime_targets import (
     desired_from_direct_images as _desired_from_direct_images,
     desired_from_live_image_truth as _desired_from_live_image_truth,
@@ -83,6 +85,10 @@ def cmd_rollout_status(args: argparse.Namespace) -> int:
     print(f"runtime_manifest_product_images={','.join(runtime_rollup['product_images'])}")
     print(f"runtime_manifest_canonical_recipe_names={','.join(runtime_rollup['canonical_recipe_names'])}")
     print(f"runtime_manifest_canonical_recipe_digests={','.join(runtime_rollup['canonical_recipe_digests'])}")
+    print(f"runtime_manifest_retrieval_enabled_targets={','.join(runtime_rollup['retrieval_enabled_targets'])}")
+    print(f"runtime_manifest_retrieval_disabled_targets={','.join(runtime_rollup['retrieval_disabled_targets'])}")
+    print(f"runtime_manifest_retrieval_component_digests={','.join(runtime_rollup['retrieval_component_digests'])}")
+    print(f"runtime_manifest_retrieval_binding_digests={','.join(runtime_rollup['retrieval_binding_digests'])}")
     return 0
 
 
@@ -94,6 +100,26 @@ def _direct_image_spec_from_args(args: argparse.Namespace) -> dict[str, object]:
     return image_spec_from_direct_images(str(args.wrapper_image), str(args.product_image))
 
 
+def _require_retrieval_approval(desired, state_root) -> None:
+    if desired.image_spec.get("retrieval_enabled") is not True or _is_dev_named_target(
+        desired.slot
+    ):
+        return
+    contract = desired.image_spec.get("retrieval_contract")
+    if not isinstance(contract, dict):
+        raise ValueError("retrieval is enabled without an embedded component contract")
+    product_digest = digest_from_image_ref(
+        desired.image_spec.get("product_image")
+    ) or ""
+    if not retrieval_contract_is_approved(
+        state_root,
+        desired.family,
+        contract,
+        product_image_digest=product_digest,
+    ):
+        raise ValueError("production retrieval enablement requires exact component approval")
+
+
 def _prepare_runtime_env_for_direct_image(desired, profile) -> None:
     runtime_dir = _ensure_runtime_dir(desired.slot)
     uid, gid = slot_uid_gid(desired.slot)
@@ -103,6 +129,7 @@ def _prepare_runtime_env_for_direct_image(desired, profile) -> None:
         "OPENCLAW_GATEWAY_PORT": str(desired.route.gateway_port if desired.route else ""),
         "OPENCLAW_BRIDGE_PORT": str(desired.route.bridge_port if desired.route else ""),
     }
+    updates.update(retrieval_env(desired.image_spec))
     secret_file = primary_profile_secret_file(profile, desired.slot)
     if secret_file.path.exists():
         if secret_file.path.is_symlink() or not secret_file.path.is_file():
@@ -127,7 +154,12 @@ def cmd_rollout_image_plan(args: argparse.Namespace) -> int:
             slots = [binding.linux_account for binding in load_runtime_bindings(state_root) if binding.enabled]
         plans = []
         for slot in slots:
-            desired, profile = _desired_from_direct_images(slot, image_spec, state_root)
+            desired, profile = _desired_from_direct_images(
+                slot,
+                image_spec,
+                state_root,
+                retrieval_enabled=bool(getattr(args, "retrieval_enabled", False)),
+            )
             rendered = render_compose(profile, desired)
             checks = [
                 {"ok": ok, "name": name, "detail": detail}
@@ -142,6 +174,14 @@ def cmd_rollout_image_plan(args: argparse.Namespace) -> int:
                     "bridge_port": desired.route.bridge_port if desired.route else "",
                     "runtime_profile": profile.name,
                     "runtime_contract": profile_runtime_contract(profile),
+                    "retrieval_enabled": desired.image_spec.get("retrieval_enabled") is True,
+                    "retrieval_component_digest": desired.image_spec.get("retrieval_component_digest") or None,
+                    "retrieval_binding_digest": desired.image_spec.get("retrieval_binding_digest") or None,
+                    "retrieval_resource_profile": (
+                        (desired.image_spec.get("retrieval_contract") or {}).get("resource")
+                        if isinstance(desired.image_spec.get("retrieval_contract"), dict)
+                        else None
+                    ),
                     "checks": checks,
                     "compatible": all(item["ok"] for item in checks),
                     "compose_sha256": rendered.sha256,
@@ -176,9 +216,15 @@ def _cmd_rollout_image_apply_slot(args: argparse.Namespace, *, required_runtime_
         return 2
     try:
         image_spec = _direct_image_spec_from_args(args)
-        desired, profile = _desired_from_direct_images(slot, image_spec, state_root)
+        desired, profile = _desired_from_direct_images(
+            slot,
+            image_spec,
+            state_root,
+            retrieval_enabled=bool(getattr(args, "retrieval_enabled", False)),
+        )
         if desired.runtime_class != required_runtime_class:
             raise ValueError(f"{action_name} requires runtime_class={required_runtime_class}: {slot}")
+        _require_retrieval_approval(desired, state_root)
         _prepare_runtime_env_for_direct_image(desired, profile)
     except Exception as exc:
         print(f"rollout_{action_name.replace('-', '_')}_status=fail")
@@ -258,9 +304,15 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
         for slot in slots:
             if _is_dev_named_target(slot):
                 raise ValueError(f"image-promote target must not be a dev target: {slot}")
-            desired, profile = _desired_from_direct_images(slot, image_spec, state_root)
+            desired, profile = _desired_from_direct_images(
+                slot,
+                image_spec,
+                state_root,
+                retrieval_enabled=source_desired.image_spec.get("retrieval_enabled") is True,
+            )
             if desired.runtime_class != "customer":
                 raise ValueError(f"promotion target is not a customer target: {slot}")
+            _require_retrieval_approval(desired, state_root)
             rc = _apply_desired_slot(
                 desired=desired,
                 profile=profile,

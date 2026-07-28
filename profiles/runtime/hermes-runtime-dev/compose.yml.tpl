@@ -41,6 +41,10 @@ services:
       agent-runtime.family: "{{ family }}"
       agent-runtime.profile: "{{ runtime_profile }}"
       agent-runtime.service: gateway
+      agent-runtime.retrieval-enabled: "{{ retrieval_enabled }}"
+      agent-runtime.retrieval-component-digest: "{{ retrieval_component_digest }}"
+      agent-runtime.retrieval-binding-digest: "{{ retrieval_binding_digest }}"
+      agent-runtime.retrieval-resource-profile-digest: "{{ retrieval_resource_profile_digest }}"
     group_add:
       - "{{ data_gid }}"
     volumes:
