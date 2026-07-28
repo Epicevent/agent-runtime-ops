@@ -205,6 +205,95 @@ def _remove_stale_per_slot_master_registration(slot: str, share_source: str, cor
     return True
 
 
+def cmd_nas_view_preflight(args: argparse.Namespace) -> int:
+    """Validate one intended view assignment without changing host state."""
+    if not _require_root("preflight"):
+        return 2
+    state_root = _state_root(args)
+    try:
+        decision = check_nas_policy(args.slot, args.share, state_root)
+        if not decision.allowed:
+            raise ValueError(f"policy_denied:{decision.reason}")
+        if share_is_writable(decision.share):
+            raise ValueError("writable_share_not_a_corpus")
+        slot = decision.slot
+        user_id = validate_user_id(args.user_id)
+        spec = corpus_for_share(decision.share.source)
+
+        full_mount = mountpoint_for_share(slot, decision.share)
+        rc, _, rows = _findmnt_one(full_mount)
+        if rc == 0 and rows:
+            raise ValueError("full_share_mount_conflicts_with_view")
+
+        configured_master = shared_master_for_share(decision.share, state_root)
+        if spec.master_contract == "shared_policy_required" and configured_master is None:
+            raise ValueError("shared_master_policy_missing")
+
+        if configured_master is not None:
+            _validate_shared_master(configured_master, decision.share.source)
+            plan = build_view_plan(
+                slot,
+                user_id,
+                decision.share.source,
+                state_root,
+                list(getattr(args, "path", None) or []),
+                master_override=configured_master,
+            )
+            master_mode = _MASTER_MODE_SHARED
+            content_validation = "complete"
+            master_path = configured_master
+        else:
+            root_credential = root_credential_path(slot, decision.share)
+            shared_credential = shared_credential_for_share(decision.share, state_root)
+            customer_credential = customer_credential_path(slot, decision.share)
+            if not (
+                root_credential.exists()
+                or (shared_credential is not None and shared_credential.exists())
+                or customer_credential.exists()
+            ):
+                raise ValueError("credential_missing")
+            master_path = hidden_master(slot, spec.name)
+            master_mode = _MASTER_MODE_PER_SLOT
+            rc, _, rows = _findmnt_one(master_path)
+            if rc == 0 and rows:
+                plan = build_view_plan(
+                    slot,
+                    user_id,
+                    decision.share.source,
+                    state_root,
+                    list(getattr(args, "path", None) or []),
+                )
+                content_validation = "complete"
+            else:
+                # A read-only command cannot create the per-slot CIFS mount.
+                plan = None
+                content_validation = "deferred_until_per_slot_mount"
+                if bool(getattr(args, "require_content_ready", False)):
+                    raise ValueError("content_validation_incomplete")
+
+        print("view_preflight_schema=agent-runtime-nas-view-preflight/v1")
+        print(f"target={slot}")
+        print(f"corpus={spec.name}")
+        print(f"share={decision.share.source}")
+        print(f"master_contract={spec.master_contract}")
+        print(f"master_mode={master_mode}")
+        print(f"master_path={master_path.as_posix()}")
+        print(f"content_validation={content_validation}")
+        print(f"selected_bind_count={len(plan.room_binds) if plan is not None else 'unavailable'}")
+        print("mutates=false")
+        print("view_preflight_complete=yes")
+        print("view_preflight_status=pass")
+        return 0
+    except Exception as exc:
+        print("view_preflight_schema=agent-runtime-nas-view-preflight/v1")
+        print(f"target={args.slot}")
+        print("mutates=false")
+        print("view_preflight_complete=yes")
+        print("view_preflight_status=fail")
+        print(f"reason={exc}")
+        return 1
+
+
 def _apply_binds(plan: ViewPlan) -> tuple[bool, str, int]:
     def fail(reason: str, bound_rooms: int) -> tuple[bool, str, int]:
         entry_failed, entry_errors = unmount_tree(plan.entry)
@@ -261,15 +350,28 @@ def cmd_nas_view_assign(args: argparse.Namespace) -> int:
         if rc == 0 and rows:
             raise ValueError(f"share is fully mounted for slot at {full_mount} — run: opsctl nas unmount {slot} {decision.share.source}")
 
-        _ensure_hidden_dirs(slot, spec.name)
         configured_master = shared_master_for_share(decision.share, state_root)
+        if spec.master_contract == "shared_policy_required" and configured_master is None:
+            raise ValueError("shared_master_policy_missing")
         legacy_fstab_removed = False
+        plan: ViewPlan | None = None
         if configured_master is not None:
             if args.username or args.password_stdin:
                 raise ValueError("shared master policy forbids per-slot credential override")
             _validate_shared_master(configured_master, decision.share.source)
             master = configured_master
             master_mode = _MASTER_MODE_SHARED
+            # Resolve identity/grant paths against the exact live collector
+            # before the first write (dirs or legacy fstab migration).
+            plan = build_view_plan(
+                slot,
+                user_id,
+                decision.share.source,
+                state_root,
+                list(getattr(args, "path", None) or []),
+                master_override=master,
+            )
+            _ensure_hidden_dirs(slot, spec.name)
             # A failed older attempt may have stamped an unmounted per-slot CIFS
             # entry.  Remove only that exact legacy pair; never touch the global
             # collector mount or another slot's healthy legacy master.
@@ -278,6 +380,7 @@ def cmd_nas_view_assign(args: argparse.Namespace) -> int:
             )
         else:
             master_mode = _MASTER_MODE_PER_SLOT
+            _ensure_hidden_dirs(slot, spec.name)
             if args.username or args.password_stdin:
                 if not args.username or not args.password_stdin:
                     raise ValueError("--username and --password-stdin must be used together")
@@ -309,14 +412,15 @@ def cmd_nas_view_assign(args: argparse.Namespace) -> int:
             if not ok:
                 raise ValueError(f"master_mount_failed: {reason}")
 
-        plan = build_view_plan(
-            slot,
-            user_id,
-            decision.share.source,
-            state_root,
-            list(getattr(args, "path", None) or []),
-            master_override=master,
-        )
+        if plan is None:
+            plan = build_view_plan(
+                slot,
+                user_id,
+                decision.share.source,
+                state_root,
+                list(getattr(args, "path", None) or []),
+                master_override=master,
+            )
         ok, reason, bound_rooms = _apply_binds(plan)
         if not ok:
             raise ValueError(f"bind_failed: {reason}")

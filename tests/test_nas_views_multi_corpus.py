@@ -50,7 +50,10 @@ class CorpusPathsTest(unittest.TestCase):
     def test_share_resolves_to_corpus(self):
         self.assertEqual(corpus_for_share("//10.10.10.2/kakao-work").name, "kakao")
         spec = corpus_for_share("//10.10.10.2/hanpass_groupware")
-        self.assertEqual((spec.name, spec.layout), ("groupware", "granted_paths"))
+        self.assertEqual(
+            (spec.name, spec.layout, spec.master_contract),
+            ("groupware", "granted_paths", "shared_policy_required"),
+        )
 
     def test_unknown_share_is_refused_not_defaulted(self):
         # 조용히 카카오 레이아웃으로 흘러 엉뚱한 폴더를 여는 것보다 안 붙는 편이 안전하다.

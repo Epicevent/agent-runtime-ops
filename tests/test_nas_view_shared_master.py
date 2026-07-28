@@ -18,6 +18,7 @@ from agent_runtime_ops.commands.nas_view import (
     _validate_shared_master,
     cmd_nas_view_assign,
     cmd_nas_view_detach,
+    cmd_nas_view_preflight,
     cmd_nas_view_status,
 )
 from agent_runtime_ops.domain.nas_views import (
@@ -87,6 +88,149 @@ class SharedMasterPolicyTest(unittest.TestCase):
 
 
 class SharedMasterAssignTest(unittest.TestCase):
+    def test_groupware_preflight_output_matches_versioned_fixture(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_state(root)
+            output = io.StringIO()
+            plan = SimpleNamespace(room_binds=[object(), object()])
+            with (
+                patch("agent_runtime_ops.commands.nas_view._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.nas_view._findmnt_one", return_value=(1, "", [])),
+                patch(
+                    "agent_runtime_ops.commands.nas_view.shared_master_for_share",
+                    return_value=Path("/mnt/nas/hanpass_groupware"),
+                ),
+                patch("agent_runtime_ops.commands.nas_view._validate_shared_master"),
+                patch("agent_runtime_ops.commands.nas_view.build_view_plan", return_value=plan),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_nas_view_preflight(
+                    argparse.Namespace(
+                        state_root=str(root), slot="oc3", user_id="seung23", share=SHARE,
+                        path=["mails/seung23", "approval/example"],
+                    )
+                )
+
+        expected = (Path(__file__).parent / "fixtures" / "nas-view-preflight-pass-v1.txt").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(output.getvalue(), expected)
+
+    @unittest.skipIf(os.name == "nt", "CLI imports POSIX account modules")
+    def test_cli_exposes_exact_preflight_surface(self) -> None:
+        from agent_runtime_ops.cli import build_parser
+
+        args = build_parser().parse_args([
+            "nas", "view", "preflight", "oc3", "seung23",
+            "--share", SHARE,
+            "--path", "mails/seung23",
+        ])
+
+        self.assertIs(args.func, cmd_nas_view_preflight)
+        self.assertEqual(args.slot, "oc3")
+        self.assertEqual(args.user_id, "seung23")
+        self.assertEqual(args.share, SHARE)
+        self.assertEqual(args.path, ["mails/seung23"])
+        self.assertFalse(args.require_content_ready)
+
+    def test_groupware_preflight_requires_policy_mapping_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_state(root)
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.commands.nas_view._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.nas_view._findmnt_one", return_value=(1, "", [])),
+                patch("agent_runtime_ops.commands.nas_view.shared_master_for_share", return_value=None),
+                patch("agent_runtime_ops.commands.nas_view._ensure_hidden_dirs") as ensure_dirs,
+                patch("agent_runtime_ops.commands.nas_view._write_managed_fstab_entry") as write_fstab,
+                patch("agent_runtime_ops.commands.nas_view._mount_master") as mount_master,
+                patch("agent_runtime_ops.commands.nas_view.bind_ro") as bind,
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_nas_view_preflight(
+                    argparse.Namespace(
+                        state_root=str(root), slot="oc3", user_id="seung23", share=SHARE,
+                        path=["mails/seung23"],
+                    )
+                )
+
+        self.assertEqual(rc, 1)
+        self.assertIn("view_preflight_status=fail", output.getvalue())
+        self.assertIn("reason=shared_master_policy_missing", output.getvalue())
+        ensure_dirs.assert_not_called()
+        write_fstab.assert_not_called()
+        mount_master.assert_not_called()
+        bind.assert_not_called()
+
+    def test_groupware_preflight_validates_exact_paths_without_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "state"
+            root.mkdir()
+            _write_state(root)
+            shared = Path(tmp) / "collector"
+            (shared / "mails" / "seung23").mkdir(parents=True)
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.commands.nas_view._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.nas_view._findmnt_one", return_value=(1, "", [])),
+                patch("agent_runtime_ops.commands.nas_view.shared_master_for_share", return_value=shared),
+                patch("agent_runtime_ops.commands.nas_view._validate_shared_master"),
+                patch("agent_runtime_ops.commands.nas_view._ensure_hidden_dirs") as ensure_dirs,
+                patch("agent_runtime_ops.commands.nas_view._write_managed_fstab_entry") as write_fstab,
+                patch("agent_runtime_ops.commands.nas_view._mount_master") as mount_master,
+                patch("agent_runtime_ops.commands.nas_view.bind_ro") as bind,
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_nas_view_preflight(
+                    argparse.Namespace(
+                        state_root=str(root), slot="oc3", user_id="seung23", share=SHARE,
+                        path=["mails/seung23"],
+                    )
+                )
+
+        self.assertEqual(rc, 0, output.getvalue())
+        self.assertIn("master_contract=shared_policy_required", output.getvalue())
+        self.assertIn("content_validation=complete", output.getvalue())
+        self.assertIn("selected_bind_count=1", output.getvalue())
+        self.assertIn("mutates=false", output.getvalue())
+        self.assertIn("view_preflight_status=pass", output.getvalue())
+        ensure_dirs.assert_not_called()
+        write_fstab.assert_not_called()
+        mount_master.assert_not_called()
+        bind.assert_not_called()
+
+    def test_assign_missing_groupware_mapping_fails_before_first_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_state(root)
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.commands.nas_view._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.nas_view._findmnt_one", return_value=(1, "", [])),
+                patch("agent_runtime_ops.commands.nas_view.shared_master_for_share", return_value=None),
+                patch("agent_runtime_ops.commands.nas_view._ensure_hidden_dirs") as ensure_dirs,
+                patch("agent_runtime_ops.commands.nas_view._write_managed_fstab_entry") as write_fstab,
+                patch("agent_runtime_ops.commands.nas_view._mount_master") as mount_master,
+                patch("agent_runtime_ops.commands.nas_view._append_action_log"),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_nas_view_assign(
+                    argparse.Namespace(
+                        state_root=str(root), slot="oc3", user_id="seung23", share=SHARE,
+                        username=None, password_stdin=False, domain=None,
+                        path=["mails/seung23"],
+                    )
+                )
+
+        self.assertEqual(rc, 1)
+        self.assertIn("reason=shared_master_policy_missing", output.getvalue())
+        ensure_dirs.assert_not_called()
+        write_fstab.assert_not_called()
+        mount_master.assert_not_called()
+
     def test_stale_registration_migration_rejects_wrong_target_or_live_mount(self) -> None:
         expected = Path("/srv/kw-nas/slots/oc3/groupware/master")
         wrong = [{

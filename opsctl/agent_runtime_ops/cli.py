@@ -30,6 +30,7 @@ from .commands.heartbeat import cmd_heartbeat_disable, cmd_heartbeat_status
 from .commands.nas_view import (
     cmd_nas_view_assign,
     cmd_nas_view_detach,
+    cmd_nas_view_preflight,
     cmd_nas_view_restore,
     cmd_nas_view_status,
     cmd_nas_view_package_info,
@@ -549,6 +550,19 @@ def build_parser() -> argparse.ArgumentParser:
     nas_view_assign.add_argument("--password-stdin", action="store_true")
     nas_view_assign.add_argument("--domain")
     nas_view_assign.set_defaults(func=cmd_nas_view_assign)
+    nas_view_preflight = nas_view_sub.add_parser(
+        "preflight", help="validate one intended view assignment without writes"
+    )
+    nas_view_preflight.add_argument("slot", metavar="target")
+    nas_view_preflight.add_argument("user_id")
+    nas_view_preflight.add_argument("--share", required=True)
+    nas_view_preflight.add_argument("--path", action="append", default=[], metavar="REL_PATH")
+    nas_view_preflight.add_argument(
+        "--require-content-ready",
+        action="store_true",
+        help="fail rather than defer content validation before a destructive replacement",
+    )
+    nas_view_preflight.set_defaults(func=cmd_nas_view_preflight)
     nas_view_detach = nas_view_sub.add_parser("detach")
     nas_view_detach.add_argument("slot", metavar="target")
     nas_view_detach.add_argument("--share")

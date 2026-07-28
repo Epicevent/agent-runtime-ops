@@ -1,0 +1,12 @@
+view_preflight_schema=agent-runtime-nas-view-preflight/v1
+target=oc3
+corpus=groupware
+share=//10.10.10.2/hanpass_groupware
+master_contract=shared_policy_required
+master_mode=shared_policy_mount
+master_path=/mnt/nas/hanpass_groupware
+content_validation=complete
+selected_bind_count=2
+mutates=false
+view_preflight_complete=yes
+view_preflight_status=pass

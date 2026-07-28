@@ -1,5 +1,33 @@
 # NAS Policy
 
+## Assignment preflight contract
+
+Every automated corpus assignment must first run the read-only command below
+with the exact target, identity, share, and selected paths that the later
+`assign` command will use:
+
+```bash
+sudo /usr/local/bin/opsctl nas view preflight TARGET USER_ID \
+  --share //HOST/SHARE [--path RELATIVE_PATH ...] [--require-content-ready]
+```
+
+The command emits `agent-runtime-nas-view-preflight/v1`, `mutates=false`,
+`view_preflight_complete=yes`, and `view_preflight_status=pass|fail`.  A failed preflight blocks every later
+action for that slot, including a destructive detach.  A pass is only a
+point-in-time prerequisite observation; `assign` repeats the relevant checks
+before its first write.
+
+Replacement plans add `--require-content-ready`.  This prevents a legacy
+per-slot corpus whose source content cannot be inspected without first
+mounting it from authorizing a destructive detach.  A new, non-destructive
+assignment may report `content_validation=deferred_until_per_slot_mount`.
+
+The `hanpass_groupware` corpus has the fixed master contract
+`shared_policy_required`.  Its exact `corpus_master_mounts` entry, live
+read-only CIFS mount identity, and every selected grant path must validate.
+It never falls back to a per-slot credential or per-slot CIFS mount when that
+shared policy entry is absent or invalid.
+
 NAS 정책은 서버 private 상태에 둔다.
 
 ```text
