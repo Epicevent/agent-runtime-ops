@@ -1213,7 +1213,9 @@ class PosixRootActionStore:
         if self._required_gid is not None and info.st_gid != self._required_gid:
             raise PosixStoreSecurityError(f"{field} gid is not trusted")
         mode = stat.S_IMODE(info.st_mode)
-        forbidden = 0o022 if allow_public_read else 0o177
+        # Private paths may use the owner's read/write/execute bits.  The
+        # security boundary is that group/other receive no access at all.
+        forbidden = 0o022 if allow_public_read else 0o077
         if mode & forbidden:
             raise PosixStoreSecurityError(f"{field} mode is too permissive")
 

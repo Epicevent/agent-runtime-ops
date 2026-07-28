@@ -150,10 +150,17 @@ class AtomicPublicProjectionPublisher:
         verified = validate_public_projection(artifact.canonical_bytes)
         if verified != artifact:
             raise PublicProjectionError("projection bundle metadata mismatch")
-        if self._posix:
-            self._publish_posix(artifact)
-        else:
-            self._publish_portable(artifact)
+        try:
+            if self._posix:
+                self._publish_posix(artifact)
+            else:
+                self._publish_portable(artifact)
+        except PublicProjectionError:
+            raise
+        except OSError as exc:
+            raise PublicProjectionError(
+                "public projection path operation failed"
+            ) from exc
 
     def publish_catalog(
         self,

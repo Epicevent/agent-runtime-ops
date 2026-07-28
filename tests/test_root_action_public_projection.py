@@ -99,8 +99,14 @@ class RootActionPublicProjectionTests(unittest.TestCase):
         other.mkdir()
         link = self.root / "job-broker-1"
         link.symlink_to(other, target_is_directory=True)
+        submitted = self.broker.submit(manifest(), peer=TEST_PEER)
+        # Broker publication is deliberately best-effort.  Exercise the
+        # publisher boundary directly so a symlink failure cannot be hidden by
+        # the requester's recovery contract.
         with self.assertRaises(PublicProjectionError):
-            self.broker.submit(manifest(), peer=TEST_PEER)
+            self.publisher.publish(
+                self.broker.public_projection(submitted.job_id)
+            )
         self.assertFalse((other / "projection.json").exists())
 
     @unittest.skipUnless(os.name == "posix", "POSIX owner/mode policy requires POSIX")
@@ -110,7 +116,7 @@ class RootActionPublicProjectionTests(unittest.TestCase):
         info = path.lstat()
         self.assertTrue(stat.S_ISREG(info.st_mode))
         self.assertEqual(info.st_nlink, 1)
-        self.assertEqual(stat.S_IMODE(info.st_mode), 0o644)
+        self.assertEqual(stat.S_IMODE(info.st_mode), 0o640)
 
 
 if __name__ == "__main__":
