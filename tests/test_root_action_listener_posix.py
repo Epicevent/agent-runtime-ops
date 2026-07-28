@@ -119,7 +119,13 @@ def test_listener_rejects_multiple_frames_on_one_connection(tmp_path: Path) -> N
         client.connect(str(socket_path))
         client.sendall(frame + frame)
         client.shutdown(socket.SHUT_WR)
-        assert client.recv(1) == b""
+        try:
+            response = client.recv(1)
+        except ConnectionResetError:
+            # Linux may reset a connection closed with unread extra request
+            # bytes.  EOF and reset both prove that no response frame escaped.
+            response = b""
+        assert response == b""
     thread.join(timeout=3)
     listener.close()
     assert len(errors) == 1

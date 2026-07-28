@@ -193,7 +193,8 @@ class AtomicPublicProjectionPublisher:
     def _ensure_public_directory(self, path: Path) -> None:
         try:
             path.mkdir(mode=0o750)
-            os.chown(path, self._required_uid or 0, self._required_gid)
+            if self._required_uid is not None and self._required_gid is not None:
+                os.chown(path, self._required_uid, self._required_gid)
             os.chmod(path, 0o750)
             self._fsync_path(path.parent)
         except FileExistsError:
@@ -217,23 +218,19 @@ class AtomicPublicProjectionPublisher:
                 not stat.S_ISREG(info.st_mode)
                 or path.is_symlink()
                 or info.st_nlink != 1
-                or (
-                    self._posix
-                    and (
-                        info.st_uid != self._required_uid
-                        or info.st_gid != self._required_gid
-                        or stat.S_IMODE(info.st_mode) != 0o640
-                    )
-                )
+                or (self._posix and stat.S_IMODE(info.st_mode) != 0o640)
             ):
                 raise PublicProjectionError("immutable catalog page is unsafe")
+            if self._posix:
+                self._verify_owner(info, "immutable catalog page")
             if path.read_bytes() != raw:
                 raise PublicProjectionError("immutable catalog page changed")
             return
         try:
             if self._posix:
                 os.fchmod(fd, 0o640)
-                os.fchown(fd, self._required_uid or 0, self._required_gid)
+                if self._required_uid is not None and self._required_gid is not None:
+                    os.fchown(fd, self._required_uid, self._required_gid)
             self._write_all(fd, raw)
             os.fsync(fd)
         finally:
@@ -255,7 +252,8 @@ class AtomicPublicProjectionPublisher:
         try:
             if self._posix:
                 os.fchmod(fd, 0o640)
-                os.fchown(fd, self._required_uid or 0, self._required_gid)
+                if self._required_uid is not None and self._required_gid is not None:
+                    os.fchown(fd, self._required_uid, self._required_gid)
             self._write_all(fd, raw)
             os.fsync(fd)
         finally:
@@ -304,18 +302,13 @@ class AtomicPublicProjectionPublisher:
                 generation_re.fullmatch(candidate.name) is None
                 or not stat.S_ISDIR(info.st_mode)
                 or candidate.is_symlink()
-                or (
-                    self._posix
-                    and (
-                        info.st_uid != self._required_uid
-                        or info.st_gid != self._required_gid
-                        or stat.S_IMODE(info.st_mode) != 0o750
-                    )
-                )
+                or (self._posix and stat.S_IMODE(info.st_mode) != 0o750)
             ):
                 raise PublicProjectionError(
                     "catalog retention found an untrusted generation"
                 )
+            if self._posix:
+                self._verify_owner(info, "catalog retained generation")
             pages = list(candidate.iterdir())
             for page in pages:
                 page_info = page.lstat()
@@ -324,18 +317,13 @@ class AtomicPublicProjectionPublisher:
                     or not stat.S_ISREG(page_info.st_mode)
                     or page.is_symlink()
                     or page_info.st_nlink != 1
-                    or (
-                        self._posix
-                        and (
-                            page_info.st_uid != self._required_uid
-                            or page_info.st_gid != self._required_gid
-                            or stat.S_IMODE(page_info.st_mode) != 0o640
-                        )
-                    )
+                    or (self._posix and stat.S_IMODE(page_info.st_mode) != 0o640)
                 ):
                     raise PublicProjectionError(
                         "catalog retention found an untrusted page"
                     )
+                if self._posix:
+                    self._verify_owner(page_info, "catalog retained page")
             for page in pages:
                 page.unlink()
             candidate.rmdir()
