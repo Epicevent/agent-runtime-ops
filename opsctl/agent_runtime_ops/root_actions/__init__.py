@@ -34,6 +34,11 @@ from .client import (
 )
 from .endpoint import RootActionBrokerEndpoint
 from .listener import RootActionListenerError, RootActionUnixListener
+from .observation import (
+    MAX_PROVIDER_OBSERVATION_COUNT,
+    ObservationValidationError,
+    SanitizedExecutionObservation,
+)
 from .protocol import (
     BROKER_REQUEST_SCHEMA,
     BROKER_RESPONSE_SCHEMA,
@@ -85,6 +90,9 @@ __all__ = [
     "RootActionBrokerEndpoint",
     "RootActionListenerError",
     "RootActionUnixListener",
+    "MAX_PROVIDER_OBSERVATION_COUNT",
+    "ObservationValidationError",
+    "SanitizedExecutionObservation",
     "BrokerEventSource",
     "BrokerPeerIdentity",
     "RootActionSubmissionEndpoint",
