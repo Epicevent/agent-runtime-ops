@@ -345,8 +345,28 @@ def retrieve(server, args: dict[str, Any]) -> dict[str, Any]:
             reason_code="root_action_retrieval_result_unavailable",
         )
     try:
-        _parse_cli_result(run, error_type=server.tool_error)
+        value = _parse_cli_result(run, error_type=server.tool_error)
     except Exception:
+        return _acceptance_recovery_response(
+            server,
+            run=run,
+            argv=argv,
+            handle=handle,
+            reason_code="root_action_retrieval_result_unavailable",
+        )
+    if value["result"] == "error":
+        echoed_handle = value.get("handle")
+        reason_code = value["reason_code"]
+        if echoed_handle is not None and echoed_handle != handle:
+            reason_code = "root_action_retrieval_result_unavailable"
+        return _acceptance_recovery_response(
+            server,
+            run=run,
+            argv=argv,
+            handle=handle,
+            reason_code=reason_code,
+        )
+    if value["handle"] != handle:
         return _acceptance_recovery_response(
             server,
             run=run,
