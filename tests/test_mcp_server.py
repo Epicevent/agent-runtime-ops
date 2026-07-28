@@ -877,21 +877,47 @@ class McpServerTests(unittest.TestCase):
         runner = FakeRunner([(0, json.dumps(result), "")])
         server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
 
-        response = call_tool_result(
-            server,
-            "root_action_retrieve",
-            {"handle": handle},
-        )
+        response = call_tool(server, "root_action_retrieve", {"handle": handle})
 
-        self.assertTrue(response["isError"])
-        self.assertIn(
-            "root-action CLI projection is invalid",
-            response["structuredContent"]["next_action"],
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["acceptance_state"], "unknown")
+        self.assertTrue(response["recovery_required"])
+        self.assertEqual(response["handle"], handle)
+        self.assertEqual(
+            response["root_action"]["reason_code"],
+            "root_action_retrieval_result_unavailable",
         )
         self.assertNotIn(
             "untrusted-projection-value",
             json.dumps(response, ensure_ascii=False),
         )
+
+    def test_root_action_retrieve_transport_failure_preserves_recovery_handle(self) -> None:
+        class TimeoutRunner(FakeRunner):
+            def run(
+                self,
+                argv: list[str],
+                *,
+                input_text: str | None = None,
+                timeout: int = 60,
+            ) -> CommandResult:
+                self.calls.append(
+                    {"argv": argv, "input_text": input_text, "timeout": timeout}
+                )
+                raise subprocess.TimeoutExpired(argv, timeout)
+
+        _result, handle = root_action_cli_result()
+        runner = TimeoutRunner()
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+
+        payload = call_tool(server, "root_action_retrieve", {"handle": handle})
+
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["acceptance_state"], "unknown")
+        self.assertTrue(payload["recovery_required"])
+        self.assertEqual(payload["handle"], handle)
+        self.assertIsNone(payload["returncode"])
+        self.assertIn("Submission acceptance is unknown", payload["next_action"])
 
     def test_root_action_wait_timeout_is_agent_retryable_with_same_handle(self) -> None:
         _result, handle = root_action_cli_result()

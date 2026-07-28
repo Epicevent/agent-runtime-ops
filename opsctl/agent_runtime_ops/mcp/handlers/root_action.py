@@ -218,12 +218,13 @@ def _response(
     )
 
 
-def _submission_recovery_response(
+def _acceptance_recovery_response(
     server,
     *,
     run: dict[str, Any] | None,
     argv: list[str],
     handle: dict[str, str],
+    reason_code: str,
 ) -> dict[str, Any]:
     if run is None:
         public_runs = [
@@ -243,7 +244,7 @@ def _submission_recovery_response(
     root_action = {
         "schema": ROOT_ACTION_CLI_RESULT_SCHEMA,
         "result": "error",
-        "reason_code": "root_action_submission_result_unavailable",
+        "reason_code": reason_code,
         "handle": handle,
     }
     return server._common_response(
@@ -262,6 +263,22 @@ def _submission_recovery_response(
             "recovery_required": True,
             "acceptance_state": "unknown",
         },
+    )
+
+
+def _submission_recovery_response(
+    server,
+    *,
+    run: dict[str, Any] | None,
+    argv: list[str],
+    handle: dict[str, str],
+) -> dict[str, Any]:
+    return _acceptance_recovery_response(
+        server,
+        run=run,
+        argv=argv,
+        handle=handle,
+        reason_code="root_action_submission_result_unavailable",
     )
 
 
@@ -316,10 +333,27 @@ def submit(server, args: dict[str, Any]) -> dict[str, Any]:
 def retrieve(server, args: dict[str, Any]) -> dict[str, Any]:
     v.reject_unknown(args, {"handle"}, error_type=server.tool_error)
     handle = _handle(args.get("handle"), error_type=server.tool_error)
-    run = server._run(
-        [server.opsctl, "root-action", "retrieve", *_handle_argv(handle)],
-        timeout=15,
-    )
+    argv = [server.opsctl, "root-action", "retrieve", *_handle_argv(handle)]
+    try:
+        run = server._run(argv, timeout=15)
+    except Exception:
+        return _acceptance_recovery_response(
+            server,
+            run=None,
+            argv=argv,
+            handle=handle,
+            reason_code="root_action_retrieval_result_unavailable",
+        )
+    try:
+        _parse_cli_result(run, error_type=server.tool_error)
+    except Exception:
+        return _acceptance_recovery_response(
+            server,
+            run=run,
+            argv=argv,
+            handle=handle,
+            reason_code="root_action_retrieval_result_unavailable",
+        )
     return _response(
         server,
         run,
