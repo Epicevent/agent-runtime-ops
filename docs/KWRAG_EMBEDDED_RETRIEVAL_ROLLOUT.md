@@ -87,8 +87,11 @@ Public KWRAG v1 schemas are not changed by this OPS-private rollout contract.
 
 `tests/fixtures/kwrag_embedded_retrieval/hermes-compatibility-v1.json` binds the
 OPS-private parser to the exact clean Hermes product source and embedded component
-artifacts that first adopted this contract. It includes the exact capability labels,
-component manifest, fixed verifier argv, and canonical enabled/disabled status contract
-fixtures. The fixture explicitly records that no enabled invocation, canary target, or
-runtime mutation was observed. Passing it proves product/OPS contract compatibility only;
-it is not live consumer evidence, a target selection, or canary qualification.
+artifacts that adopted this contract. It preserves the capability-contract source
+revision separately from the later final product source revision that adds the explicit
+AIAgent consumption path. It includes the exact capability labels, component manifest,
+fixed verifier argv, and canonical enabled/disabled status contract fixtures. The fixture
+records the local networkless invocation proof separately and explicitly records that no
+live enabled invocation, canary target, or runtime mutation was observed. Passing it proves
+product/OPS contract compatibility only; it is not live consumer evidence, a target
+selection, or canary qualification.

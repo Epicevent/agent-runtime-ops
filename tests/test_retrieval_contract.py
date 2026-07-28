@@ -119,6 +119,7 @@ def test_exact_hermes_compatibility_fixture_matches_product_and_ops_contract() -
         separators=(",", ":"),
     ) + "\n"
     assert set(fixture) == {
+        "capabilityContractSourceRevision",
         "capabilityLabels",
         "componentManifest",
         "fixtureSchema",
@@ -132,8 +133,11 @@ def test_exact_hermes_compatibility_fixture_matches_product_and_ops_contract() -
         "jitech-embedded-retrieval-hermes-compatibility-fixture/v1"
     )
     assert fixture["productFamily"] == "hermes"
-    assert fixture["productSourceRevision"] == (
+    assert fixture["capabilityContractSourceRevision"] == (
         "78bd91c3139fa6ba64c021252a81ad3ec628ca3d"
+    )
+    assert fixture["productSourceRevision"] == (
+        "cb1611b44d0c66848a3d9931c9f6ccd7577e9b26"
     )
 
     labels = fixture["capabilityLabels"]
@@ -192,8 +196,9 @@ def test_exact_hermes_compatibility_fixture_matches_product_and_ops_contract() -
     validate_retrieval_status(status_fixtures["enabledContract"], enabled=True, **common)
     validate_retrieval_status(status_fixtures["disabled"], enabled=False, **common)
     assert fixture["verificationBoundary"] == {
-        "actualEnabledInvocationObserved": False,
         "canaryTargetSelected": False,
+        "liveEnabledInvocationObserved": False,
+        "localNetworklessInvocationObserved": True,
         "runtimeMutationObserved": False,
     }
 
