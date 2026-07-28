@@ -285,7 +285,7 @@ install_python_env() {
 install_root_action_broker_contract() {
   local release_dir="$1"
   local unit_source="$release_dir/systemd/agent-runtime-root-action-broker.service"
-  local install_root_real current_path unit_tmp
+  local install_root_real current_path unit_tmp main_pid
   [[ -f "$unit_source" && ! -L "$unit_source" ]] \
     || die "missing root-action broker unit source: $unit_source"
   # Resolve the trusted reader by its production account name at install time.
@@ -315,9 +315,20 @@ install_root_action_broker_contract() {
   rm -f "$unit_tmp"
   if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload >/dev/null
+    if systemctl is-active --quiet "$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")"; then
+      systemctl restart "$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")" >/dev/null
+      systemctl is-active --quiet "$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")" \
+        || die "root-action broker did not remain active after release restart"
+      main_pid="$(systemctl show --property=MainPID --value "$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")")"
+      [[ "$main_pid" =~ ^[1-9][0-9]{0,9}$ ]] \
+        || die "root-action broker MainPID is invalid after release restart"
+      grep -Fzqx "AGENT_RUNTIME_OPS_RELEASE=$release_dir" "/proc/$main_pid/environ" \
+        || die "root-action broker is not running the installed release"
+      info "root_action_broker_update=active_restarted_release_verified"
+    fi
   fi
-  # Enabling or starting this new root service is a separate ratified external
-  # boundary. Installation only places the fixed contract and directories.
+  # An inactive broker remains a separate ratified activation boundary. An
+  # already-active broker must move with self-update so old code can be pruned.
   info "root_action_broker_unit=$ROOT_ACTION_BROKER_SERVICE_FILE"
   info "root_action_broker_activation=deferred_not_enabled_or_started"
 }

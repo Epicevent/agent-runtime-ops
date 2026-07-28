@@ -28,7 +28,11 @@ def test_install_places_fixed_root_action_contract_without_activation_or_new_sud
     assert '-e "s|@@RELEASE_DIR@@|$release_dir|g"' in function
     assert "systemctl enable" not in function
     assert "systemctl start" not in function
-    assert "systemctl restart" not in function
+    assert 'systemctl is-active --quiet "$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")"' in function
+    assert 'systemctl restart "$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")"' in function
+    assert 'systemctl show --property=MainPID --value' in function
+    assert 'grep -Fzqx "AGENT_RUNTIME_OPS_RELEASE=$release_dir"' in function
+    assert "active_restarted_release_verified" in function
     sudoers_start = install.index("install_ops_sudoers()")
     sudoers_end = install.index("\n}\n", sudoers_start) + 3
     sudoers = install[sudoers_start:sudoers_end]
