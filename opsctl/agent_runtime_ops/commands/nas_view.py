@@ -458,6 +458,9 @@ def cmd_nas_view_status(args: argparse.Namespace) -> int:
     # view_N_share/_corpus 로 소스를 가른다. 빠뜨리면 그 소스는 화면에서 사라지고,
     # 안 보이는 소스는 초록으로 오해된다.
     records = list(iter_view_records(views))
+    issue_codes: list[str] = []
+    observation_gaps: list[str] = []
+    print("view_status_schema=agent-runtime-nas-view-status/v1")
     print(f"view_count={len(records)}")
     print("mutates=false")
     exit_code = 0
@@ -514,6 +517,7 @@ def cmd_nas_view_status(args: argparse.Namespace) -> int:
             healthy = False
         print(f"{prefix}_healthy={'yes' if healthy else 'no'}")
         if not healthy:
+            issue_codes.append("view_unhealthy")
             exit_code = 1
 
     # Boot persistence: a healthy view that will not survive a reboot is a
@@ -542,6 +546,7 @@ def cmd_nas_view_status(args: argparse.Namespace) -> int:
         print(f"boot_fstab_entries={len(records) - len(missing)}/{len(records)}")
         if missing:
             print(f"boot_fstab_missing={','.join(missing)}")
+            issue_codes.append("boot_fstab_missing")
             exit_code = 1
         if _is_root():
             proc = _run_text(["crontab", "-l"], timeout=10)
@@ -550,9 +555,11 @@ def cmd_nas_view_status(args: argparse.Namespace) -> int:
             has_cron = proc.returncode == 0 and crontab_has_reboot_restore(proc.stdout)
             print(f"boot_restore_cron={'yes' if has_cron else 'no'}")
             if not has_cron:
+                issue_codes.append("boot_restore_missing")
                 exit_code = 1
         else:
             print("boot_restore_cron=unknown_requires_root")
+            observation_gaps.append("boot_restore_requires_root")
 
     # nofail keeps a lost boot race silent (mounts absent, boot "fine") —
     # surface failed CIFS mount units so the first status line after an
@@ -560,10 +567,12 @@ def cmd_nas_view_status(args: argparse.Namespace) -> int:
     failed_units, failed_error = failed_cifs_mount_units()
     if failed_error is not None:
         print(f"failed_cifs_mount_units=unknown reason={failed_error}")
+        observation_gaps.append("failed_cifs_mount_units_unavailable")
     else:
         print(f"failed_cifs_mount_units={len(failed_units)}")
         if failed_units:
             print("failed_cifs_mount_unit_names=" + ",".join(failed_units))
+            issue_codes.append("failed_cifs_mount_units")
             exit_code = 1
 
     # Registration is not boot success (2026-07-07: every managed pair present,
@@ -578,8 +587,21 @@ def cmd_nas_view_status(args: argparse.Namespace) -> int:
     print(f"managed_fstab_mounted={len(declared) - len(unmounted)}/{len(declared)}")
     if unmounted:
         print("managed_fstab_unmounted=" + ",".join(unmounted))
+        issue_codes.append("managed_fstab_unmounted")
         exit_code = 1
-    print("view_status=ok")
+    print(f"view_status={'ok' if exit_code == 0 else 'degraded'}")
+    print(f"view_exit_code={exit_code}")
+    print(
+        "view_status_issues_json="
+        + json.dumps(sorted(set(issue_codes)), ensure_ascii=False, separators=(",", ":"))
+    )
+    print(
+        "view_observation_gaps_json="
+        + json.dumps(sorted(set(observation_gaps)), ensure_ascii=False, separators=(",", ":"))
+    )
+    # This terminal marker is deliberately last.  Consumers may use an rc=1
+    # degraded snapshot only when this line and every declared row arrived.
+    print("view_snapshot_complete=yes")
     return exit_code
 
 
