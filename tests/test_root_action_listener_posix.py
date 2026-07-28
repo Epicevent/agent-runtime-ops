@@ -181,23 +181,29 @@ def test_client_reset_during_request_read_does_not_escape_listener(tmp_path: Pat
     )
     listener.open()
     errors: list[BaseException] = []
-    thread = serve_one(listener, errors)
+    stop = threading.Event()
+
+    def serve() -> None:
+        try:
+            listener.serve_forever(stop)
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     client.connect(str(socket_path))
     client.sendall(b"\x00")
     client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
     client.close()
-    thread.join(timeout=3)
 
-    assert not thread.is_alive()
-    assert errors == []
-
-    thread = serve_one(listener, errors)
     handle, projection = RootActionBrokerClient(socket_path=socket_path).submit(
         manifest("job-after-read-reset")
     )
+    stop.set()
     thread.join(timeout=3)
     listener.close()
+    assert not thread.is_alive()
     assert errors == []
     assert handle.job_id == "job-after-read-reset"
     assert projection["status"]["state"]["name"] == "pending"
