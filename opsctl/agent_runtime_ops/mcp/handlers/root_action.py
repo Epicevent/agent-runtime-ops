@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import shlex
 from typing import Any
 
 from ...root_actions.client import RootActionRequestHandle
@@ -163,10 +164,8 @@ def _response(
     public_run = {**run, "stdout": ""}
     ok = run["returncode"] == 0 and value["result"] == "ok"
     reason = value.get("reason_code")
-    retryable = retry_on_timeout and reason in {
-        "terminal_receipt_polling_timed_out",
-        "outcome_unknown_recovery_needed",
-    }
+    outcome_unknown = reason == "outcome_unknown_recovery_needed"
+    retryable = retry_on_timeout and reason == "terminal_receipt_polling_timed_out"
     handle = value.get("handle") or fallback_handle
     next_action = None
     if submission_acceptance_unknown:
@@ -179,6 +178,12 @@ def _response(
         next_action = (
             "Call root_action_wait again with the unchanged returned handle. "
             "Do not ask the user to poll, run a shell, or carry receipt output."
+        )
+    elif outcome_unknown:
+        next_action = (
+            "Stop polling: the broker recorded an immutable unknown outcome. Preserve the "
+            "unchanged handle for an authorized reconciliation path; do not resubmit the "
+            "action or ask the user to carry receipt output."
         )
     elif ok and value.get("state") != "terminal":
         next_action = (
@@ -194,7 +199,7 @@ def _response(
             "root_action": value,
             "handle": handle,
             "retryable": retryable,
-            "recovery_required": submission_acceptance_unknown,
+            "recovery_required": submission_acceptance_unknown or outcome_unknown,
             "acceptance_state": (
                 "unknown"
                 if submission_acceptance_unknown
@@ -202,6 +207,53 @@ def _response(
                 if value["result"] == "ok" or value.get("handle") is not None
                 else "not_observed"
             ),
+        },
+    )
+
+
+def _submission_recovery_response(
+    server,
+    *,
+    run: dict[str, Any] | None,
+    argv: list[str],
+    handle: dict[str, str],
+) -> dict[str, Any]:
+    if run is None:
+        public_runs = [
+            {
+                "command": {
+                    "argv": argv,
+                    "display": shlex.join(argv),
+                    "stdin": "provided",
+                },
+                "returncode": None,
+                "stdout": "",
+                "stderr": "",
+            }
+        ]
+    else:
+        public_runs = [{**run, "stdout": ""}]
+    root_action = {
+        "schema": ROOT_ACTION_CLI_RESULT_SCHEMA,
+        "result": "error",
+        "reason_code": "root_action_submission_result_unavailable",
+        "handle": handle,
+    }
+    return server._common_response(
+        ok=False,
+        mutated=False,
+        runs=public_runs,
+        next_action=(
+            "Submission acceptance is unknown. Call root_action_retrieve with the derived "
+            "unchanged handle before considering any new submission. Never change the digest "
+            "or create a second execution attempt to resolve this state."
+        ),
+        extra={
+            "root_action": root_action,
+            "handle": handle,
+            "retryable": False,
+            "recovery_required": True,
+            "acceptance_state": "unknown",
         },
     )
 
@@ -215,19 +267,36 @@ def submit(server, args: dict[str, Any]) -> dict[str, Any]:
         sealed = seal_typed_manifest(canonical_manifest_bytes(manifest))
     except (TypeError, ValueError, ManifestValidationError) as exc:
         raise server.tool_error(f"typed root-action manifest rejected: {exc}") from exc
-    run = server._run(
-        [server.opsctl, "root-action", "submit", "--manifest-stdin"],
-        input_text=sealed.canonical_manifest.decode("utf-8"),
-        timeout=15,
-    )
-    value = _parse_cli_result(run, error_type=server.tool_error)
-    accepted = value["result"] == "ok" or value.get("handle") is not None
     derived_handle = {
         "job_id": sealed.job_id,
         "job_digest": sealed.job_digest,
         "request_id": sealed.request_id,
         "reply_target": sealed.reply_target,
     }
+    argv = [server.opsctl, "root-action", "submit", "--manifest-stdin"]
+    try:
+        run = server._run(
+            argv,
+            input_text=sealed.canonical_manifest.decode("utf-8"),
+            timeout=15,
+        )
+    except Exception:
+        return _submission_recovery_response(
+            server,
+            run=None,
+            argv=argv,
+            handle=derived_handle,
+        )
+    try:
+        value = _parse_cli_result(run, error_type=server.tool_error)
+    except Exception:
+        return _submission_recovery_response(
+            server,
+            run=run,
+            argv=argv,
+            handle=derived_handle,
+        )
+    accepted = value["result"] == "ok" or value.get("handle") is not None
     return _response(
         server,
         run,

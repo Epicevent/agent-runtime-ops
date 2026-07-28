@@ -800,18 +800,10 @@ class PosixRootActionStore:
         if session.state is not BootstrapState.ISSUED:
             raise StorageConflict("new bootstrap session must be issued")
         with self._transaction() as connection:
-            connection.execute(
-                """
-                UPDATE root_action_auth_bootstrap
-                SET state='expired'
-                WHERE state='issued' AND expires_at<=?
-                """,
-                (session.issued_at,),
-            )
             if connection.execute(
-                "SELECT 1 FROM root_action_auth_bootstrap WHERE state='issued'"
+                "SELECT 1 FROM root_action_auth_bootstrap LIMIT 1"
             ).fetchone() is not None:
-                raise StorageConflict("an unexpired bootstrap session already exists")
+                raise StorageConflict("initial bootstrap has already been created")
             self._execute_insert(
                 connection,
                 """

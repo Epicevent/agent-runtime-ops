@@ -158,6 +158,46 @@ def enroll(store: PosixRootActionStore) -> RegisteredCredential:
     return credential
 
 
+def test_initial_bootstrap_cannot_be_recreated_after_consumption() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        store = make_store(Path(temporary) / "root-actions")
+        enroll(store)
+        second_token = bytes.fromhex("62" * 32)
+        second = BootstrapSession(
+            bootstrap_id="bootstrap-second",
+            token_digest=bootstrap_token_digest(second_token),
+            issued_at="2026-07-28T02:00:00Z",
+            expires_at="2026-07-28T02:10:00Z",
+            remaining_registrations=1,
+        )
+
+        with pytest.raises(StorageConflict, match="initial bootstrap"):
+            store.create_auth_bootstrap(second)
+
+
+def test_initial_bootstrap_cannot_be_recreated_after_expiration() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        store = make_store(Path(temporary) / "root-actions")
+        first = BootstrapSession(
+            bootstrap_id="bootstrap-expired",
+            token_digest=bootstrap_token_digest(bytes.fromhex("63" * 32)),
+            issued_at=ISSUED,
+            expires_at=BOOTSTRAP_EXPIRES,
+            remaining_registrations=1,
+        )
+        store.create_auth_bootstrap(first)
+        second = BootstrapSession(
+            bootstrap_id="bootstrap-after-expiry",
+            token_digest=bootstrap_token_digest(bytes.fromhex("64" * 32)),
+            issued_at="2026-07-28T03:00:00Z",
+            expires_at="2026-07-28T03:10:00Z",
+            remaining_registrations=1,
+        )
+
+        with pytest.raises(StorageConflict, match="initial bootstrap"):
+            store.create_auth_bootstrap(second)
+
+
 def pending_job(store: PosixRootActionStore):
     job = seal_typed_manifest(encoded(valid_manifest()))
     store.seal_pending(

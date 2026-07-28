@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 
@@ -903,6 +904,34 @@ class McpServerTests(unittest.TestCase):
             ["--wait-timeout", "10.0", "--poll-interval", "1.0"],
         )
 
+    def test_root_action_wait_unknown_outcome_stops_polling_and_requires_recovery(self) -> None:
+        _result, handle = root_action_cli_result()
+        unknown_result = {
+            "schema": "agent-runtime-root-action-cli-result/v1",
+            "result": "error",
+            "reason_code": "outcome_unknown_recovery_needed",
+            "handle": handle,
+        }
+        runner = FakeRunner([(2, json.dumps(unknown_result), "")])
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+
+        payload = call_tool(
+            server,
+            "root_action_wait",
+            {
+                "handle": handle,
+                "wait_timeout_seconds": 10,
+                "poll_interval_seconds": 1,
+            },
+        )
+
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["retryable"])
+        self.assertTrue(payload["recovery_required"])
+        self.assertEqual(payload["handle"], handle)
+        self.assertIn("Stop polling", payload["next_action"])
+        self.assertNotIn("Call root_action_wait again", payload["next_action"])
+
     def test_root_action_submit_transport_failure_exposes_derived_recovery_handle(self) -> None:
         error_result = {
             "schema": "agent-runtime-root-action-cli-result/v1",
@@ -932,6 +961,52 @@ class McpServerTests(unittest.TestCase):
         )
         self.assertIn("root_action_retrieve", payload["next_action"])
         self.assertIn("Never change the digest", payload["next_action"])
+
+    def test_root_action_submit_malformed_output_preserves_derived_recovery_handle(self) -> None:
+        runner = FakeRunner([(0, '{"truncated":', "")])
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        manifest_value = json.loads(root_action_manifest("job-mcp"))
+        job = seal_typed_manifest(root_action_manifest("job-mcp"))
+
+        payload = call_tool(server, "root_action_submit", {"manifest": manifest_value})
+
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["recovery_required"])
+        self.assertEqual(payload["acceptance_state"], "unknown")
+        self.assertEqual(payload["handle"]["job_id"], job.job_id)
+        self.assertEqual(payload["handle"]["job_digest"], job.job_digest)
+        self.assertEqual(payload["root_action"]["handle"], payload["handle"])
+        self.assertEqual(payload["stdout"], "")
+        self.assertIn("root_action_retrieve", payload["next_action"])
+
+    def test_root_action_submit_timeout_preserves_derived_recovery_handle(self) -> None:
+        class TimeoutRunner(FakeRunner):
+            def run(
+                self,
+                argv: list[str],
+                *,
+                input_text: str | None = None,
+                timeout: int = 60,
+            ) -> CommandResult:
+                self.calls.append(
+                    {"argv": argv, "input_text": input_text, "timeout": timeout}
+                )
+                raise subprocess.TimeoutExpired(argv, timeout)
+
+        runner = TimeoutRunner()
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+        manifest_value = json.loads(root_action_manifest("job-mcp"))
+        job = seal_typed_manifest(root_action_manifest("job-mcp"))
+
+        payload = call_tool(server, "root_action_submit", {"manifest": manifest_value})
+
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["recovery_required"])
+        self.assertEqual(payload["acceptance_state"], "unknown")
+        self.assertEqual(payload["handle"]["job_id"], job.job_id)
+        self.assertEqual(payload["handle"]["job_digest"], job.job_digest)
+        self.assertIsNone(payload["returncode"])
+        self.assertIn("root_action_retrieve", payload["next_action"])
 
     def test_root_action_tools_reject_untyped_or_incomplete_inputs_before_opsctl(self) -> None:
         runner = FakeRunner()
