@@ -1,7 +1,8 @@
 [Unit]
-Description=Agent Runtime root-action trusted submission and publication broker
+Description=Agent Runtime root-action WebAuthn approval and execution broker
 After=local-fs.target
 ConditionPathIsDirectory=@@CURRENT_LINK@@
+ConditionPathIsFile=/etc/agent-runtime-ops/root-action-webauthn.env
 
 [Service]
 Type=simple
@@ -9,6 +10,7 @@ User=root
 Group=root
 UMask=0027
 ExecStart=@@CURRENT_LINK@@/.venv/bin/python -m agent_runtime_ops.root_actions.service
+EnvironmentFile=/etc/agent-runtime-ops/root-action-webauthn.env
 Restart=on-failure
 RestartSec=2s
 NoNewPrivileges=yes
@@ -16,6 +18,7 @@ PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
 ReadWritePaths=/var/lib/agent-runtime-ops/root-actions /run/agent-runtime-ops
+ReadOnlyPaths=/etc/agent-runtime-ops/root-action-webauthn.env
 RestrictAddressFamilies=AF_UNIX
 RuntimeDirectory=agent-runtime-ops
 RuntimeDirectoryMode=0750

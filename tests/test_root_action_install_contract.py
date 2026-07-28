@@ -32,7 +32,7 @@ def test_install_places_fixed_root_action_contract_without_activation_or_new_sud
     assert "root-action" not in sudoers
 
 
-def test_service_is_submission_publication_only_and_uses_fixed_paths() -> None:
+def test_service_is_root_owned_webauthn_broker_and_uses_fixed_paths() -> None:
     unit = Path("systemd/agent-runtime-root-action-broker.service").read_text(
         encoding="utf-8"
     )
@@ -41,9 +41,10 @@ def test_service_is_submission_publication_only_and_uses_fixed_paths() -> None:
     assert "ReadWritePaths=/var/lib/agent-runtime-ops/root-actions /run/agent-runtime-ops" in unit
     assert "RestrictAddressFamilies=AF_UNIX" in unit
     assert "RuntimeDirectory=agent-runtime-ops" in unit
+    assert "EnvironmentFile=/etc/agent-runtime-ops/root-action-webauthn.env" in unit
+    assert "ConditionPathIsFile=/etc/agent-runtime-ops/root-action-webauthn.env" in unit
     assert "PAM" not in unit
     assert "sudo" not in unit.lower()
-    assert "worker" not in unit.lower()
 
 
 def test_custom_install_root_materializes_a_functional_absolute_unit_path() -> None:

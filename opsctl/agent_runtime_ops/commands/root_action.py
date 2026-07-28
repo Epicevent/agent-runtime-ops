@@ -202,3 +202,20 @@ def cmd_root_action_wait(args: argparse.Namespace) -> int:
 def cmd_root_action_preflight(_args: argparse.Namespace) -> int:
     _emit(root_action_preflight())
     return 0
+
+
+def cmd_root_action_auth_bootstrap(args: argparse.Namespace) -> int:
+    try:
+        value = RootActionBrokerClient().create_auth_bootstrap(
+            timeout_seconds=args.broker_timeout,
+        )
+    except (OSError, ValueError, RootActionClientError):
+        return _emit_error("root_action_auth_bootstrap_failed_closed")
+    _emit(
+        {
+            "schema": ROOT_ACTION_CLI_RESULT_SCHEMA,
+            "result": "ok",
+            "bootstrap": value,
+        }
+    )
+    return 0

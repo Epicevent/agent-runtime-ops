@@ -10,10 +10,17 @@ from .contracts import MAX_MANIFEST_BYTES, seal_typed_manifest
 
 BROKER_REQUEST_SCHEMA = "agent-runtime-root-action-broker-request/v1"
 BROKER_RESPONSE_SCHEMA = "agent-runtime-root-action-broker-response/v1"
-MAX_BROKER_REQUEST_BYTES = MAX_MANIFEST_BYTES + 16 * 1024
+MAX_BROKER_REQUEST_BYTES = 512 * 1024
 MAX_BROKER_RESPONSE_BYTES = 4 * 1024 * 1024
 _SAFE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}")
 _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
+_BOOTSTRAP_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{43}")
+_CREDENTIAL_ROLES = {"approval", "recovery"}
+_CREDENTIAL_LABELS = {
+    "office_windows_hello",
+    "remote_phone_passkey",
+    "recovery_fido2",
+}
 
 
 class BrokerProtocolError(ValueError):
@@ -87,6 +94,21 @@ def retrieve_request(
     )
 
 
+def auth_request(method: str, **values: Any) -> bytes:
+    if not isinstance(method, str) or not method.startswith("auth_"):
+        raise BrokerProtocolError("authorization method is invalid")
+    return encode_frame(
+        canonical_json(
+            {
+                "schema": BROKER_REQUEST_SCHEMA,
+                "method": method,
+                **values,
+            }
+        ),
+        maximum=MAX_BROKER_REQUEST_BYTES,
+    )
+
+
 def parse_request_frame(frame: bytes) -> tuple[str, dict[str, Any]]:
     payload = decode_frame(frame, maximum=MAX_BROKER_REQUEST_BYTES)
     try:
@@ -133,6 +155,78 @@ def parse_request_frame(frame: bytes) -> tuple[str, dict[str, Any]]:
         ):
             raise BrokerProtocolError("retrieve request identity is invalid")
         return method, {key: value[key] for key in expected - {"schema", "method"}}
+    if method in {"auth_status", "auth_bootstrap_create"}:
+        if set(value) != {"schema", "method"}:
+            raise BrokerProtocolError("authorization request field set is invalid")
+        return method, {}
+    if method == "auth_registration_begin":
+        expected = {"schema", "method", "bootstrap_token", "role", "label"}
+        if set(value) != expected:
+            raise BrokerProtocolError("registration begin field set is invalid")
+        if (
+            not isinstance(value["bootstrap_token"], str)
+            or _BOOTSTRAP_TOKEN_RE.fullmatch(value["bootstrap_token"]) is None
+            or not isinstance(value["role"], str)
+            or value["role"] not in _CREDENTIAL_ROLES
+            or not isinstance(value["label"], str)
+            or value["label"] not in _CREDENTIAL_LABELS
+        ):
+            raise BrokerProtocolError("registration begin fields are invalid")
+        return method, {
+            key: value[key] for key in ("bootstrap_token", "role", "label")
+        }
+    if method == "auth_registration_finish":
+        expected = {
+            "schema",
+            "method",
+            "bootstrap_token",
+            "ceremony_id",
+            "credential",
+        }
+        if set(value) != expected:
+            raise BrokerProtocolError("registration finish field set is invalid")
+        if (
+            not isinstance(value["bootstrap_token"], str)
+            or _BOOTSTRAP_TOKEN_RE.fullmatch(value["bootstrap_token"]) is None
+            or not isinstance(value["ceremony_id"], str)
+            or _SAFE_ID_RE.fullmatch(value["ceremony_id"]) is None
+            or not isinstance(value["credential"], dict)
+        ):
+            raise BrokerProtocolError("registration finish fields are invalid")
+        return method, {
+            "bootstrap_token": value["bootstrap_token"],
+            "ceremony_id": value["ceremony_id"],
+            "browser_credential": value["credential"],
+        }
+    if method == "auth_approval_begin":
+        expected = {"schema", "method", "job_id", "job_digest"}
+        if set(value) != expected:
+            raise BrokerProtocolError("approval begin field set is invalid")
+        if (
+            not isinstance(value["job_id"], str)
+            or _SAFE_ID_RE.fullmatch(value["job_id"]) is None
+            or not isinstance(value["job_digest"], str)
+            or _DIGEST_RE.fullmatch(value["job_digest"]) is None
+        ):
+            raise BrokerProtocolError("approval begin identity is invalid")
+        return method, {
+            "job_id": value["job_id"],
+            "job_digest": value["job_digest"],
+        }
+    if method == "auth_approval_finish":
+        expected = {"schema", "method", "ceremony_id", "credential"}
+        if set(value) != expected:
+            raise BrokerProtocolError("approval finish field set is invalid")
+        if (
+            not isinstance(value["ceremony_id"], str)
+            or _SAFE_ID_RE.fullmatch(value["ceremony_id"]) is None
+            or not isinstance(value["credential"], dict)
+        ):
+            raise BrokerProtocolError("approval finish fields are invalid")
+        return method, {
+            "ceremony_id": value["ceremony_id"],
+            "browser_credential": value["credential"],
+        }
     raise BrokerProtocolError("broker request method is unsupported")
 
 

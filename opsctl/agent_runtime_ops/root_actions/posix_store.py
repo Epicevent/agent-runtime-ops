@@ -13,6 +13,17 @@ from .admission import (
     LineageSummary,
     SubmissionAdmission,
 )
+from .authorization import (
+    ApprovalRecord,
+    BootstrapSession,
+    BootstrapState,
+    CeremonyPurpose,
+    CeremonyState,
+    CredentialRole,
+    PendingCeremony,
+    RegisteredCredential,
+    VerifiedAssertion,
+)
 from .contracts import ManifestValidationError, SealedJob, seal_typed_manifest
 from .receipts import (
     QuarantineRecord,
@@ -27,6 +38,7 @@ from .state import (
     JobState,
     TerminalOutcome,
     TransitionEvent,
+    TransitionKind,
     apply_transition,
     initial_record,
     validate_record,
@@ -40,7 +52,7 @@ from .storage import (
 )
 
 
-_SCHEMA = """
+_BASE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS root_action_jobs (
     job_id TEXT PRIMARY KEY,
     job_digest TEXT NOT NULL UNIQUE,
@@ -108,8 +120,67 @@ CREATE TABLE IF NOT EXISTS root_action_quarantine (
     root_storage_id TEXT NOT NULL
 );
 """
-_SCHEMA_VERSION = 2
-_REQUIRED_TABLES = {
+_AUTH_SCHEMA = """
+CREATE TABLE IF NOT EXISTS root_action_auth_bootstrap (
+    bootstrap_id TEXT PRIMARY KEY,
+    token_digest TEXT NOT NULL UNIQUE,
+    issued_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    remaining_registrations INTEGER NOT NULL,
+    state TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS root_action_auth_credentials (
+    credential_id BLOB PRIMARY KEY,
+    credential_fingerprint TEXT NOT NULL UNIQUE,
+    public_key BLOB NOT NULL,
+    sign_count INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    label TEXT NOT NULL,
+    aaguid TEXT NOT NULL,
+    device_type TEXT NOT NULL,
+    backed_up INTEGER NOT NULL,
+    registered_at TEXT NOT NULL,
+    revoked_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS root_action_auth_active_label
+ON root_action_auth_credentials(label) WHERE revoked_at IS NULL;
+CREATE TABLE IF NOT EXISTS root_action_auth_ceremonies (
+    ceremony_id TEXT PRIMARY KEY,
+    purpose TEXT NOT NULL,
+    challenge BLOB NOT NULL,
+    binding_nonce BLOB NOT NULL,
+    challenge_digest TEXT NOT NULL UNIQUE,
+    issued_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    job_id TEXT REFERENCES root_action_jobs(job_id),
+    job_digest TEXT,
+    bootstrap_id TEXT REFERENCES root_action_auth_bootstrap(bootstrap_id),
+    role TEXT,
+    label TEXT,
+    state TEXT NOT NULL,
+    consumed_at TEXT,
+    credential_fingerprint TEXT REFERENCES root_action_auth_credentials(credential_fingerprint)
+);
+CREATE INDEX IF NOT EXISTS root_action_auth_ceremony_job
+ON root_action_auth_ceremonies(job_id, issued_at);
+CREATE TABLE IF NOT EXISTS root_action_auth_approvals (
+    approval_id TEXT PRIMARY KEY,
+    ceremony_id TEXT NOT NULL UNIQUE REFERENCES root_action_auth_ceremonies(ceremony_id),
+    job_id TEXT NOT NULL REFERENCES root_action_jobs(job_id),
+    job_digest TEXT NOT NULL,
+    credential_fingerprint TEXT NOT NULL REFERENCES root_action_auth_credentials(credential_fingerprint),
+    verified_at TEXT NOT NULL,
+    origin TEXT NOT NULL,
+    rp_id TEXT NOT NULL,
+    user_verified INTEGER NOT NULL,
+    sign_count INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS root_action_auth_approval_job
+ON root_action_auth_approvals(job_id, verified_at);
+"""
+_SCHEMA = _BASE_SCHEMA + _AUTH_SCHEMA
+_SCHEMA_VERSION = 3
+_SCHEMA_VERSION_2_TABLES = {
     "root_action_jobs",
     "root_action_records",
     "root_action_ledger",
@@ -117,6 +188,13 @@ _REQUIRED_TABLES = {
     "root_action_receipts",
     "root_action_receipt_current",
     "root_action_quarantine",
+}
+_REQUIRED_TABLES = {
+    *_SCHEMA_VERSION_2_TABLES,
+    "root_action_auth_bootstrap",
+    "root_action_auth_credentials",
+    "root_action_auth_ceremonies",
+    "root_action_auth_approvals",
 }
 
 
@@ -438,6 +516,16 @@ class PosixRootActionStore:
         with self._connect() as connection:
             return self._read_record(connection, job_id)
 
+    def running_job_ids(self) -> tuple[str, ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT job_id FROM root_action_records
+                WHERE state='running' ORDER BY last_changed_at, job_id
+                """
+            ).fetchall()
+        return tuple(row["job_id"] for row in rows)
+
     def compare_and_append(self, event: TransitionEvent) -> JobRecord:
         with self._transaction() as connection:
             return self._compare_and_append(connection, event)
@@ -534,6 +622,79 @@ class PosixRootActionStore:
             reference=RawReceiptReference(**values),
             raw_bytes=raw_bytes,
         )
+
+    def complete_claimed_execution(
+        self,
+        *,
+        event: TransitionEvent,
+        raw: RawReceiptArtifact,
+        receipt: ReceiptArtifact,
+    ) -> JobRecord:
+        if event.kind is not TransitionKind.COMPLETE_EXECUTION:
+            raise StorageConflict("execution completion requires a complete event")
+        return self._finalize_claimed_execution(
+            event=event,
+            raw=raw,
+            receipt=receipt,
+        )
+
+    def mark_claimed_execution_unknown(
+        self,
+        *,
+        event: TransitionEvent,
+        raw: RawReceiptArtifact,
+        receipt: ReceiptArtifact,
+    ) -> JobRecord:
+        if event.kind is not TransitionKind.MARK_UNKNOWN:
+            raise StorageConflict("unknown completion requires a mark-unknown event")
+        return self._finalize_claimed_execution(
+            event=event,
+            raw=raw,
+            receipt=receipt,
+        )
+
+    def _finalize_claimed_execution(
+        self,
+        *,
+        event: TransitionEvent,
+        raw: RawReceiptArtifact,
+        receipt: ReceiptArtifact,
+    ) -> JobRecord:
+        self._verify_receipt(receipt)
+        reference = raw.reference
+        value = receipt.receipt_copy()
+        if (
+            event.job_id != reference.job_id
+            or event.job_digest != reference.job_digest
+            or receipt.job_id != reference.job_id
+            or receipt.job_digest != reference.job_digest
+            or value.get("raw_receipt_digest") != reference.raw_receipt_digest
+        ):
+            raise StorageConflict("execution receipt identity mismatch")
+        with self._transaction() as connection:
+            job = self._read_job(connection, event.job_id)
+            if job.job_digest != event.job_digest:
+                raise StorageConflict("execution event job identity mismatch")
+            self._execute_insert(
+                connection,
+                """
+                INSERT INTO root_action_raw_receipts
+                (job_id, job_digest, raw_receipt_digest, root_storage_id, raw_receipt)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    reference.job_id,
+                    reference.job_digest,
+                    reference.raw_receipt_digest,
+                    reference.root_storage_id,
+                    raw.raw_bytes,
+                ),
+                "raw receipt already exists",
+            )
+            record = self._compare_and_append(connection, event)
+            self._validate_receipt_publication(connection, receipt)
+            self._insert_receipt(connection, receipt)
+            return record
 
     def publish_if_absent(self, artifact: ReceiptArtifact) -> None:
         self._verify_receipt(artifact)
@@ -634,6 +795,330 @@ class PosixRootActionStore:
             raise StorageConflict("quarantine receipt index metadata mismatch")
         self._verify_receipt(artifact)
         return artifact
+
+    def create_auth_bootstrap(self, session: BootstrapSession) -> None:
+        if session.state is not BootstrapState.ISSUED:
+            raise StorageConflict("new bootstrap session must be issued")
+        with self._transaction() as connection:
+            connection.execute(
+                """
+                UPDATE root_action_auth_bootstrap
+                SET state='expired'
+                WHERE state='issued' AND expires_at<=?
+                """,
+                (session.issued_at,),
+            )
+            if connection.execute(
+                "SELECT 1 FROM root_action_auth_bootstrap WHERE state='issued'"
+            ).fetchone() is not None:
+                raise StorageConflict("an unexpired bootstrap session already exists")
+            self._execute_insert(
+                connection,
+                """
+                INSERT INTO root_action_auth_bootstrap
+                (bootstrap_id, token_digest, issued_at, expires_at,
+                 remaining_registrations, state)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session.bootstrap_id,
+                    session.token_digest,
+                    session.issued_at,
+                    session.expires_at,
+                    session.remaining_registrations,
+                    session.state.value,
+                ),
+                "bootstrap identity already exists",
+            )
+
+    def read_auth_bootstrap(self, bootstrap_id: str) -> BootstrapSession:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT bootstrap_id, token_digest, issued_at, expires_at,
+                       remaining_registrations, state
+                FROM root_action_auth_bootstrap WHERE bootstrap_id=?
+                """,
+                (bootstrap_id,),
+            ).fetchone()
+        if row is None:
+            raise StorageNotFound(bootstrap_id)
+        return self._bootstrap_from_row(row)
+
+    def read_auth_bootstrap_by_token(self, token_digest: str) -> BootstrapSession:
+        with self._connect() as connection:
+            return self._bootstrap_by_token(connection, token_digest)
+
+    def issue_registration_ceremony(
+        self, *, token_digest: str, ceremony: PendingCeremony
+    ) -> None:
+        if (
+            ceremony.purpose is not CeremonyPurpose.REGISTRATION
+            or ceremony.state is not CeremonyState.ISSUED
+        ):
+            raise StorageConflict("registration ceremony is invalid")
+        with self._transaction() as connection:
+            bootstrap = self._bootstrap_by_token(connection, token_digest)
+            if (
+                bootstrap.bootstrap_id != ceremony.bootstrap_id
+                or bootstrap.state is not BootstrapState.ISSUED
+                or bootstrap.remaining_registrations < 1
+                or bootstrap.expires_at <= ceremony.issued_at
+                or ceremony.expires_at > bootstrap.expires_at
+            ):
+                raise StorageConflict("bootstrap does not authorize this registration")
+            outstanding = connection.execute(
+                """
+                SELECT 1 FROM root_action_auth_ceremonies
+                WHERE bootstrap_id=? AND state='issued' AND expires_at>=?
+                """,
+                (bootstrap.bootstrap_id, ceremony.issued_at),
+            ).fetchone()
+            if outstanding is not None:
+                raise StorageConflict("bootstrap already has an issued ceremony")
+            self._insert_ceremony(connection, ceremony)
+
+    def complete_registration(
+        self,
+        *,
+        token_digest: str,
+        ceremony_id: str,
+        credential: RegisteredCredential,
+        consumed_at: str,
+    ) -> RegisteredCredential:
+        with self._transaction() as connection:
+            ceremony = self._read_ceremony(connection, ceremony_id)
+            if (
+                ceremony.purpose is not CeremonyPurpose.REGISTRATION
+                or ceremony.state is not CeremonyState.ISSUED
+                or ceremony.expires_at <= consumed_at
+                or ceremony.bootstrap_id is None
+                or ceremony.role is not credential.role
+                or ceremony.label != credential.label
+            ):
+                raise StorageConflict("registration ceremony cannot be consumed")
+            bootstrap = self._bootstrap_by_token(connection, token_digest)
+            if (
+                bootstrap.bootstrap_id != ceremony.bootstrap_id
+                or bootstrap.state is not BootstrapState.ISSUED
+                or bootstrap.remaining_registrations < 1
+                or bootstrap.expires_at <= consumed_at
+            ):
+                raise StorageConflict("bootstrap is not active for registration")
+            self._insert_credential(connection, credential)
+            cursor = connection.execute(
+                """
+                UPDATE root_action_auth_ceremonies
+                SET state='consumed', consumed_at=?, credential_fingerprint=?
+                WHERE ceremony_id=? AND state='issued'
+                """,
+                (consumed_at, credential.fingerprint, ceremony.ceremony_id),
+            )
+            if cursor.rowcount != 1:
+                raise StorageConflict("registration ceremony consumption race")
+            remaining = bootstrap.remaining_registrations - 1
+            state = "consumed" if remaining == 0 else "issued"
+            cursor = connection.execute(
+                """
+                UPDATE root_action_auth_bootstrap
+                SET remaining_registrations=?, state=?
+                WHERE bootstrap_id=? AND state='issued'
+                  AND remaining_registrations=?
+                """,
+                (
+                    remaining,
+                    state,
+                    bootstrap.bootstrap_id,
+                    bootstrap.remaining_registrations,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StorageConflict("bootstrap registration counter race")
+        return credential
+
+    def active_credentials(
+        self, role: CredentialRole
+    ) -> tuple[RegisteredCredential, ...]:
+        if not isinstance(role, CredentialRole):
+            raise ValueError("credential role is invalid")
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT credential_id, credential_fingerprint, public_key,
+                       sign_count, role, label, aaguid,
+                       device_type, backed_up, registered_at, revoked_at
+                FROM root_action_auth_credentials
+                WHERE role=? AND revoked_at IS NULL
+                ORDER BY registered_at, credential_fingerprint
+                """,
+                (role.value,),
+            ).fetchall()
+        return tuple(self._credential_from_row(row) for row in rows)
+
+    def read_credential(self, credential_id: bytes) -> RegisteredCredential:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT credential_id, credential_fingerprint, public_key,
+                       sign_count, role, label, aaguid,
+                       device_type, backed_up, registered_at, revoked_at
+                FROM root_action_auth_credentials WHERE credential_id=?
+                """,
+                (credential_id,),
+            ).fetchone()
+        if row is None:
+            raise StorageNotFound("credential")
+        return self._credential_from_row(row)
+
+    def issue_approval_ceremony(self, ceremony: PendingCeremony) -> None:
+        if (
+            ceremony.purpose is not CeremonyPurpose.APPROVAL
+            or ceremony.state is not CeremonyState.ISSUED
+            or ceremony.job_id is None
+            or ceremony.job_digest is None
+        ):
+            raise StorageConflict("approval ceremony is invalid")
+        with self._transaction() as connection:
+            record = self._read_record(connection, ceremony.job_id)
+            if (
+                record.job_digest != ceremony.job_digest
+                or record.state is not JobState.PENDING
+                or record.execution_count != 0
+            ):
+                raise StorageConflict("only the exact pending job can request approval")
+            if connection.execute(
+                """
+                SELECT 1 FROM root_action_auth_credentials
+                WHERE role='approval' AND revoked_at IS NULL LIMIT 1
+                """
+            ).fetchone() is None:
+                raise StorageConflict("no active approval credential is enrolled")
+            connection.execute(
+                """
+                UPDATE root_action_auth_ceremonies
+                SET state='expired', consumed_at=?
+                WHERE purpose='approval' AND state='issued' AND expires_at<=?
+                """,
+                (ceremony.issued_at, ceremony.issued_at),
+            )
+            self._insert_ceremony(connection, ceremony)
+
+    def read_ceremony(self, ceremony_id: str) -> PendingCeremony:
+        with self._connect() as connection:
+            return self._read_ceremony(connection, ceremony_id)
+
+    def claim_with_approval(
+        self,
+        *,
+        ceremony: PendingCeremony,
+        credential: RegisteredCredential,
+        verified: VerifiedAssertion,
+        approval: ApprovalRecord,
+        claim_event: TransitionEvent,
+    ) -> JobRecord:
+        if (
+            ceremony.purpose is not CeremonyPurpose.APPROVAL
+            or ceremony.state is not CeremonyState.ISSUED
+            or credential.role is not CredentialRole.APPROVAL
+            or credential.revoked_at is not None
+            or verified.credential_id != credential.credential_id
+            or verified.user_verified is not True
+            or verified.device_type != credential.device_type
+            or approval.origin != verified.origin
+            or approval.rp_id != verified.rp_id
+            or approval.ceremony_id != ceremony.ceremony_id
+            or approval.job_id != ceremony.job_id
+            or approval.job_digest != ceremony.job_digest
+            or approval.credential_fingerprint != credential.fingerprint
+            or approval.sign_count != verified.new_sign_count
+            or approval.user_verified is not True
+            or claim_event.kind.value != "claim_execution"
+            or claim_event.job_id != ceremony.job_id
+            or claim_event.job_digest != ceremony.job_digest
+        ):
+            raise StorageConflict("approval claim contract is invalid")
+        with self._transaction() as connection:
+            stored_ceremony = self._read_ceremony(connection, ceremony.ceremony_id)
+            if stored_ceremony != ceremony or ceremony.expires_at <= approval.verified_at:
+                raise StorageConflict("approval ceremony is stale, consumed, or expired")
+            stored_credential = self._read_credential(connection, credential.credential_id)
+            if stored_credential != credential:
+                raise StorageConflict("approval credential changed during verification")
+            cursor = connection.execute(
+                """
+                UPDATE root_action_auth_credentials
+                SET sign_count=?, backed_up=?
+                WHERE credential_id=? AND sign_count=? AND revoked_at IS NULL
+                """,
+                (
+                    verified.new_sign_count,
+                    1 if verified.backed_up else 0,
+                    credential.credential_id,
+                    credential.sign_count,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StorageConflict("credential counter compare-and-swap failed")
+            cursor = connection.execute(
+                """
+                UPDATE root_action_auth_ceremonies
+                SET state='consumed', consumed_at=?, credential_fingerprint=?
+                WHERE ceremony_id=? AND state='issued'
+                """,
+                (
+                    approval.verified_at,
+                    credential.fingerprint,
+                    ceremony.ceremony_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StorageConflict("approval ceremony consumption race")
+            self._execute_insert(
+                connection,
+                """
+                INSERT INTO root_action_auth_approvals
+                (approval_id, ceremony_id, job_id, job_digest,
+                 credential_fingerprint, verified_at, origin, rp_id,
+                 user_verified, sign_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    approval.approval_id,
+                    approval.ceremony_id,
+                    approval.job_id,
+                    approval.job_digest,
+                    approval.credential_fingerprint,
+                    approval.verified_at,
+                    approval.origin,
+                    approval.rp_id,
+                    1,
+                    approval.sign_count,
+                ),
+                "approval identity already exists",
+            )
+            return self._compare_and_append(connection, claim_event)
+
+    def approvals(self, job_id: str) -> tuple[ApprovalRecord, ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT approval_id, ceremony_id, job_id, job_digest,
+                       credential_fingerprint, verified_at, origin, rp_id,
+                       user_verified, sign_count
+                FROM root_action_auth_approvals
+                WHERE job_id=? ORDER BY verified_at, approval_id
+                """,
+                (job_id,),
+            ).fetchall()
+        return tuple(
+            ApprovalRecord(
+                **{
+                    **dict(row),
+                    "user_verified": bool(row["user_verified"]),
+                }
+            )
+            for row in rows
+        )
 
     def _prepare_root(self, *, create: bool) -> None:
         if create:
@@ -781,6 +1266,20 @@ class PosixRootActionStore:
             except Exception:
                 connection.rollback()
                 raise
+        elif version == 2:
+            if tables != _SCHEMA_VERSION_2_TABLES:
+                raise PosixStoreSecurityError(
+                    "root-action v2 database table set is invalid"
+                )
+            try:
+                connection.executescript(
+                    "BEGIN IMMEDIATE;\n"
+                    + _AUTH_SCHEMA
+                    + f"\nPRAGMA user_version={_SCHEMA_VERSION};\nCOMMIT;"
+                )
+            except Exception:
+                connection.rollback()
+                raise
         elif version != _SCHEMA_VERSION:
             raise PosixStoreSecurityError("root-action database schema is unsupported")
         self._verify_schema(connection)
@@ -847,6 +1346,144 @@ class PosixRootActionStore:
                 job.canonical_manifest,
             ),
             "job_id is already sealed",
+        )
+
+    @staticmethod
+    def _bootstrap_from_row(row: sqlite3.Row) -> BootstrapSession:
+        values = dict(row)
+        values["state"] = BootstrapState(values["state"])
+        return BootstrapSession(**values)
+
+    def _bootstrap_by_token(
+        self, connection: sqlite3.Connection, token_digest: str
+    ) -> BootstrapSession:
+        row = connection.execute(
+            """
+            SELECT bootstrap_id, token_digest, issued_at, expires_at,
+                   remaining_registrations, state
+            FROM root_action_auth_bootstrap WHERE token_digest=?
+            """,
+            (token_digest,),
+        ).fetchone()
+        if row is None:
+            raise StorageNotFound("bootstrap")
+        return self._bootstrap_from_row(row)
+
+    @staticmethod
+    def _credential_from_row(row: sqlite3.Row) -> RegisteredCredential:
+        values = dict(row)
+        stored_fingerprint = values.pop("credential_fingerprint")
+        values["credential_id"] = bytes(values["credential_id"])
+        values["public_key"] = bytes(values["public_key"])
+        values["role"] = CredentialRole(values["role"])
+        values["backed_up"] = bool(values["backed_up"])
+        credential = RegisteredCredential(**values)
+        if credential.fingerprint != stored_fingerprint:
+            raise StorageConflict("credential fingerprint metadata mismatch")
+        return credential
+
+    def _read_credential(
+        self, connection: sqlite3.Connection, credential_id: bytes
+    ) -> RegisteredCredential:
+        row = connection.execute(
+            """
+            SELECT credential_id, credential_fingerprint, public_key,
+                   sign_count, role, label, aaguid,
+                   device_type, backed_up, registered_at, revoked_at
+            FROM root_action_auth_credentials WHERE credential_id=?
+            """,
+            (credential_id,),
+        ).fetchone()
+        if row is None:
+            raise StorageNotFound("credential")
+        return self._credential_from_row(row)
+
+    def _insert_credential(
+        self, connection: sqlite3.Connection, credential: RegisteredCredential
+    ) -> None:
+        self._execute_insert(
+            connection,
+            """
+            INSERT INTO root_action_auth_credentials
+            (credential_id, credential_fingerprint, public_key, sign_count,
+             role, label, aaguid, device_type, backed_up, registered_at,
+             revoked_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                credential.credential_id,
+                credential.fingerprint,
+                credential.public_key,
+                credential.sign_count,
+                credential.role.value,
+                credential.label,
+                credential.aaguid,
+                credential.device_type,
+                1 if credential.backed_up else 0,
+                credential.registered_at,
+                credential.revoked_at,
+            ),
+            "credential or active label already exists",
+        )
+
+    @staticmethod
+    def _ceremony_from_row(row: sqlite3.Row) -> PendingCeremony:
+        values = dict(row)
+        values["challenge"] = bytes(values["challenge"])
+        values["binding_nonce"] = bytes(values["binding_nonce"])
+        values["purpose"] = CeremonyPurpose(values["purpose"])
+        values["state"] = CeremonyState(values["state"])
+        if values["role"] is not None:
+            values["role"] = CredentialRole(values["role"])
+        return PendingCeremony(**values)
+
+    def _read_ceremony(
+        self, connection: sqlite3.Connection, ceremony_id: str
+    ) -> PendingCeremony:
+        row = connection.execute(
+            """
+            SELECT ceremony_id, purpose, challenge, binding_nonce,
+                   challenge_digest, issued_at,
+                   expires_at, job_id, job_digest, bootstrap_id, role, label,
+                   state, consumed_at, credential_fingerprint
+            FROM root_action_auth_ceremonies WHERE ceremony_id=?
+            """,
+            (ceremony_id,),
+        ).fetchone()
+        if row is None:
+            raise StorageNotFound(ceremony_id)
+        return self._ceremony_from_row(row)
+
+    def _insert_ceremony(
+        self, connection: sqlite3.Connection, ceremony: PendingCeremony
+    ) -> None:
+        self._execute_insert(
+            connection,
+            """
+            INSERT INTO root_action_auth_ceremonies
+            (ceremony_id, purpose, challenge, binding_nonce, challenge_digest, issued_at,
+             expires_at, job_id, job_digest, bootstrap_id, role, label, state,
+             consumed_at, credential_fingerprint)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                ceremony.ceremony_id,
+                ceremony.purpose.value,
+                ceremony.challenge,
+                ceremony.binding_nonce,
+                ceremony.challenge_digest,
+                ceremony.issued_at,
+                ceremony.expires_at,
+                ceremony.job_id,
+                ceremony.job_digest,
+                ceremony.bootstrap_id,
+                ceremony.role.value if ceremony.role else None,
+                ceremony.label,
+                ceremony.state.value,
+                ceremony.consumed_at,
+                ceremony.credential_fingerprint,
+            ),
+            "ceremony identity already exists",
         )
 
     @staticmethod

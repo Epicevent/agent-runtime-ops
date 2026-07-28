@@ -23,6 +23,7 @@ from agent_runtime_ops.root_actions.protocol import (
     parse_request_frame,
     parse_response_frame,
     MAX_BROKER_REQUEST_BYTES,
+    auth_request,
 )
 from agent_runtime_ops.root_actions.receipts import RECEIPT_SCHEMA, seal_receipt
 from agent_runtime_ops.root_actions.state import (
@@ -286,6 +287,71 @@ def test_retrieve_protocol_rejects_untyped_or_unsafe_identity(
         canonical_json(request), maximum=MAX_BROKER_REQUEST_BYTES
     )
     with pytest.raises(BrokerProtocolError, match="identity"):
+        parse_request_frame(frame)
+
+
+def test_authorization_protocol_has_exact_bounded_method_contracts() -> None:
+    method, values = parse_request_frame(auth_request("auth_status"))
+    assert method == "auth_status"
+    assert values == {}
+
+    method, values = parse_request_frame(
+        auth_request(
+            "auth_registration_begin",
+            bootstrap_token="A" * 43,
+            role="approval",
+            label="office_windows_hello",
+        )
+    )
+    assert method == "auth_registration_begin"
+    assert values["label"] == "office_windows_hello"
+
+    method, values = parse_request_frame(
+        auth_request(
+            "auth_approval_finish",
+            ceremony_id="ceremony-safe",
+            credential={"id": "opaque", "response": {}},
+        )
+    )
+    assert method == "auth_approval_finish"
+    assert values["browser_credential"]["id"] == "opaque"
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        {
+            "method": "auth_registration_begin",
+            "bootstrap_token": "short",
+            "role": "approval",
+            "label": "office_windows_hello",
+        },
+        {
+            "method": "auth_registration_begin",
+            "bootstrap_token": "A" * 43,
+            "role": ["approval"],
+            "label": "office_windows_hello",
+        },
+        {
+            "method": "auth_approval_begin",
+            "job_id": "../escape",
+            "job_digest": "sha256:" + "a" * 64,
+        },
+        {
+            "method": "auth_approval_finish",
+            "ceremony_id": "ceremony-safe",
+            "credential": "not-an-object",
+        },
+    ],
+)
+def test_authorization_protocol_rejects_ambiguous_or_unbounded_fields(
+    case: dict[str, object],
+) -> None:
+    frame = encode_frame(
+        canonical_json({"schema": BROKER_REQUEST_SCHEMA, **case}),
+        maximum=MAX_BROKER_REQUEST_BYTES,
+    )
+    with pytest.raises(BrokerProtocolError):
         parse_request_frame(frame)
 
 

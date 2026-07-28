@@ -5,12 +5,15 @@ import os
 from pathlib import Path
 import pwd
 
+from .auth_service import RootActionAuthorizationService
+from .authorization import WebAuthnPolicy, WebAuthnVerifier
 from .broker import TypedRootActionBroker
 from .endpoint import RootActionBrokerEndpoint
 from .listener import DEFAULT_RUNTIME_ROOT, DEFAULT_SOCKET_PATH, RootActionUnixListener
 from .posix_store import PosixRootActionStore
 from .public_projection import AtomicPublicProjectionPublisher
 from .submission import SubmissionPolicy
+from .worker import RootActionExecutionWorker
 
 
 STATE_ROOT = Path("/var/lib/agent-runtime-ops/root-actions")
@@ -53,9 +56,21 @@ def main() -> int:
             allowed_gids=frozenset({group.gr_gid}),
         ),
     )
+    webauthn_policy = WebAuthnPolicy.from_environment()
+    worker = RootActionExecutionWorker(
+        store,
+        repair_public=broker.repair_public_best_effort,
+    )
+    worker.recover_orphaned_claims()
     broker.reconcile_public()
+    worker.start()
+    authorization = RootActionAuthorizationService(
+        store,
+        WebAuthnVerifier(webauthn_policy),
+        dispatch=worker.enqueue,
+    )
     listener = RootActionUnixListener(
-        RootActionBrokerEndpoint(broker),
+        RootActionBrokerEndpoint(broker, authorization=authorization),
         socket_path=DEFAULT_SOCKET_PATH,
         required_uid=0,
         trusted_gid=group.gr_gid,
@@ -66,6 +81,7 @@ def main() -> int:
         listener.serve_forever()
     finally:
         listener.close()
+        worker.close()
     return 0
 
 

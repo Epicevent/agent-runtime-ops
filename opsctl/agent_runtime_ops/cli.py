@@ -97,6 +97,7 @@ from .commands.runtime_config import (
 from .commands.runtime_truth import cmd_runtime_truth
 from .commands.root_action import (
     cmd_root_action_preflight,
+    cmd_root_action_auth_bootstrap,
     cmd_root_action_retrieve,
     cmd_root_action_submit,
     cmd_root_action_wait,
@@ -181,6 +182,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="emit a bounded read-only install and activation observation bundle",
     )
     root_action_preflight.set_defaults(func=cmd_root_action_preflight)
+    root_action_auth_bootstrap = root_action_sub.add_parser(
+        "auth-bootstrap",
+        help="create a root-only one-time WebAuthn enrollment bootstrap",
+    )
+    root_action_auth_bootstrap.add_argument(
+        "--broker-timeout", type=broker_timeout_arg, default=5.0
+    )
+    root_action_auth_bootstrap.set_defaults(func=cmd_root_action_auth_bootstrap)
     root_action_submit = root_action_sub.add_parser("submit")
     manifest_source = root_action_submit.add_mutually_exclusive_group(required=True)
     manifest_source.add_argument("--manifest-file")

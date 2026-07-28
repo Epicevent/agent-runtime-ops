@@ -27,7 +27,7 @@ class RootActionTypedCoreScopeTests(unittest.TestCase):
         )
         self.assertIsInstance(LocalRootActionFixture(), RootActionStore)
 
-    def test_core_imports_no_execution_auth_web_or_service_runtime(self) -> None:
+    def test_root_runtime_keeps_web_and_untyped_shell_outside_the_core(self) -> None:
         root = Path("opsctl/agent_runtime_ops/root_actions")
         forbidden_modules = {
             "subprocess",
@@ -50,15 +50,25 @@ class RootActionTypedCoreScopeTests(unittest.TestCase):
         socket_importers = {
             path.name
             for path in root.glob("*.py")
-            if "socket" in path.read_text(encoding="utf-8")
+            if "import socket" in path.read_text(encoding="utf-8")
         }
-        self.assertEqual(socket_importers, {"client.py", "listener.py", "service.py"})
+        self.assertEqual(socket_importers, {"client.py", "listener.py"})
         endpoint_source = (root / "endpoint.py").read_text(encoding="utf-8")
-        self.assertNotIn("dispatch", endpoint_source.lower())
         self.assertNotIn("handler.run", endpoint_source)
         self.assertEqual(
             RootActionBrokerEndpoint.ALLOWED_METHODS,
-            frozenset({"submit", "retrieve"}),
+            frozenset(
+                {
+                    "submit",
+                    "retrieve",
+                    "auth_status",
+                    "auth_bootstrap_create",
+                    "auth_registration_begin",
+                    "auth_registration_finish",
+                    "auth_approval_begin",
+                    "auth_approval_finish",
+                }
+            ),
         )
 
         pyproject = Path("pyproject.toml").read_text(encoding="utf-8")

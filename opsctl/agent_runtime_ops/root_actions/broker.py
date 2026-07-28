@@ -302,6 +302,18 @@ class TypedRootActionBroker:
             self._public_sink.publish(bundle)
         return bundle
 
+    def repair_public_best_effort(self, job_id: str) -> PublicProjectionBundle:
+        """Build the authoritative projection and repair its derived copy.
+
+        Persistence and execution authority never depend on the public sink;
+        callers still receive the root-built bundle when a derived-file repair
+        fails, and startup reconciliation can retry publication.
+        """
+
+        bundle = self.public_projection(job_id)
+        self._repair_public_best_effort(job_id, bundle=bundle)
+        return bundle
+
     def reconcile_public(self) -> tuple[PublicProjectionBundle, ...]:
         """Rebuild every derived public file from root-owned authority.
 

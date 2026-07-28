@@ -1,8 +1,4 @@
-"""Decision-independent typed root-action contracts.
-
-This package deliberately contains no authentication, dispatch, shell execution,
-installer, service, or web integration.
-"""
+"""Typed root-action contracts, root-owned authorization, and receipt core."""
 
 from .contracts import (
     MANIFEST_SCHEMA,
@@ -25,6 +21,39 @@ from .admission import (
     LineageFailurePolicy,
     LineageSummary,
     SubmissionAdmission,
+)
+from .authorization import (
+    APPROVAL_CHALLENGE_SECONDS,
+    AUTHORIZATION_SCHEMA,
+    BOOTSTRAP_SECONDS,
+    REGISTRATION_CHALLENGE_SECONDS,
+    ApprovalRecord,
+    BootstrapSession,
+    BootstrapState,
+    CeremonyPurpose,
+    CeremonyState,
+    CredentialRole,
+    PendingCeremony,
+    RegisteredCredential,
+    VerifiedAssertion,
+    WebAuthnAuthorizationError,
+    WebAuthnPolicy,
+    WebAuthnVerifier,
+    action_challenge_bytes,
+    bootstrap_token_digest,
+    credential_fingerprint,
+    decoded_bootstrap_token,
+    encoded_bootstrap_token,
+    new_bootstrap_id,
+    new_bootstrap_token,
+    new_ceremony_id,
+    public_credential_summary,
+    registration_challenge_bytes,
+)
+from .auth_service import (
+    CeremonyOptions,
+    RegistrationResult,
+    RootActionAuthorizationService,
 )
 from .client import (
     DEFAULT_BROKER_SOCKET,
@@ -59,6 +88,7 @@ from .execution import (
     OperationAvailability,
     OperationHandlerRegistry,
 )
+from .worker import RootActionExecutionWorker, RootActionWorkerError
 from .posix_store import PosixRootActionStore, PosixStoreSecurityError
 from .public_projection import (
     AtomicPublicProjectionPublisher,
@@ -80,6 +110,35 @@ from .submission import (
 from .registry import DEFAULT_REGISTRY, REGISTRY_VERSION
 
 __all__ = [
+    "APPROVAL_CHALLENGE_SECONDS",
+    "AUTHORIZATION_SCHEMA",
+    "BOOTSTRAP_SECONDS",
+    "REGISTRATION_CHALLENGE_SECONDS",
+    "ApprovalRecord",
+    "BootstrapSession",
+    "BootstrapState",
+    "CeremonyPurpose",
+    "CeremonyState",
+    "CredentialRole",
+    "PendingCeremony",
+    "RegisteredCredential",
+    "VerifiedAssertion",
+    "WebAuthnAuthorizationError",
+    "WebAuthnPolicy",
+    "WebAuthnVerifier",
+    "action_challenge_bytes",
+    "bootstrap_token_digest",
+    "credential_fingerprint",
+    "decoded_bootstrap_token",
+    "encoded_bootstrap_token",
+    "new_bootstrap_id",
+    "new_bootstrap_token",
+    "new_ceremony_id",
+    "public_credential_summary",
+    "registration_challenge_bytes",
+    "CeremonyOptions",
+    "RegistrationResult",
+    "RootActionAuthorizationService",
     "DEFAULT_REGISTRY",
     "BROKER_REQUEST_SCHEMA",
     "BROKER_RESPONSE_SCHEMA",
@@ -117,6 +176,8 @@ __all__ = [
     "KwragProductArtifactProbeHandler",
     "OperationAvailability",
     "OperationHandlerRegistry",
+    "RootActionExecutionWorker",
+    "RootActionWorkerError",
     "MANIFEST_SCHEMA",
     "ManifestValidationError",
     "REGISTRY_VERSION",

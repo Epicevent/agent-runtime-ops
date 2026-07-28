@@ -167,7 +167,7 @@ class PosixRootActionStoreTests(unittest.TestCase):
 
     def test_database_schema_version_and_exact_table_set_are_enforced(self) -> None:
         with self.store._connect() as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
 
         extra_root = Path(self.temp.name) / "extra-table-store"
         extra = PosixRootActionStore(

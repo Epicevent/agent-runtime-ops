@@ -10,6 +10,8 @@ import threading
 from .endpoint import RootActionBrokerEndpoint
 from .protocol import MAX_BROKER_REQUEST_BYTES, BrokerProtocolError
 from .submission import BrokerPeerIdentity
+from .storage import StorageConflict
+from .worker import RootActionWorkerError
 
 
 DEFAULT_RUNTIME_ROOT = Path("/run/agent-runtime-ops")
@@ -202,7 +204,13 @@ class RootActionUnixListener:
                 self.serve_once()
             except socket.timeout:
                 continue
-            except (BrokerProtocolError, ValueError, KeyError):
+            except (
+                BrokerProtocolError,
+                ValueError,
+                KeyError,
+                StorageConflict,
+                RootActionWorkerError,
+            ):
                 # Fail closed by closing this one connection without a response.
                 continue
 

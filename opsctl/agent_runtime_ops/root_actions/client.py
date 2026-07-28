@@ -18,6 +18,7 @@ from .protocol import (
     parse_response_frame,
     retrieve_request,
     submit_request,
+    auth_request,
 )
 from .public_projection import validate_public_projection
 from .receipts import ReceiptArtifact, seal_receipt
@@ -125,6 +126,34 @@ class RootActionBrokerClient:
             expected_method="retrieve",
             expected_handle=handle,
         )
+
+    def create_auth_bootstrap(
+        self,
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> dict[str, Any]:
+        response = self._exchange(
+            auth_request("auth_bootstrap_create"),
+            timeout_seconds=timeout_seconds,
+        )
+        expected = {
+            "schema",
+            "method",
+            "bootstrap_id",
+            "bootstrap_token",
+            "expires_at",
+            "remaining_registrations",
+        }
+        if (
+            set(response) != expected
+            or response["schema"] != BROKER_RESPONSE_SCHEMA
+            or response["method"] != "auth_bootstrap_create"
+            or not isinstance(response["bootstrap_token"], str)
+            or len(response["bootstrap_token"]) != 43
+            or response["remaining_registrations"] != 3
+        ):
+            raise RootActionClientError("authorization bootstrap response is invalid")
+        return {key: response[key] for key in expected - {"schema", "method"}}
 
     def poll_terminal(
         self,

@@ -9,6 +9,7 @@ import pytest
 
 from agent_runtime_ops.commands.root_action import (
     broker_timeout_arg,
+    cmd_root_action_auth_bootstrap,
     cmd_root_action_retrieve,
     cmd_root_action_submit,
     cmd_root_action_wait,
@@ -87,6 +88,14 @@ class FakeClient:
         type(self).waited = True
         return projection(terminal=True), object()
 
+    def create_auth_bootstrap(self, *, timeout_seconds: float):
+        return {
+            "bootstrap_id": "bootstrap-cli",
+            "bootstrap_token": "A" * 43,
+            "expires_at": "2026-07-28T01:10:00Z",
+            "remaining_registrations": 3,
+        }
+
 
 class PollTimeoutClient(FakeClient):
     def poll_terminal(self, handle, *, timeout_seconds: float, interval_seconds: float):
@@ -106,6 +115,26 @@ class SubmitFailureClient(FakeClient):
 class BinaryStdin:
     def __init__(self, raw: bytes) -> None:
         self.buffer = BytesIO(raw)
+
+
+def test_root_only_auth_bootstrap_emits_bounded_enrollment_material(
+    monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        "agent_runtime_ops.commands.root_action.RootActionBrokerClient", FakeClient
+    )
+    assert cmd_root_action_auth_bootstrap(argparse.Namespace(broker_timeout=5.0)) == 0
+    result = json.loads(capfd.readouterr().out)
+    assert result == {
+        "schema": "agent-runtime-root-action-cli-result/v1",
+        "result": "ok",
+        "bootstrap": {
+            "bootstrap_id": "bootstrap-cli",
+            "bootstrap_token": "A" * 43,
+            "expires_at": "2026-07-28T01:10:00Z",
+            "remaining_registrations": 3,
+        },
+    }
 
 
 def test_submit_wait_reads_exact_file_bytes_and_emits_bound_terminal_receipt(

@@ -138,6 +138,21 @@ class HandlerResult:
     raw_bytes: bytes
     public_status: str
     public_facts: tuple[tuple[str, str], ...]
+    terminal_outcome: str = "succeeded"
+    reason_code: str = "handler_succeeded"
+    exit_code: int = 0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.raw_bytes, bytes) or not self.raw_bytes:
+            raise ValueError("handler raw receipt must be non-empty bytes")
+        if self.terminal_outcome not in {"succeeded", "failed"}:
+            raise ValueError("handler terminal outcome is invalid")
+        if not isinstance(self.reason_code, str) or not self.reason_code:
+            raise ValueError("handler reason code is invalid")
+        if isinstance(self.exit_code, bool) or not isinstance(self.exit_code, int):
+            raise ValueError("handler exit code is invalid")
+        if self.terminal_outcome == "succeeded" and self.exit_code != 0:
+            raise ValueError("successful handler result requires exit code zero")
 
 
 class OperationHandler(Protocol):
