@@ -209,6 +209,37 @@ def test_client_reset_during_request_read_does_not_escape_listener(tmp_path: Pat
     assert projection["status"]["state"]["name"] == "pending"
 
 
+def test_endpoint_oserror_is_not_misclassified_as_a_client_reset(tmp_path: Path) -> None:
+    class FailingEndpoint:
+        def handle(self, _frame: bytes, *, peer: BrokerPeerIdentity) -> bytes:
+            assert peer.uid == os.getuid()
+            raise OSError("handler storage failed")
+
+    socket_path = tmp_path / "runtime" / "broker.sock"
+    listener = RootActionUnixListener(
+        FailingEndpoint(),
+        socket_path=socket_path,
+        required_uid=os.getuid(),
+        trusted_gid=os.getgid(),
+        create_parent=True,
+    )
+    listener.open()
+    errors: list[BaseException] = []
+    thread = serve_one(listener, errors)
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.connect(str(socket_path))
+        client.sendall(submit_request(manifest("job-handler-io-failure")))
+        client.shutdown(socket.SHUT_WR)
+        assert client.recv(1) == b""
+    thread.join(timeout=3)
+    listener.close()
+
+    assert not thread.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], OSError)
+    assert str(errors[0]) == "handler storage failed"
+
+
 def test_production_projection_permissions_are_root_trusted_group_only(
     tmp_path: Path,
 ) -> None:

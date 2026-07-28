@@ -192,12 +192,16 @@ class RootActionUnixListener:
                 connection.settimeout(2.0)
                 peer = self._peer_identity(connection)
                 frame = self._read_one_frame(connection)
-                response = self.endpoint.handle(frame, peer=peer)
+            except OSError:
+                # A reset or timeout while reading belongs to this accepted
+                # connection.  It must not terminate the broker.
+                return
+            response = self.endpoint.handle(frame, peer=peer)
+            try:
                 connection.sendall(response)
             except OSError:
-                # A reset or timeout belongs to this accepted connection.  It
-                # must not terminate the broker whether it happens before the
-                # full frame arrives or after the request has committed.
+                # The request may already have committed.  A client that
+                # leaves before reading its response is connection-local.
                 return
 
     def serve_forever(self, stop: threading.Event | None = None) -> None:
