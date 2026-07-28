@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import math
+import re
 import socket
 import struct
 import time
@@ -41,6 +42,8 @@ _RESPONSE_FIELDS = {
     "reason_code",
     "projection",
 }
+_HANDLE_ID_RE = re.compile(r"[a-z0-9][a-z0-9._:-]{0,127}")
+_HANDLE_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 
 
 class RootActionClientError(RuntimeError):
@@ -53,6 +56,16 @@ class RootActionRequestHandle:
     job_digest: str
     request_id: str
     reply_target: str
+
+    def __post_init__(self) -> None:
+        if any(
+            not isinstance(value, str) or _HANDLE_ID_RE.fullmatch(value) is None
+            for value in (self.job_id, self.request_id, self.reply_target)
+        ) or (
+            not isinstance(self.job_digest, str)
+            or _HANDLE_DIGEST_RE.fullmatch(self.job_digest) is None
+        ):
+            raise RootActionClientError("root action request handle is invalid")
 
 
 Transport = Callable[[bytes, float], bytes]

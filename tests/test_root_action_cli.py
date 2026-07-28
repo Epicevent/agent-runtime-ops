@@ -15,7 +15,10 @@ from agent_runtime_ops.commands.root_action import (
     poll_interval_arg,
     wait_timeout_arg,
 )
-from agent_runtime_ops.root_actions.client import RootActionRequestHandle
+from agent_runtime_ops.root_actions.client import (
+    RootActionClientError,
+    RootActionRequestHandle,
+)
 from tests.test_root_action_admission import manifest
 
 
@@ -77,6 +80,21 @@ class FakeClient:
     def poll_terminal(self, handle, *, timeout_seconds: float, interval_seconds: float):
         type(self).waited = True
         return projection(terminal=True), object()
+
+
+class PollTimeoutClient(FakeClient):
+    def poll_terminal(self, handle, *, timeout_seconds: float, interval_seconds: float):
+        raise RootActionClientError("terminal_receipt_polling_timed_out")
+
+
+class PollTransportFailureClient(FakeClient):
+    def poll_terminal(self, handle, *, timeout_seconds: float, interval_seconds: float):
+        raise RootActionClientError("broker response failed closed")
+
+
+class SubmitFailureClient(FakeClient):
+    def submit(self, raw: bytes, *, timeout_seconds: float):
+        raise RootActionClientError("broker response failed closed")
 
 
 class BinaryStdin:
@@ -144,6 +162,77 @@ def test_submit_stdin_is_bounded_and_exact(
     assert result["receipt"] is None
 
 
+@pytest.mark.parametrize(
+    ("client_type", "reason_code"),
+    [
+        (PollTimeoutClient, "terminal_receipt_polling_timed_out"),
+        (PollTransportFailureClient, "root_action_retrieval_failed_closed"),
+    ],
+)
+def test_submit_wait_failure_preserves_machine_recovery_handle(
+    client_type: type[FakeClient],
+    reason_code: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    raw = manifest("job-cli")
+    path = tmp_path / "manifest.json"
+    path.write_bytes(raw)
+    monkeypatch.setattr(
+        "agent_runtime_ops.commands.root_action.RootActionBrokerClient", client_type
+    )
+    args = argparse.Namespace(
+        manifest_file=str(path),
+        manifest_stdin=False,
+        wait=True,
+        broker_timeout=5.0,
+        wait_timeout=900.0,
+        poll_interval=0.25,
+    )
+    assert cmd_root_action_submit(args) == 2
+    result = json.loads(capfd.readouterr().out)
+    assert result == {
+        "schema": "agent-runtime-root-action-cli-result/v1",
+        "result": "error",
+        "reason_code": reason_code,
+        "handle": {
+            "job_id": "job-cli",
+            "job_digest": DIGEST,
+            "request_id": "request-job-cli",
+            "reply_target": "reply-job-cli",
+        },
+    }
+
+
+def test_submit_failure_before_acceptance_has_no_recovery_handle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "manifest.json"
+    path.write_bytes(manifest("job-cli"))
+    monkeypatch.setattr(
+        "agent_runtime_ops.commands.root_action.RootActionBrokerClient",
+        SubmitFailureClient,
+    )
+    args = argparse.Namespace(
+        manifest_file=str(path),
+        manifest_stdin=False,
+        wait=True,
+        broker_timeout=5.0,
+        wait_timeout=900.0,
+        poll_interval=0.25,
+    )
+    assert cmd_root_action_submit(args) == 2
+    result = json.loads(capfd.readouterr().out)
+    assert result == {
+        "schema": "agent-runtime-root-action-cli-result/v1",
+        "result": "error",
+        "reason_code": "root_action_submission_failed_closed",
+    }
+
+
 def test_retrieve_and_wait_carry_complete_identity_bound_handle(
     monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
 ) -> None:
@@ -165,6 +254,68 @@ def test_retrieve_and_wait_carry_complete_identity_bound_handle(
     assert cmd_root_action_wait(argparse.Namespace(**common)) == 0
     waited = json.loads(capfd.readouterr().out)
     assert waited["receipt"]["reply_target"] == "reply-job-cli"
+
+
+@pytest.mark.parametrize(
+    ("command", "reason_code"),
+    [
+        (cmd_root_action_retrieve, "root_action_retrieval_failed_closed"),
+        (cmd_root_action_wait, "terminal_receipt_polling_timed_out"),
+    ],
+)
+def test_retrieve_failures_preserve_valid_machine_recovery_handle(
+    command,
+    reason_code: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    class BrokenClient(FakeClient):
+        def retrieve(self, handle, *, timeout_seconds: float):
+            raise RootActionClientError("broker response failed closed")
+
+        def poll_terminal(
+            self, handle, *, timeout_seconds: float, interval_seconds: float
+        ):
+            raise RootActionClientError("terminal_receipt_polling_timed_out")
+
+    monkeypatch.setattr(
+        "agent_runtime_ops.commands.root_action.RootActionBrokerClient", BrokenClient
+    )
+    args = argparse.Namespace(
+        job_id="job-cli",
+        job_digest=DIGEST,
+        request_id="request-job-cli",
+        reply_target="reply-job-cli",
+        broker_timeout=5.0,
+        wait_timeout=900.0,
+        poll_interval=0.25,
+    )
+    assert command(args) == 2
+    result = json.loads(capfd.readouterr().out)
+    assert result["reason_code"] == reason_code
+    assert result["handle"]["job_digest"] == DIGEST
+
+
+def test_invalid_recovery_handle_is_never_echoed(
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        "agent_runtime_ops.commands.root_action.RootActionBrokerClient", FakeClient
+    )
+    args = argparse.Namespace(
+        job_id="../escape",
+        job_digest=DIGEST,
+        request_id="request-job-cli",
+        reply_target="reply-job-cli",
+        broker_timeout=5.0,
+        wait_timeout=900.0,
+        poll_interval=0.25,
+    )
+    assert cmd_root_action_retrieve(args) == 2
+    result = json.loads(capfd.readouterr().out)
+    assert result["reason_code"] == "root_action_retrieval_failed_closed"
+    assert "handle" not in result
 
 
 def test_cli_source_has_no_shell_payload_or_configurable_socket_surface() -> None:

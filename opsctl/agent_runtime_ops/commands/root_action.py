@@ -94,12 +94,7 @@ def _public_result(
     return {
         "schema": ROOT_ACTION_CLI_RESULT_SCHEMA,
         "result": "ok",
-        "handle": {
-            "job_id": handle.job_id,
-            "job_digest": handle.job_digest,
-            "request_id": handle.request_id,
-            "reply_target": handle.reply_target,
-        },
+        "handle": _handle_value(handle),
         "observed_projection_digest": projection["projection_digest"],
         "state": status["name"],
         "terminal_outcome": status["terminal_outcome"],
@@ -112,14 +107,28 @@ def _emit(value: dict[str, Any]) -> None:
     sys.stdout.buffer.write(_canonical(value))
 
 
-def _emit_error(reason_code: str) -> int:
-    _emit(
-        {
-            "schema": ROOT_ACTION_CLI_RESULT_SCHEMA,
-            "result": "error",
-            "reason_code": reason_code,
-        }
-    )
+def _handle_value(handle: RootActionRequestHandle) -> dict[str, str]:
+    return {
+        "job_id": handle.job_id,
+        "job_digest": handle.job_digest,
+        "request_id": handle.request_id,
+        "reply_target": handle.reply_target,
+    }
+
+
+def _emit_error(
+    reason_code: str,
+    *,
+    recovery_handle: RootActionRequestHandle | None = None,
+) -> int:
+    value: dict[str, Any] = {
+        "schema": ROOT_ACTION_CLI_RESULT_SCHEMA,
+        "result": "error",
+        "reason_code": reason_code,
+    }
+    if recovery_handle is not None:
+        value["handle"] = _handle_value(recovery_handle)
+    _emit(value)
     return 2
 
 
@@ -128,25 +137,29 @@ def cmd_root_action_submit(args: argparse.Namespace) -> int:
         raw = _read_manifest(args)
         client = RootActionBrokerClient()
         handle, projection = client.submit(raw, timeout_seconds=args.broker_timeout)
-        if args.wait:
+    except (OSError, ValueError, ManifestValidationError, RootActionClientError):
+        return _emit_error("root_action_submission_failed_closed")
+    if args.wait:
+        try:
             projection, _receipt = client.poll_terminal(
                 handle,
                 timeout_seconds=args.wait_timeout,
                 interval_seconds=args.poll_interval,
             )
-        _emit(_public_result(handle, projection))
-        return 0
-    except (OSError, ValueError, ManifestValidationError, RootActionClientError) as exc:
-        reason = str(exc)
-        if reason not in {
-            "outcome_unknown_recovery_needed",
-            "terminal_receipt_polling_timed_out",
-        }:
-            reason = "root_action_submission_failed_closed"
-        return _emit_error(reason)
+        except (OSError, ValueError, RootActionClientError) as exc:
+            reason = str(exc)
+            if reason not in {
+                "outcome_unknown_recovery_needed",
+                "terminal_receipt_polling_timed_out",
+            }:
+                reason = "root_action_retrieval_failed_closed"
+            return _emit_error(reason, recovery_handle=handle)
+    _emit(_public_result(handle, projection))
+    return 0
 
 
 def cmd_root_action_retrieve(args: argparse.Namespace) -> int:
+    handle: RootActionRequestHandle | None = None
     try:
         handle = _handle_from_args(args)
         projection = RootActionBrokerClient().retrieve(
@@ -156,10 +169,14 @@ def cmd_root_action_retrieve(args: argparse.Namespace) -> int:
         _emit(_public_result(handle, projection))
         return 0
     except (OSError, ValueError, RootActionClientError):
-        return _emit_error("root_action_retrieval_failed_closed")
+        return _emit_error(
+            "root_action_retrieval_failed_closed",
+            recovery_handle=handle,
+        )
 
 
 def cmd_root_action_wait(args: argparse.Namespace) -> int:
+    handle: RootActionRequestHandle | None = None
     try:
         handle = _handle_from_args(args)
         projection, _receipt = RootActionBrokerClient().poll_terminal(
@@ -176,4 +193,4 @@ def cmd_root_action_wait(args: argparse.Namespace) -> int:
             "terminal_receipt_polling_timed_out",
         }:
             reason = "root_action_retrieval_failed_closed"
-        return _emit_error(reason)
+        return _emit_error(reason, recovery_handle=handle)
