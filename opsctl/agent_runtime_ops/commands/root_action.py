@@ -16,10 +16,11 @@ from ..root_actions.client import (
     MAX_WAIT_TIMEOUT_SECONDS,
 )
 from ..root_actions.contracts import MAX_MANIFEST_BYTES, ManifestValidationError
+from ..root_actions.protocol import MAX_BROKER_RESPONSE_BYTES
 
 
 ROOT_ACTION_CLI_RESULT_SCHEMA = "agent-runtime-root-action-cli-result/v1"
-MAX_ROOT_ACTION_CLI_RESULT_BYTES = 1024 * 1024
+MAX_ROOT_ACTION_CLI_RESULT_BYTES = MAX_BROKER_RESPONSE_BYTES
 
 
 def _bounded_float(value: str, *, maximum: float, label: str) -> float:
@@ -100,6 +101,7 @@ def _public_result(
         "terminal_outcome": status["terminal_outcome"],
         "reason_code": status["reason_code"],
         "receipt": projection["receipt"],
+        "projection": projection,
     }
 
 

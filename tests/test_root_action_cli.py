@@ -39,6 +39,12 @@ def projection(*, terminal: bool) -> dict:
                 "reason_code": "completed" if terminal else None,
             }
         },
+        "history": {
+            "events": [
+                {"action": "sealed_pending"},
+                *([{"action": "complete_execution"}] if terminal else []),
+            ]
+        },
         "receipt": (
             {
                 "schema": "agent-runtime-root-action-receipt/v1",
@@ -133,8 +139,14 @@ def test_submit_wait_reads_exact_file_bytes_and_emits_bound_terminal_receipt(
     assert result["state"] == "terminal"
     assert result["receipt"]["request_id"] == "request-job-cli"
     assert result["receipt"]["reply_target"] == "reply-job-cli"
-    assert "stdout" not in result["receipt"]
-    assert "stderr" not in result["receipt"]
+    assert result["projection"] == projection(terminal=True)
+    assert result["projection"]["status"]["state"]["name"] == "terminal"
+    assert [row["action"] for row in result["projection"]["history"]["events"]] == [
+        "sealed_pending",
+        "complete_execution",
+    ]
+    assert "stdout" not in json.dumps(result)
+    assert "stderr" not in json.dumps(result)
 
 
 def test_submit_stdin_is_bounded_and_exact(
