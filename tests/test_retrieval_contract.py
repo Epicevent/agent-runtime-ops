@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from unittest.mock import patch
@@ -14,6 +15,7 @@ from agent_runtime_ops.domain.retrieval_contract import (
     bind_retrieval_intent,
     canonical_digest,
     load_retrieval_approvals,
+    matched_retrieval_contract,
     retrieval_contract_from_labels,
     retrieval_contract_is_approved,
     run_retrieval_status_probe,
@@ -30,6 +32,12 @@ DIGEST_B = "sha256:" + "b" * 64
 DIGEST_C = "sha256:" + "c" * 64
 DIGEST_D = "sha256:" + "d" * 64
 REVISION = "8" * 40
+HERMES_COMPATIBILITY_FIXTURE = (
+    Path(__file__).parent
+    / "fixtures"
+    / "kwrag_embedded_retrieval"
+    / "hermes-compatibility-v1.json"
+)
 
 
 def resource_envelope() -> dict[str, object]:
@@ -98,6 +106,114 @@ def status_payload(spec: dict[str, object], *, enabled: bool) -> dict[str, objec
         "consumptionReceiptDigest": DIGEST_C if enabled else None,
         "revocationStatus": None if enabled else "complete",
     }
+
+
+def test_exact_hermes_compatibility_fixture_matches_product_and_ops_contract() -> None:
+    raw = HERMES_COMPATIBILITY_FIXTURE.read_text(encoding="utf-8")
+    fixture = json.loads(raw)
+    assert raw == json.dumps(
+        fixture,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ) + "\n"
+    assert set(fixture) == {
+        "capabilityLabels",
+        "componentManifest",
+        "fixtureSchema",
+        "productFamily",
+        "productSourceRevision",
+        "statusFixtures",
+        "verificationBoundary",
+        "verifierArgv",
+    }
+    assert fixture["fixtureSchema"] == (
+        "jitech-embedded-retrieval-hermes-compatibility-fixture/v1"
+    )
+    assert fixture["productFamily"] == "hermes"
+    assert fixture["productSourceRevision"] == (
+        "78bd91c3139fa6ba64c021252a81ad3ec628ca3d"
+    )
+
+    labels = fixture["capabilityLabels"]
+    contract = matched_retrieval_contract(labels, labels)
+    assert contract is not None
+    assert contract["component_digest"] == (
+        "sha256:7f6e4ace39c8d868e0517040be0a82742b791dd44744afdae66d54e596b25478"
+    )
+    assert contract["component_manifest_digest"] == (
+        "sha256:c1e0e8ed1462db8663d8063e4e97ba4530c4f1a7bf3f24a514807eb56c19baf6"
+    )
+    assert contract["source_archive_digest"] == (
+        "sha256:6c04a7d297410708a0300b3ab3193e047c950c924bc7edc6d4ae7ae127efb97a"
+    )
+    assert contract["contract_digest"] == (
+        "sha256:ccf826f0fe6f7edc36b6d5eacdee87277859d2f6dae3a4ea4cab5f51cba183db"
+    )
+    assert contract["resource"]["profileDigest"] == (
+        "sha256:2d4ff46a2d76e712421a9758ecb0ae1d262e2d42ea00cee888c103477e6709ed"
+    )
+    assert contract["verify_argv"] == fixture["verifierArgv"] == [
+        "hermes",
+        "kwrag-slot",
+        "status",
+        "--json",
+    ]
+
+    manifest = fixture["componentManifest"]
+    manifest_raw = (
+        json.dumps(
+            manifest,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        + b"\n"
+    )
+    assert "sha256:" + hashlib.sha256(manifest_raw).hexdigest() == (
+        contract["component_manifest_digest"]
+    )
+    assert manifest["component_wheel"]["sha256"] == contract["component_digest"]
+    assert manifest["component_source_archive"]["sha256"] == (
+        contract["source_archive_digest"]
+    )
+    assert manifest["contract_collection_digest"] == contract["contract_digest"]
+    assert manifest["component_source_revision"] == contract["source_revision"]
+
+    status_fixtures = fixture["statusFixtures"]
+    common = {
+        "expected_component_digest": contract["component_digest"],
+        "expected_binding_digest": "sha256:" + "d" * 64,
+        "expected_resource_profile_digest": contract["resource"]["profileDigest"],
+        "expected_gpu_access": "none",
+    }
+    validate_retrieval_status(status_fixtures["enabledContract"], enabled=True, **common)
+    validate_retrieval_status(status_fixtures["disabled"], enabled=False, **common)
+    assert fixture["verificationBoundary"] == {
+        "actualEnabledInvocationObserved": False,
+        "canaryTargetSelected": False,
+        "runtimeMutationObserved": False,
+    }
+
+
+def test_hermes_enabled_compatibility_fixture_does_not_relax_live_evidence_gate() -> None:
+    fixture = json.loads(HERMES_COMPATIBILITY_FIXTURE.read_text(encoding="utf-8"))
+    labels = fixture["capabilityLabels"]
+    contract = retrieval_contract_from_labels(labels)
+    assert contract is not None
+    unavailable = dict(fixture["statusFixtures"]["enabledContract"])
+    unavailable["resourceStatus"] = "unavailable"
+    with pytest.raises(ValueError, match="resource observation is unavailable"):
+        validate_retrieval_status(
+            unavailable,
+            expected_component_digest=contract["component_digest"],
+            expected_binding_digest="sha256:" + "d" * 64,
+            expected_resource_profile_digest=contract["resource"]["profileDigest"],
+            expected_gpu_access="none",
+            enabled=True,
+        )
 
 
 def test_capability_is_default_off_in_process_and_resource_digest_bound() -> None:

@@ -82,3 +82,13 @@ postcondition fails. Rollback rechecks the restored tuple and reports the conten
 disable/revocation observation when the restored tuple carries the capability.
 
 Public KWRAG v1 schemas are not changed by this OPS-private rollout contract.
+
+## Hermes compatibility fixture
+
+`tests/fixtures/kwrag_embedded_retrieval/hermes-compatibility-v1.json` binds the
+OPS-private parser to the exact clean Hermes product source and embedded component
+artifacts that first adopted this contract. It includes the exact capability labels,
+component manifest, fixed verifier argv, and canonical enabled/disabled status contract
+fixtures. The fixture explicitly records that no enabled invocation, canary target, or
+runtime mutation was observed. Passing it proves product/OPS contract compatibility only;
+it is not live consumer evidence, a target selection, or canary qualification.
