@@ -5,7 +5,10 @@ import hashlib
 from dataclasses import replace
 import unittest
 
-from agent_runtime_ops.root_actions import seal_typed_manifest
+from agent_runtime_ops.root_actions import (
+    SanitizedExecutionObservation,
+    seal_typed_manifest,
+)
 from agent_runtime_ops.root_actions.local_fixture import LocalRootActionFixture
 from agent_runtime_ops.root_actions.projection import ProjectionError, status_projection
 from agent_runtime_ops.root_actions.receipts import (
@@ -126,6 +129,38 @@ class RootActionReceiptTests(unittest.TestCase):
         value["removed_lines"] = 1
         with self.assertRaisesRegex(
             ReceiptValidationError, "cannot contain removed lines"
+        ):
+            seal_receipt(receipt_bytes(value))
+
+    def test_public_receipt_enforces_complete_execution_observation(self) -> None:
+        value = public_receipt(self.job)
+        observation = SanitizedExecutionObservation(
+            dispatch_started=True,
+            dispatch_completed=True,
+            provider_request_count=4,
+            provider_reservation_count=4,
+            preserved_snapshot_path="/srv/kwrag/runtime/snapshot-1",
+            staging_path="/srv/kwrag/staging/job-1",
+        ).public_facts(allowed_path_roots=("/srv/kwrag",))
+        value["result"]["facts"] = [
+            {"name": name, "value": fact_value}
+            for name, fact_value in observation
+        ]
+        seal_receipt(receipt_bytes(value))
+
+        value["result"]["facts"].pop()
+        with self.assertRaisesRegex(
+            ReceiptValidationError, "execution observation contract"
+        ):
+            seal_receipt(receipt_bytes(value))
+
+    def test_public_receipt_rejects_terminal_status_fact(self) -> None:
+        value = public_receipt(self.job)
+        value["result"]["facts"].append(
+            {"name": "terminal_status", "value": "succeeded"}
+        )
+        with self.assertRaisesRegex(
+            ReceiptValidationError, "execution observation contract"
         ):
             seal_receipt(receipt_bytes(value))
 

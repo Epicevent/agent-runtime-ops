@@ -8,7 +8,24 @@ import re
 MAX_PROVIDER_OBSERVATION_COUNT = 1_000_000
 MAX_PUBLIC_PATH_BYTES = 1024
 UNAVAILABLE_FACT_VALUE = "unavailable"
+OBSERVATION_CONTRACT_SCHEMA = "agent-runtime-root-action-observation-contract/v1"
+EXECUTION_OBSERVATION_FACT_ORDER = (
+    "dispatch_started",
+    "dispatch_completed",
+    "provider_request_count",
+    "provider_reservation_count",
+    "preserved_snapshot_path",
+    "staging_path",
+)
+EXECUTION_OBSERVATION_FACT_NAMES = frozenset(EXECUTION_OBSERVATION_FACT_ORDER)
+FORBIDDEN_OBSERVATION_FACT_NAMES = frozenset(
+    {"terminal_outcome", "terminal_status"}
+)
+_BOOLEAN_FACT_NAMES = ("dispatch_started", "dispatch_completed")
+_COUNT_FACT_NAMES = ("provider_request_count", "provider_reservation_count")
+_PATH_FACT_NAMES = ("preserved_snapshot_path", "staging_path")
 _PUBLIC_PATH_RE = re.compile(r"/[A-Za-z0-9._/-]+")
+_CANONICAL_COUNT_RE = re.compile(r"0|[1-9][0-9]{0,6}")
 
 
 class ObservationValidationError(ValueError):
@@ -77,6 +94,71 @@ def _count_fact(value: int | None) -> str:
     return UNAVAILABLE_FACT_VALUE if value is None else str(value)
 
 
+def execution_observation_contract_projection() -> dict[str, object]:
+    return {
+        "schema": OBSERVATION_CONTRACT_SCHEMA,
+        "fact_order": list(EXECUTION_OBSERVATION_FACT_ORDER),
+        "boolean_facts": list(_BOOLEAN_FACT_NAMES),
+        "count_facts": list(_COUNT_FACT_NAMES),
+        "path_facts": list(_PATH_FACT_NAMES),
+        "unavailable_value": UNAVAILABLE_FACT_VALUE,
+        "maximum_provider_count": MAX_PROVIDER_OBSERVATION_COUNT,
+        "terminal_status_source": "receipt.terminal_outcome",
+        "forbidden_fact_names": sorted(FORBIDDEN_OBSERVATION_FACT_NAMES),
+        "partial_policy": "reject",
+    }
+
+
+def validate_public_observation_facts(
+    facts: tuple[tuple[str, str], ...],
+) -> None:
+    """Validate the reserved public fact subset without inferring missing values."""
+
+    names = tuple(name for name, _value in facts)
+    forbidden = FORBIDDEN_OBSERVATION_FACT_NAMES.intersection(names)
+    if forbidden:
+        raise ObservationValidationError(
+            "terminal status must come from the receipt envelope"
+        )
+    observed = tuple(
+        name for name in names if name in EXECUTION_OBSERVATION_FACT_NAMES
+    )
+    if not observed:
+        return
+    if observed != EXECUTION_OBSERVATION_FACT_ORDER:
+        raise ObservationValidationError(
+            "execution observation facts must be complete and ordered"
+        )
+    values = dict(facts)
+    for name in _BOOLEAN_FACT_NAMES:
+        if values[name] not in {"true", "false", UNAVAILABLE_FACT_VALUE}:
+            raise ObservationValidationError(
+                f"{name} is not a public boolean observation"
+            )
+    if (
+        values["dispatch_completed"] == "true"
+        and values["dispatch_started"] != "true"
+    ):
+        raise ObservationValidationError(
+            "dispatch_completed=true requires dispatch_started=true"
+        )
+    for name in _COUNT_FACT_NAMES:
+        value = values[name]
+        if value == UNAVAILABLE_FACT_VALUE:
+            continue
+        if (
+            _CANONICAL_COUNT_RE.fullmatch(value) is None
+            or int(value) > MAX_PROVIDER_OBSERVATION_COUNT
+        ):
+            raise ObservationValidationError(
+                f"{name} is not a bounded canonical public count"
+            )
+    for name in _PATH_FACT_NAMES:
+        value = values[name]
+        if value != UNAVAILABLE_FACT_VALUE:
+            _canonical_public_path(value, name)
+
+
 @dataclass(frozen=True)
 class SanitizedExecutionObservation:
     """Decision-independent auxiliary facts for a future typed handler receipt.
@@ -125,7 +207,7 @@ class SanitizedExecutionObservation:
         )
         if len(set(roots)) != len(roots):
             raise ObservationValidationError("allowed_path_roots must be unique")
-        return (
+        facts = (
             ("dispatch_started", _boolean_fact(self.dispatch_started)),
             ("dispatch_completed", _boolean_fact(self.dispatch_completed)),
             ("provider_request_count", _count_fact(self.provider_request_count)),
@@ -150,3 +232,5 @@ class SanitizedExecutionObservation:
                 ),
             ),
         )
+        validate_public_observation_facts(facts)
+        return facts

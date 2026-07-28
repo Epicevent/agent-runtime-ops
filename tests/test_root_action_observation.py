@@ -1,15 +1,37 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 import unittest
 
 from agent_runtime_ops.root_actions import (
+    EXECUTION_OBSERVATION_FACT_ORDER,
     MAX_PROVIDER_OBSERVATION_COUNT,
     ObservationValidationError,
     SanitizedExecutionObservation,
+    execution_observation_contract_projection,
+    validate_public_observation_facts,
 )
 
 
 class SanitizedExecutionObservationTests(unittest.TestCase):
+    def test_committed_contract_fixture_is_exact_projection(self) -> None:
+        actual = (
+            json.dumps(
+                execution_observation_contract_projection(),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+        expected = (
+            Path(__file__).parent
+            / "fixtures"
+            / "root_action_observation_contract_v1.json"
+        ).read_bytes()
+        self.assertEqual(actual, expected)
+
     def test_measured_observation_has_fixed_sanitized_fact_shape(self) -> None:
         observation = SanitizedExecutionObservation(
             dispatch_started=True,
@@ -132,6 +154,54 @@ class SanitizedExecutionObservationTests(unittest.TestCase):
             observation.public_facts(
                 allowed_path_roots=tuple(f"/srv/root-{index}" for index in range(17))
             )
+
+    def test_reserved_fact_subset_must_be_complete_and_ordered(self) -> None:
+        valid = SanitizedExecutionObservation(
+            dispatch_started=True,
+            dispatch_completed=False,
+            provider_request_count=0,
+            provider_reservation_count=None,
+            preserved_snapshot_path=None,
+            staging_path=None,
+        ).public_facts(allowed_path_roots=())
+        validate_public_observation_facts((("handler_status", "pass"), *valid))
+
+        with self.assertRaisesRegex(
+            ObservationValidationError, "complete and ordered"
+        ):
+            validate_public_observation_facts(valid[:-1])
+        with self.assertRaisesRegex(
+            ObservationValidationError, "complete and ordered"
+        ):
+            validate_public_observation_facts(tuple(reversed(valid)))
+
+    def test_public_observation_rejects_noncanonical_values(self) -> None:
+        baseline = dict.fromkeys(EXECUTION_OBSERVATION_FACT_ORDER, "unavailable")
+        invalid_values = (
+            ("dispatch_started", "yes"),
+            ("provider_request_count", "00"),
+            ("provider_reservation_count", str(MAX_PROVIDER_OBSERVATION_COUNT + 1)),
+            ("staging_path", "/srv/staging/../private"),
+        )
+        for name, value in invalid_values:
+            with self.subTest(name=name, value=value), self.assertRaises(
+                ObservationValidationError
+            ):
+                candidate = dict(baseline)
+                candidate[name] = value
+                validate_public_observation_facts(
+                    tuple(
+                        (key, candidate[key])
+                        for key in EXECUTION_OBSERVATION_FACT_ORDER
+                    )
+                )
+
+    def test_terminal_status_fact_is_forbidden(self) -> None:
+        for name in ("terminal_status", "terminal_outcome"):
+            with self.subTest(name=name), self.assertRaisesRegex(
+                ObservationValidationError, "receipt envelope"
+            ):
+                validate_public_observation_facts(((name, "succeeded"),))
 
 
 if __name__ == "__main__":

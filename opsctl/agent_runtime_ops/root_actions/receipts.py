@@ -8,6 +8,11 @@ import re
 import unicodedata
 from typing import Any
 
+from .observation import (
+    ObservationValidationError,
+    validate_public_observation_facts,
+)
+
 
 RECEIPT_SCHEMA = "agent-runtime-root-action-receipt/v1"
 MAX_RECEIPT_BYTES = 512 * 1024
@@ -232,12 +237,21 @@ def _validate_public(value: dict[str, Any]) -> None:
             "result.facts must be a list with at most 128 items"
         )
     names: list[str] = []
+    fact_pairs: list[tuple[str, str]] = []
     for index, raw_fact in enumerate(facts):
         fact = _exact(raw_fact, _FACT_KEYS, f"result.facts[{index}]")
-        names.append(_safe_id(fact["name"], f"result.facts[{index}].name"))
-        _safe_text(fact["value"], f"result.facts[{index}].value", 4096)
+        name = _safe_id(fact["name"], f"result.facts[{index}].name")
+        value = _safe_text(fact["value"], f"result.facts[{index}].value", 4096)
+        names.append(name)
+        fact_pairs.append((name, value))
     if len(set(names)) != len(names):
         raise ReceiptValidationError("result.facts names must be unique")
+    try:
+        validate_public_observation_facts(tuple(fact_pairs))
+    except ObservationValidationError as exc:
+        raise ReceiptValidationError(
+            "result.facts violates the execution observation contract"
+        ) from exc
 
 
 def _validate_quarantine(value: dict[str, Any]) -> None:

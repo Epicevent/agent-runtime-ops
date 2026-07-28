@@ -35,9 +35,15 @@ from .client import (
 from .endpoint import RootActionBrokerEndpoint
 from .listener import RootActionListenerError, RootActionUnixListener
 from .observation import (
+    EXECUTION_OBSERVATION_FACT_NAMES,
+    EXECUTION_OBSERVATION_FACT_ORDER,
+    FORBIDDEN_OBSERVATION_FACT_NAMES,
     MAX_PROVIDER_OBSERVATION_COUNT,
+    OBSERVATION_CONTRACT_SCHEMA,
     ObservationValidationError,
     SanitizedExecutionObservation,
+    execution_observation_contract_projection,
+    validate_public_observation_facts,
 )
 from .protocol import (
     BROKER_REQUEST_SCHEMA,
@@ -90,9 +96,15 @@ __all__ = [
     "RootActionBrokerEndpoint",
     "RootActionListenerError",
     "RootActionUnixListener",
+    "EXECUTION_OBSERVATION_FACT_NAMES",
+    "EXECUTION_OBSERVATION_FACT_ORDER",
+    "FORBIDDEN_OBSERVATION_FACT_NAMES",
     "MAX_PROVIDER_OBSERVATION_COUNT",
+    "OBSERVATION_CONTRACT_SCHEMA",
     "ObservationValidationError",
     "SanitizedExecutionObservation",
+    "execution_observation_contract_projection",
+    "validate_public_observation_facts",
     "BrokerEventSource",
     "BrokerPeerIdentity",
     "RootActionSubmissionEndpoint",
