@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import os
 import sqlite3
+import stat
 import sys
 from pathlib import Path
 
@@ -23,6 +25,7 @@ from ..domain.nas_views import (
     crontab_has_reboot_restore,
     drop_view_record,
     fstab_boot_entry_present,
+    shared_master_fstab_entry_present,
     get_view_record,
     hidden_master,
     iter_view_records,
@@ -39,14 +42,16 @@ from ..domain.nas_views import (
     view_root,
 )
 
-_KAKAO_PACKAGE_ROOT = Path("/mnt/nas/kakao-work")
 from ..host.account_files import (
     read_password_from_stdin,
     write_credential_file,
 )
 from ..host.bind_mounts import bind_ro, unmount_tree
 from ..host.nas_ready import failed_cifs_mount_units, wait_for_nas_ready
-from ..host.fstab import remove_managed_fstab_entry as _remove_managed_fstab_entry
+from ..host.fstab import (
+    read_managed_fstab_entries as _read_managed_fstab_entries,
+    remove_managed_fstab_entry as _remove_managed_fstab_entry,
+)
 from ..host.mounts import findmnt_one as _findmnt_one
 from ..host.mounts import is_readonly_mount as _is_readonly_mount
 from ..nas import (
@@ -54,10 +59,17 @@ from ..nas import (
     customer_credential_path,
     mountpoint_for_share,
     parse_smb_share,
+    parse_cifs_mount_source,
     root_credential_path,
     share_is_writable,
     shared_credential_for_share,
+    shared_master_for_share,
 )
+
+
+_MASTER_MODE_PER_SLOT = "per_slot_cifs"
+_MASTER_MODE_SHARED = "shared_policy_mount"
+_KAKAO_PACKAGE_ROOT = Path("/mnt/nas/kakao-work")
 
 
 def _require_root(command: str) -> bool:
@@ -102,22 +114,121 @@ def _mount_master(master: Path, share_source: str) -> tuple[bool, str]:
     return ok, "ok" if ok else (error or "master_state_did_not_match_expected_cifs_ro")
 
 
+def _assert_no_symlink_components(path: Path) -> None:
+    if not path.is_absolute():
+        raise ValueError(f"shared_master_path_not_absolute:{path}")
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        try:
+            info = current.lstat()
+        except OSError as exc:
+            raise ValueError(f"shared_master_path_unreadable:{current}:{exc}") from exc
+        if stat.S_ISLNK(info.st_mode):
+            raise ValueError(f"shared_master_path_symlink:{current}")
+
+
+def _validate_shared_master(master: Path, share_source: str) -> dict[str, str]:
+    """Validate an already-mounted root-policy source without trusting its path."""
+    _assert_no_symlink_components(master)
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_DIRECTORY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(master, flags)
+    except OSError as exc:
+        raise ValueError(f"shared_master_open_failed:{master}:{exc}") from exc
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISDIR(before.st_mode):
+            raise ValueError(f"shared_master_not_directory:{master}")
+        rc, error, rows = _findmnt_one(master)
+        if rc != 0 or len(rows) != 1:
+            raise ValueError(error or f"shared_master_mount_not_exact:rows={len(rows)}")
+        row = rows[0]
+        if row.get("target") != str(master) or row.get("fstype") != "cifs":
+            raise ValueError("shared_master_mount_identity_mismatch")
+        observed, subpath = parse_cifs_mount_source(row.get("source", ""))
+        expected = parse_smb_share(share_source)
+        if subpath is not None or observed.host != expected.host or observed.share != expected.share:
+            raise ValueError("shared_master_share_mismatch")
+        after = os.fstat(fd)
+        def identity(value) -> tuple[int, int, int]:
+            return value.st_dev, value.st_ino, stat.S_IFMT(value.st_mode)
+        if identity(before) != identity(after):
+            raise ValueError("shared_master_changed_during_validation")
+        return row
+    finally:
+        os.close(fd)
+
+
+def _record_master_mode(record: dict | None) -> str:
+    # Records written before shared-master support are legacy per-slot CIFS.
+    mode = str((record or {}).get("master_mode") or _MASTER_MODE_PER_SLOT)
+    if mode not in {_MASTER_MODE_PER_SLOT, _MASTER_MODE_SHARED}:
+        raise ValueError(f"unknown_master_mode:{mode}")
+    return mode
+
+
+def _shared_master_for_record(record: dict, share_source: str, state_root: Path) -> Path:
+    configured = shared_master_for_share(parse_smb_share(share_source), state_root)
+    if configured is None:
+        raise ValueError("shared_master_policy_missing")
+    recorded = str(record.get("master_path") or "")
+    if not recorded or Path(recorded).as_posix() != configured.as_posix():
+        raise ValueError("shared_master_policy_drift")
+    _validate_shared_master(configured, share_source)
+    return configured
+
+
+def _remove_stale_per_slot_master_registration(slot: str, share_source: str, corpus: str) -> bool:
+    """Remove only the exact, unmounted legacy entry superseded by shared mode."""
+    matches = [
+        entry
+        for entry in _read_managed_fstab_entries()
+        if entry.get("slot") == slot and entry.get("source") == share_source
+    ]
+    if not matches:
+        return False
+    if len(matches) != 1:
+        raise ValueError("legacy_master_registration_ambiguous")
+    expected = hidden_master(slot, corpus)
+    entry = matches[0]
+    if Path(entry.get("mountpoint", "")) != expected or entry.get("access") != "ro":
+        raise ValueError("legacy_master_registration_identity_mismatch")
+    rc, _, rows = _findmnt_one(expected)
+    if rc == 0 and rows:
+        raise ValueError("legacy_master_registration_still_mounted")
+    if not _remove_managed_fstab_entry(slot, share_source):
+        raise ValueError("legacy_master_registration_remove_failed")
+    return True
+
+
 def _apply_binds(plan: ViewPlan) -> tuple[bool, str, int]:
+    def fail(reason: str, bound_rooms: int) -> tuple[bool, str, int]:
+        entry_failed, entry_errors = unmount_tree(plan.entry)
+        view_failed, view_errors = unmount_tree(plan.view)
+        rollback_errors = entry_errors + view_errors
+        if entry_failed or view_failed:
+            reason += ":rollback_failed:" + "; ".join(rollback_errors)
+        return False, reason, bound_rooms
+
     # granted_paths 코퍼스는 단일 패키지가 없다 — 붙일 것이 전부 room_binds 에 있다.
     if plan.package_dir is not None and plan.package_bind is not None:
         ok, reason = bind_ro(plan.package_dir, plan.package_bind)
         if not ok:
-            return False, f"package_bind:{reason}", 0
+            return fail(f"package_bind:{reason}", 0)
     bound_rooms = 0
     for source, target in plan.room_binds:
         ok, reason = bind_ro(source, target)
         if not ok:
-            return False, f"room_bind:{target.name}:{reason}", bound_rooms
+            return fail(f"room_bind:{target.name}:{reason}", bound_rooms)
         bound_rooms += 1
     # --rbind: the package/media submounts under view must follow into the entry.
     ok, reason = bind_ro(plan.view, plan.entry, recursive=True)
     if not ok:
-        return False, f"entry_bind:{reason}", bound_rooms
+        return fail(f"entry_bind:{reason}", bound_rooms)
     return True, "ok", bound_rooms
 
 
@@ -150,45 +261,61 @@ def cmd_nas_view_assign(args: argparse.Namespace) -> int:
         if rc == 0 and rows:
             raise ValueError(f"share is fully mounted for slot at {full_mount} — run: opsctl nas unmount {slot} {decision.share.source}")
 
-        if args.username or args.password_stdin:
-            if not args.username or not args.password_stdin:
-                raise ValueError("--username and --password-stdin must be used together")
-            password = read_password_from_stdin()
-            # Corpus master reads a SHARED corpus via an infra read account.
-            # Unlike `nas mount` (own-folder self-service, slot-owned cred),
-            # the customer must NOT be able to read this key — store root-owned.
-            credential_path = root_credential_path(slot, decision.share)
-            write_credential_file(credential_path, args.username, password, args.domain, 0, 0)
-            # Drop any pre-fix customer-readable copy of the same corpus secret.
-            customer_copy = customer_credential_path(slot, decision.share)
-            if customer_copy.exists():
-                customer_copy.unlink()
-        else:
-            # Corpus reuse: the root vault is the only safe source. Migrate any
-            # pre-fix slot-home copy into the vault (same secret, no re-entry),
-            # then fail closed rather than mount off a customer-readable cred.
-            migrate_customer_credential_to_root(slot, decision.share)
-            credential_path = root_credential_path(slot, decision.share)
-            if not credential_path.exists():
-                # per-slot 복사본이 없으면 공유 코퍼스 credential(ONE 공유 ro 계정,
-                # nas-policy corpus_credentials 선언)로 붙는다 — 슬롯마다 같은 비밀을
-                # 다시 심을 이유가 없다(공유 진실은 스토리지에 있다). override 가
-                # 필요하면 --username/--password-stdin 으로 per-slot 을 명시한다.
-                shared = shared_credential_for_share(decision.share, state_root)
-                if shared is not None and shared.exists():
-                    credential_path = shared
-                else:
-                    raise ValueError("credential_missing: no per-slot copy, and no corpus credential declared/present for this share (nas-policy corpus_credentials) — or pass --username USER --password-stdin")
-
         _ensure_hidden_dirs(slot, spec.name)
-        master = hidden_master(slot, spec.name)
-        _write_managed_fstab_entry(slot, decision.share.source, master, credential_path)
-        ok, reason = _mount_master(master, decision.share.source)
-        if not ok:
-            raise ValueError(f"master_mount_failed: {reason}")
+        configured_master = shared_master_for_share(decision.share, state_root)
+        legacy_fstab_removed = False
+        if configured_master is not None:
+            if args.username or args.password_stdin:
+                raise ValueError("shared master policy forbids per-slot credential override")
+            _validate_shared_master(configured_master, decision.share.source)
+            master = configured_master
+            master_mode = _MASTER_MODE_SHARED
+            # A failed older attempt may have stamped an unmounted per-slot CIFS
+            # entry.  Remove only that exact legacy pair; never touch the global
+            # collector mount or another slot's healthy legacy master.
+            legacy_fstab_removed = _remove_stale_per_slot_master_registration(
+                slot, decision.share.source, spec.name
+            )
+        else:
+            master_mode = _MASTER_MODE_PER_SLOT
+            if args.username or args.password_stdin:
+                if not args.username or not args.password_stdin:
+                    raise ValueError("--username and --password-stdin must be used together")
+                password = read_password_from_stdin()
+                # Corpus master reads a SHARED corpus via an infra read account.
+                # Unlike `nas mount` (own-folder self-service, slot-owned cred),
+                # the customer must NOT be able to read this key — store root-owned.
+                credential_path = root_credential_path(slot, decision.share)
+                write_credential_file(credential_path, args.username, password, args.domain, 0, 0)
+                # Drop any pre-fix customer-readable copy of the same corpus secret.
+                customer_copy = customer_credential_path(slot, decision.share)
+                if customer_copy.exists():
+                    customer_copy.unlink()
+            else:
+                # Corpus reuse: the root vault is the only safe source. Migrate any
+                # pre-fix slot-home copy into the vault (same secret, no re-entry),
+                # then fail closed rather than mount off a customer-readable cred.
+                migrate_customer_credential_to_root(slot, decision.share)
+                credential_path = root_credential_path(slot, decision.share)
+                if not credential_path.exists():
+                    shared = shared_credential_for_share(decision.share, state_root)
+                    if shared is not None and shared.exists():
+                        credential_path = shared
+                    else:
+                        raise ValueError("credential_missing: no per-slot copy, and no corpus credential declared/present for this share (nas-policy corpus_credentials) — or pass --username USER --password-stdin")
+            master = hidden_master(slot, spec.name)
+            _write_managed_fstab_entry(slot, decision.share.source, master, credential_path)
+            ok, reason = _mount_master(master, decision.share.source)
+            if not ok:
+                raise ValueError(f"master_mount_failed: {reason}")
 
         plan = build_view_plan(
-            slot, user_id, decision.share.source, state_root, list(getattr(args, "path", None) or [])
+            slot,
+            user_id,
+            decision.share.source,
+            state_root,
+            list(getattr(args, "path", None) or []),
+            master_override=master,
         )
         ok, reason, bound_rooms = _apply_binds(plan)
         if not ok:
@@ -201,23 +328,43 @@ def cmd_nas_view_assign(args: argparse.Namespace) -> int:
         _append_action_log(state_root, "nas_view_assign", args.slot, args.share, "fail", str(exc))
         return 1
 
-    put_view_record(views, slot, plan.corpus, {
-        "user_id": plan.user_id,
-        "share": plan.share.source,
-        "corpus": plan.corpus,
-        "package": plan.package_dir.name if plan.package_dir else "",
-        # 재부팅 복구가 같은 경로를 다시 세울 수 있게 원장에 남긴다(restore 는 DB 를 못 본다).
-        "paths": list(plan.paths),
-        "rooms_bound": bound_rooms,
-        "rooms_missing_media": list(plan.missing_rooms),
-        "assigned_at": _now_iso(),
-    })
-    save_views_state(state_root, views)
+    try:
+        put_view_record(views, slot, plan.corpus, {
+            "user_id": plan.user_id,
+            "share": plan.share.source,
+            "corpus": plan.corpus,
+            "master_mode": master_mode,
+            "master_path": master.as_posix(),
+            "package": plan.package_dir.name if plan.package_dir else "",
+            # 재부팅 복구가 같은 경로를 다시 세울 수 있게 원장에 남긴다(restore 는 DB 를 못 본다).
+            "paths": list(plan.paths),
+            "rooms_bound": bound_rooms,
+            "rooms_missing_media": list(plan.missing_rooms),
+            "assigned_at": _now_iso(),
+        })
+        save_views_state(state_root, views)
+    except Exception as exc:
+        # A mounted view without its recovery record is an invisible partial
+        # assignment.  Tear down only this slot's binds and fail loudly.
+        entry_failed, entry_errors = unmount_tree(plan.entry)
+        view_failed, view_errors = unmount_tree(plan.view)
+        rollback = entry_errors + view_errors
+        reason = f"state_persist_failed:{exc}"
+        if entry_failed or view_failed:
+            reason += ":rollback_failed:" + "; ".join(rollback)
+        print(f"target={args.slot}")
+        print(f"user_id={args.user_id}")
+        print("view_assign_status=fail")
+        print(f"reason={reason}")
+        _append_action_log(state_root, "nas_view_assign", args.slot, args.share, "fail", reason)
+        return 1
 
     print(f"target={slot}")
     print(f"user_id={plan.user_id}")
     print(f"corpus={plan.corpus}")
     print(f"share={plan.share.source}")
+    print(f"master_mode={master_mode}")
+    print(f"legacy_fstab_removed={'yes' if legacy_fstab_removed else 'no'}")
     print(f"package={plan.package_dir.name if plan.package_dir else ''}")
     if plan.paths:
         print(f"paths_bound={bound_rooms}/{len(plan.paths)}")
@@ -257,13 +404,22 @@ def cmd_nas_view_detach(args: argparse.Namespace) -> int:
             if corpus != PRIMARY_CORPUS:
                 record = get_view_record(views, slot, corpus)
 
+        master_mode = _record_master_mode(record)
         entry_failed, entry_errors = unmount_tree(slot_entry(slot, corpus))
         view_failed, view_errors = unmount_tree(view_root(slot, corpus))
-        master_failed, master_errors = unmount_tree(hidden_master(slot, corpus))
+        if master_mode == _MASTER_MODE_PER_SLOT:
+            master_failed, master_errors = unmount_tree(hidden_master(slot, corpus))
+        else:
+            # Never unmount a shared collector source while detaching one slot.
+            master_failed, master_errors = 0, []
         failures = entry_errors + view_errors + master_errors
         if entry_failed or view_failed or master_failed:
             raise ValueError("umount_failed: " + "; ".join(failures))
-        fstab_removed = _remove_managed_fstab_entry(slot, share_source)
+        fstab_removed = (
+            _remove_managed_fstab_entry(slot, share_source)
+            if master_mode == _MASTER_MODE_PER_SLOT
+            else False
+        )
         # Corpus creds live root-owned in the vault (root:root 0600 — root-only,
         # safe) and are kept so re-attach needs no password re-entry. Only a
         # customer-readable copy (a pre-fix artifact) is a real exposure; remove it.
@@ -285,6 +441,7 @@ def cmd_nas_view_detach(args: argparse.Namespace) -> int:
     print(f"target={slot}")
     print(f"corpus={corpus}")
     print(f"share={share_source}")
+    print(f"master_mode={master_mode}")
     print(f"fstab_entry_removed={'yes' if fstab_removed else 'no'}")
     print(f"state_record_removed={'yes' if had_record else 'no'}")
     print(f"customer_credential_removed={'yes' if customer_cred_removed else 'no'}")
@@ -312,19 +469,49 @@ def cmd_nas_view_status(args: argparse.Namespace) -> int:
         print(f"{prefix}_share={record.get('share', '')}")
         print(f"{prefix}_package={record.get('package', '')}")
         print(f"{prefix}_paths_json={json.dumps(record.get('paths') or [], ensure_ascii=False, separators=(',', ':'))}")
-        checks = {
-            "master_mounted": hidden_master(slot, corpus),
-            "entry_mounted": slot_entry(slot, corpus),
-        }
         healthy = True
-        for label, path in checks.items():
-            rc, _, rows = _findmnt_one(path)
-            mounted = rc == 0 and bool(rows)
-            readonly = mounted and _is_readonly_mount(rows[0])
-            print(f"{prefix}_{label}={'yes' if mounted else 'no'}")
-            print(f"{prefix}_{label}_readonly={'yes' if readonly else 'no'}")
-            if not mounted or not readonly:
-                healthy = False
+        try:
+            master_mode = _record_master_mode(record)
+            if master_mode == _MASTER_MODE_SHARED:
+                master = _shared_master_for_record(record, record.get("share", ""), state_root)
+                # The collector mount may be rw.  It is never exposed directly;
+                # every selected child and the slot entry must still be ro.
+                _, _, master_rows = _findmnt_one(master)
+                master_mounted = bool(master_rows)
+                master_readonly = master_mounted and _is_readonly_mount(master_rows[0])
+                master_readonly_required = False
+            else:
+                master = hidden_master(slot, corpus)
+                rc, _, master_rows = _findmnt_one(master)
+                master_mounted = rc == 0 and bool(master_rows)
+                master_readonly = master_mounted and _is_readonly_mount(master_rows[0])
+                master_readonly_required = True
+            master_validation = "ok"
+        except Exception as exc:
+            master_mode = str(record.get("master_mode") or _MASTER_MODE_PER_SLOT)
+            master = Path(str(record.get("master_path") or hidden_master(slot, corpus)))
+            master_mounted = False
+            master_readonly = False
+            master_readonly_required = master_mode != _MASTER_MODE_SHARED
+            master_validation = str(exc)
+            healthy = False
+        print(f"{prefix}_master_mode={master_mode}")
+        print(f"{prefix}_master_path={master.as_posix()}")
+        print(f"{prefix}_master_mounted={'yes' if master_mounted else 'no'}")
+        print(f"{prefix}_master_readonly={'yes' if master_readonly else 'no'}")
+        print(f"{prefix}_master_readonly_required={'yes' if master_readonly_required else 'no'}")
+        print(f"{prefix}_master_validation={master_validation}")
+        if not master_mounted or (master_readonly_required and not master_readonly):
+            healthy = False
+
+        entry = slot_entry(slot, corpus)
+        rc, _, rows = _findmnt_one(entry)
+        entry_mounted = rc == 0 and bool(rows)
+        entry_readonly = entry_mounted and _is_readonly_mount(rows[0])
+        print(f"{prefix}_entry_mounted={'yes' if entry_mounted else 'no'}")
+        print(f"{prefix}_entry_mounted_readonly={'yes' if entry_readonly else 'no'}")
+        if not entry_mounted or not entry_readonly:
+            healthy = False
         print(f"{prefix}_healthy={'yes' if healthy else 'no'}")
         if not healthy:
             exit_code = 1
@@ -335,7 +522,23 @@ def cmd_nas_view_status(args: argparse.Namespace) -> int:
     # half is only decidable when run via sudo).
     fstab_text = _read_fstab()
     if records:
-        missing = [slot for slot, _corpus, record in records if not fstab_boot_entry_present(slot, record.get("share", ""), fstab_text)]
+        missing: list[str] = []
+        for slot, corpus, record in records:
+            try:
+                mode = _record_master_mode(record)
+                if mode == _MASTER_MODE_SHARED:
+                    master = shared_master_for_share(parse_smb_share(record.get("share", "")), state_root)
+                    present = (
+                        master is not None
+                        and Path(str(record.get("master_path") or "")).as_posix() == master.as_posix()
+                        and shared_master_fstab_entry_present(record.get("share", ""), master, fstab_text)
+                    )
+                else:
+                    present = fstab_boot_entry_present(slot, record.get("share", ""), fstab_text)
+            except Exception:
+                present = False
+            if not present:
+                missing.append(slot if corpus == PRIMARY_CORPUS else f"{slot}:{corpus}")
         print(f"boot_fstab_entries={len(records) - len(missing)}/{len(records)}")
         if missing:
             print(f"boot_fstab_missing={','.join(missing)}")
@@ -565,16 +768,29 @@ def _restore_views(state_root: Path, records: list) -> int:
         user_id = record.get("user_id", "")
         try:
             _ensure_hidden_dirs(slot, corpus)
-            ok, reason = _mount_master(hidden_master(slot, corpus), share_source)
-            if not ok:
-                raise ValueError(f"master_mount_failed: {reason}")
+            master_mode = _record_master_mode(record)
+            if master_mode == _MASTER_MODE_SHARED:
+                master = _shared_master_for_record(record, share_source, state_root)
+            else:
+                master = hidden_master(slot, corpus)
+                ok, reason = _mount_master(master, share_source)
+                if not ok:
+                    raise ValueError(f"master_mount_failed: {reason}")
             plan = build_view_plan(
-                slot, user_id, share_source, state_root, list(record.get("paths") or [])
+                slot,
+                user_id,
+                share_source,
+                state_root,
+                list(record.get("paths") or []),
+                master_override=master,
             )
             ok, reason, bound_rooms = _apply_binds(plan)
             if not ok:
                 raise ValueError(f"bind_failed: {reason}")
-            print(f"restored target={slot} corpus={corpus} user_id={user_id} rooms_bound={bound_rooms}")
+            print(
+                f"restored target={slot} corpus={corpus} user_id={user_id} "
+                f"master_mode={master_mode} rooms_bound={bound_rooms}"
+            )
             _append_action_log(state_root, "nas_view_restore", slot, share_source, "ok", f"user_id={user_id}")
         except Exception as exc:
             failed += 1

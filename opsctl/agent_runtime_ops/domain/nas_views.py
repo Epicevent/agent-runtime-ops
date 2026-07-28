@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import os
 import sqlite3
 import re
 from pathlib import Path
@@ -113,6 +114,27 @@ def fstab_boot_entry_present(slot: str, share: str, fstab_text: str) -> bool:
             return False
         entry = lines[index + 1].strip()
         return bool(entry) and not entry.startswith("#") and " cifs " in f" {entry} "
+    return False
+
+
+def shared_master_fstab_entry_present(share: str, master: Path, fstab_text: str) -> bool:
+    """True for an exact non-comment CIFS fstab entry for a shared master.
+
+    Unlike a per-slot master this entry is not stamped by opsctl, so it has no
+    managed marker.  Only the exact source/target/fstype triple is relevant;
+    options and credential material are intentionally neither returned nor
+    logged here.
+    """
+    expected_target = master.as_posix()
+    for raw in fstab_text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split()
+        if len(fields) < 3 or fields[2] != "cifs":
+            continue
+        if _fstab_unescape(fields[0]) == share and _fstab_unescape(fields[1]) == expected_target:
+            return True
     return False
 
 
@@ -296,12 +318,28 @@ def resolve_granted_dirs(master: Path, paths: list[str]) -> tuple[list[tuple[Pat
     for raw in paths:
         rel = validate_relative_path(raw)
         source = master / rel
-        if not source.is_dir() or source.is_symlink():
+        current = master
+        symlink = None
+        for part in rel.split("/"):
+            current /= part
+            if current.is_symlink():
+                symlink = current
+                break
+        if symlink is not None:
+            raise ValueError(f"granted path contains symlink: {rel}")
+        if not source.is_dir():
             missing.append(rel)
             continue
+        try:
+            master_real = master.resolve(strict=True)
+            source_real = source.resolve(strict=True)
+        except OSError as exc:
+            raise ValueError(f"granted path cannot be resolved safely: {rel}: {exc}") from exc
+        if source_real != master_real and master_real not in source_real.parents:
+            raise ValueError(f"granted path escaped master: {rel}")
         alias = path_alias(rel)
         if alias in view_names:
-            continue
+            raise ValueError(f"granted path alias collision: {rel} -> {alias}")
         view_names.add(alias)
         binds.append((source, Path(alias)))
     return binds, missing
@@ -330,19 +368,23 @@ def build_view_plan(
     share_source: str,
     state_root: Path,
     paths: list[str] | None = None,
+    *,
+    master_override: Path | None = None,
 ) -> ViewPlan:
-    """Requires the hidden master to be mounted already (package discovery reads it).
+    """Requires its selected master to be mounted already (package discovery reads it).
 
     코퍼스 레이아웃별로 갈린다(CORPORA). 카카오는 users/ 패키지 + 방 바인드,
-    그룹웨어는 사람 폴더 하나(방 없음). 경로는 코퍼스별이라 한 슬롯에 카카오와
-    그룹웨어가 나란히 설 수 있다."""
+    그룹웨어는 grant-selected paths.  ``master_override`` is the validated
+    root-policy collector mount; without it the legacy hidden per-slot master
+    remains unchanged. 경로는 코퍼스별이라 한 슬롯에 카카오와 그룹웨어가 나란히 설
+    수 있다."""
     decision = check_nas_policy(slot, share_source, state_root)
     if not decision.allowed:
         raise ValueError(f"policy denied: {decision.reason}")
     slot = decision.slot
     user_id = validate_user_id(user_id)
     spec = corpus_for_share(decision.share.source)
-    master = hidden_master(slot, spec.name)
+    master = master_override if master_override is not None else hidden_master(slot, spec.name)
     view = view_root(slot, spec.name)
     room_binds: list[tuple[Path, Path]] = []
     missing: list[str] = []
@@ -450,5 +492,14 @@ def save_views_state(state_root: Path, data: dict) -> None:
     data.setdefault("meta", {"schema_version": 1})
     path = state_path(state_root, VIEWS_STATE_NAME)
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(dump_yaml(data), encoding="utf-8")
-    tmp.replace(path)
+    with tmp.open("w", encoding="utf-8") as handle:
+        handle.write(dump_yaml(data))
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+    if hasattr(os, "O_DIRECTORY"):
+        fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)

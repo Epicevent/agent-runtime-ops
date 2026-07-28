@@ -1,0 +1,316 @@
+from __future__ import annotations
+
+import argparse
+import contextlib
+import io
+import json
+import os
+from pathlib import Path
+from types import SimpleNamespace
+import tempfile
+import unittest
+import uuid
+from unittest.mock import patch
+
+from agent_runtime_ops.commands.nas_view import (
+    _restore_views,
+    _remove_stale_per_slot_master_registration,
+    _validate_shared_master,
+    cmd_nas_view_assign,
+    cmd_nas_view_detach,
+    cmd_nas_view_status,
+)
+from agent_runtime_ops.domain.nas_views import (
+    load_views_state,
+    put_view_record,
+    save_views_state,
+    shared_master_fstab_entry_present,
+)
+from agent_runtime_ops.nas import canonical_shared_master_path, parse_smb_share
+from agent_runtime_ops.routing import RuntimeBinding, dump_runtime_bindings
+from agent_runtime_ops.yamlio import dump_yaml
+
+
+SHARE = "//10.10.10.2/hanpass_groupware"
+
+
+def _write_state(root: Path) -> None:
+    binding = RuntimeBinding(
+        instance_id=str(uuid.uuid5(uuid.NAMESPACE_DNS, "oc3")),
+        linux_account="oc3",
+        public_host="oc3.ji-tech.co.kr",
+        family="openclaw",
+        runtime_class="customer",
+        gateway_port=28989,
+        bridge_port=28990,
+    )
+    (root / "runtime-bindings.json").write_text(dump_runtime_bindings([binding]), encoding="utf-8")
+    (root / "nas-policy.yaml").write_text(
+        dump_yaml(
+            {
+                "defaults": {"auto_approve": False},
+                "accounts": {
+                    "oc3": {"auto_approve": True, "grants": [{"allow": SHARE}]},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+class SharedMasterPolicyTest(unittest.TestCase):
+    def test_exact_share_maps_to_posix_path(self) -> None:
+        policy = {"corpus_master_mounts": {SHARE: "/mnt/nas/hanpass_groupware"}}
+        got = canonical_shared_master_path(parse_smb_share(SHARE), policy)
+        self.assertIsNotNone(got)
+        self.assertEqual(got.as_posix(), "/mnt/nas/hanpass_groupware")
+
+    def test_mapping_is_exact_and_rejects_unsafe_paths(self) -> None:
+        other = parse_smb_share("//10.10.10.2/kakao-work")
+        self.assertIsNone(canonical_shared_master_path(other, {"corpus_master_mounts": {SHARE: "/mnt/nas/gw"}}))
+        for bad in ("", "relative/path", "/", "/mnt/../etc", "C:\\temp"):
+            with self.assertRaises(ValueError, msg=bad):
+                canonical_shared_master_path(
+                    parse_smb_share(SHARE), {"corpus_master_mounts": {SHARE: bad}}
+                )
+
+    def test_shared_master_boot_entry_matches_exact_source_target(self) -> None:
+        fstab = (
+            "# collector\n"
+            f"{SHARE} /mnt/nas/hanpass_groupware cifs credentials=/secret,defaults 0 0\n"
+        )
+        self.assertTrue(
+            shared_master_fstab_entry_present(SHARE, Path("/mnt/nas/hanpass_groupware"), fstab)
+        )
+        self.assertFalse(shared_master_fstab_entry_present(SHARE, Path("/mnt/nas/other"), fstab))
+        self.assertNotIn("/secret", json.dumps({"present": True}))
+
+
+class SharedMasterAssignTest(unittest.TestCase):
+    def test_stale_registration_migration_rejects_wrong_target_or_live_mount(self) -> None:
+        expected = Path("/srv/kw-nas/slots/oc3/groupware/master")
+        wrong = [{
+            "slot": "oc3", "source": SHARE, "mountpoint": "/srv/kw-nas/slots/oc9/master",
+            "access": "ro", "credentials": "/secret",
+        }]
+        with (
+            patch("agent_runtime_ops.commands.nas_view._read_managed_fstab_entries", return_value=wrong),
+            patch("agent_runtime_ops.commands.nas_view.hidden_master", return_value=expected),
+            patch("agent_runtime_ops.commands.nas_view._remove_managed_fstab_entry") as remove,
+        ):
+            with self.assertRaisesRegex(ValueError, "identity_mismatch"):
+                _remove_stale_per_slot_master_registration("oc3", SHARE, "groupware")
+        remove.assert_not_called()
+
+        exact = [{
+            "slot": "oc3", "source": SHARE, "mountpoint": str(expected),
+            "access": "ro", "credentials": "/secret",
+        }]
+        with (
+            patch("agent_runtime_ops.commands.nas_view._read_managed_fstab_entries", return_value=exact),
+            patch("agent_runtime_ops.commands.nas_view.hidden_master", return_value=expected),
+            patch("agent_runtime_ops.commands.nas_view._findmnt_one", return_value=(0, "", [{"target": str(expected)}])),
+            patch("agent_runtime_ops.commands.nas_view._remove_managed_fstab_entry") as remove,
+        ):
+            with self.assertRaisesRegex(ValueError, "still_mounted"):
+                _remove_stale_per_slot_master_registration("oc3", SHARE, "groupware")
+        remove.assert_not_called()
+
+    def test_assign_reuses_shared_master_and_migrates_only_stale_registration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "state"
+            root.mkdir()
+            _write_state(root)
+            shared = Path(tmp) / "collector-master"
+            (shared / "mails" / "seung23").mkdir(parents=True)
+            (shared / "groupware" / "approval" / "황정승 책임").mkdir(parents=True)
+            hidden = Path(tmp) / "slot-hidden-master"
+            binds: list[tuple[Path, Path, bool]] = []
+
+            def fake_bind(source: Path, target: Path, *, recursive: bool = False):
+                binds.append((source, target, recursive))
+                return True, "ok"
+
+            stale = [{
+                "slot": "oc3",
+                "source": SHARE,
+                "mountpoint": str(hidden),
+                "access": "ro",
+                "credentials": "/etc/samba/credentials/ro_groupware.cred",
+            }]
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.commands.nas_view._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.nas_view._ensure_hidden_dirs"),
+                patch("agent_runtime_ops.commands.nas_view.hidden_master", return_value=hidden),
+                patch("agent_runtime_ops.commands.nas_view.shared_master_for_share", return_value=shared),
+                patch("agent_runtime_ops.commands.nas_view._validate_shared_master"),
+                patch("agent_runtime_ops.commands.nas_view._read_managed_fstab_entries", return_value=stale),
+                patch("agent_runtime_ops.commands.nas_view._remove_managed_fstab_entry", return_value=True) as remove,
+                patch("agent_runtime_ops.commands.nas_view._findmnt_one", return_value=(1, "", [])),
+                patch("agent_runtime_ops.commands.nas_view.bind_ro", side_effect=fake_bind),
+                patch("agent_runtime_ops.commands.nas_view._write_managed_fstab_entry") as write_fstab,
+                patch("agent_runtime_ops.commands.nas_view._mount_master") as mount_master,
+                patch("agent_runtime_ops.commands.nas_view.migrate_customer_credential_to_root") as migrate,
+                patch("agent_runtime_ops.commands.nas_view.read_password_from_stdin") as password,
+                patch("agent_runtime_ops.commands.nas_view._append_action_log"),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_nas_view_assign(
+                    argparse.Namespace(
+                        state_root=str(root),
+                        slot="oc3",
+                        user_id="seung23",
+                        share=SHARE,
+                        username=None,
+                        password_stdin=False,
+                        domain=None,
+                        path=["groupware/approval/황정승 책임", "mails/seung23"],
+                    )
+                )
+
+            self.assertEqual(rc, 0, output.getvalue())
+            self.assertIn("master_mode=shared_policy_mount", output.getvalue())
+            self.assertIn("legacy_fstab_removed=yes", output.getvalue())
+            remove.assert_called_once_with("oc3", SHARE)
+            write_fstab.assert_not_called()
+            mount_master.assert_not_called()
+            migrate.assert_not_called()
+            password.assert_not_called()
+            self.assertEqual([source for source, _, _ in binds[:-1]], [
+                shared / "groupware" / "approval" / "황정승 책임",
+                shared / "mails" / "seung23",
+            ])
+            record = load_views_state(root)["corpus_views"]["oc3"]["groupware"]
+            self.assertEqual(record["master_mode"], "shared_policy_mount")
+            self.assertEqual(Path(record["master_path"]), shared)
+
+    def test_shared_policy_rejects_per_slot_credential_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_state(root)
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.commands.nas_view._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.nas_view._ensure_hidden_dirs"),
+                patch("agent_runtime_ops.commands.nas_view._findmnt_one", return_value=(1, "", [])),
+                patch("agent_runtime_ops.commands.nas_view.shared_master_for_share", return_value=Path(tmp)),
+                patch("agent_runtime_ops.commands.nas_view.read_password_from_stdin") as read_password,
+                patch("agent_runtime_ops.commands.nas_view._append_action_log"),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_nas_view_assign(
+                    argparse.Namespace(
+                        state_root=str(root), slot="oc3", user_id="seung23", share=SHARE,
+                        username="wrong-shape", password_stdin=True, domain=None,
+                        path=["mails/seung23"],
+                    )
+                )
+        self.assertEqual(rc, 1)
+        self.assertIn("forbids per-slot credential", output.getvalue())
+        read_password.assert_not_called()
+
+    def test_shared_detach_never_unmounts_global_master_or_removes_fstab(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            views = load_views_state(root)
+            put_view_record(views, "oc3", "groupware", {
+                "user_id": "seung23", "share": SHARE, "corpus": "groupware",
+                "master_mode": "shared_policy_mount", "master_path": "/mnt/nas/hanpass_groupware",
+            })
+            save_views_state(root, views)
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.commands.nas_view._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.nas_view.unmount_tree", return_value=(0, [])) as unmount,
+                patch("agent_runtime_ops.commands.nas_view._remove_managed_fstab_entry") as remove,
+                patch("agent_runtime_ops.commands.nas_view._append_action_log"),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_nas_view_detach(
+                    argparse.Namespace(state_root=str(root), slot="oc3", corpus="groupware", share=None)
+                )
+        self.assertEqual(rc, 0, output.getvalue())
+        self.assertEqual(unmount.call_count, 2)
+        self.assertTrue(all("/mnt/nas/hanpass_groupware" not in str(call) for call in unmount.call_args_list))
+        remove.assert_not_called()
+        self.assertIn("fstab_entry_removed=no", output.getvalue())
+
+    def test_shared_restore_revalidates_policy_and_skips_per_slot_mount(self) -> None:
+        record = {
+            "user_id": "seung23", "share": SHARE, "paths": ["mails/seung23"],
+            "master_mode": "shared_policy_mount", "master_path": "/mnt/nas/hanpass_groupware",
+        }
+        plan = SimpleNamespace(user_id="seung23")
+        with (
+            patch("agent_runtime_ops.commands.nas_view._ensure_hidden_dirs"),
+            patch("agent_runtime_ops.commands.nas_view._shared_master_for_record", return_value=Path("/mnt/nas/hanpass_groupware")),
+            patch("agent_runtime_ops.commands.nas_view._mount_master") as mount_master,
+            patch("agent_runtime_ops.commands.nas_view.build_view_plan", return_value=plan) as build,
+            patch("agent_runtime_ops.commands.nas_view._apply_binds", return_value=(True, "ok", 1)),
+            patch("agent_runtime_ops.commands.nas_view._append_action_log"),
+        ):
+            failed = _restore_views(Path("/state"), [("oc3", "groupware", record)])
+        self.assertEqual(failed, 0)
+        mount_master.assert_not_called()
+        self.assertEqual(build.call_args.kwargs["master_override"], Path("/mnt/nas/hanpass_groupware"))
+
+    def test_status_is_honest_about_rw_collector_but_requires_ro_entry(self) -> None:
+        master = Path("/mnt/nas/hanpass_groupware")
+        record = {
+            "user_id": "seung23", "share": SHARE, "paths": ["mails/seung23"],
+            "master_mode": "shared_policy_mount", "master_path": master.as_posix(),
+        }
+        records = {"views": {}, "corpus_views": {"oc3": {"groupware": record}}}
+        fstab = f"{SHARE} {master.as_posix()} cifs credentials=/not-output,rw 0 0\n"
+
+        def findmnt(path: Path):
+            if path == master:
+                return 0, "", [{
+                    "target": master.as_posix(), "source": SHARE, "fstype": "cifs", "options": "rw",
+                }]
+            return 0, "", [{
+                "target": str(path), "source": f"{SHARE}[/mails/seung23]",
+                "fstype": "none", "options": "ro,nosuid,nodev,bind",
+            }]
+
+        output = io.StringIO()
+        with (
+            patch("agent_runtime_ops.commands.nas_view.load_views_state", return_value=records),
+            patch("agent_runtime_ops.commands.nas_view._shared_master_for_record", return_value=master),
+            patch("agent_runtime_ops.commands.nas_view.shared_master_for_share", return_value=master),
+            patch("agent_runtime_ops.commands.nas_view._findmnt_one", side_effect=findmnt),
+            patch("agent_runtime_ops.commands.nas_view._read_fstab", return_value=fstab),
+            patch("agent_runtime_ops.commands.nas_view._is_root", return_value=False),
+            patch("agent_runtime_ops.commands.nas_view.failed_cifs_mount_units", return_value=([], None)),
+            contextlib.redirect_stdout(output),
+        ):
+            rc = cmd_nas_view_status(SimpleNamespace(state_root="/unused"))
+        text = output.getvalue()
+        self.assertEqual(rc, 0, text)
+        self.assertIn("view_1_master_readonly=no", text)
+        self.assertIn("view_1_master_readonly_required=no", text)
+        self.assertIn("view_1_entry_mounted_readonly=yes", text)
+        self.assertIn("view_1_healthy=yes", text)
+        self.assertIn("boot_fstab_entries=1/1", text)
+        self.assertNotIn("not-output", text)
+
+
+@unittest.skipUnless(os.name == "posix", "requires POSIX directory fd and mount path semantics")
+class SharedMasterPosixValidationTest(unittest.TestCase):
+    def test_exact_mount_identity_validates_and_symlink_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            master = Path(tmp) / "master"
+            master.mkdir()
+            row = {"target": str(master), "source": SHARE, "fstype": "cifs", "options": "rw"}
+            with patch("agent_runtime_ops.commands.nas_view._findmnt_one", return_value=(0, "", [row])):
+                self.assertEqual(_validate_shared_master(master, SHARE), row)
+
+            link = Path(tmp) / "link"
+            link.symlink_to(master, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                _validate_shared_master(link, SHARE)
+
+
+if __name__ == "__main__":
+    unittest.main()
