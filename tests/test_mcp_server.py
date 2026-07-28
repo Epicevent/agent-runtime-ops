@@ -1035,6 +1035,32 @@ class McpServerTests(unittest.TestCase):
             "root_action_retrieval_result_unavailable",
         )
 
+    def test_root_action_wait_non_timeout_failure_requires_retrieval_recovery(self) -> None:
+        _result, handle = root_action_cli_result()
+        error_result = {
+            "schema": "agent-runtime-root-action-cli-result/v1",
+            "result": "error",
+            "reason_code": "root_action_retrieval_failed_closed",
+            "handle": handle,
+        }
+        runner = FakeRunner([(2, json.dumps(error_result), "")])
+        server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+
+        payload = call_tool(server, "root_action_wait", {"handle": handle})
+
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["acceptance_state"], "unknown")
+        self.assertTrue(payload["recovery_required"])
+        self.assertFalse(payload["retryable"])
+        self.assertEqual(payload["handle"], handle)
+        self.assertEqual(payload["root_action"]["handle"], handle)
+        self.assertEqual(
+            payload["root_action"]["reason_code"],
+            "root_action_retrieval_failed_closed",
+        )
+        self.assertIn("root_action_retrieve", payload["next_action"])
+        self.assertIn("Never change the digest", payload["next_action"])
+
     def test_root_action_wait_unavailable_output_preserves_input_handle(self) -> None:
         class TimeoutRunner(FakeRunner):
             def run(

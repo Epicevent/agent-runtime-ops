@@ -459,6 +459,17 @@ def wait(server, args: dict[str, Any]) -> dict[str, Any]:
             handle=handle,
             reason_code="root_action_retrieval_result_unavailable",
         )
+    if value["result"] == "error" and value["reason_code"] not in {
+        "terminal_receipt_polling_timed_out",
+        "outcome_unknown_recovery_needed",
+    }:
+        return _acceptance_recovery_response(
+            server,
+            run=run,
+            argv=argv,
+            handle=handle,
+            reason_code=value["reason_code"],
+        )
     return _response(
         server,
         run,
