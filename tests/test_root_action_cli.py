@@ -380,6 +380,10 @@ def test_cli_source_has_no_shell_payload_or_configurable_socket_surface() -> Non
     assert 'parser.add_argument("--reply-target", required=True)' in root_section
     assert '"--projection-digest"' not in root_section
     assert 'root_action_sub.add_parser(\n        "preflight"' in root_section
+    assert 'root_action_sub.add_parser(\n        "auth-activate"' in root_section
+    assert 'root_action_auth_activate.add_argument("--rp-id", required=True)' in root_section
+    assert 'root_action_auth_activate.add_argument("--origin", required=True)' in root_section
+    assert '"--environment-file"' not in root_section
 
 
 @pytest.mark.parametrize("value", ["nan", "inf", "-inf", "0", "-1", "60.01"])

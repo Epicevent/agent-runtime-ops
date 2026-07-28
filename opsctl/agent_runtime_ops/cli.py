@@ -96,6 +96,7 @@ from .commands.runtime_config import (
 )
 from .commands.runtime_truth import cmd_runtime_truth
 from .commands.root_action import (
+    cmd_root_action_auth_activate,
     cmd_root_action_preflight,
     cmd_root_action_auth_bootstrap,
     cmd_root_action_retrieve,
@@ -182,6 +183,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="emit a bounded read-only install and activation observation bundle",
     )
     root_action_preflight.set_defaults(func=cmd_root_action_preflight)
+    root_action_auth_activate = root_action_sub.add_parser(
+        "auth-activate",
+        help="create the fixed root WebAuthn policy and enable the broker",
+    )
+    root_action_auth_activate.add_argument("--rp-id", required=True)
+    root_action_auth_activate.add_argument("--origin", required=True)
+    root_action_auth_activate.set_defaults(func=cmd_root_action_auth_activate)
     root_action_auth_bootstrap = root_action_sub.add_parser(
         "auth-bootstrap",
         help="create a root-only one-time WebAuthn enrollment bootstrap",

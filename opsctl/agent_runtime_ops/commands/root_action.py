@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -18,6 +19,11 @@ from ..root_actions.client import (
 from ..root_actions.contracts import MAX_MANIFEST_BYTES, ManifestValidationError
 from ..root_actions.protocol import MAX_BROKER_RESPONSE_BYTES
 from ..root_action_preflight import root_action_preflight
+from ..root_action_activation import (
+    RootActionActivationConfig,
+    RootActionActivationError,
+    activate_root_action_broker,
+)
 
 
 ROOT_ACTION_CLI_RESULT_SCHEMA = "agent-runtime-root-action-cli-result/v1"
@@ -216,6 +222,25 @@ def cmd_root_action_auth_bootstrap(args: argparse.Namespace) -> int:
             "schema": ROOT_ACTION_CLI_RESULT_SCHEMA,
             "result": "ok",
             "bootstrap": value,
+        }
+    )
+    return 0
+
+
+def cmd_root_action_auth_activate(args: argparse.Namespace) -> int:
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        return _emit_error("root_action_auth_activation_requires_root")
+    try:
+        activation = activate_root_action_broker(
+            RootActionActivationConfig(rp_id=args.rp_id, origin=args.origin)
+        )
+    except (OSError, ValueError, RootActionActivationError):
+        return _emit_error("root_action_auth_activation_failed_closed")
+    _emit(
+        {
+            "schema": ROOT_ACTION_CLI_RESULT_SCHEMA,
+            "result": "ok",
+            "activation": activation,
         }
     )
     return 0

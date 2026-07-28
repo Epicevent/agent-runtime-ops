@@ -71,11 +71,13 @@ not an operational E2E receipt.
 
 The root service reads `/etc/agent-runtime-ops/root-action-webauthn.env`. It is
 not created from repository defaults because the production HTTPS origin is a
-host fact. The root-owned file must be mode `0600` and contain:
+host fact. The measured OPS production origin is `https://ops.ji-tech.co.kr`
+and its narrow RP ID is `ops.ji-tech.co.kr`. The root-owned file must be mode
+`0600` and contain:
 
 ```text
-ROOT_ACTION_WEBAUTHN_RP_ID=<the deployed relying-party domain>
-ROOT_ACTION_WEBAUTHN_ORIGINS=<the exact HTTPS OPS origin>
+ROOT_ACTION_WEBAUTHN_RP_ID=ops.ji-tech.co.kr
+ROOT_ACTION_WEBAUTHN_ORIGINS=https://ops.ji-tech.co.kr
 ROOT_ACTION_WEBAUTHN_USER_ID=<32 random bytes encoded as 64 lowercase hex characters>
 ROOT_ACTION_WEBAUTHN_RP_NAME=JI TECH root action
 ```
@@ -85,6 +87,16 @@ The OPS service must receive the same exact origin as
 values fail closed. The systemd unit does not start without the root environment
 file, and the OPS mutation endpoints reject requests until their origin value is
 configured.
+
+After the approved ops release is installed, root activates this exact policy
+through the typed command below. It creates the user ID with the kernel random
+source, writes the environment atomically as root-only, refuses to replace a
+different existing RP policy, and verifies that systemd reports the broker both
+enabled and active. It never prints the user ID.
+
+```text
+opsctl root-action auth-activate --rp-id ops.ji-tech.co.kr --origin https://ops.ji-tech.co.kr
+```
 
 After the service starts, a kernel-authenticated root peer runs
 `opsctl root-action auth-bootstrap` once. Its ten-minute token permits the three
