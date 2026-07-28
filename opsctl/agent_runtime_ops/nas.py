@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import fnmatch
 import hashlib
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .paths import state_path
 from .routing import get_runtime_binding, validate_linux_account
@@ -158,6 +158,38 @@ def shared_credential_for_share(share: SmbShare, state_root: Path) -> Path | Non
     """nas-policy.yaml 을 읽어 이 share 의 공유 credential 경로를 돌려준다(있으면)."""
     policy = load_yaml(state_path(state_root, "nas-policy.yaml"))
     return canonical_shared_credential_path(share, policy)
+
+
+def canonical_shared_master_path(share: SmbShare, policy: dict) -> Path | None:
+    """Return the root-declared, already-mounted corpus source for *share*.
+
+    Some corpora are already mounted once for a host collector.  Reusing that
+    mount avoids inventing or copying a second NAS credential into every slot;
+    the slot still receives only the grant-selected read-only bind mounts.
+
+    This is deliberately an exact share mapping, not a wildcard.  A broad
+    pattern must never redirect an unrelated corpus to a privileged host path.
+    The value is private root-owned policy, not a CLI supplied path.
+    """
+    mapping = policy.get("corpus_master_mounts") if isinstance(policy, dict) else None
+    if not isinstance(mapping, dict) or share.source not in mapping:
+        return None
+    raw = mapping.get(share.source)
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(f"corpus_master_mounts entry for {share.source} must be a non-empty absolute path")
+    text = raw.strip()
+    if "\x00" in text or "\\" in text:
+        raise ValueError(f"corpus_master_mounts entry for {share.source} is not a canonical POSIX path")
+    value = PurePosixPath(text)
+    if not value.is_absolute() or value == PurePosixPath("/") or any(part in {"", ".", ".."} for part in value.parts[1:]):
+        raise ValueError(f"corpus_master_mounts entry for {share.source} must be a confined absolute path")
+    return Path(value.as_posix())
+
+
+def shared_master_for_share(share: SmbShare, state_root: Path) -> Path | None:
+    """Load the exact shared master mapping from private nas-policy.yaml."""
+    policy = load_yaml(state_path(state_root, "nas-policy.yaml"))
+    return canonical_shared_master_path(share, policy)
 
 
 def request_path(slot: str, share: SmbShare) -> Path:

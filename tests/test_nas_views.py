@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import io
 import json
+import os
 import sqlite3
 from pathlib import Path
 import tempfile
@@ -12,6 +13,7 @@ import uuid
 from unittest.mock import patch
 
 from agent_runtime_ops.commands.nas_view import (
+    _apply_binds,
     cmd_nas_view_assign,
     cmd_nas_view_detach,
     cmd_nas_view_status,
@@ -19,11 +21,13 @@ from agent_runtime_ops.commands.nas_view import (
     _kakao_catalog,
 )
 from agent_runtime_ops.domain.nas_views import (
+    ViewPlan,
     build_view_plan,
     find_user_package,
     load_membership_rooms,
     load_package_room_summary,
     load_views_state,
+    resolve_granted_dirs,
     save_views_state,
     validate_room_id,
     validate_user_id,
@@ -162,6 +166,26 @@ class NasViewDomainTests(unittest.TestCase):
             again = load_views_state(root)
             self.assertEqual(again["views"]["oc3"]["user_id"], "42")
             self.assertEqual(again["meta"]["schema_version"], 1)
+
+    def test_granted_path_alias_collision_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            master = Path(tmp)
+            (master / "a" / "b").mkdir(parents=True)
+            (master / "a_b").mkdir()
+            with self.assertRaisesRegex(ValueError, "alias collision"):
+                resolve_granted_dirs(master, ["a/b", "a_b"])
+
+    @unittest.skipUnless(os.name == "posix", "requires POSIX symlink semantics")
+    def test_granted_path_rejects_intermediate_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            master = root / "master"
+            outside = root / "outside"
+            master.mkdir()
+            (outside / "mail").mkdir(parents=True)
+            (master / "escape").symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "contains symlink"):
+                resolve_granted_dirs(master, ["escape/mail"])
 
 
 class NasViewCliTests(unittest.TestCase):
@@ -348,6 +372,30 @@ class NasViewCliTests(unittest.TestCase):
             self.assertIn("boot_fstab_entries=1/1", output.getvalue())
             self.assertIn("boot_restore_cron=unknown_requires_root", output.getvalue())
 
+    def test_partial_bind_failure_is_rolled_back(self) -> None:
+        plan = ViewPlan(
+            slot="oc3",
+            user_id="42",
+            share=parse_smb_share("//192.168.0.222/hanpass_groupware"),
+            master=Path("/master"),
+            view=Path("/view"),
+            entry=Path("/entry"),
+            room_binds=[(Path("/master/a"), Path("/view/a")), (Path("/master/b"), Path("/view/b"))],
+            corpus="groupware",
+        )
+        with (
+            patch(
+                "agent_runtime_ops.commands.nas_view.bind_ro",
+                side_effect=[(True, "ok"), (False, "source_changed")],
+            ),
+            patch("agent_runtime_ops.commands.nas_view.unmount_tree", return_value=(0, [])) as unmount,
+        ):
+            ok, reason, bound = _apply_binds(plan)
+        self.assertFalse(ok)
+        self.assertIn("room_bind:b:source_changed", reason)
+        self.assertEqual(bound, 1)
+        self.assertEqual([call.args[0] for call in unmount.call_args_list], [Path("/entry"), Path("/view")])
+
 
 class CatalogCommandTests(unittest.TestCase):
     def test_whatsapp_catalog_includes_observed_room_names(self) -> None:
@@ -424,7 +472,7 @@ class FakeProc:
 
 class BindRoTests(unittest.TestCase):
     def _ro_row(self) -> list[dict[str, str]]:
-        return [{"target": "t", "source": "s", "fstype": "none", "options": "ro,bind"}]
+        return [{"target": "t", "source": "s", "fstype": "none", "options": "ro,nosuid,nodev,bind"}]
 
     def test_bind_ro_uses_rbind_when_recursive(self) -> None:
         from agent_runtime_ops.host import bind_mounts
@@ -446,6 +494,7 @@ class BindRoTests(unittest.TestCase):
                 ok, reason = bind_mounts.bind_ro(source, target, recursive=True)
         self.assertTrue(ok, reason)
         self.assertEqual(commands[0][:2], ["mount", "--rbind"])
+        self.assertEqual(commands[1][2], "remount,ro,nosuid,nodev,bind")
 
     def test_bind_ro_rebuilds_stale_existing_mount(self) -> None:
         from agent_runtime_ops.host import bind_mounts
@@ -485,6 +534,57 @@ class BindRoTests(unittest.TestCase):
                 ok, reason = bind_mounts.bind_ro(source, target)
         self.assertFalse(ok)
         self.assertIn("stale_mount_unmount_failed", reason)
+
+    def test_bind_ro_rejects_readonly_mount_missing_nosuid_nodev(self) -> None:
+        from agent_runtime_ops.host import bind_mounts
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "src"
+            source.mkdir()
+            target = Path(tmp) / "dst"
+            with (
+                patch.object(bind_mounts, "_run_text", return_value=FakeProc()),
+                patch.object(
+                    bind_mounts,
+                    "findmnt_one",
+                    side_effect=[(1, "", []), (0, "", [{
+                        "target": str(target), "source": str(source), "fstype": "none", "options": "ro,bind",
+                    }])],
+                ),
+                patch.object(bind_mounts, "unmount_tree", return_value=(0, [])) as unmount,
+            ):
+                ok, reason = bind_mounts.bind_ro(source, target)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "bind_mounted_state_not_ro_nosuid_nodev")
+        unmount.assert_called_once_with(target)
+
+    def test_bind_ro_detects_source_replacement_during_mount(self) -> None:
+        from agent_runtime_ops.host import bind_mounts
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "src"
+            source.mkdir()
+            target = Path(tmp) / "dst"
+            old = Path(tmp) / "src-old"
+            calls = 0
+
+            def fake_run(command: list[str], timeout: int = 20) -> FakeProc:
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    source.rename(old)
+                    source.mkdir()
+                return FakeProc()
+
+            with (
+                patch.object(bind_mounts, "_run_text", side_effect=fake_run),
+                patch.object(bind_mounts, "findmnt_one", return_value=(1, "", [])),
+                patch.object(bind_mounts, "unmount_tree", return_value=(0, [])) as unmount,
+            ):
+                ok, reason = bind_mounts.bind_ro(source, target)
+        self.assertFalse(ok)
+        self.assertEqual(reason, "bind_source_changed_during_mount")
+        unmount.assert_called_once_with(target)
 
 
 if __name__ == "__main__":

@@ -48,6 +48,14 @@ managed 엔트리다: 마커 `# agent-runtime-ops nas slot={slot} source={share}
   통째로 새 mountpoint로 **교체**된다(추가가 아니라서 좀비가 안 남는다). 옛 자리에 살아있는
   마운트만 직접 umount한다. 절차: `NAS_RUNBOOK.md`의 "OCn workspace 이주".
 
+공유 corpus에 이미 root가 관리하는 중앙 collector mount가 있다면 예외적으로 그 mount를
+`nas-policy.yaml`의 `corpus_master_mounts`에 exact share→path로 선언할 수 있다. 이때 슬롯별
+managed CIFS entry를 새로 박제하지 않는다. 대신 중앙 mount의 기존 fstab entry가 부팅 권위이고,
+slot view 원장은 `master_mode=shared_policy_mount`와 당시 exact path를 함께 보존한다. restore는
+현재 private policy와 원장의 path가 같고 live CIFS source가 같은 경우에만 bind를 재생한다.
+detach는 중앙 mount/fstab을 절대 제거하지 않는다. 기존 실패가 남긴 슬롯별 entry는 exact
+slot/share/derived target이고 미마운트임을 확인한 경우에만 shared mode assign이 이주 제거한다.
+
 ## Q5. 자리는 의도의 함수 — mountpoint 파생
 
 Docker의 `read_only` 바인드는 **recursive read-only**다: 컨테이너 create/start/restart
