@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -25,6 +26,9 @@ from agent_runtime_ops.domain.retrieval_contract import (
     write_retrieval_approval,
 )
 from agent_runtime_ops.domain import image_specs
+from agent_runtime_ops.domain.runtime_manifest import desired_from_runtime_manifest
+from agent_runtime_ops.routing import RuntimeBinding
+from agent_runtime_ops.state import RuntimeTarget
 from agent_runtime_ops.state import image_spec_from_manifest
 
 
@@ -483,6 +487,124 @@ def test_private_runtime_manifest_round_trips_component_binding_without_public_s
         image_spec_from_manifest(manifest)
 
 
+def _legacy_runtime_target(image_spec: dict[str, object]) -> RuntimeTarget:
+    return RuntimeTarget(
+        target="dev-hermes-img",
+        family="hermes",
+        runtime_class="customer",
+        image_name="direct-image",
+        image_spec=image_spec,
+        runtime_profile="hermes-runtime-customer",
+        route=RuntimeBinding(
+            instance_id="11111111-1111-4111-8111-111111111111",
+            linux_account="dev-hermes-img",
+            public_host="dev-hermes-img.ji-tech.co.kr",
+            family="hermes",
+            runtime_class="customer",
+            gateway_port=30089,
+            bridge_port=30090,
+        ),
+    )
+
+
+def test_apply_migrates_pre_projection_manifest_to_exact_disabled_binding(
+    tmp_path: Path,
+) -> None:
+    target = _legacy_runtime_target(
+        {
+            "wrapper_image": "ghcr.io/epicevent/agent-runtime-hermes@sha256:"
+            + "1" * 64,
+            "product_image": "ghcr.io/epicevent/hermes-runtime@sha256:"
+            + "2" * 64,
+            "retrieval_component_digest": "",
+            "retrieval_enabled": False,
+            "retrieval_binding_digest": "",
+        }
+    )
+    profile = SimpleNamespace(
+        digest=DIGEST_D,
+        metadata={
+            "family": "hermes",
+            "slot_class": "customer",
+            "container_nas_root": "/workspace/nas_docs",
+        },
+    )
+
+    with (
+        patch(
+            "agent_runtime_ops.domain.runtime_manifest.load_runtime_target",
+            return_value=target,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_manifest.load_profile",
+            return_value=profile,
+        ),
+    ):
+        migrated, loaded_profile = desired_from_runtime_manifest(
+            "dev-hermes-img",
+            tmp_path,
+        )
+
+    assert loaded_profile is profile
+    assert migrated.image_spec["retrieval_enabled"] is False
+    assert migrated.image_spec["retrieval_component_digest"] == ""
+    assert migrated.image_spec["retrieval_binding_digest"] == canonical_digest(
+        migrated.image_spec["retrieval_binding"]
+    )
+    assert migrated.image_spec["retrieval_binding_digest"] != ""
+    validate_retrieval_target_binding(
+        migrated.image_spec,
+        instance_id=target.route.instance_id,
+        family="hermes",
+        runtime_profile_digest=DIGEST_D,
+        container_nas_root="/workspace/nas_docs",
+    )
+
+
+@pytest.mark.parametrize(
+    "partial",
+    [
+        {"retrieval_component_digest": DIGEST_A},
+        {"retrieval_enabled": True},
+        {"retrieval_binding_digest": DIGEST_B},
+        {"retrieval_contract": {"schema": RETRIEVAL_SCHEMA}},
+    ],
+)
+def test_apply_rejects_incomplete_retrieval_projection_migration(
+    tmp_path: Path,
+    partial: dict[str, object],
+) -> None:
+    target = _legacy_runtime_target(
+        {
+            "wrapper_image": "ghcr.io/epicevent/agent-runtime-hermes@sha256:"
+            + "1" * 64,
+            "product_image": "ghcr.io/epicevent/hermes-runtime@sha256:"
+            + "2" * 64,
+            **partial,
+        }
+    )
+    profile = SimpleNamespace(
+        digest=DIGEST_D,
+        metadata={
+            "family": "hermes",
+            "slot_class": "customer",
+            "container_nas_root": "/workspace/nas_docs",
+        },
+    )
+    with (
+        patch(
+            "agent_runtime_ops.domain.runtime_manifest.load_runtime_target",
+            return_value=target,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_manifest.load_profile",
+            return_value=profile,
+        ),
+        pytest.raises(ValueError, match="incomplete retrieval projection migration"),
+    ):
+        desired_from_runtime_manifest("dev-hermes-img", tmp_path)
+
+
 def test_every_runtime_profile_projects_same_in_process_binding_labels() -> None:
     profile_root = Path(__file__).parents[1] / "profiles" / "runtime"
     templates = sorted(profile_root.glob("*/compose.yml.tpl"))
@@ -593,7 +715,13 @@ def test_apply_and_rollback_gate_terminal_receipts_before_success() -> None:
         repo / "opsctl" / "agent_runtime_ops" / "commands" / "apply.py"
     ).read_text(encoding="utf-8")
     rollback_probe = rollback_source.index("run_retrieval_status_probe(")
-    rollback_finish = rollback_source.index("finish_rollback_transaction(")
-    rollback_success = rollback_source.index('print("rollback_status=ok")')
+    rollback_finish = rollback_source.index(
+        "finish_rollback_transaction(",
+        rollback_probe,
+    )
+    rollback_success = rollback_source.index(
+        'print("rollback_status=ok")',
+        rollback_finish,
+    )
     assert rollback_probe < rollback_finish < rollback_success
     assert "retrieval_disable_observation_failed" in rollback_source

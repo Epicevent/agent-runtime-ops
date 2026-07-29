@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from ..profiles import load_profile
@@ -71,9 +72,36 @@ def desired_from_runtime_manifest(slot: str, state_root: Path):
         raise ValueError(
             f"runtime manifest profile runtime_class mismatch: profile={profile.metadata.get('slot_class')} manifest={target.runtime_class}"
         )
-    if "retrieval_binding" in target.image_spec:
-        from .retrieval_contract import validate_retrieval_target_binding
+    from .retrieval_contract import (
+        bind_retrieval_intent,
+        validate_retrieval_target_binding,
+    )
 
+    if "retrieval_binding" not in target.image_spec:
+        if (
+            isinstance(target.image_spec.get("retrieval_contract"), dict)
+            or bool(target.image_spec.get("retrieval_component_digest"))
+            or target.image_spec.get("retrieval_enabled") is True
+            or bool(target.image_spec.get("retrieval_binding_digest"))
+        ):
+            raise ValueError(
+                "runtime manifest has an incomplete retrieval projection migration"
+            )
+        target = replace(
+            target,
+            image_spec=bind_retrieval_intent(
+                target.image_spec,
+                instance_id=target.route.instance_id,
+                family=target.family,
+                runtime_profile_digest=profile.digest,
+                container_nas_root=str(
+                    profile.metadata.get("container_nas_root") or ""
+                ),
+                enabled=False,
+            ),
+        )
+
+    if "retrieval_binding" in target.image_spec:
         validate_retrieval_target_binding(
             target.image_spec,
             instance_id=target.route.instance_id,

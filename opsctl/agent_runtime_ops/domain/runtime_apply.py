@@ -23,6 +23,7 @@ from .config_contract import config_owner_run_as, run_config_validate_in_image
 from .image_specs import image_spec_config_contract
 from .runtime_backup import (
     backup_agent_runtime_state,
+    consume_legacy_retrieval_projection_exemption,
     finish_rollback_transaction,
     legacy_retrieval_projection_failures_are_expected,
     legacy_retrieval_projection_failures_may_be_expected,
@@ -129,6 +130,12 @@ def _restore_and_verify_backup(
     restored, reason = restore_backup(slot, runtime_dir, backup_dir, state_root)
     if not restored:
         return False, reason
+    if reason == "rollback_empty_baseline_restored":
+        try:
+            finish_rollback_transaction(slot, state_root, backup_dir)
+        except Exception as exc:
+            return False, f"rollback_verification_failed:{exc}"
+        return True, "rollback_empty_baseline_restored_verified"
     try:
         previous_desired, previous_profile = load_backup_runtime_contract(
             slot,
@@ -147,12 +154,16 @@ def _restore_and_verify_backup(
         }
         legacy_projection_absence = False
         if legacy_retrieval_projection_failures_may_be_expected(
+            state_root,
+            slot,
             backup_dir,
             failed,
         ):
             truth, _ = live_runtime_truth(slot, state_root)
             legacy_projection_absence = (
                 legacy_retrieval_projection_failures_are_expected(
+                    state_root,
+                    slot,
                     backup_dir,
                     failed,
                     truth,
@@ -175,6 +186,12 @@ def _restore_and_verify_backup(
             )
             if status is None:
                 return False, "rollback_retrieval_verifier_unavailable"
+        if legacy_projection_absence:
+            consume_legacy_retrieval_projection_exemption(
+                state_root,
+                slot,
+                backup_dir,
+            )
         finish_rollback_transaction(slot, state_root, backup_dir)
     except Exception as exc:
         return False, f"rollback_verification_failed:{exc}"

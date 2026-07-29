@@ -17,9 +17,9 @@ from typing import Iterator
 from ..profiles import load_profile
 from ..yamlio import load_yaml
 from ..host.files import atomic_write_text, fsync_parent
-from .common import now_iso, run_text_cwd
+from .common import now_iso, run_text, run_text_cwd
 from .runtime_manifest import desired_from_manifest, read_legacy_slot_manifest
-from .docker_compose import docker_compose_command
+from .docker_compose import compose_project_name, docker_compose_command
 from .runtime_paths import (
     agent_backup_root,
     agent_compose_path,
@@ -35,6 +35,19 @@ _BACKUP_NAME = re.compile(
 _ROLLBACK_TRANSACTION_SCHEMA = "agent-runtime-rollback-transaction/v1"
 _ROLLBACK_TRANSACTION_NAME = ".agent-runtime-rollback-transaction.json"
 _RUNTIME_TRANSACTION_LOCK_NAME = ".agent-runtime-transaction.lock"
+_LEGACY_RETRIEVAL_MIGRATION_SCHEMA = (
+    "agent-runtime-legacy-retrieval-migration/v1"
+)
+_LEGACY_RETRIEVAL_MIGRATION_NAME = (
+    ".agent-runtime-legacy-retrieval-migration.json"
+)
+_LEGACY_RETRIEVAL_MIGRATION_KEYS = {
+    "backup_metadata_sha256",
+    "backup_name",
+    "consumed_at",
+    "schema",
+    "slot",
+}
 _ROLLBACK_TRANSACTION_KEYS = {
     "backup_metadata_sha256",
     "backup_name",
@@ -119,6 +132,10 @@ def _rollback_transaction_path(state_root: Path, slot: str) -> Path:
 
 def _runtime_transaction_lock_path(state_root: Path, slot: str) -> Path:
     return runtime_recovery_dir(state_root, slot) / _RUNTIME_TRANSACTION_LOCK_NAME
+
+
+def _legacy_retrieval_migration_path(state_root: Path, slot: str) -> Path:
+    return runtime_recovery_dir(state_root, slot) / _LEGACY_RETRIEVAL_MIGRATION_NAME
 
 
 def _validate_controlled_directory(
@@ -475,6 +492,57 @@ def _remove_regular_file(target: Path) -> None:
         fsync_parent(target)
 
 
+def _empty_baseline_project_residue(slot: str) -> tuple[bool, str]:
+    project = compose_project_name(slot)
+    observations = (
+        (
+            "containers",
+            [
+                "docker",
+                "ps",
+                "-a",
+                "--filter",
+                f"label=com.docker.compose.project={project}",
+                "--format",
+                "{{.ID}}",
+            ],
+        ),
+        (
+            "networks",
+            [
+                "docker",
+                "network",
+                "ls",
+                "--filter",
+                f"label=com.docker.compose.project={project}",
+                "--format",
+                "{{.ID}}",
+            ],
+        ),
+        (
+            "volumes",
+            [
+                "docker",
+                "volume",
+                "ls",
+                "--filter",
+                f"label=com.docker.compose.project={project}",
+                "--format",
+                "{{.Name}}",
+            ],
+        ),
+    )
+    for kind, argv in observations:
+        result = run_text(argv, timeout=30)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            return False, detail or f"empty_baseline_{kind}_query_failed"
+        count = len([line for line in result.stdout.splitlines() if line.strip()])
+        if count:
+            return False, f"empty_baseline_{kind}_remain:{count}"
+    return True, "empty_baseline_project_absent"
+
+
 def _validate_env_restore_inputs(
     runtime_dir: Path,
     backup_dir: Path,
@@ -659,6 +727,20 @@ def restore_backup(slot: str, runtime_dir: Path, backup_dir: Path, state_root: P
 
     _begin_rollback_transaction(slot, state_root, backup_dir)
 
+    if not had_compose and compose_path.is_file():
+        down = run_text_cwd(
+            docker_compose_command(
+                slot,
+                compose_path,
+                "down",
+                "--remove-orphans",
+            ),
+            runtime_dir,
+            timeout=180,
+        )
+        if down.returncode != 0:
+            return False, (down.stderr or down.stdout).strip() or "empty_baseline_compose_down_failed"
+
     restore_backup_env(runtime_dir, backup_dir)
     for had_file, source, target in restore_plan:
         if had_file:
@@ -667,7 +749,18 @@ def restore_backup(slot: str, runtime_dir: Path, backup_dir: Path, state_root: P
             _remove_regular_file(target)
 
     if not had_compose:
-        return False, "no_previous_agent_runtime_compose"
+        active_paths = [
+            runtime_dir / ".env",
+            compose_path,
+            manifest_path,
+            state_manifest_file,
+        ]
+        if any(path.exists() or path.is_symlink() for path in active_paths):
+            return False, "empty_baseline_active_files_remain"
+        clean, reason = _empty_baseline_project_residue(slot)
+        if not clean:
+            return False, reason
+        return True, "rollback_empty_baseline_restored"
 
     config = run_text_cwd(docker_compose_command(slot, compose_path, "config"), runtime_dir, timeout=60)
     if config.returncode != 0:
@@ -688,6 +781,110 @@ def finish_rollback_transaction(
     backup_dir: Path,
 ) -> None:
     _finish_rollback_transaction(slot, state_root, backup_dir)
+
+
+def _legacy_retrieval_migration_identity(
+    state_root: Path,
+    slot: str,
+    backup_dir: Path,
+) -> dict[str, str]:
+    validated_backup = _validate_backup_dir(state_root, slot, backup_dir)
+    _, metadata_digest = _validate_backup_integrity(
+        state_root,
+        slot,
+        validated_backup,
+    )
+    return {
+        "backup_metadata_sha256": metadata_digest,
+        "backup_name": validated_backup.name,
+        "schema": _LEGACY_RETRIEVAL_MIGRATION_SCHEMA,
+        "slot": slot,
+    }
+
+
+def _load_legacy_retrieval_migration(
+    state_root: Path,
+    slot: str,
+) -> dict[str, object] | None:
+    recovery_dir = runtime_recovery_dir(state_root, slot)
+    receipt_path = _legacy_retrieval_migration_path(state_root, slot)
+    if not receipt_path.exists() and not receipt_path.is_symlink():
+        return None
+    _validate_controlled_directory(recovery_dir, exact_mode=0o700)
+    receipt = _strict_json_object(receipt_path)
+    if set(receipt) != _LEGACY_RETRIEVAL_MIGRATION_KEYS:
+        raise ValueError(
+            "legacy retrieval migration receipt keys do not match the exact schema"
+        )
+    if receipt.get("schema") != _LEGACY_RETRIEVAL_MIGRATION_SCHEMA:
+        raise ValueError("unsupported legacy retrieval migration receipt schema")
+    if receipt.get("slot") != slot:
+        raise ValueError("legacy retrieval migration receipt slot mismatch")
+    backup_name = receipt.get("backup_name")
+    if not isinstance(backup_name, str) or _BACKUP_NAME.fullmatch(backup_name) is None:
+        raise ValueError("legacy retrieval migration receipt backup name is invalid")
+    metadata_digest = receipt.get("backup_metadata_sha256")
+    if (
+        not isinstance(metadata_digest, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", metadata_digest) is None
+    ):
+        raise ValueError("legacy retrieval migration receipt digest is invalid")
+    consumed_at = receipt.get("consumed_at")
+    if not isinstance(consumed_at, str) or not consumed_at:
+        raise ValueError("legacy retrieval migration receipt timestamp is invalid")
+    return receipt
+
+
+def _legacy_retrieval_migration_is_available(
+    state_root: Path,
+    slot: str,
+    backup_dir: Path,
+) -> bool:
+    identity = _legacy_retrieval_migration_identity(state_root, slot, backup_dir)
+    receipt = _load_legacy_retrieval_migration(state_root, slot)
+    if receipt is None:
+        return True
+    if any(receipt.get(key) != value for key, value in identity.items()):
+        return False
+    # A host crash after persisting consumption but before removing the rollback
+    # marker must be able to resume the exact same backup. Once that transaction
+    # is finished, the receipt permanently blocks a fresh exemption.
+    return pending_rollback_backup(state_root, slot) == backup_dir
+
+
+def consume_legacy_retrieval_projection_exemption(
+    state_root: Path,
+    slot: str,
+    backup_dir: Path,
+) -> Path:
+    if pending_rollback_backup(state_root, slot) != backup_dir:
+        raise RuntimeError(
+            "legacy retrieval migration requires the exact pending rollback backup"
+        )
+    identity = _legacy_retrieval_migration_identity(state_root, slot, backup_dir)
+    receipt_path = _legacy_retrieval_migration_path(state_root, slot)
+    receipt = _load_legacy_retrieval_migration(state_root, slot)
+    if receipt is not None:
+        if any(receipt.get(key) != value for key, value in identity.items()):
+            raise RuntimeError(
+                "legacy retrieval migration exemption was already consumed"
+            )
+        return receipt_path
+    payload = {
+        **identity,
+        "consumed_at": now_iso(),
+    }
+    atomic_write_text(
+        receipt_path,
+        json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n",
+        mode=0o600,
+    )
+    persisted = _load_legacy_retrieval_migration(state_root, slot)
+    if persisted is None or any(
+        persisted.get(key) != value for key, value in identity.items()
+    ):
+        raise RuntimeError("legacy retrieval migration receipt persistence failed")
+    return receipt_path
 
 
 def backup_manifest_data(backup_dir: Path) -> dict:
@@ -735,12 +932,16 @@ def backup_allows_legacy_retrieval_projection_absence(backup_dir: Path) -> bool:
 
 
 def legacy_retrieval_projection_failures_are_expected(
+    state_root: Path,
+    slot: str,
     backup_dir: Path,
     failed_checks: set[str],
     truth: dict[str, str],
 ) -> bool:
     return (
         legacy_retrieval_projection_failures_may_be_expected(
+            state_root,
+            slot,
             backup_dir,
             failed_checks,
         )
@@ -751,6 +952,8 @@ def legacy_retrieval_projection_failures_are_expected(
 
 
 def legacy_retrieval_projection_failures_may_be_expected(
+    state_root: Path,
+    slot: str,
     backup_dir: Path,
     failed_checks: set[str],
 ) -> bool:
@@ -758,6 +961,11 @@ def legacy_retrieval_projection_failures_may_be_expected(
         bool(failed_checks)
         and failed_checks <= _LEGACY_RETRIEVAL_PROJECTION_FAILURES
         and backup_allows_legacy_retrieval_projection_absence(backup_dir)
+        and _legacy_retrieval_migration_is_available(
+            state_root,
+            slot,
+            backup_dir,
+        )
     )
 
 

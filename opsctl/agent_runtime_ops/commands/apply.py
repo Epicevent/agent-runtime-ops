@@ -13,6 +13,7 @@ from ..domain.runtime_checks import (
     run_live_slot_checks_with_wait as _run_live_slot_checks_with_wait,
 )
 from ..domain.runtime_backup import (
+    consume_legacy_retrieval_projection_exemption,
     finish_rollback_transaction,
     legacy_retrieval_projection_failures_are_expected,
     legacy_retrieval_projection_failures_may_be_expected,
@@ -107,6 +108,33 @@ def _cmd_rollback_locked(args: argparse.Namespace, state_root) -> int:
         _append_action_log(state_root, "rollback", args.slot, str(backup_dir), "fail", reason)
         return 1
 
+    if reason == "rollback_empty_baseline_restored":
+        try:
+            finish_rollback_transaction(args.slot, state_root, backup_dir)
+        except Exception as exc:
+            print("rollback_status=fail")
+            print(f"reason=rollback_transaction_finish_failed:{exc}")
+            _append_action_log(
+                state_root,
+                "rollback",
+                args.slot,
+                str(backup_dir),
+                "fail",
+                "rollback_transaction_finish_failed",
+            )
+            return 1
+        print("rollback_status=ok")
+        print("rollback_empty_baseline=yes")
+        _append_action_log(
+            state_root,
+            "rollback",
+            args.slot,
+            str(backup_dir),
+            "ok",
+            "rollback_empty_baseline_restored_verified",
+        )
+        return 0
+
     try:
         desired, profile = load_backup_runtime_contract(args.slot, backup_dir, state_root)
     except Exception as exc:
@@ -127,6 +155,8 @@ def _cmd_rollback_locked(args: argparse.Namespace, state_root) -> int:
             failed_checks.add(name)
     legacy_projection_absence = False
     if legacy_retrieval_projection_failures_may_be_expected(
+        state_root,
+        args.slot,
         backup_dir,
         failed_checks,
     ):
@@ -134,6 +164,8 @@ def _cmd_rollback_locked(args: argparse.Namespace, state_root) -> int:
             truth, _ = live_runtime_truth(args.slot, state_root)
             legacy_projection_absence = (
                 legacy_retrieval_projection_failures_are_expected(
+                    state_root,
+                    args.slot,
                     backup_dir,
                     failed_checks,
                     truth,
@@ -189,6 +221,12 @@ def _cmd_rollback_locked(args: argparse.Namespace, state_root) -> int:
         print(f"rollback_retrieval_revocation_status={(status or {}).get('revocationStatus') or 'not_applicable'}")
 
     try:
+        if legacy_projection_absence:
+            consume_legacy_retrieval_projection_exemption(
+                state_root,
+                args.slot,
+                backup_dir,
+            )
         finish_rollback_transaction(args.slot, state_root, backup_dir)
     except Exception as exc:
         print("rollback_status=fail")

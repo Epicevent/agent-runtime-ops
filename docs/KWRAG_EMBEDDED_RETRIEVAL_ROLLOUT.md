@@ -84,10 +84,19 @@ disable/revocation observation when the restored tuple carries the capability.
 Apply and rollback are serialized per slot by a persistent root-controlled lock. A
 crash-recovery marker is bound to one immutable backup and is removed only after the
 restored runtime passes its live checks and, when present, the exact retrieval verifier.
+If a failed first apply has no prior runtime tuple, rollback removes the candidate
+compose/env/manifests, verifies that the compose project has zero containers, networks,
+and volumes, and only then completes the recovery marker. A crash or residual Docker
+object preserves the same marker so the exact backup can resume.
 For the first upgrade only, a backup whose manifest and compose bytes prove that it
 predates all retrieval fields may complete rollback when live truth also proves both the
 capability and runtime projection labels are wholly absent; partial, extra, current
-capability-absent, or otherwise inconsistent projections remain hard failures.
+capability-absent, or otherwise inconsistent projections remain hard failures. Successful
+use persists a root-controlled receipt bound to the backup metadata digest. The same
+pending backup may resume after a crash, but a later transaction cannot consume the
+migration exception again. Normal apply converts a pre-projection runtime manifest in
+memory to its exact target-specific disabled binding before rendering; partial migration
+fields are rejected instead of guessed.
 
 Public KWRAG v1 schemas are not changed by this OPS-private rollout contract.
 
