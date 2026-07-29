@@ -88,6 +88,16 @@ If a failed first apply has no prior runtime tuple, rollback removes the candida
 compose/env/manifests, verifies that the compose project has zero containers, networks,
 and volumes, and only then completes the recovery marker. A crash or residual Docker
 object preserves the same marker so the exact backup can resume.
+
+Tool self-update also preserves recovery points created by releases that stored
+`.agent-runtime-backups` below the slot-owned runtime directory. Before activating
+the new release, the installer reads those files with fd-relative no-follow checks,
+binds their complete artifact/diagnostic identity, and atomically copies them into
+the root-controlled recovery tree. Originals are retained. Unsafe ownership, modes,
+links, unexpected entries, size excess, or concurrent replacement abort activation;
+an operator rollback repeats the same import if installation did not reach it. Since
+legacy releases did not capture `.env`, an imported recovery point deliberately
+leaves the current `.env` untouched rather than guessing prior secret state.
 For the first upgrade only, a backup whose manifest and compose bytes prove that it
 predates all retrieval fields may complete rollback when live truth also proves both the
 capability and runtime projection labels are wholly absent; partial, extra, current

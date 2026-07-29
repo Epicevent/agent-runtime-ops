@@ -631,6 +631,16 @@ seed_runtime_bindings() {
   fi
 }
 
+migrate_legacy_runtime_backups() {
+  local release_dir="$1"
+  if [[ ! -f "$STATE_ROOT/runtime-bindings.json" ]]; then
+    info "legacy_runtime_backup_migration=skipped reason=runtime_bindings_absent"
+    return 0
+  fi
+  "$release_dir/.venv/bin/python" -m agent_runtime_ops.install_migrations \
+    --state-root "$STATE_ROOT"
+}
+
 archive_legacy_state_files() {
   [[ -d "$STATE_ROOT" ]] || return 0
   [[ -f "$STATE_ROOT/runtime-bindings.json" ]] || return 0
@@ -964,6 +974,12 @@ install_package() {
   fi
   write_manifest "$release_dir" "$src" "$commit" "$summary"
   chown -R root:"$OPS_GROUP" "$release_dir"
+
+  # Import recovery points with the new release before changing current.  A
+  # malformed slot-owned legacy tree aborts the update, while successful
+  # copies are durable under STATE_ROOT and remain useful even if activation
+  # later fails.
+  migrate_legacy_runtime_backups "$release_dir"
 
   activate_release "$release_dir"
   install_root_action_broker_contract "$release_dir"

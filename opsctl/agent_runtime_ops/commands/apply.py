@@ -17,6 +17,7 @@ from ..domain.runtime_backup import (
     finish_rollback_transaction,
     legacy_retrieval_projection_failures_are_expected,
     legacy_retrieval_projection_failures_may_be_expected,
+    import_legacy_agent_runtime_backups,
     latest_backup,
     load_backup_runtime_contract,
     pending_rollback_backup,
@@ -33,7 +34,10 @@ from ..domain.runtime_paths import (
 
 def cmd_apply(args: argparse.Namespace) -> int:
     if not _is_root():
-        print("error: run as root/admin: sudo /usr/local/bin/opsctl apply TARGET", file=sys.stderr)
+        print(
+            "error: run as root/admin: sudo /usr/local/bin/opsctl apply TARGET",
+            file=sys.stderr,
+        )
         return 2
     state_root = _state_root(args)
     try:
@@ -43,7 +47,9 @@ def cmd_apply(args: argparse.Namespace) -> int:
         print("apply_status=fail")
         print(f"reason={exc}")
         try:
-            _append_action_log(state_root, "apply", args.slot, args.slot, "fail", str(exc))
+            _append_action_log(
+                state_root, "apply", args.slot, args.slot, "fail", str(exc)
+            )
         except Exception:
             pass
         return 1
@@ -58,7 +64,10 @@ def cmd_apply(args: argparse.Namespace) -> int:
 
 def cmd_rollback(args: argparse.Namespace) -> int:
     if not _is_root():
-        print("error: run as root/admin: sudo /usr/local/bin/opsctl rollback TARGET", file=sys.stderr)
+        print(
+            "error: run as root/admin: sudo /usr/local/bin/opsctl rollback TARGET",
+            file=sys.stderr,
+        )
         return 2
     state_root = _state_root(args)
     try:
@@ -89,6 +98,14 @@ def _cmd_rollback_locked(args: argparse.Namespace, state_root) -> int:
         if backup_dir is None:
             backup_dir = latest_backup(state_root, args.slot)
         if backup_dir is None:
+            imported = import_legacy_agent_runtime_backups(
+                args.slot,
+                runtime_dir,
+                state_root,
+            )
+            print(f"legacy_backups_imported={len(imported)}")
+            backup_dir = latest_backup(state_root, args.slot)
+        if backup_dir is None:
             raise FileNotFoundError("no agent-runtime backup")
         ok, reason = restore_backup(args.slot, runtime_dir, backup_dir, state_root)
     except Exception as exc:
@@ -96,7 +113,9 @@ def _cmd_rollback_locked(args: argparse.Namespace, state_root) -> int:
         print("rollback_status=fail")
         print(f"reason={exc}")
         try:
-            _append_action_log(state_root, "rollback", args.slot, args.slot, "fail", str(exc))
+            _append_action_log(
+                state_root, "rollback", args.slot, args.slot, "fail", str(exc)
+            )
         except Exception:
             pass
         return 1
@@ -105,7 +124,9 @@ def _cmd_rollback_locked(args: argparse.Namespace, state_root) -> int:
     print(f"rollback_reason={reason}")
     if not ok:
         print("rollback_status=fail")
-        _append_action_log(state_root, "rollback", args.slot, str(backup_dir), "fail", reason)
+        _append_action_log(
+            state_root, "rollback", args.slot, str(backup_dir), "fail", reason
+        )
         return 1
 
     if reason == "rollback_empty_baseline_restored":
@@ -136,11 +157,15 @@ def _cmd_rollback_locked(args: argparse.Namespace, state_root) -> int:
         return 0
 
     try:
-        desired, profile = load_backup_runtime_contract(args.slot, backup_dir, state_root)
+        desired, profile = load_backup_runtime_contract(
+            args.slot, backup_dir, state_root
+        )
     except Exception as exc:
         print("rollback_status=fail")
         print(f"reason={exc}")
-        _append_action_log(state_root, "rollback", args.slot, str(backup_dir), "fail", str(exc))
+        _append_action_log(
+            state_root, "rollback", args.slot, str(backup_dir), "fail", str(exc)
+        )
         return 1
 
     failed_checks: set[str] = set()
@@ -216,9 +241,15 @@ def _cmd_rollback_locked(args: argparse.Namespace, state_root) -> int:
                 "retrieval_disable_observation_failed",
             )
             return 1
-        print(f"rollback_retrieval_enabled={'yes' if desired.image_spec.get('retrieval_enabled') is True else 'no'}")
-        print(f"rollback_retrieval_binding_digest={desired.image_spec.get('retrieval_binding_digest') or 'none'}")
-        print(f"rollback_retrieval_revocation_status={(status or {}).get('revocationStatus') or 'not_applicable'}")
+        print(
+            f"rollback_retrieval_enabled={'yes' if desired.image_spec.get('retrieval_enabled') is True else 'no'}"
+        )
+        print(
+            f"rollback_retrieval_binding_digest={desired.image_spec.get('retrieval_binding_digest') or 'none'}"
+        )
+        print(
+            f"rollback_retrieval_revocation_status={(status or {}).get('revocationStatus') or 'not_applicable'}"
+        )
 
     try:
         if legacy_projection_absence:

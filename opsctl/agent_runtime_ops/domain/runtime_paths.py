@@ -53,6 +53,12 @@ def agent_backup_root(state_root: Path, slot: str) -> Path:
     return runtime_recovery_dir(state_root, slot) / "backups"
 
 
+def legacy_agent_backup_root(runtime_dir: Path) -> Path:
+    """Backup root used by releases before recovery state moved under STATE_ROOT."""
+
+    return runtime_dir / ".agent-runtime-backups"
+
+
 def safe_managed_file(path: Path) -> None:
     if path.exists() and path.is_symlink():
         raise ValueError(f"managed file must not be symlink: {path}")
@@ -78,5 +84,7 @@ def state_runtime_dir(state_root: Path, slot: str, *, create: bool = False) -> P
     return slot_dir
 
 
-def state_manifest_path(state_root: Path, slot: str, *, create_parent: bool = False) -> Path:
+def state_manifest_path(
+    state_root: Path, slot: str, *, create_parent: bool = False
+) -> Path:
     return state_runtime_dir(state_root, slot, create=create_parent) / "manifest.yaml"
