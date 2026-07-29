@@ -1,0 +1,373 @@
+from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor
+import json
+import threading
+import time
+import unittest
+
+from agent_runtime_ops.root_actions import BrokerPeerIdentity, SubmissionPolicy
+from agent_runtime_ops.root_actions.broker import (
+    PUBLIC_CATALOG_JOB_LIMIT,
+    TypedRootActionBroker,
+)
+from agent_runtime_ops.root_actions.local_fixture import LocalRootActionFixture
+from agent_runtime_ops.root_actions.registry import REGISTRY_VERSION
+from agent_runtime_ops.root_actions.state import (
+    TerminalOutcome,
+    TransitionEvent,
+    TransitionKind,
+)
+from agent_runtime_ops.root_actions.storage import StorageNotFound
+
+
+def manifest(*, job_id: str = "job-broker-1") -> bytes:
+    return json.dumps(
+        {
+            "schema": "agent-runtime-root-action-manifest/v1",
+            "registry_version": REGISTRY_VERSION,
+            "job_id": job_id,
+            "operation_id": "artifact.probe_kwrag_product",
+            "operation_version": 1,
+            "request": {
+                "request_id": "request-broker-1",
+                "lineage_id": "lineage-broker-1",
+                "reply_target": "task-019f-root",
+                "submitted_at": "2026-07-27T08:00:00Z",
+            },
+            "parameters": {
+                "revision": "1" * 40,
+            },
+            "expected_pre_state": {"kind": "none", "digest": None},
+            "review": {
+                "purpose": "Read one bounded candidate proof.",
+                "premises": [
+                    {
+                        "claim": "The probe reads only the named proof fields.",
+                        "basis": "direct_observation",
+                        "anchor": {
+                            "source": "opsctl artifact probe source",
+                            "quote": "writes=0",
+                        },
+                        "falsifier": "Any host write or unbounded output invalidates the premise.",
+                    }
+                ],
+                "targets": ["kwrag candidate proof"],
+                "changes": ["No persistent change"],
+                "recovery": ["No rollback is required for a read-only operation"],
+                "risk_delta": {
+                    "baseline": "The artifact is not observed by this job.",
+                    "added": [],
+                    "removed": [],
+                    "maximum_consequence": "The bounded observation may fail closed.",
+                },
+            },
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+
+TEST_PEER = BrokerPeerIdentity(uid=1002, gid=1002, pid=4242)
+TEST_SUBMISSION_POLICY = SubmissionPolicy(
+    allowed_uids=frozenset({1002}),
+    allowed_gids=frozenset(),
+)
+
+
+class FixedEvents:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def next_event(self) -> tuple[str, str]:
+        self.calls += 1
+        return f"event-sealed-{self.calls}", f"2026-07-27T08:00:0{self.calls}Z"
+
+
+class CapturingSink:
+    def __init__(self) -> None:
+        self.bundles = []
+
+    def publish(self, bundle) -> None:
+        self.bundles.append(bundle)
+
+
+class FailingSink:
+    def publish(self, bundle) -> None:
+        raise OSError("projection storage unavailable")
+
+
+class BoundedCatalogStore(LocalRootActionFixture):
+    def __init__(self) -> None:
+        super().__init__()
+        self.observed_limit = None
+
+    def catalog_job_ids(self, *, limit: int):
+        self.observed_limit = limit
+        ids, _count = super().catalog_job_ids(limit=limit)
+        return ids, 5000
+
+
+class CatalogCoverageSink(CapturingSink):
+    def __init__(self) -> None:
+        super().__init__()
+        self.catalog = None
+
+    def publish_catalog(self, bundles, *, authority_job_count=None) -> None:
+        self.catalog = (bundles, authority_job_count)
+
+
+class ConcurrentPublicationSink(CapturingSink):
+    def __init__(self) -> None:
+        super().__init__()
+        self._guard = threading.Lock()
+        self.active = 0
+        self.maximum_active = 0
+
+    def _enter(self) -> None:
+        with self._guard:
+            self.active += 1
+            self.maximum_active = max(self.maximum_active, self.active)
+        time.sleep(0.01)
+
+    def _leave(self) -> None:
+        with self._guard:
+            self.active -= 1
+
+    def publish(self, bundle) -> None:
+        self._enter()
+        try:
+            super().publish(bundle)
+        finally:
+            self._leave()
+
+    def publish_catalog(self, bundles, *, authority_job_count=None) -> None:
+        self._enter()
+        try:
+            self.catalog = (bundles, authority_job_count)
+        finally:
+            self._leave()
+
+
+class TypedRootActionBrokerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = LocalRootActionFixture()
+        self.events = FixedEvents()
+        self.sink = CapturingSink()
+        self.broker = TypedRootActionBroker(
+            self.store,
+            events=self.events,
+            public_sink=self.sink,
+            submission_policy=TEST_SUBMISSION_POLICY,
+        )
+
+    def test_submit_seals_pending_and_projects_exact_public_status(self) -> None:
+        submitted = self.broker.submit(manifest(), peer=TEST_PEER)
+        self.assertEqual(submitted.job_id, "job-broker-1")
+        self.assertEqual(submitted.status["state"]["name"], "pending")
+        self.assertEqual(
+            submitted.status["job"]["reply_target"],
+            "task-019f-root",
+        )
+        self.assertEqual(self.broker.status(submitted.job_id), submitted.status)
+        history = self.broker.history(submitted.job_id)
+        self.assertEqual(
+            [row["action"] for row in history["events"]], ["sealed_pending"]
+        )
+        self.assertEqual(len(self.sink.bundles), 1)
+        self.assertEqual(self.sink.bundles[0].job_digest, submitted.job_digest)
+
+    def test_exact_duplicate_is_idempotent_and_does_not_replace_sealed_job(
+        self,
+    ) -> None:
+        first = self.broker.submit(manifest(), peer=TEST_PEER)
+        second = self.broker.submit(manifest(), peer=TEST_PEER)
+        self.assertEqual(second, first)
+        self.assertEqual(self.broker.status(first.job_id), first.status)
+        self.assertEqual(len(self.store.read_ledger(first.job_id)), 1)
+
+    def test_receipt_lookup_is_bound_to_exact_job_digest(self) -> None:
+        submitted = self.broker.submit(manifest(), peer=TEST_PEER)
+        with self.assertRaises(StorageNotFound):
+            self.broker.receipt("job-broker-1", "sha256:" + "0" * 64)
+        with self.assertRaises(StorageNotFound):
+            self.broker.receipt("job-missing", submitted.job_digest)
+
+    def test_public_projection_is_canonical_and_identity_bound(self) -> None:
+        submitted = self.broker.submit(manifest(), peer=TEST_PEER)
+        bundle = self.broker.public_projection(submitted.job_id)
+        self.assertEqual(bundle.job_id, submitted.job_id)
+        self.assertEqual(bundle.job_digest, submitted.job_digest)
+        self.assertTrue(bundle.status_bytes.endswith(b"\n"))
+        self.assertTrue(bundle.history_bytes.endswith(b"\n"))
+        self.assertNotIn(b"stdout", bundle.status_bytes + bundle.history_bytes)
+        self.assertNotIn(b"stderr", bundle.status_bytes + bundle.history_bytes)
+        self.assertEqual(
+            json.loads(bundle.status_bytes)["job"]["job_digest"],
+            submitted.job_digest,
+        )
+
+    def test_catalog_rebuild_fetches_only_explicit_bounded_recent_ids(self) -> None:
+        store = BoundedCatalogStore()
+        sink = CatalogCoverageSink()
+        broker = TypedRootActionBroker(
+            store,
+            events=FixedEvents(),
+            public_sink=sink,
+            submission_policy=TEST_SUBMISSION_POLICY,
+        )
+        broker.submit(manifest(), peer=TEST_PEER)
+        self.assertEqual(store.observed_limit, PUBLIC_CATALOG_JOB_LIMIT)
+        self.assertIsNotNone(sink.catalog)
+        bundles, authority_count = sink.catalog
+        self.assertEqual(len(bundles), 1)
+        self.assertEqual(authority_count, 5000)
+
+    def test_public_broker_exposes_no_authentication_or_dispatch_surface(self) -> None:
+        self.assertFalse(hasattr(self.broker, "authenticate"))
+        self.assertFalse(hasattr(self.broker, "approve"))
+        self.assertFalse(hasattr(self.broker, "dispatch"))
+        self.assertFalse(hasattr(self.broker, "execute"))
+
+    def test_submitter_cannot_supply_audit_event_identity_or_time(self) -> None:
+        with self.assertRaises(TypeError):
+            self.broker.submit(  # type: ignore[call-arg]
+                manifest(job_id="job-forged-event"),
+                peer=TEST_PEER,
+                event_id="event-from-submitter",
+                occurred_at="2026-07-27T00:00:00Z",
+            )
+
+    def test_disabled_historical_family_is_rejected_without_execution(self) -> None:
+        value = json.loads(manifest(job_id="job-disabled-network"))
+        value["operation_id"] = "kwrag.network_ensure"
+        value["parameters"] = {
+            "network_plan_digest": "sha256:" + "a" * 64,
+            "expected_state": "absent",
+            "expected_identity_digest": None,
+        }
+        submitted = self.broker.submit(
+            json.dumps(value).encode("utf-8"), peer=TEST_PEER
+        )
+        self.assertEqual(submitted.status["state"]["name"], "terminal")
+        self.assertEqual(submitted.status["state"]["execution_count"], 0)
+        self.assertEqual(
+            submitted.status["state"]["reason_code"],
+            "disabled_by_product_boundary",
+        )
+        self.assertEqual(submitted.status["receipt"]["kind"], "terminal_notice")
+        self.assertEqual(
+            [row["action"] for row in self.broker.history(submitted.job_id)["events"]],
+            ["sealed_pending", "close_pending"],
+        )
+
+    def test_public_projection_failure_is_recoverable_from_authoritative_store(
+        self,
+    ) -> None:
+        failing = TypedRootActionBroker(
+            self.store,
+            events=self.events,
+            public_sink=FailingSink(),
+            submission_policy=TEST_SUBMISSION_POLICY,
+        )
+        submitted = failing.submit(
+            manifest(job_id="job-projection-recovery"), peer=TEST_PEER
+        )
+        self.assertEqual(submitted.job_id, "job-projection-recovery")
+        self.assertEqual(self.store.list_job_ids(), ("job-projection-recovery",))
+
+        recovered_sink = CapturingSink()
+        recovered = TypedRootActionBroker(
+            self.store,
+            events=self.events,
+            public_sink=recovered_sink,
+            submission_policy=TEST_SUBMISSION_POLICY,
+        ).reconcile_public()
+        self.assertEqual(
+            [item.job_id for item in recovered], ["job-projection-recovery"]
+        )
+        self.assertEqual(len(recovered_sink.bundles), 1)
+
+    def test_stale_projection_cannot_overwrite_a_newer_public_revision(self) -> None:
+        submitted = self.broker.submit(
+            manifest(job_id="job-stale-publication"), peer=TEST_PEER
+        )
+        job = self.store.read_sealed(submitted.job_id)
+        self.store.compare_and_append(
+            TransitionEvent(
+                event_id="event-claim-stale-publication",
+                job_id=job.job_id,
+                job_digest=job.job_digest,
+                expected_revision=0,
+                kind=TransitionKind.CLAIM_EXECUTION,
+                occurred_at="2026-07-27T08:00:08Z",
+            )
+        )
+        stale = self.broker.public_projection(submitted.job_id)
+        self.store.compare_and_append(
+            TransitionEvent(
+                event_id="event-complete-stale-publication",
+                job_id=job.job_id,
+                job_digest=job.job_digest,
+                expected_revision=1,
+                kind=TransitionKind.COMPLETE_EXECUTION,
+                occurred_at="2026-07-27T08:00:09Z",
+                outcome=TerminalOutcome.SUCCEEDED,
+                reason_code="exit-zero",
+            )
+        )
+
+        current = self.broker.repair_public_best_effort(submitted.job_id)
+        publication_count = len(self.sink.bundles)
+        repaired = self.broker._repair_public_best_effort(
+            submitted.job_id,
+            bundle=stale,
+        )
+
+        self.assertEqual(json.loads(current.status_bytes)["state"]["revision"], 2)
+        self.assertEqual(repaired.projection_digest, current.projection_digest)
+        self.assertEqual(len(self.sink.bundles), publication_count)
+        self.assertEqual(
+            json.loads(self.sink.bundles[-1].status_bytes)["state"]["revision"],
+            2,
+        )
+
+    def test_projection_and_catalog_publication_are_serialized(self) -> None:
+        sink = ConcurrentPublicationSink()
+        broker = TypedRootActionBroker(
+            self.store,
+            events=self.events,
+            public_sink=sink,
+            submission_policy=TEST_SUBMISSION_POLICY,
+        )
+        broker.submit(manifest(job_id="job-serialized-one"), peer=TEST_PEER)
+        second_manifest = json.loads(manifest(job_id="job-serialized-two"))
+        second_manifest["request"]["lineage_id"] = "lineage-serialized-two"
+        broker.submit(json.dumps(second_manifest).encode("utf-8"), peer=TEST_PEER)
+        for index, job_id in enumerate(
+            ("job-serialized-one", "job-serialized-two"), start=1
+        ):
+            job = self.store.read_sealed(job_id)
+            self.store.compare_and_append(
+                TransitionEvent(
+                    event_id=f"event-claim-serialized-{index}",
+                    job_id=job.job_id,
+                    job_digest=job.job_digest,
+                    expected_revision=0,
+                    kind=TransitionKind.CLAIM_EXECUTION,
+                    occurred_at=f"2026-07-27T08:00:{8 + index:02d}Z",
+                )
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [
+                pool.submit(broker.repair_public_best_effort, job_id)
+                for job_id in ("job-serialized-one", "job-serialized-two")
+            ]
+            for future in futures:
+                future.result(timeout=5)
+
+        self.assertEqual(sink.maximum_active, 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

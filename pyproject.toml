@@ -11,6 +11,7 @@ dependencies = [
   "Jinja2>=3.1.0",
   "PyMySQL[rsa]>=1.1.0",
   "PyYAML>=6.0.0",
+  "webauthn>=2.8.0,<3.0.0",
 ]
 
 [project.scripts]
@@ -22,3 +23,6 @@ package-dir = {"" = "opsctl"}
 
 [tool.setuptools.packages.find]
 where = ["opsctl"]
+
+[tool.setuptools.package-data]
+"agent_runtime_ops.root_actions" = ["historical_inventory_v1.json"]

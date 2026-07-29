@@ -1,0 +1,106 @@
+{
+  "schema": "agent-runtime-root-action-historical-inventory/v1",
+  "source": {
+    "logical_root": "kakao rag/.artifacts/root-actions",
+    "cutoff": "2026-07-27T10:20:38+09:00",
+    "universe": "*.sh with LastWriteTime at or before cutoff",
+    "evidence_locator": "reports/evidence/root-action-approval-2026-07-27/root-action-59-typed-family-inventory.txt",
+    "classification_boundary": "Candidate functional families inferred from historical filenames and action labels; membership does not prove executor implementation or settle future parameter schemas."
+  },
+  "families": [
+    {
+      "operation_id": "audit.verify",
+      "actions": [
+        "agent-loop-root-03b-audit-failed-03a-ack-guard.sh",
+        "agent-loop-root-03c-audit-failed-03a-ack-guard-v2.sh",
+        "agent-loop-root-03e-audit-failed-policy-campaign-staging.sh",
+        "agent-loop-root-03f-corrected-directory-modes-audit.sh",
+        "agent-loop-root-03g-audit-terminal-decision-marker-shape.sh",
+        "agent-loop-root-03i-audit-failed-03h-recovery-staging.sh",
+        "agent-loop-root-03k-audit-failed-03j-prior-audit-drift.sh",
+        "agent-loop-root-03k-v2-audit-failed-03j-malformed-prior-audit-digest.sh",
+        "agent-loop-root-03m-audit-failed-03l-v2-forward-recovery-staging.sh",
+        "agent-loop-root-03n-audit-sanitized-pretrace-bootstrap-failure.sh",
+        "agent-loop-root-03o-audit-timestamped-pretrace-bootstrap-failure.sh",
+        "kwrag-root-09aa-forward-recovery-audit-marker-fixture.sh",
+        "kwrag-root-09a-audit-new-candidate-build-prerequisites.sh",
+        "kwrag-root-09ac-verify-finalized-candidate-and-receipt.sh",
+        "kwrag-root-09ad-forward-recovery-readonly-env-collision.sh",
+        "kwrag-root-09b-forward-recovery-final-receipt-mode.sh",
+        "kwrag-root-09f-audit-failed-09e-partial-state.sh",
+        "kwrag-root-09h-audit-failed-09g-attestation-driver-state.sh",
+        "kwrag-root-09m-audit-failed-09l-nested-selftest.sh",
+        "kwrag-root-09n-forward-recovery-audit-diagnostic-regex.sh",
+        "kwrag-root-09o-forward-recovery-systemexit-diagnostic.sh",
+        "kwrag-root-09p-forward-recovery-last-technical-line.sh",
+        "kwrag-root-09r-audit-failed-09q-nested-validation.sh",
+        "kwrag-root-09s-audit-deep-nested-file-stdin-validation.sh",
+        "kwrag-root-09u-audit-failed-09t-image-descriptor-state.sh",
+        "kwrag-root-09v-audit-classic-driver-descriptor-shape.sh",
+        "kwrag-root-09x-audit-failed-09w-image-build-root-scope.sh",
+        "kwrag-root-09z-audit-failed-09y-build-metadata-image-name.sh",
+        "kwrag-root-10d-audit-existing-network-identity.sh",
+        "kwrag-root-10e-audit-transient-network-lifecycle.sh"
+      ]
+    },
+    {
+      "operation_id": "projection.staging_selftest",
+      "actions": [
+        "kwrag-root-08a-verify-posix-projection-staging-syscalls.sh",
+        "kwrag-root-08b-forward-recovery-package-import.sh",
+        "kwrag-root-08c-forward-recovery-fixture-mode.sh"
+      ]
+    },
+    {
+      "operation_id": "agent_loop.campaign_run",
+      "actions": [
+        "agent-loop-root-03a-run-policy-campaign-a-d.sh",
+        "agent-loop-root-03d-forward-recovery-exact-ack.sh",
+        "agent-loop-root-03h-run-cumulative-75-conservative-cost-recovery.sh",
+        "agent-loop-root-03j-run-forward-recovery-v3.sh",
+        "agent-loop-root-03l-forward-recovery-after-prior-audit-drift.sh",
+        "agent-loop-root-03l-v2-forward-recovery-corrected-prior-audit-digest.sh",
+        "agent-loop-root-03p-run-task-close-corrected-forward-recovery.sh"
+      ]
+    },
+    {
+      "operation_id": "kwrag.candidate_build",
+      "actions": [
+        "kwrag-root-09c-create-snapshot-and-build-candidate.sh",
+        "kwrag-root-09c-v2-create-snapshot-and-build-candidate.sh",
+        "kwrag-root-09d-forward-recovery-readonly-env-names.sh",
+        "kwrag-root-09d-v2-forward-recovery-readonly-env-names.sh",
+        "kwrag-root-09e-forward-recovery-snapshot-env-scope.sh",
+        "kwrag-root-09g-build-candidate-from-verified-snapshot.sh",
+        "kwrag-root-09i-build-candidate-max-metadata-provenance.sh",
+        "kwrag-root-09j-service-context-forward-recovery-build.sh",
+        "kwrag-root-09k-file-stdin-service-context-build.sh",
+        "kwrag-root-09l-context-audit-escape-forward-recovery.sh",
+        "kwrag-root-09q-build-context-boundary-forward-recovery.sh",
+        "kwrag-root-09t-flattened-candidate-build-forward-recovery.sh"
+      ]
+    },
+    {
+      "operation_id": "kwrag.artifact_finalize",
+      "actions": [
+        "kwrag-root-09ab-finalize-canonical-image-name-receipt.sh",
+        "kwrag-root-09w-finalize-classic-driver-candidate-receipt.sh",
+        "kwrag-root-09y-scoped-root-receipt-finalization-forward-recovery.sh"
+      ]
+    },
+    {
+      "operation_id": "kwrag.runtime_verify",
+      "actions": [
+        "kwrag-root-10a-run-isolated-candidate-runtime-verification.sh",
+        "kwrag-root-10b-forward-recovery-gb10-runtime-verification.sh"
+      ]
+    },
+    {
+      "operation_id": "kwrag.network_ensure",
+      "actions": [
+        "kwrag-root-10c-create-owned-internal-network.sh",
+        "kwrag-root-10f-create-owned-network-forward-recovery.sh"
+      ]
+    }
+  ]
+}

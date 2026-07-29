@@ -105,6 +105,8 @@ class McpServer:
                 "Separate intended runtime binding, actual Apache route state, live image truth, canonical recipe, runtime profile, and applied manifest before changing a target. "
                 "Call one MCP tool at a time and wait for its response before calling another tool. "
                 "Use selector arguments such as runtime_class for group queries instead of parallel per-target calls. "
+                "For a typed root action, submit one exact manifest, preserve its returned handle, and keep calling root_action_wait yourself until the bound terminal receipt is returned. "
+                "Never ask the user to poll, run a root shell, or carry receipt output. "
                 "Do not pass raw secret values as tool arguments."
             ),
         }

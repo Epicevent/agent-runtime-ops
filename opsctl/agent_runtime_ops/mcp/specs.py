@@ -5,6 +5,56 @@ from typing import Any
 from ..runtime_secrets import RUNTIME_SECRET_KEYS
 
 
+def _root_action_handle_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "job_id": {"type": "string"},
+            "job_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+            "request_id": {"type": "string"},
+            "reply_target": {"type": "string"},
+        },
+        "required": ["job_id", "job_digest", "request_id", "reply_target"],
+        "additionalProperties": False,
+    }
+
+
+def _root_action_manifest_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "description": (
+            "Exact agent-runtime-root-action-manifest/v1 object. The executable registry and "
+            "typed parameter schema are revalidated before broker submission."
+        ),
+        "properties": {
+            "schema": {"type": "string", "const": "agent-runtime-root-action-manifest/v1"},
+            "registry_version": {
+                "type": "string",
+                "const": "agent-runtime-root-action-registry/v1",
+            },
+            "job_id": {"type": "string"},
+            "operation_id": {"type": "string"},
+            "operation_version": {"type": "integer"},
+            "request": {"type": "object"},
+            "parameters": {"type": "object"},
+            "expected_pre_state": {"type": "object"},
+            "review": {"type": "object"},
+        },
+        "required": [
+            "schema",
+            "registry_version",
+            "job_id",
+            "operation_id",
+            "operation_version",
+            "request",
+            "parameters",
+            "expected_pre_state",
+            "review",
+        ],
+        "additionalProperties": False,
+    }
+
+
 def list_tool_specs() -> list[dict[str, Any]]:
     return [
         {
@@ -463,6 +513,62 @@ def list_tool_specs() -> list[dict[str, Any]]:
                 "type": "object",
                 "properties": {"target": {"type": "string"}},
                 "required": ["target"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "root_action_submit",
+            "title": "Submit Exact Typed Root Action",
+            "description": (
+                "Submit one exact typed manifest to the root-owned broker for OPS review. This does "
+                "not approve or execute the job. Preserve the returned identity-bound handle."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {"manifest": _root_action_manifest_schema()},
+                "required": ["manifest"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "root_action_retrieve",
+            "title": "Retrieve Root Action Projection",
+            "description": (
+                "Read the sanitized status, immutable history, and receipt projection for exactly "
+                "the identity-bound handle returned by root_action_submit."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {"handle": _root_action_handle_schema()},
+                "required": ["handle"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "root_action_wait",
+            "title": "Wait for Root Action Receipt",
+            "description": (
+                "Wait for the terminal sanitized receipt bound to an exact root-action handle. "
+                "A bounded timeout returns the same handle and is retryable by the agent."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "handle": _root_action_handle_schema(),
+                    "wait_timeout_seconds": {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "maximum": 50,
+                        "default": 45,
+                    },
+                    "poll_interval_seconds": {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "maximum": 5,
+                        "default": 0.5,
+                    },
+                },
+                "required": ["handle"],
                 "additionalProperties": False,
             },
         },

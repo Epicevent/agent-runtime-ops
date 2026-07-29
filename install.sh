@@ -34,6 +34,12 @@ USAGE_COST_SERVICE_FILE="${AGENT_RUNTIME_USAGE_COST_SERVICE_FILE:-/etc/systemd/s
 USAGE_COST_TIMER_FILE="${AGENT_RUNTIME_USAGE_COST_TIMER_FILE:-/etc/systemd/system/agent-runtime-usage-cost-estimate.timer}"
 USAGE_FX_SERVICE_FILE="${AGENT_RUNTIME_USAGE_FX_SERVICE_FILE:-/etc/systemd/system/agent-runtime-usage-fx-refresh.service}"
 USAGE_FX_TIMER_FILE="${AGENT_RUNTIME_USAGE_FX_TIMER_FILE:-/etc/systemd/system/agent-runtime-usage-fx-refresh.timer}"
+ROOT_ACTION_STATE_ROOT="/var/lib/agent-runtime-ops/root-actions"
+ROOT_ACTION_PRIVATE_ROOT="$ROOT_ACTION_STATE_ROOT/private"
+ROOT_ACTION_PUBLIC_ROOT="$ROOT_ACTION_STATE_ROOT/public"
+ROOT_ACTION_RUNTIME_ROOT="/run/agent-runtime-ops"
+ROOT_ACTION_BROKER_SERVICE_FILE="/etc/systemd/system/agent-runtime-root-action-broker.service"
+ROOT_ACTION_TRUSTED_ACCOUNT="svcops"
 USAGE_DB_DEFAULTS_FILE="${AGENT_RUNTIME_USAGE_DB_DEFAULTS_FILE:-/etc/agent-runtime-ops/usage-writer.cnf}"
 USAGE_PRICING_DIR="${AGENT_RUNTIME_USAGE_PRICING_DIR:-$STATE_ROOT/usage-pricing}"
 USAGE_PRICING_FILE="${AGENT_RUNTIME_USAGE_PRICING_FILE:-$USAGE_PRICING_DIR/current.json}"
@@ -274,6 +280,57 @@ install_python_env() {
     -r "$release_dir/requirements.lock" >/dev/null
   "$release_dir/.venv/bin/pip" install --no-deps "$release_dir" >/dev/null
   "$release_dir/.venv/bin/opsctl" profile list >/dev/null
+}
+
+install_root_action_broker_contract() {
+  local release_dir="$1"
+  local unit_source="$release_dir/systemd/agent-runtime-root-action-broker.service"
+  local install_root_real current_path unit_tmp main_pid
+  [[ -f "$unit_source" && ! -L "$unit_source" ]] \
+    || die "missing root-action broker unit source: $unit_source"
+  # Resolve the trusted reader by its production account name at install time.
+  # Numeric IDs are host facts and must never be embedded in the release.
+  getent passwd "$ROOT_ACTION_TRUSTED_ACCOUNT" >/dev/null \
+    || die "missing trusted root-action reader account: $ROOT_ACTION_TRUSTED_ACCOUNT"
+  getent group "$ROOT_ACTION_TRUSTED_ACCOUNT" >/dev/null \
+    || die "missing trusted root-action reader group: $ROOT_ACTION_TRUSTED_ACCOUNT"
+  [[ "$(id -gn "$ROOT_ACTION_TRUSTED_ACCOUNT")" == "$ROOT_ACTION_TRUSTED_ACCOUNT" ]] \
+    || die "trusted root-action reader primary group must match its account name"
+  install_root_real="$(realpath -m "$INSTALL_ROOT")"
+  current_path="$install_root_real/current"
+  [[ "$current_path" =~ ^/[A-Za-z0-9._/-]+$ ]] \
+    || die "root-action broker current path must be an absolute control-free system path"
+  install -d -o root -g "$ROOT_ACTION_TRUSTED_ACCOUNT" -m 0750 "$ROOT_ACTION_STATE_ROOT"
+  install -d -o root -g root -m 0700 "$ROOT_ACTION_PRIVATE_ROOT"
+  install -d -o root -g "$ROOT_ACTION_TRUSTED_ACCOUNT" -m 0750 "$ROOT_ACTION_PUBLIC_ROOT"
+  install -d -o root -g "$ROOT_ACTION_TRUSTED_ACCOUNT" -m 0750 "$ROOT_ACTION_RUNTIME_ROOT"
+  unit_tmp="$(mktemp)"
+  sed \
+    -e "s|@@CURRENT_LINK@@|$current_path|g" \
+    -e "s|@@RELEASE_DIR@@|$release_dir|g" \
+    "$unit_source" >"$unit_tmp"
+  ! grep -Eq '@@(CURRENT_LINK|RELEASE_DIR)@@' "$unit_tmp" \
+    || die "root-action broker unit placeholder was not fully materialized"
+  install -o root -g root -m 0644 "$unit_tmp" "$ROOT_ACTION_BROKER_SERVICE_FILE"
+  rm -f "$unit_tmp"
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null
+    if systemctl is-active --quiet "$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")"; then
+      systemctl restart "$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")" >/dev/null
+      systemctl is-active --quiet "$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")" \
+        || die "root-action broker did not remain active after release restart"
+      main_pid="$(systemctl show --property=MainPID --value "$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")")"
+      [[ "$main_pid" =~ ^[1-9][0-9]{0,9}$ ]] \
+        || die "root-action broker MainPID is invalid after release restart"
+      grep -Fzqx "AGENT_RUNTIME_OPS_RELEASE=$release_dir" "/proc/$main_pid/environ" \
+        || die "root-action broker is not running the installed release"
+      info "root_action_broker_update=active_restarted_release_verified"
+    fi
+  fi
+  # An inactive broker remains a separate ratified activation boundary. An
+  # already-active broker must move with self-update so old code can be pruned.
+  info "root_action_broker_unit=$ROOT_ACTION_BROKER_SERVICE_FILE"
+  info "root_action_broker_activation=deferred_not_enabled_or_started"
 }
 
 install_gemini_cli() {
@@ -909,6 +966,7 @@ install_package() {
   chown -R root:"$OPS_GROUP" "$release_dir"
 
   activate_release "$release_dir"
+  install_root_action_broker_contract "$release_dir"
   install_ops_sudoers
   install_boot_restore_unit
   install_usage_collect_timer

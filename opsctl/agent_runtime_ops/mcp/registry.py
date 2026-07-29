@@ -10,6 +10,7 @@ from .handlers import image as image_handlers
 from .handlers import nas as nas_handlers
 from .handlers import recipe as recipe_handlers
 from .handlers import rollout as rollout_handlers
+from .handlers import root_action as root_action_handlers
 from .handlers import routing as routing_handlers
 from .handlers import runtime_config as runtime_config_handlers
 from .handlers import secrets as secret_handlers
@@ -53,6 +54,9 @@ HANDLERS: dict[str, ToolHandler] = {
     "handoff_value_command": _bind(handoff_handlers.value_command),
     "heartbeat_status": _bind(heartbeat_handlers.status),
     "heartbeat_disable": _bind(heartbeat_handlers.disable),
+    "root_action_submit": _bind(root_action_handlers.submit),
+    "root_action_retrieve": _bind(root_action_handlers.retrieve),
+    "root_action_wait": _bind(root_action_handlers.wait),
     "target_rollback": _bind(routing_handlers.target_rollback),
     "nas_status": _bind(nas_handlers.status),
     "nas_mount": _bind(nas_handlers.mount),
