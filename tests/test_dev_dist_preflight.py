@@ -3,9 +3,11 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agent_runtime_ops.domain.dev_recipe_runtime import (
     dist_halves,
+    ensure_dev_runtime_dir,
     merge_preserved_control_ui,
     preflight_dev_dist,
 )
@@ -75,6 +77,64 @@ class PreflightTest(unittest.TestCase):
                 with self.assertRaises(ValueError) as ctx:
                     preflight_dev_dist(empty, runtime_only=runtime_only)
                 self.assertIn("index.js", str(ctx.exception))
+
+
+class RuntimeDirectoryPreflightTest(unittest.TestCase):
+    def test_read_only_preflight_requires_directory_and_existing_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home_root = root / "home"
+            slot_home = home_root / "oc20"
+            slot_home.mkdir(parents=True)
+            runtime_dir = slot_home / "openclaw"
+            state_root = root / "state"
+
+            def mapped_path(value: object) -> Path:
+                return home_root if str(value) == "/home" else Path(value)
+
+            with (
+                patch(
+                    "agent_runtime_ops.domain.dev_recipe_runtime.Path",
+                    side_effect=mapped_path,
+                ),
+                patch(
+                    "agent_runtime_ops.domain.dev_recipe_runtime.slot_uid_gid",
+                    return_value=(1000, 1000),
+                ),
+            ):
+                with self.assertRaises(FileNotFoundError):
+                    ensure_dev_runtime_dir("oc20", create=False)
+
+                runtime_dir.write_text("not a directory", encoding="utf-8")
+                with self.assertRaises(FileNotFoundError):
+                    ensure_dev_runtime_dir("oc20", create=False)
+
+                runtime_dir.unlink()
+                runtime_dir.mkdir()
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "missing an existing runtime manifest",
+                ):
+                    ensure_dev_runtime_dir(
+                        "oc20",
+                        create=False,
+                        state_root=state_root,
+                        require_existing_manifest=True,
+                    )
+
+                (runtime_dir / ".agent-runtime-manifest").write_text(
+                    "slot=oc20\n",
+                    encoding="utf-8",
+                )
+                self.assertEqual(
+                    ensure_dev_runtime_dir(
+                        "oc20",
+                        create=False,
+                        state_root=state_root,
+                        require_existing_manifest=True,
+                    ),
+                    runtime_dir,
+                )
 
 
 class MergePreservedControlUiTest(unittest.TestCase):

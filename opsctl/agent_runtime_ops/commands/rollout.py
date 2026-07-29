@@ -366,7 +366,12 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
             _require_retrieval_approval(desired, state_root)
             target_plans.append((slot, desired, profile))
         for slot, desired, profile in target_plans:
-            _ensure_runtime_dir(slot, create=False)
+            _ensure_runtime_dir(
+                slot,
+                create=False,
+                state_root=state_root,
+                require_existing_manifest=True,
+            )
             target_rendered = render_compose(profile, desired)
             target_projection_failed = 0
             for ok, name, detail in _run_static_slot_checks(

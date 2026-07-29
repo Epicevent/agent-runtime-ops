@@ -940,6 +940,59 @@ def test_legacy_projection_exemption_requires_exact_pending_backup(
     )
 
 
+def test_legacy_projection_exemption_cannot_be_reused_by_fresh_same_backup_transaction(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    agent_compose_path(runtime_dir).write_text(
+        "services:\n  gateway:\n    image: legacy-wrapper@sha256:old\n",
+        encoding="utf-8",
+    )
+    backup_dir = backup_agent_runtime_state("oc20", runtime_dir, state_root)
+    failures = {
+        "truth_retrieval_projection_complete_and_consistent",
+        "truth_retrieval_binding_matches_expected",
+        "truth_retrieval_enabled_declared",
+    }
+    from agent_runtime_ops.domain.runtime_backup import _begin_rollback_transaction
+
+    _begin_rollback_transaction("oc20", state_root, backup_dir)
+    first_receipt = consume_legacy_retrieval_projection_exemption(
+        state_root,
+        "oc20",
+        backup_dir,
+    )
+    first_transaction_id = json.loads(
+        first_receipt.read_text(encoding="utf-8")
+    )["rollback_transaction_id"]
+    finish_rollback_transaction("oc20", state_root, backup_dir)
+
+    _begin_rollback_transaction("oc20", state_root, backup_dir)
+    fresh_transaction_id = json.loads(
+        rollback_transaction_path(state_root).read_text(encoding="utf-8")
+    )["transaction_id"]
+    assert fresh_transaction_id != first_transaction_id
+    assert not legacy_retrieval_projection_failures_may_be_expected(
+        state_root,
+        "oc20",
+        backup_dir,
+        failures,
+    )
+    with pytest.raises(
+        RuntimeError,
+        match="legacy retrieval migration exemption was already consumed",
+    ):
+        consume_legacy_retrieval_projection_exemption(
+            state_root,
+            "oc20",
+            backup_dir,
+        )
+    assert pending_rollback_backup(state_root, "oc20") == backup_dir
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX ownership/mode contract")
 def test_legacy_projection_migration_receipt_mode_drift_fails_closed(
     tmp_path: Path,

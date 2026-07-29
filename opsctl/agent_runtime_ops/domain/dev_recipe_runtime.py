@@ -7,6 +7,7 @@ import stat
 
 from ..host.account_files import atomic_write_key_value, read_key_value_file, runtime_ids, slot_uid_gid
 from ..routing import get_runtime_binding
+from .runtime_paths import agent_manifest_path, state_manifest_path
 
 DEV_RECIPE_STAGE_ROOT = "agent-runtime-source"
 
@@ -42,7 +43,13 @@ def assert_child_of(child: Path, parent: Path) -> None:
         raise ValueError(f"path escaped managed root: {child}")
 
 
-def ensure_dev_runtime_dir(slot: str, *, create: bool = True) -> Path:
+def ensure_dev_runtime_dir(
+    slot: str,
+    *,
+    create: bool = True,
+    state_root: Path | None = None,
+    require_existing_manifest: bool = False,
+) -> Path:
     uid, gid = slot_uid_gid(slot)
     home = Path("/home") / slot
     if home.is_symlink():
@@ -53,6 +60,22 @@ def ensure_dev_runtime_dir(slot: str, *, create: bool = True) -> Path:
     if runtime_dir.exists() and runtime_dir.is_symlink():
         raise ValueError(f"managed runtime dir must not be symlink: {runtime_dir}")
     if not create:
+        if not runtime_dir.is_dir():
+            raise FileNotFoundError(runtime_dir)
+        if require_existing_manifest:
+            if state_root is None:
+                raise ValueError(
+                    "state_root is required when an existing runtime manifest is required"
+                )
+            manifest_paths = (
+                agent_manifest_path(runtime_dir),
+                state_manifest_path(state_root, slot),
+            )
+            if not any(path.is_file() and not path.is_symlink() for path in manifest_paths):
+                raise ValueError(
+                    "promotion target is missing an existing runtime manifest: "
+                    f"{slot}"
+                )
         return runtime_dir
     runtime_dir.mkdir(mode=0o750, parents=True, exist_ok=True)
     os.chown(runtime_dir, uid, gid)

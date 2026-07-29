@@ -8,6 +8,7 @@ import hashlib
 import os
 from pathlib import Path
 import re
+import secrets
 import shutil
 import stat
 import tempfile
@@ -33,16 +34,17 @@ from .runtime_paths import (
 _BACKUP_NAME = re.compile(
     r"^(?P<timestamp>\d{8}T\d{6}[+-]\d{4})(?:\.(?P<suffix>\d+))?$"
 )
-_ROLLBACK_TRANSACTION_SCHEMA = "agent-runtime-rollback-transaction/v1"
+_ROLLBACK_TRANSACTION_SCHEMA = "agent-runtime-rollback-transaction/v2"
 _ROLLBACK_TRANSACTION_NAME = ".agent-runtime-rollback-transaction.json"
 _RUNTIME_TRANSACTION_LOCK_NAME = ".agent-runtime-transaction.lock"
 _RUNTIME_HOST_MUTATION_LOCK_NAME = ".agent-runtime-host-mutation.lock"
-_LEGACY_RETRIEVAL_MIGRATION_SCHEMA = "agent-runtime-legacy-retrieval-migration/v1"
+_LEGACY_RETRIEVAL_MIGRATION_SCHEMA = "agent-runtime-legacy-retrieval-migration/v2"
 _LEGACY_RETRIEVAL_MIGRATION_NAME = ".agent-runtime-legacy-retrieval-migration.json"
 _LEGACY_RETRIEVAL_MIGRATION_KEYS = {
     "backup_metadata_sha256",
     "backup_name",
     "consumed_at",
+    "rollback_transaction_id",
     "schema",
     "slot",
 }
@@ -51,6 +53,7 @@ _ROLLBACK_TRANSACTION_KEYS = {
     "backup_name",
     "schema",
     "slot",
+    "transaction_id",
 }
 _BACKUP_SCHEMA = "agent-runtime-backup/v2"
 _LEGACY_BACKUP_IMPORT_SCHEMA = "agent-runtime-legacy-backup-import/v1"
@@ -642,7 +645,10 @@ def _validate_backup_integrity(
     return metadata, metadata_digest
 
 
-def pending_rollback_backup(state_root: Path, slot: str) -> Path | None:
+def _load_rollback_transaction(
+    state_root: Path,
+    slot: str,
+) -> dict[str, object] | None:
     recovery_dir = runtime_recovery_dir(state_root, slot)
     if not recovery_dir.exists() and not recovery_dir.is_symlink():
         return None
@@ -657,6 +663,12 @@ def pending_rollback_backup(state_root: Path, slot: str) -> Path | None:
         raise ValueError("unsupported rollback transaction schema")
     if transaction.get("slot") != slot:
         raise ValueError("rollback transaction slot does not match the requested slot")
+    transaction_id = transaction.get("transaction_id")
+    if (
+        not isinstance(transaction_id, str)
+        or re.fullmatch(r"[0-9a-f]{64}", transaction_id) is None
+    ):
+        raise ValueError("rollback transaction id is invalid")
     backup_name = transaction.get("backup_name")
     if not isinstance(backup_name, str) or _BACKUP_NAME.fullmatch(backup_name) is None:
         raise ValueError("rollback transaction backup name is invalid")
@@ -668,6 +680,19 @@ def pending_rollback_backup(state_root: Path, slot: str) -> Path | None:
     _, metadata_digest = _validate_backup_integrity(state_root, slot, backup_dir)
     if transaction.get("backup_metadata_sha256") != metadata_digest:
         raise ValueError("rollback transaction backup metadata digest mismatch")
+    return transaction
+
+
+def pending_rollback_backup(state_root: Path, slot: str) -> Path | None:
+    transaction = _load_rollback_transaction(state_root, slot)
+    if transaction is None:
+        return None
+    backup_name = str(transaction["backup_name"])
+    backup_dir = _validate_backup_dir(
+        state_root,
+        slot,
+        agent_backup_root(state_root, slot) / backup_name,
+    )
     return backup_dir
 
 
@@ -695,6 +720,7 @@ def _begin_rollback_transaction(
         "backup_name": validated_backup.name,
         "schema": _ROLLBACK_TRANSACTION_SCHEMA,
         "slot": slot,
+        "transaction_id": secrets.token_hex(32),
     }
     atomic_write_text(
         transaction_path,
@@ -1456,6 +1482,7 @@ def _legacy_retrieval_migration_identity(
     state_root: Path,
     slot: str,
     backup_dir: Path,
+    rollback_transaction_id: str,
 ) -> dict[str, str]:
     validated_backup = _validate_backup_dir(state_root, slot, backup_dir)
     _, metadata_digest = _validate_backup_integrity(
@@ -1466,6 +1493,7 @@ def _legacy_retrieval_migration_identity(
     return {
         "backup_metadata_sha256": metadata_digest,
         "backup_name": validated_backup.name,
+        "rollback_transaction_id": rollback_transaction_id,
         "schema": _LEGACY_RETRIEVAL_MIGRATION_SCHEMA,
         "slot": slot,
     }
@@ -1509,16 +1537,24 @@ def _legacy_retrieval_migration_is_available(
     slot: str,
     backup_dir: Path,
 ) -> bool:
-    identity = _legacy_retrieval_migration_identity(state_root, slot, backup_dir)
+    transaction = _load_rollback_transaction(state_root, slot)
+    if transaction is None or transaction.get("backup_name") != backup_dir.name:
+        return False
+    identity = _legacy_retrieval_migration_identity(
+        state_root,
+        slot,
+        backup_dir,
+        str(transaction["transaction_id"]),
+    )
     receipt = _load_legacy_retrieval_migration(state_root, slot)
     if receipt is None:
         return True
     if any(receipt.get(key) != value for key, value in identity.items()):
         return False
     # A host crash after persisting consumption but before removing the rollback
-    # marker must be able to resume the exact same backup. Once that transaction
-    # is finished, the receipt permanently blocks a fresh exemption.
-    return pending_rollback_backup(state_root, slot) == backup_dir
+    # marker resumes the same transaction id. A fresh transaction, even for the
+    # same backup bytes, receives a new id and cannot reuse the exemption.
+    return True
 
 
 def consume_legacy_retrieval_projection_exemption(
@@ -1526,11 +1562,17 @@ def consume_legacy_retrieval_projection_exemption(
     slot: str,
     backup_dir: Path,
 ) -> Path:
-    if pending_rollback_backup(state_root, slot) != backup_dir:
+    transaction = _load_rollback_transaction(state_root, slot)
+    if transaction is None or transaction.get("backup_name") != backup_dir.name:
         raise RuntimeError(
             "legacy retrieval migration requires the exact pending rollback backup"
         )
-    identity = _legacy_retrieval_migration_identity(state_root, slot, backup_dir)
+    identity = _legacy_retrieval_migration_identity(
+        state_root,
+        slot,
+        backup_dir,
+        str(transaction["transaction_id"]),
+    )
     receipt_path = _legacy_retrieval_migration_path(state_root, slot)
     receipt = _load_legacy_retrieval_migration(state_root, slot)
     if receipt is not None:
