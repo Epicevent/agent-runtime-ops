@@ -49,7 +49,9 @@ canary and promotion do not invoke this enabled-only gate. A persistent root-own
 host mutation lock serializes the observation with all normal runtime apply and
 rollback operations, including operations on different slots. PID availability is
 the minimum remaining capacity across `pid_max`, `threads-max`, and every finite
-ancestor cgroup `pids.max`/`pids.current` pair.
+ancestor cgroup `pids.max`/`pids.current` pair. The cgroup lineage comes from the
+fixed-inspect host PID of the verified source container, and starts at its parent so
+the source container's own per-container ceiling is not mistaken for shared capacity.
 
 The verifier argv is image-attested, contains no shell, and accepts no query, path,
 backend, network, grant, projection, or credential argument from the operator.

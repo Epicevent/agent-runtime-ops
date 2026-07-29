@@ -114,23 +114,29 @@ def test_fixed_host_observer_uses_bounded_proc_cpu_delta() -> None:
             return "1000\n"
         if name.endswith("/proc/sys/kernel/threads-max"):
             return "800\n"
-        if name.endswith("/proc/self/cgroup"):
+        if name.endswith("/proc/4321/cgroup"):
             return "0::/system.slice/agent.service\n"
         raise AssertionError(name)
 
     def read_optional_text(path: object) -> str | None:
         name = str(path).replace("\\", "/")
-        if name.endswith("/system.slice/agent.service/pids.max"):
+        if name.endswith("/system.slice/pids.max"):
             return "600\n"
-        if name.endswith("/system.slice/agent.service/pids.current"):
-            return "50\n"
-        if name.endswith("/system.slice/pids.max") or name.endswith("/pids.max"):
-            return "max\n"
         if name.endswith("/system.slice/pids.current"):
-            return "100\n"
+            return "50\n"
+        if name.endswith("/pids.max"):
+            return "max\n"
         if name.endswith("/pids.current"):
             return "200\n"
         raise AssertionError(name)
+
+    inspect_commands: list[tuple[list[str], int]] = []
+
+    def inspect_runner(
+        command: list[str], *, timeout: int
+    ) -> subprocess.CompletedProcess[str]:
+        inspect_commands.append((command, timeout))
+        return completed("4321\n")
 
     with (
         patch("agent_runtime_ops.domain.retrieval_resources._read_ascii", side_effect=read_text),
@@ -141,9 +147,21 @@ def test_fixed_host_observer_uses_bounded_proc_cpu_delta() -> None:
         patch("agent_runtime_ops.domain.retrieval_resources.time.sleep") as sleeper,
         patch("agent_runtime_ops.domain.retrieval_resources.os.cpu_count", return_value=4),
     ):
-        observed = _fixed_host_headroom()
+        observed = _fixed_host_headroom("container-1", runner=inspect_runner)
 
     sleeper.assert_called_once_with(0.1)
+    assert inspect_commands == [
+        (
+            [
+                "docker",
+                "inspect",
+                "--format",
+                "{{.State.Pid}}",
+                "container-1",
+            ],
+            10,
+        )
+    ]
     assert observed == {
         "cpu_available_millicores": 2800,
         "memory_available_bytes": 4096 * 1024,

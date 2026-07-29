@@ -160,9 +160,11 @@ def _cgroup_pid_location(raw: str) -> tuple[Path, tuple[str, ...]]:
     raise ValueError("host cgroup PID controller is unavailable")
 
 
-def _cgroup_pid_availability(raw: str) -> int:
+def _cgroup_pid_availability(raw: str, *, skip_leaf: bool = False) -> int:
     root, relative_parts = _cgroup_pid_location(raw)
     current = root.joinpath(*relative_parts)
+    if skip_leaf and current != root:
+        current = current.parent
     observed = False
     available_limits: list[int] = []
     while True:
@@ -190,12 +192,34 @@ def _cgroup_pid_availability(raw: str) -> int:
     return min(available_limits) if available_limits else 2**63 - 1
 
 
-def _fixed_host_headroom() -> dict[str, int]:
+def _container_pid(
+    container: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = run_text,
+) -> int:
+    result = runner(
+        ["docker", "inspect", "--format", "{{.State.Pid}}", container],
+        timeout=10,
+    )
+    if result.returncode != 0:
+        raise ValueError("retrieval container PID observation failed")
+    raw = (result.stdout or "").strip()
+    if len(raw) > 32 or re.fullmatch(r"[1-9]\d*", raw) is None:
+        raise ValueError("retrieval container PID observation is invalid")
+    return int(raw)
+
+
+def _fixed_host_headroom(
+    container: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = run_text,
+) -> dict[str, int]:
     meminfo_path = Path("/proc/meminfo")
     loadavg_path = Path("/proc/loadavg")
     pid_max_path = Path("/proc/sys/kernel/pid_max")
     threads_max_path = Path("/proc/sys/kernel/threads-max")
-    cgroup_path = Path("/proc/self/cgroup")
+    container_pid = _container_pid(container, runner=runner)
+    cgroup_path = Path("/proc") / str(container_pid) / "cgroup"
     stat_path = Path("/proc/stat")
     stat_before = _read_ascii(stat_path)
     time.sleep(0.1)
@@ -240,7 +264,7 @@ def _fixed_host_headroom() -> dict[str, int]:
     pid_max = int(pid_max_text)
     threads_max = int(threads_max_text)
     tasks = int(task_match.group(1))
-    cgroup_pid_available = _cgroup_pid_availability(cgroup_text)
+    cgroup_pid_available = _cgroup_pid_availability(cgroup_text, skip_leaf=True)
     return {
         "cpu_available_millicores": available_millicores,
         "memory_available_bytes": int(available_match.group(1)) * 1024,
@@ -290,7 +314,7 @@ def measure_retrieval_promotion_headroom(
     image_spec: dict[str, object],
     *,
     runner: Callable[..., subprocess.CompletedProcess[str]] = run_text,
-    host_observer: Callable[[], dict[str, int]] = _fixed_host_headroom,
+    host_observer: Callable[[], dict[str, int]] | None = None,
 ) -> dict[str, object]:
     """Fail closed unless source usage and one target reservation fit now.
 
@@ -302,7 +326,11 @@ def measure_retrieval_promotion_headroom(
         raise ValueError("retrieval headroom is only defined for enabled intent")
     resource = _resource_envelope(image_spec)
     container_usage = _container_usage(container, runner=runner)
-    host = host_observer()
+    host = (
+        host_observer()
+        if host_observer is not None
+        else _fixed_host_headroom(container, runner=runner)
+    )
     required = {
         "cpu_required_millicores": int(resource["cpuReservationMillicores"]),
         "memory_required_bytes": int(resource["memoryReservationBytes"]),
