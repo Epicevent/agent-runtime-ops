@@ -2213,6 +2213,79 @@ class CliReleaseRolloutTests(unittest.TestCase):
                         self.assertIn(reason, output.getvalue())
                 apply.assert_not_called()
 
+    def test_promotion_rejects_canonical_dev_source_alias_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            dev_source_route = RuntimeBinding(
+                instance_id=str(uuid.uuid5(uuid.NAMESPACE_DNS, "dev-oc-img")),
+                linux_account="dev-oc-img",
+                public_host="image-canary.ji-tech.co.kr",
+                family="openclaw",
+                runtime_class="customer",
+                gateway_port=32002,
+                bridge_port=32003,
+            )
+            current_bindings = load_runtime_bindings(root)
+            (root / "runtime-bindings.json").write_text(
+                dump_runtime_bindings([*current_bindings, dev_source_route]),
+                encoding="utf-8",
+            )
+            source_desired = RuntimeTarget(
+                target="dev-oc-img",
+                family="openclaw",
+                runtime_class="customer",
+                image_name="direct-image",
+                image_spec={
+                    "wrapper_image": wrapper_image_ref(
+                        "agent-runtime-openclaw", "9"
+                    ),
+                    "product_image": wrapper_image_ref("openclaw-jitech", "8"),
+                },
+                runtime_profile="openclaw-customer",
+                route=dev_source_route,
+            )
+            with (
+                patch("agent_runtime_ops.commands.rollout._is_root", return_value=True),
+                patch(
+                    "agent_runtime_ops.commands.rollout._desired_from_live_image_truth",
+                    return_value=(
+                        source_desired,
+                        load_profile("openclaw-customer"),
+                    ),
+                ),
+                patch(
+                    "agent_runtime_ops.commands.rollout._run_static_slot_checks",
+                    return_value=[],
+                ),
+                patch(
+                    "agent_runtime_ops.commands.rollout._run_live_slot_checks",
+                    return_value=[],
+                ),
+                patch("agent_runtime_ops.commands.rollout._apply_desired_slot") as apply,
+            ):
+                for source_alias in (
+                    dev_source_route.public_host,
+                    dev_source_route.instance_id,
+                ):
+                    with self.subTest(source_alias=source_alias):
+                        output = io.StringIO()
+                        with contextlib.redirect_stdout(output):
+                            rc = cmd_rollout_image_promote(
+                                argparse.Namespace(
+                                    state_root=str(root),
+                                    from_slot=source_alias,
+                                    slots="oc4",
+                                )
+                            )
+                        self.assertEqual(rc, 1)
+                        self.assertIn(
+                            "image-promote source must not be a dev target: "
+                            "dev-oc-img",
+                            output.getvalue(),
+                        )
+                apply.assert_not_called()
+
     def test_enabled_promotion_verifies_source_before_first_target_apply(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

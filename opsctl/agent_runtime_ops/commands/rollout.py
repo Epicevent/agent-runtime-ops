@@ -312,6 +312,11 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
                     f"image-promote target must not be a dev target: {slot}"
                 )
         source_binding = get_runtime_binding(from_slot, state_root)
+        if _is_dev_named_target(source_binding.linux_account):
+            raise ValueError(
+                "image-promote source must not be a dev target: "
+                f"{source_binding.linux_account}"
+            )
         if source_binding != source_desired.route:
             raise ValueError("image-promote source binding changed during validation")
         target_bindings = [get_runtime_binding(slot, state_root) for slot in slots]
