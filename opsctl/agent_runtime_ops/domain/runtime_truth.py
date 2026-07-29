@@ -25,6 +25,7 @@ _RETRIEVAL_PROJECTION_LABEL_KEYS = {
     "agent-runtime.retrieval-binding-digest",
     "agent-runtime.retrieval-resource-profile-digest",
 }
+_RETRIEVAL_PROJECTION_LABEL_PREFIX = "agent-runtime.retrieval-"
 
 
 def local_canonical_recipe_check_from_truth(truth: dict[str, str]) -> tuple[bool, str, str | None]:
@@ -144,11 +145,14 @@ def live_image_truth_from_info(binding: RuntimeBinding, info: dict, apache_route
     retrieval_labels_present = any(
         key.startswith(RETRIEVAL_LABEL_PREFIX) for key in labels
     )
-    retrieval_projection_labels_present = any(
-        key in labels for key in _RETRIEVAL_PROJECTION_LABEL_KEYS
-    )
-    retrieval_projection_complete = all(
-        key in labels for key in _RETRIEVAL_PROJECTION_LABEL_KEYS
+    retrieval_projection_label_keys = {
+        key
+        for key in labels
+        if key.startswith(_RETRIEVAL_PROJECTION_LABEL_PREFIX)
+    }
+    retrieval_projection_labels_present = bool(retrieval_projection_label_keys)
+    retrieval_projection_complete = (
+        retrieval_projection_label_keys == _RETRIEVAL_PROJECTION_LABEL_KEYS
     )
     retrieval_contract: dict[str, object] | None = None
     if retrieval_labels_present:

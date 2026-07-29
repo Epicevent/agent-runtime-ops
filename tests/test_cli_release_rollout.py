@@ -1797,6 +1797,47 @@ class CliReleaseRolloutTests(unittest.TestCase):
         self.assertEqual(truth["retrieval_projection_complete"], "false")
         self.assertEqual(truth["retrieval_projection_consistent"], "false")
 
+    def test_live_image_truth_rejects_unknown_only_runtime_projection_label(self) -> None:
+        route = binding("oc20", "hermes", "customer", 30689, 30690)
+        labels = hermes_recipe_labels()
+        labels["agent-runtime.retrieval-bindng-digest"] = "sha256:" + "1" * 64
+        info = {
+            "Config": {
+                "Image": wrapper_image_ref("agent-runtime-hermes", "3"),
+                "Labels": labels,
+            }
+        }
+
+        truth = live_image_truth_from_info(route, info, route)
+
+        self.assertEqual(truth["retrieval_projection_labels_present"], "true")
+        self.assertEqual(truth["retrieval_projection_complete"], "false")
+        self.assertEqual(truth["retrieval_projection_consistent"], "false")
+
+    def test_live_image_truth_rejects_extra_runtime_projection_label(self) -> None:
+        route = binding("oc20", "hermes", "customer", 30689, 30690)
+        labels = hermes_recipe_labels()
+        labels.update(
+            {
+                "agent-runtime.retrieval-enabled": "false",
+                "agent-runtime.retrieval-component-digest": "",
+                "agent-runtime.retrieval-binding-digest": "",
+                "agent-runtime.retrieval-resource-profile-digest": "",
+                "agent-runtime.retrieval-unexpected": "present",
+            }
+        )
+        info = {
+            "Config": {
+                "Image": wrapper_image_ref("agent-runtime-hermes", "3"),
+                "Labels": labels,
+            }
+        }
+
+        truth = live_image_truth_from_info(route, info, route)
+
+        self.assertEqual(truth["retrieval_projection_complete"], "false")
+        self.assertEqual(truth["retrieval_projection_consistent"], "false")
+
     def test_live_image_truth_accepts_complete_absent_runtime_projection(self) -> None:
         route = binding("oc20", "hermes", "customer", 30689, 30690)
         labels = hermes_recipe_labels()
