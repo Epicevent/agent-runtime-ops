@@ -81,6 +81,14 @@ matching the declared profile. A disabled status requires no receipt digests,
 postcondition fails. Rollback rechecks the restored tuple and reports the content-free
 disable/revocation observation when the restored tuple carries the capability.
 
+Apply and rollback are serialized per slot by a persistent root-controlled lock. A
+crash-recovery marker is bound to one immutable backup and is removed only after the
+restored runtime passes its live checks and, when present, the exact retrieval verifier.
+For the first upgrade only, a backup whose manifest and compose bytes prove that it
+predates all retrieval fields may complete rollback when live truth also proves both the
+capability and runtime projection labels are wholly absent; partial, extra, current
+capability-absent, or otherwise inconsistent projections remain hard failures.
+
 Public KWRAG v1 schemas are not changed by this OPS-private rollout contract.
 
 ## Hermes compatibility fixture

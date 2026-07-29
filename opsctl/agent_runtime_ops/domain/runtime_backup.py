@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import errno
 import hashlib
@@ -10,6 +11,8 @@ import re
 import shutil
 import stat
 import tempfile
+import threading
+from typing import Iterator
 
 from ..profiles import load_profile
 from ..yamlio import load_yaml
@@ -31,6 +34,7 @@ _BACKUP_NAME = re.compile(
 )
 _ROLLBACK_TRANSACTION_SCHEMA = "agent-runtime-rollback-transaction/v1"
 _ROLLBACK_TRANSACTION_NAME = ".agent-runtime-rollback-transaction.json"
+_RUNTIME_TRANSACTION_LOCK_NAME = ".agent-runtime-transaction.lock"
 _ROLLBACK_TRANSACTION_KEYS = {
     "backup_metadata_sha256",
     "backup_name",
@@ -44,6 +48,13 @@ _BACKUP_ARTIFACTS = {
     "docker-compose.agent-runtime.yml": "had_compose",
     "manifest.yaml": "had_state_manifest",
 }
+_LEGACY_RETRIEVAL_PROJECTION_FAILURES = {
+    "truth_retrieval_binding_matches_expected",
+    "truth_retrieval_enabled_declared",
+    "truth_retrieval_projection_complete_and_consistent",
+}
+_WINDOWS_LOCKS: dict[str, threading.Lock] = {}
+_WINDOWS_LOCKS_GUARD = threading.Lock()
 
 
 def _backup_sort_key(path: Path) -> tuple[datetime, int] | None:
@@ -106,6 +117,10 @@ def _rollback_transaction_path(state_root: Path, slot: str) -> Path:
     return runtime_recovery_dir(state_root, slot) / _ROLLBACK_TRANSACTION_NAME
 
 
+def _runtime_transaction_lock_path(state_root: Path, slot: str) -> Path:
+    return runtime_recovery_dir(state_root, slot) / _RUNTIME_TRANSACTION_LOCK_NAME
+
+
 def _validate_controlled_directory(
     path: Path,
     *,
@@ -155,6 +170,71 @@ def _ensure_recovery_paths(state_root: Path, slot: str) -> tuple[Path, Path]:
     backup_root = agent_backup_root(state_root, slot)
     _ensure_controlled_directory(backup_root, parent=recovery_dir)
     return recovery_dir, backup_root
+
+
+def _validate_runtime_lock_descriptor(descriptor: int, path: Path) -> None:
+    descriptor_stat = os.fstat(descriptor)
+    if not stat.S_ISREG(descriptor_stat.st_mode):
+        raise ValueError(f"runtime transaction lock must be a regular file: {path}")
+    if descriptor_stat.st_nlink != 1:
+        raise ValueError(f"runtime transaction lock must have one link: {path}")
+    if os.name != "nt" and stat.S_IMODE(descriptor_stat.st_mode) != 0o600:
+        raise ValueError(f"runtime transaction lock mode must be 0600: {path}")
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is not None and descriptor_stat.st_uid != geteuid():
+        raise ValueError(f"runtime transaction lock owner mismatch: {path}")
+
+
+@contextmanager
+def runtime_transaction_lock(state_root: Path, slot: str) -> Iterator[Path]:
+    """Serialize every apply/rollback transaction for one runtime slot.
+
+    The persistent inode is intentional: deleting a lock file after releasing it can
+    split concurrent callers across different inodes. Production uses non-blocking
+    POSIX flock; Windows gets a process-local fail-closed equivalent for unit tests.
+    """
+
+    recovery_dir, _ = _ensure_recovery_paths(state_root, slot)
+    lock_path = _runtime_transaction_lock_path(state_root, slot)
+    if lock_path.is_symlink():
+        raise ValueError(f"runtime transaction lock must not be a symlink: {lock_path}")
+    flags = os.O_RDWR | os.O_CREAT
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(lock_path, flags, 0o600)
+    windows_lock: threading.Lock | None = None
+    windows_lock_held = False
+    posix_lock_held = False
+    try:
+        _validate_runtime_lock_descriptor(descriptor, lock_path)
+        if lock_path.parent != recovery_dir:
+            raise ValueError(f"runtime transaction lock parent mismatch: {lock_path}")
+        if os.name == "nt":
+            key = str(lock_path.resolve(strict=False)).casefold()
+            with _WINDOWS_LOCKS_GUARD:
+                windows_lock = _WINDOWS_LOCKS.setdefault(key, threading.Lock())
+            if not windows_lock.acquire(blocking=False):
+                raise RuntimeError(f"another runtime transaction is active: {slot}")
+            windows_lock_held = True
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise RuntimeError(
+                    f"another runtime transaction is active: {slot}"
+                ) from exc
+            posix_lock_held = True
+        yield lock_path
+    finally:
+        if windows_lock_held and windows_lock is not None:
+            windows_lock.release()
+        if posix_lock_held:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
 
 def _strict_json_object(path: Path, *, maximum_bytes: int = 4096) -> dict[str, object]:
@@ -617,6 +697,68 @@ def backup_manifest_data(backup_dir: Path) -> dict:
         if isinstance(data, dict):
             return data
     return read_legacy_slot_manifest(backup_dir / ".agent-runtime-manifest")
+
+
+def backup_allows_legacy_retrieval_projection_absence(backup_dir: Path) -> bool:
+    """Identify an exact pre-feature backup that could not contain projection labels.
+
+    This narrow migration exception is only consumed while verifying a restored
+    backup. Normal live truth continues to require the canonical four projection
+    labels, including for capability-absent current deployments.
+    """
+
+    manifest = backup_manifest_data(backup_dir)
+    if not isinstance(manifest, dict):
+        return False
+    recipe = manifest.get("recipe")
+    if isinstance(recipe, dict) and any(
+        key in recipe for key in ("retrieval_contract", "retrieval_binding")
+    ):
+        return False
+    if any(
+        key in manifest
+        for key in (
+            "retrieval_binding_digest",
+            "retrieval_component_digest",
+            "retrieval_enabled",
+        )
+    ):
+        return False
+    compose_path = backup_dir / "docker-compose.agent-runtime.yml"
+    if compose_path.is_symlink() or not compose_path.is_file():
+        return False
+    try:
+        compose_text = compose_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return False
+    return "agent-runtime.retrieval-" not in compose_text
+
+
+def legacy_retrieval_projection_failures_are_expected(
+    backup_dir: Path,
+    failed_checks: set[str],
+    truth: dict[str, str],
+) -> bool:
+    return (
+        legacy_retrieval_projection_failures_may_be_expected(
+            backup_dir,
+            failed_checks,
+        )
+        and truth.get("truth_status") == "ok"
+        and truth.get("retrieval_labels_present") == "false"
+        and truth.get("retrieval_projection_labels_present") == "false"
+    )
+
+
+def legacy_retrieval_projection_failures_may_be_expected(
+    backup_dir: Path,
+    failed_checks: set[str],
+) -> bool:
+    return (
+        bool(failed_checks)
+        and failed_checks <= _LEGACY_RETRIEVAL_PROJECTION_FAILURES
+        and backup_allows_legacy_retrieval_projection_absence(backup_dir)
+    )
 
 
 def load_backup_runtime_contract(slot: str, backup_dir: Path, state_root: Path):

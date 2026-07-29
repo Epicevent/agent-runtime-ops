@@ -24,9 +24,12 @@ from .image_specs import image_spec_config_contract
 from .runtime_backup import (
     backup_agent_runtime_state,
     finish_rollback_transaction,
+    legacy_retrieval_projection_failures_are_expected,
+    legacy_retrieval_projection_failures_may_be_expected,
     load_backup_runtime_contract,
     restore_backup,
     restore_backup_env,
+    runtime_transaction_lock,
 )
 from .runtime_manifest import write_slot_manifests
 from .docker_compose import (
@@ -42,7 +45,7 @@ from .runtime_paths import (
     slot_runtime_dir,
     state_manifest_path,
 )
-from .runtime_truth import find_gateway_container
+from .runtime_truth import find_gateway_container, live_runtime_truth
 from .retrieval_contract import run_retrieval_status_probe
 from .workspace_guidance import ensure_runtime_workspace_guidance
 
@@ -132,7 +135,7 @@ def _restore_and_verify_backup(
             backup_dir,
             state_root,
         )
-        failed = [
+        failed = {
             name
             for ok, name, _ in run_live_slot_checks_with_wait(
                 previous_desired,
@@ -141,7 +144,22 @@ def _restore_and_verify_backup(
                 timeout_seconds=profile_startup_timeout_seconds(previous_profile),
             )
             if not ok
-        ]
+        }
+        legacy_projection_absence = False
+        if legacy_retrieval_projection_failures_may_be_expected(
+            backup_dir,
+            failed,
+        ):
+            truth, _ = live_runtime_truth(slot, state_root)
+            legacy_projection_absence = (
+                legacy_retrieval_projection_failures_are_expected(
+                    backup_dir,
+                    failed,
+                    truth,
+                )
+            )
+            if legacy_projection_absence:
+                failed.clear()
         if failed:
             return False, "rollback_live_failed:" + ",".join(sorted(failed))
         if isinstance(previous_desired.image_spec.get("retrieval_contract"), dict):
@@ -160,10 +178,56 @@ def _restore_and_verify_backup(
         finish_rollback_transaction(slot, state_root, backup_dir)
     except Exception as exc:
         return False, f"rollback_verification_failed:{exc}"
-    return True, "rollback_applied_verified"
+    return (
+        True,
+        (
+            "rollback_applied_verified_legacy_projection_absence"
+            if legacy_projection_absence
+            else "rollback_applied_verified"
+        ),
+    )
 
 
 def apply_desired_slot(
+    *,
+    desired,
+    profile,
+    state_root: Path,
+    allow_first_apply: bool,
+    action_name: str = "apply",
+    emit_progress: bool = False,
+    prepare_runtime_env: Callable[[], None] | None = None,
+) -> int:
+    try:
+        with runtime_transaction_lock(state_root, desired.slot):
+            return _apply_desired_slot_locked(
+                desired=desired,
+                profile=profile,
+                state_root=state_root,
+                allow_first_apply=allow_first_apply,
+                action_name=action_name,
+                emit_progress=emit_progress,
+                prepare_runtime_env=prepare_runtime_env,
+            )
+    except Exception as exc:
+        print(f"target={getattr(desired, 'slot', '')}")
+        print("apply_status=fail")
+        print(f"reason={exc}")
+        try:
+            append_action_log(
+                state_root,
+                action_name,
+                getattr(desired, "slot", ""),
+                getattr(desired, "slot", ""),
+                "fail",
+                str(exc),
+            )
+        except Exception:
+            pass
+        return 1
+
+
+def _apply_desired_slot_locked(
     *,
     desired,
     profile,

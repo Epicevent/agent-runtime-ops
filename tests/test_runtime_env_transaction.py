@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
+from agent_runtime_ops.commands.apply import cmd_rollback
 from agent_runtime_ops.domain.runtime_apply import (
     _restore_and_verify_backup,
     apply_desired_slot,
@@ -23,6 +24,7 @@ from agent_runtime_ops.domain.runtime_backup import (
     pending_rollback_backup,
     restore_backup,
     restore_backup_env,
+    runtime_transaction_lock,
 )
 from agent_runtime_ops.domain.runtime_paths import (
     agent_compose_path,
@@ -41,6 +43,15 @@ def rollback_transaction_path(state_root: Path, slot: str = "oc20") -> Path:
         / "runtime-recovery"
         / slot
         / ".agent-runtime-rollback-transaction.json"
+    )
+
+
+def runtime_transaction_lock_path(state_root: Path, slot: str = "oc20") -> Path:
+    return (
+        state_root
+        / "runtime-recovery"
+        / slot
+        / ".agent-runtime-transaction.lock"
     )
 
 
@@ -137,6 +148,84 @@ def test_backup_and_recovery_identity_live_only_under_controlled_state_root(
         ):
             assert path.stat().st_uid == expected_uid
             assert stat.S_IMODE(path.stat().st_mode) == 0o700
+
+
+def test_runtime_transaction_lock_serializes_same_slot_and_persists_inode(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+
+    with runtime_transaction_lock(state_root, "oc20") as lock_path:
+        assert lock_path == runtime_transaction_lock_path(state_root)
+        assert lock_path.is_file()
+        first_inode = lock_path.stat().st_ino
+        with pytest.raises(RuntimeError, match="another runtime transaction is active"):
+            with runtime_transaction_lock(state_root, "oc20"):
+                pass
+        with pytest.raises(RuntimeError, match="another runtime transaction is active"):
+            with runtime_transaction_lock(state_root, "oc20"):
+                pass
+
+    with runtime_transaction_lock(state_root, "oc20") as lock_path:
+        assert lock_path.stat().st_ino == first_inode
+        if os.name != "nt":
+            assert lock_path.stat().st_uid == os.geteuid()
+            assert stat.S_IMODE(lock_path.stat().st_mode) == 0o600
+
+
+def test_apply_holds_runtime_transaction_lock_for_the_entire_slot_operation(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    desired = SimpleNamespace(slot="oc20")
+
+    def observe_locked_operation(**_: object) -> int:
+        with pytest.raises(RuntimeError, match="another runtime transaction is active"):
+            with runtime_transaction_lock(state_root, "oc20"):
+                pass
+        return 0
+
+    with patch(
+        "agent_runtime_ops.domain.runtime_apply._apply_desired_slot_locked",
+        side_effect=observe_locked_operation,
+    ) as locked_apply:
+        rc = apply_desired_slot(
+            desired=desired,
+            profile=SimpleNamespace(),
+            state_root=state_root,
+            allow_first_apply=False,
+        )
+
+    assert rc == 0
+    locked_apply.assert_called_once()
+
+
+def test_manual_rollback_holds_the_same_runtime_transaction_lock(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+
+    def observe_locked_operation(*_: object) -> int:
+        with pytest.raises(RuntimeError, match="another runtime transaction is active"):
+            with runtime_transaction_lock(state_root, "oc20"):
+                pass
+        return 0
+
+    with (
+        patch("agent_runtime_ops.commands.apply._is_root", return_value=True),
+        patch("agent_runtime_ops.commands.apply._state_root", return_value=state_root),
+        patch(
+            "agent_runtime_ops.commands.apply._cmd_rollback_locked",
+            side_effect=observe_locked_operation,
+        ) as locked_rollback,
+    ):
+        rc = cmd_rollback(SimpleNamespace(slot="oc20"))
+
+    assert rc == 0
+    locked_rollback.assert_called_once()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX ownership/mode contract")
@@ -366,6 +455,93 @@ def test_restore_transaction_finishes_only_after_live_and_probe_pass(
     assert reason == "rollback_applied_verified"
     assert not transaction_path.exists()
     assert pending_rollback_backup(state_root, "oc20") is None
+
+
+@pytest.mark.parametrize(
+    ("compose_text", "expected_ok", "expected_reason"),
+    [
+        (
+            "services:\n  gateway:\n    image: legacy-wrapper@sha256:old\n",
+            True,
+            "rollback_applied_verified_legacy_projection_absence",
+        ),
+        (
+            "services:\n  gateway:\n    labels:\n      agent-runtime.retrieval-enabled: 'false'\n",
+            False,
+            "rollback_live_failed:truth_retrieval_binding_matches_expected,"
+            "truth_retrieval_enabled_declared,"
+            "truth_retrieval_projection_complete_and_consistent",
+        ),
+    ],
+)
+def test_legacy_projection_absence_is_only_accepted_for_exact_pre_feature_backup(
+    tmp_path: Path,
+    compose_text: str,
+    expected_ok: bool,
+    expected_reason: str,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    agent_compose_path(runtime_dir).write_text(compose_text, encoding="utf-8")
+    agent_manifest_path(runtime_dir).write_text(
+        "slot=oc20\nfamily=hermes\nruntime_profile=hermes-runtime-customer\n",
+        encoding="utf-8",
+    )
+    backup_dir = backup_agent_runtime_state("oc20", runtime_dir, state_root)
+    agent_compose_path(runtime_dir).write_text("candidate\n", encoding="utf-8")
+    previous_desired = SimpleNamespace(image_spec={}, route=None)
+    previous_profile = SimpleNamespace(name="profile")
+    retrieval_failures = [
+        (False, "truth_retrieval_projection_complete_and_consistent", "missing"),
+        (False, "truth_retrieval_binding_matches_expected", "missing"),
+        (False, "truth_retrieval_enabled_declared", "missing"),
+    ]
+    completed = subprocess.CompletedProcess(["docker"], 0, "", "")
+    truth = {
+        "truth_status": "ok",
+        "retrieval_labels_present": "false",
+        "retrieval_projection_labels_present": "false",
+    }
+
+    with (
+        patch(
+            "agent_runtime_ops.domain.runtime_backup.run_text_cwd",
+            return_value=completed,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.load_backup_runtime_contract",
+            return_value=(previous_desired, previous_profile),
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.profile_startup_timeout_seconds",
+            return_value=1,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.run_live_slot_checks_with_wait",
+            return_value=retrieval_failures,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.live_runtime_truth",
+            return_value=(truth, []),
+        ) as live_truth,
+    ):
+        ok, reason = _restore_and_verify_backup(
+            slot="oc20",
+            runtime_dir=runtime_dir,
+            backup_dir=backup_dir,
+            state_root=state_root,
+        )
+
+    assert ok is expected_ok
+    assert reason == expected_reason
+    if expected_ok:
+        live_truth.assert_called_once_with("oc20", state_root)
+        assert pending_rollback_backup(state_root, "oc20") is None
+    else:
+        live_truth.assert_not_called()
+        assert pending_rollback_backup(state_root, "oc20") == backup_dir
 
 
 def test_pending_transaction_rejects_changed_backup_identity(tmp_path: Path) -> None:
