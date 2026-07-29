@@ -45,7 +45,11 @@ requires current host CPU, memory, and PID headroom for one more reservation. Th
 content-free observation and its digest are printed with the promotion receipt. This
 is an instantaneous admission gate, not a capacity guarantee. `shared_stateless` GPU
 profiles fail closed until a direct GPU headroom observer is defined. Default-off
-canary and promotion do not invoke this enabled-only gate.
+canary and promotion do not invoke this enabled-only gate. A persistent root-owned
+host mutation lock serializes the observation with all normal runtime apply and
+rollback operations, including operations on different slots. PID availability is
+the minimum remaining capacity across `pid_max`, `threads-max`, and every finite
+ancestor cgroup `pids.max`/`pids.current` pair.
 
 The verifier argv is image-attested, contains no shell, and accepts no query, path,
 backend, network, grant, projection, or credential argument from the operator.

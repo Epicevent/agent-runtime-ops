@@ -112,10 +112,32 @@ def test_fixed_host_observer_uses_bounded_proc_cpu_delta() -> None:
             return "0.00 0.00 0.00 2/100 1\n"
         if name.endswith("/proc/sys/kernel/pid_max"):
             return "1000\n"
+        if name.endswith("/proc/sys/kernel/threads-max"):
+            return "800\n"
+        if name.endswith("/proc/self/cgroup"):
+            return "0::/system.slice/agent.service\n"
+        raise AssertionError(name)
+
+    def read_optional_text(path: object) -> str | None:
+        name = str(path).replace("\\", "/")
+        if name.endswith("/system.slice/agent.service/pids.max"):
+            return "600\n"
+        if name.endswith("/system.slice/agent.service/pids.current"):
+            return "50\n"
+        if name.endswith("/system.slice/pids.max") or name.endswith("/pids.max"):
+            return "max\n"
+        if name.endswith("/system.slice/pids.current"):
+            return "100\n"
+        if name.endswith("/pids.current"):
+            return "200\n"
         raise AssertionError(name)
 
     with (
         patch("agent_runtime_ops.domain.retrieval_resources._read_ascii", side_effect=read_text),
+        patch(
+            "agent_runtime_ops.domain.retrieval_resources._read_optional_ascii",
+            side_effect=read_optional_text,
+        ),
         patch("agent_runtime_ops.domain.retrieval_resources.time.sleep") as sleeper,
         patch("agent_runtime_ops.domain.retrieval_resources.os.cpu_count", return_value=4),
     ):
@@ -125,7 +147,7 @@ def test_fixed_host_observer_uses_bounded_proc_cpu_delta() -> None:
     assert observed == {
         "cpu_available_millicores": 2800,
         "memory_available_bytes": 4096 * 1024,
-        "pids_available": 900,
+        "pids_available": 550,
     }
 
 

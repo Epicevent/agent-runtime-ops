@@ -22,6 +22,7 @@ from ..domain.runtime_backup import (
     load_backup_runtime_contract,
     pending_rollback_backup,
     restore_backup,
+    runtime_host_mutation_lock,
     runtime_transaction_lock,
 )
 from ..domain.runtime_manifest import desired_from_runtime_manifest
@@ -71,8 +72,9 @@ def cmd_rollback(args: argparse.Namespace) -> int:
         return 2
     state_root = _state_root(args)
     try:
-        with runtime_transaction_lock(state_root, args.slot):
-            return _cmd_rollback_locked(args, state_root)
+        with runtime_host_mutation_lock(state_root):
+            with runtime_transaction_lock(state_root, args.slot):
+                return _cmd_rollback_locked(args, state_root)
     except Exception as exc:
         print(f"target={args.slot}")
         print("rollback_status=fail")

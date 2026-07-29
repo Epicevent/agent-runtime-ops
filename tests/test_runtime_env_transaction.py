@@ -26,6 +26,7 @@ from agent_runtime_ops.domain.runtime_backup import (
     pending_rollback_backup,
     restore_backup,
     restore_backup_env,
+    runtime_host_mutation_lock,
     runtime_transaction_lock,
 )
 from agent_runtime_ops.domain.runtime_paths import (
@@ -55,6 +56,10 @@ def runtime_transaction_lock_path(state_root: Path, slot: str = "oc20") -> Path:
         / slot
         / ".agent-runtime-transaction.lock"
     )
+
+
+def runtime_host_mutation_lock_path(state_root: Path) -> Path:
+    return state_root / "runtime-recovery" / ".agent-runtime-host-mutation.lock"
 
 
 def legacy_migration_path(state_root: Path, slot: str = "oc20") -> Path:
@@ -185,6 +190,26 @@ def test_runtime_transaction_lock_serializes_same_slot_and_persists_inode(
             assert stat.S_IMODE(lock_path.stat().st_mode) == 0o600
 
 
+def test_runtime_host_mutation_lock_serializes_different_slots_and_persists_inode(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+
+    with runtime_host_mutation_lock(state_root) as lock_path:
+        assert lock_path == runtime_host_mutation_lock_path(state_root)
+        first_inode = lock_path.stat().st_ino
+        with pytest.raises(RuntimeError, match="another runtime host mutation"):
+            with runtime_host_mutation_lock(state_root):
+                pass
+
+    with runtime_host_mutation_lock(state_root) as lock_path:
+        assert lock_path.stat().st_ino == first_inode
+        if os.name != "nt":
+            assert lock_path.stat().st_uid == os.geteuid()
+            assert stat.S_IMODE(lock_path.stat().st_mode) == 0o600
+
+
 def test_apply_holds_runtime_transaction_lock_for_the_entire_slot_operation(
     tmp_path: Path,
 ) -> None:
@@ -193,6 +218,9 @@ def test_apply_holds_runtime_transaction_lock_for_the_entire_slot_operation(
     desired = SimpleNamespace(slot="oc20")
 
     def observe_locked_operation(**_: object) -> int:
+        with pytest.raises(RuntimeError, match="another runtime host mutation"):
+            with runtime_host_mutation_lock(state_root):
+                pass
         with pytest.raises(RuntimeError, match="another runtime transaction is active"):
             with runtime_transaction_lock(state_root, "oc20"):
                 pass
@@ -213,6 +241,43 @@ def test_apply_holds_runtime_transaction_lock_for_the_entire_slot_operation(
     locked_apply.assert_called_once()
 
 
+def test_apply_runs_admission_while_host_and_slot_locks_are_held(
+    tmp_path: Path,
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    desired = SimpleNamespace(slot="oc20")
+    events: list[str] = []
+
+    def admission() -> None:
+        with pytest.raises(RuntimeError, match="another runtime host mutation"):
+            with runtime_host_mutation_lock(state_root):
+                pass
+        with pytest.raises(RuntimeError, match="another runtime transaction is active"):
+            with runtime_transaction_lock(state_root, "oc20"):
+                pass
+        events.append("admitted")
+
+    def mutate(**_: object) -> int:
+        events.append("mutated")
+        return 0
+
+    with patch(
+        "agent_runtime_ops.domain.runtime_apply._apply_desired_slot_locked",
+        side_effect=mutate,
+    ):
+        rc = apply_desired_slot(
+            desired=desired,
+            profile=SimpleNamespace(),
+            state_root=state_root,
+            allow_first_apply=False,
+            pre_apply_admission=admission,
+        )
+
+    assert rc == 0
+    assert events == ["admitted", "mutated"]
+
+
 def test_manual_rollback_holds_the_same_runtime_transaction_lock(
     tmp_path: Path,
 ) -> None:
@@ -220,6 +285,9 @@ def test_manual_rollback_holds_the_same_runtime_transaction_lock(
     state_root.mkdir()
 
     def observe_locked_operation(*_: object) -> int:
+        with pytest.raises(RuntimeError, match="another runtime host mutation"):
+            with runtime_host_mutation_lock(state_root):
+                pass
         with pytest.raises(RuntimeError, match="another runtime transaction is active"):
             with runtime_transaction_lock(state_root, "oc20"):
                 pass

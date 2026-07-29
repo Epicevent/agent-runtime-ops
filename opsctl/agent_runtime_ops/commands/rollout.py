@@ -340,16 +340,24 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
             if desired.runtime_class != "customer":
                 raise ValueError(f"promotion target is not a customer target: {slot}")
             _require_retrieval_approval(desired, state_root)
-            if source_retrieval_container is not None:
+
+            def verify_headroom_before_apply(
+                *,
+                target: str = slot,
+                target_image_spec: dict[str, object] = desired.image_spec,
+            ) -> None:
+                if source_retrieval_container is None:
+                    return
                 headroom = measure_retrieval_promotion_headroom(
                     source_retrieval_container,
-                    source_desired.image_spec,
+                    target_image_spec,
                 )
                 for key in sorted(headroom):
-                    print(f"retrieval_headroom[{slot}].{key}={headroom[key]}")
+                    print(f"retrieval_headroom[{target}].{key}={headroom[key]}")
                 digest = str(headroom["observationDigest"])
                 headroom_observation_digests.append(digest)
                 _check_line(True, "promotion_retrieval_headroom_verified", digest)
+
             _ensure_runtime_dir(desired.slot)
             rc = _apply_desired_slot(
                 desired=desired,
@@ -360,6 +368,7 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
                 prepare_runtime_env=lambda desired=desired, profile=profile: (
                     _prepare_runtime_env_for_direct_image(desired, profile)
                 ),
+                pre_apply_admission=verify_headroom_before_apply,
             )
             if rc != 0:
                 print("rollout_image_promote_status=partial")

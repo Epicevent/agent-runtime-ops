@@ -36,6 +36,7 @@ _BACKUP_NAME = re.compile(
 _ROLLBACK_TRANSACTION_SCHEMA = "agent-runtime-rollback-transaction/v1"
 _ROLLBACK_TRANSACTION_NAME = ".agent-runtime-rollback-transaction.json"
 _RUNTIME_TRANSACTION_LOCK_NAME = ".agent-runtime-transaction.lock"
+_RUNTIME_HOST_MUTATION_LOCK_NAME = ".agent-runtime-host-mutation.lock"
 _LEGACY_RETRIEVAL_MIGRATION_SCHEMA = "agent-runtime-legacy-retrieval-migration/v1"
 _LEGACY_RETRIEVAL_MIGRATION_NAME = ".agent-runtime-legacy-retrieval-migration.json"
 _LEGACY_RETRIEVAL_MIGRATION_KEYS = {
@@ -346,6 +347,10 @@ def _runtime_transaction_lock_path(state_root: Path, slot: str) -> Path:
     return runtime_recovery_dir(state_root, slot) / _RUNTIME_TRANSACTION_LOCK_NAME
 
 
+def _runtime_host_mutation_lock_path(state_root: Path) -> Path:
+    return state_root / "runtime-recovery" / _RUNTIME_HOST_MUTATION_LOCK_NAME
+
+
 def _legacy_retrieval_migration_path(state_root: Path, slot: str) -> Path:
     return runtime_recovery_dir(state_root, slot) / _LEGACY_RETRIEVAL_MIGRATION_NAME
 
@@ -390,15 +395,65 @@ def _ensure_controlled_directory(path: Path, *, parent: Path) -> bool:
     return created
 
 
-def _ensure_recovery_paths(state_root: Path, slot: str) -> tuple[Path, Path]:
+def _ensure_recovery_root(state_root: Path) -> Path:
     _validate_controlled_directory(state_root)
     recovery_root = state_root / "runtime-recovery"
     _ensure_controlled_directory(recovery_root, parent=state_root)
+    return recovery_root
+
+
+def _ensure_recovery_paths(state_root: Path, slot: str) -> tuple[Path, Path]:
+    recovery_root = _ensure_recovery_root(state_root)
     recovery_dir = runtime_recovery_dir(state_root, slot)
     _ensure_controlled_directory(recovery_dir, parent=recovery_root)
     backup_root = agent_backup_root(state_root, slot)
     _ensure_controlled_directory(backup_root, parent=recovery_dir)
     return recovery_dir, backup_root
+
+
+@contextmanager
+def runtime_host_mutation_lock(state_root: Path) -> Iterator[Path]:
+    """Serialize capacity admission with every runtime apply and rollback."""
+
+    recovery_root = _ensure_recovery_root(state_root)
+    lock_path = _runtime_host_mutation_lock_path(state_root)
+    if lock_path.is_symlink():
+        raise ValueError(f"runtime host mutation lock must not be a symlink: {lock_path}")
+    flags = os.O_RDWR | os.O_CREAT
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(lock_path, flags, 0o600)
+    windows_lock: threading.Lock | None = None
+    windows_lock_held = False
+    posix_lock_held = False
+    try:
+        _validate_runtime_lock_descriptor(descriptor, lock_path)
+        if lock_path.parent != recovery_root:
+            raise ValueError(f"runtime host mutation lock parent mismatch: {lock_path}")
+        if os.name == "nt":
+            key = str(lock_path.resolve(strict=False)).casefold()
+            with _WINDOWS_LOCKS_GUARD:
+                windows_lock = _WINDOWS_LOCKS.setdefault(key, threading.Lock())
+            if not windows_lock.acquire(blocking=False):
+                raise RuntimeError("another runtime host mutation is active")
+            windows_lock_held = True
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise RuntimeError("another runtime host mutation is active") from exc
+            posix_lock_held = True
+        yield lock_path
+    finally:
+        if windows_lock_held and windows_lock is not None:
+            windows_lock.release()
+        if posix_lock_held:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
 
 
 def _validate_runtime_lock_descriptor(descriptor: int, path: Path) -> None:

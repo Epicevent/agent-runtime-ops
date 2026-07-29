@@ -30,6 +30,7 @@ from .runtime_backup import (
     load_backup_runtime_contract,
     restore_backup,
     restore_backup_env,
+    runtime_host_mutation_lock,
     runtime_transaction_lock,
 )
 from .runtime_manifest import write_slot_manifests
@@ -214,18 +215,22 @@ def apply_desired_slot(
     action_name: str = "apply",
     emit_progress: bool = False,
     prepare_runtime_env: Callable[[], None] | None = None,
+    pre_apply_admission: Callable[[], None] | None = None,
 ) -> int:
     try:
-        with runtime_transaction_lock(state_root, desired.slot):
-            return _apply_desired_slot_locked(
-                desired=desired,
-                profile=profile,
-                state_root=state_root,
-                allow_first_apply=allow_first_apply,
-                action_name=action_name,
-                emit_progress=emit_progress,
-                prepare_runtime_env=prepare_runtime_env,
-            )
+        with runtime_host_mutation_lock(state_root):
+            with runtime_transaction_lock(state_root, desired.slot):
+                if pre_apply_admission is not None:
+                    pre_apply_admission()
+                return _apply_desired_slot_locked(
+                    desired=desired,
+                    profile=profile,
+                    state_root=state_root,
+                    allow_first_apply=allow_first_apply,
+                    action_name=action_name,
+                    emit_progress=emit_progress,
+                    prepare_runtime_env=prepare_runtime_env,
+                )
     except Exception as exc:
         print(f"target={getattr(desired, 'slot', '')}")
         print("apply_status=fail")

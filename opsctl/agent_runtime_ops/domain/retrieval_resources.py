@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import time
@@ -131,10 +131,71 @@ def _read_ascii(path: Path) -> str:
     return path.read_text(encoding="ascii")
 
 
+def _read_optional_ascii(path: Path) -> str | None:
+    try:
+        return _read_ascii(path)
+    except FileNotFoundError:
+        return None
+
+
+def _cgroup_pid_location(raw: str) -> tuple[Path, tuple[str, ...]]:
+    for line in raw.splitlines():
+        parts = line.split(":", 2)
+        if len(parts) != 3:
+            raise ValueError("host cgroup PID observation is invalid")
+        hierarchy, controllers, relative_raw = parts
+        controller_set = set(controllers.split(",")) if controllers else set()
+        if (hierarchy == "0" and not controller_set) or "pids" in controller_set:
+            relative = PurePosixPath(relative_raw)
+            if not relative.is_absolute() or any(
+                part in {"", ".", ".."} for part in relative.parts[1:]
+            ):
+                raise ValueError("host cgroup PID path is invalid")
+            root = (
+                Path("/sys/fs/cgroup")
+                if hierarchy == "0" and not controller_set
+                else Path("/sys/fs/cgroup/pids")
+            )
+            return root, tuple(relative.parts[1:])
+    raise ValueError("host cgroup PID controller is unavailable")
+
+
+def _cgroup_pid_availability(raw: str) -> int:
+    root, relative_parts = _cgroup_pid_location(raw)
+    current = root.joinpath(*relative_parts)
+    observed = False
+    available_limits: list[int] = []
+    while True:
+        maximum_raw = _read_optional_ascii(current / "pids.max")
+        usage_raw = _read_optional_ascii(current / "pids.current")
+        if (maximum_raw is None) != (usage_raw is None):
+            raise ValueError("host cgroup PID observation is incomplete")
+        if maximum_raw is not None and usage_raw is not None:
+            observed = True
+            maximum = maximum_raw.strip()
+            usage = usage_raw.strip()
+            if re.fullmatch(r"\d+", usage) is None:
+                raise ValueError("host cgroup PID usage is invalid")
+            if maximum != "max":
+                if re.fullmatch(r"\d+", maximum) is None:
+                    raise ValueError("host cgroup PID limit is invalid")
+                available_limits.append(max(0, int(maximum) - int(usage)))
+        if current == root:
+            break
+        if root not in current.parents:
+            raise ValueError("host cgroup PID path escaped its fixed root")
+        current = current.parent
+    if not observed:
+        raise ValueError("host cgroup PID observation is unavailable")
+    return min(available_limits) if available_limits else 2**63 - 1
+
+
 def _fixed_host_headroom() -> dict[str, int]:
     meminfo_path = Path("/proc/meminfo")
     loadavg_path = Path("/proc/loadavg")
     pid_max_path = Path("/proc/sys/kernel/pid_max")
+    threads_max_path = Path("/proc/sys/kernel/threads-max")
+    cgroup_path = Path("/proc/self/cgroup")
     stat_path = Path("/proc/stat")
     stat_before = _read_ascii(stat_path)
     time.sleep(0.1)
@@ -142,12 +203,16 @@ def _fixed_host_headroom() -> dict[str, int]:
     meminfo = _read_ascii(meminfo_path)
     loadavg = _read_ascii(loadavg_path).strip()
     pid_max_text = _read_ascii(pid_max_path).strip()
+    threads_max_text = _read_ascii(threads_max_path).strip()
+    cgroup_text = _read_ascii(cgroup_path)
     if (
         len(stat_before) > 64 * 1024
         or len(stat_after) > 64 * 1024
         or len(meminfo) > 64 * 1024
         or len(loadavg) > 1024
         or len(pid_max_text) > 64
+        or len(threads_max_text) > 64
+        or len(cgroup_text) > 64 * 1024
     ):
         raise ValueError("host resource observation exceeds fixed bounds")
     available_match = re.search(r"^MemAvailable:\s+(\d+)\s+kB$", meminfo, re.MULTILINE)
@@ -155,7 +220,11 @@ def _fixed_host_headroom() -> dict[str, int]:
     if available_match is None or len(load_parts) < 4:
         raise ValueError("host resource observation is incomplete")
     task_match = re.fullmatch(r"\d+/(\d+)", load_parts[3])
-    if task_match is None or re.fullmatch(r"\d+", pid_max_text) is None:
+    if (
+        task_match is None
+        or re.fullmatch(r"\d+", pid_max_text) is None
+        or re.fullmatch(r"\d+", threads_max_text) is None
+    ):
         raise ValueError("host PID observation is invalid")
     cpu_count = os.cpu_count()
     if not isinstance(cpu_count, int) or cpu_count < 1:
@@ -169,11 +238,17 @@ def _fixed_host_headroom() -> dict[str, int]:
         raise ValueError("host CPU counter delta is invalid")
     available_millicores = (total_millicores * idle_delta) // total_delta
     pid_max = int(pid_max_text)
+    threads_max = int(threads_max_text)
     tasks = int(task_match.group(1))
+    cgroup_pid_available = _cgroup_pid_availability(cgroup_text)
     return {
         "cpu_available_millicores": available_millicores,
         "memory_available_bytes": int(available_match.group(1)) * 1024,
-        "pids_available": max(0, pid_max - tasks),
+        "pids_available": min(
+            max(0, pid_max - tasks),
+            max(0, threads_max - tasks),
+            cgroup_pid_available,
+        ),
     }
 
 

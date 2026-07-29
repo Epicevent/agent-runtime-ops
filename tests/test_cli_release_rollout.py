@@ -2018,6 +2018,10 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 }
 
             def applied(**kwargs: object) -> int:
+                admission = kwargs.get("pre_apply_admission")
+                self.assertIsNotNone(admission)
+                assert callable(admission)
+                admission()
                 events.append("target_applied")
                 return 0
 
@@ -2111,6 +2115,16 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 route=routes["oc4"],
             )
             output = io.StringIO()
+            target_mutations: list[str] = []
+
+            def apply_with_admission(**kwargs: object) -> int:
+                admission = kwargs.get("pre_apply_admission")
+                self.assertIsNotNone(admission)
+                assert callable(admission)
+                admission()
+                target_mutations.append("target_applied")
+                return 0
+
             with (
                 patch("agent_runtime_ops.commands.rollout._is_root", return_value=True),
                 patch(
@@ -2145,7 +2159,10 @@ class CliReleaseRolloutTests(unittest.TestCase):
                         "host memory headroom is below retrieval reservation"
                     ),
                 ),
-                patch("agent_runtime_ops.commands.rollout._apply_desired_slot") as apply,
+                patch(
+                    "agent_runtime_ops.commands.rollout._apply_desired_slot",
+                    side_effect=apply_with_admission,
+                ) as apply,
                 contextlib.redirect_stdout(output),
             ):
                 rc = cmd_rollout_image_promote(
@@ -2161,7 +2178,8 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 "host memory headroom is below retrieval reservation",
                 output.getvalue(),
             )
-            apply.assert_not_called()
+            self.assertEqual(target_mutations, [])
+            apply.assert_called_once()
 
     def test_runtime_truth_compares_image_recipe_digest_to_local_canonical_recipe(self) -> None:
         ok, name, detail = local_canonical_recipe_check_from_truth(
