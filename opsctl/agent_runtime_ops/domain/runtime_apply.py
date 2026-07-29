@@ -8,7 +8,7 @@ from typing import Callable
 
 import os
 
-from ..host.account_files import ensure_not_symlink_chain, runtime_ids
+from ..host.account_files import ensure_not_symlink_chain, runtime_ids, slot_uid_gid
 from ..redaction import redact
 from ..renderer import render_compose
 from ..routing import RuntimeBinding
@@ -49,7 +49,12 @@ from .runtime_paths import (
     state_manifest_path,
 )
 from .runtime_truth import find_gateway_container, live_runtime_truth
-from .retrieval_contract import run_retrieval_status_probe
+from .dev_recipe_runtime import upsert_runtime_env_file
+from .retrieval_contract import (
+    require_retrieval_approval,
+    retrieval_env,
+    run_retrieval_status_probe,
+)
 from .workspace_guidance import ensure_runtime_workspace_guidance
 
 
@@ -263,6 +268,10 @@ def _apply_desired_slot_locked(
     backup_dir: Path | None = None
     runtime_env_prepared = False
     try:
+        # This check is deliberately inside both the host mutation lock and the
+        # slot transaction lock.  Command-level planning is useful diagnostics,
+        # but only this current policy read is authoritative for mutation.
+        require_retrieval_approval(desired, state_root)
         rendered = render_compose(profile, desired)
         static_failures = [
             name for ok, name, _ in run_static_slot_checks(desired, profile, rendered, state_root=state_root) if not ok
@@ -297,6 +306,21 @@ def _apply_desired_slot_locked(
                 )
         backup_dir = backup_agent_runtime_state(desired.slot, runtime_dir, state_root)
         begin_rollback_transaction(desired.slot, state_root, backup_dir)
+        # Runtime manifests are also accepted by ordinary ``opsctl apply``.
+        # Project their retrieval intent through the same recoverable .env
+        # transaction as direct-image rollout commands. Legacy/non-image test
+        # fixtures without the field remain outside this extension.
+        if "retrieval_enabled" in desired.image_spec:
+            runtime_env_prepared = True
+            retrieval_updates = retrieval_env(desired.image_spec)
+            uid, gid = slot_uid_gid(desired.slot)
+            upsert_runtime_env_file(
+                runtime_dir / ".env",
+                retrieval_updates,
+                uid,
+                gid,
+                remove_empty_keys=set(retrieval_updates),
+            )
         if prepare_runtime_env is not None:
             runtime_env_prepared = True
             prepare_runtime_env()

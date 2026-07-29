@@ -10,6 +10,7 @@ import tempfile
 from typing import Any
 
 from ..yamlio import dump_yaml, load_yaml
+from .common import is_dev_slot
 from .artifact_probe import (
     ArtifactProbeError,
     CommandResult,
@@ -522,6 +523,40 @@ def retrieval_contract_is_approved(
         "source_archive_digest": contract.get("source_archive_digest"),
     }
     return all(item.get(key) == value for key, value in expected.items())
+
+
+def require_retrieval_approval(desired: object, state_root: Path) -> None:
+    """Fail closed on enabled production retrieval inside the apply lock.
+
+    Command-specific preflights may call this too, but the shared apply path is
+    authoritative so an ordinary ``opsctl apply`` cannot bypass approval and a
+    policy rotation between planning and mutation is observed.
+    """
+    image_spec = getattr(desired, "image_spec", None)
+    if not isinstance(image_spec, dict) or image_spec.get("retrieval_enabled") is not True:
+        return
+    slot = str(getattr(desired, "slot", "") or "")
+    if is_dev_slot(slot):
+        return
+    contract = image_spec.get("retrieval_contract")
+    if not isinstance(contract, dict):
+        raise ValueError("retrieval is enabled without an embedded component contract")
+    product_image = image_spec.get("product_image")
+    if not isinstance(product_image, str) or "@" not in product_image:
+        raise ValueError("retrieval product image must be pinned by digest")
+    product_digest = product_image.rsplit("@", 1)[1]
+    if not SHA256_RE.fullmatch(product_digest):
+        raise ValueError("retrieval product image must be pinned by sha256 digest")
+    family = str(getattr(desired, "family", "") or "")
+    if not retrieval_contract_is_approved(
+        state_root,
+        family,
+        contract,
+        product_image_digest=product_digest,
+    ):
+        raise ValueError(
+            "production retrieval enablement requires exact component approval"
+        )
 
 
 def validate_retrieval_status(

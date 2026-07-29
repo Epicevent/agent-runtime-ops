@@ -1383,6 +1383,133 @@ def test_apply_backs_up_env_before_prepare_and_restores_on_pre_dispatch_failure(
     assert env_path.read_text(encoding="utf-8") == original
 
 
+def test_shared_apply_rechecks_retrieval_approval_before_any_mutation(
+    tmp_path: Path,
+) -> None:
+    desired = SimpleNamespace(
+        slot="oc20",
+        route=None,
+        family="hermes",
+        image_spec={"retrieval_enabled": True},
+        image_name="direct-image",
+    )
+    profile = SimpleNamespace(
+        name="hermes-runtime-customer",
+        digest="sha256:" + "a" * 64,
+    )
+    with (
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.require_retrieval_approval",
+            side_effect=ValueError("approval rotated"),
+        ) as approval,
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.backup_agent_runtime_state"
+        ) as backup,
+        patch("agent_runtime_ops.domain.runtime_apply.append_action_log"),
+    ):
+        rc = apply_desired_slot(
+            desired=desired,
+            profile=profile,
+            state_root=tmp_path,
+            allow_first_apply=True,
+        )
+
+    assert rc == 1
+    approval.assert_called_once_with(desired, tmp_path)
+    backup.assert_not_called()
+
+
+def test_shared_apply_projects_retrieval_env_for_manifest_driven_apply(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    env_path = runtime_dir / ".env"
+    env_path.write_text("UNCHANGED=old\n", encoding="utf-8")
+    desired = SimpleNamespace(
+        slot="oc20",
+        route=None,
+        family="hermes",
+        image_spec={"retrieval_enabled": False},
+        image_name="direct-image",
+    )
+    profile = SimpleNamespace(
+        name="hermes-runtime-customer",
+        digest="sha256:" + "a" * 64,
+    )
+    rendered = SimpleNamespace(text="services: {}\n", sha256="sha256:" + "b" * 64)
+    retrieval_updates = {
+        "JITECH_RETRIEVAL_ENABLED": "false",
+        "JITECH_RETRIEVAL_COMPONENT_DIGEST": "",
+        "JITECH_RETRIEVAL_BINDING_DIGEST": "sha256:" + "c" * 64,
+        "JITECH_RETRIEVAL_RESOURCE_PROFILE_DIGEST": "",
+    }
+    with (
+        patch("agent_runtime_ops.domain.runtime_apply.require_retrieval_approval"),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.render_compose",
+            return_value=rendered,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.run_static_slot_checks",
+            return_value=[],
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.slot_runtime_dir",
+            return_value=runtime_dir,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.ensure_nas_workspace_dir",
+            return_value=tmp_path / "nas",
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.ensure_runtime_workspace_guidance",
+            return_value={},
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.image_spec_config_contract",
+            return_value=None,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.retrieval_env",
+            return_value=retrieval_updates,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.slot_uid_gid",
+            return_value=(1000, 1000),
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.upsert_runtime_env_file"
+        ) as upsert,
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.required_compose_variables",
+            return_value=set(),
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.atomic_write",
+            side_effect=RuntimeError("pre-dispatch-stop"),
+        ),
+        patch("agent_runtime_ops.domain.runtime_apply.append_action_log"),
+    ):
+        rc = apply_desired_slot(
+            desired=desired,
+            profile=profile,
+            state_root=state_root,
+            allow_first_apply=True,
+        )
+
+    assert rc == 1
+    upsert.assert_called_once_with(
+        env_path,
+        retrieval_updates,
+        1000,
+        1000,
+        remove_empty_keys=set(retrieval_updates),
+    )
+
+
 def test_apply_keeps_prepared_env_after_successful_dispatch(tmp_path: Path) -> None:
     runtime_dir = tmp_path / "runtime"
     runtime_dir.mkdir()

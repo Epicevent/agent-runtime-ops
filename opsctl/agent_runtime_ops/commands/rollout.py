@@ -15,7 +15,6 @@ from ..domain.common import OPERATOR_ACCOUNTS as _OPERATOR_ACCOUNTS
 from ..domain.common import state_root as _state_root
 from ..domain.image_specs import (
     IMAGE_ROLLOUT_IMAGE_NAME,
-    digest_from_image_ref,
     image_spec_from_direct_images,
     image_spec_recipe_payload,
     profile_runtime_contract,
@@ -28,8 +27,7 @@ from ..domain.runtime_checks import run_live_slot_checks as _run_live_slot_check
 from ..domain.runtime_checks import run_static_slot_checks as _run_static_slot_checks
 from ..domain.runtime_rollup import runtime_manifest_rollup
 from ..domain.retrieval_contract import (
-    retrieval_contract_is_approved,
-    retrieval_env,
+    require_retrieval_approval,
     run_retrieval_status_probe,
 )
 from ..domain.retrieval_resources import measure_retrieval_promotion_headroom
@@ -108,23 +106,7 @@ def _direct_image_spec_from_args(args: argparse.Namespace) -> dict[str, object]:
 
 
 def _require_retrieval_approval(desired, state_root) -> None:
-    if desired.image_spec.get("retrieval_enabled") is not True or _is_dev_named_target(
-        desired.slot
-    ):
-        return
-    contract = desired.image_spec.get("retrieval_contract")
-    if not isinstance(contract, dict):
-        raise ValueError("retrieval is enabled without an embedded component contract")
-    product_digest = digest_from_image_ref(
-        desired.image_spec.get("product_image")
-    ) or ""
-    if not retrieval_contract_is_approved(
-        state_root,
-        desired.family,
-        contract,
-        product_image_digest=product_digest,
-    ):
-        raise ValueError("production retrieval enablement requires exact component approval")
+    require_retrieval_approval(desired, state_root)
 
 
 def _prepare_runtime_env_for_direct_image(desired, profile) -> None:
@@ -136,8 +118,6 @@ def _prepare_runtime_env_for_direct_image(desired, profile) -> None:
         "OPENCLAW_GATEWAY_PORT": str(desired.route.gateway_port if desired.route else ""),
         "OPENCLAW_BRIDGE_PORT": str(desired.route.bridge_port if desired.route else ""),
     }
-    retrieval_updates = retrieval_env(desired.image_spec)
-    updates.update(retrieval_updates)
     secret_file = primary_profile_secret_file(profile, desired.slot)
     if secret_file.path.exists():
         if secret_file.path.is_symlink() or not secret_file.path.is_file():
@@ -153,7 +133,6 @@ def _prepare_runtime_env_for_direct_image(desired, profile) -> None:
         updates,
         uid,
         gid,
-        remove_empty_keys=set(retrieval_updates),
     )
 
 

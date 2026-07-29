@@ -20,6 +20,7 @@ from agent_runtime_ops.domain.retrieval_contract import (
     parse_retrieval_status_output,
     retrieval_contract_from_labels,
     retrieval_contract_is_approved,
+    require_retrieval_approval,
     run_retrieval_status_probe,
     validate_retrieval_status,
     validate_retrieval_target_binding,
@@ -622,6 +623,22 @@ def test_every_runtime_profile_projects_same_in_process_binding_labels() -> None
         assert "kwrag_net" not in text
 
 
+def test_hermes_profiles_make_managed_retrieval_intent_authoritative() -> None:
+    profile_root = Path(__file__).parents[1] / "profiles" / "runtime"
+    hermes_templates = sorted(profile_root.glob("hermes-*/compose.yml.tpl"))
+    assert len(hermes_templates) == 6
+    required_environment = {
+        'JITECH_RETRIEVAL_ENABLED: "${JITECH_RETRIEVAL_ENABLED}"',
+        'JITECH_RETRIEVAL_COMPONENT_DIGEST: "${JITECH_RETRIEVAL_COMPONENT_DIGEST:-}"',
+        'JITECH_RETRIEVAL_BINDING_DIGEST: "${JITECH_RETRIEVAL_BINDING_DIGEST}"',
+        'JITECH_RETRIEVAL_RESOURCE_PROFILE_DIGEST: "${JITECH_RETRIEVAL_RESOURCE_PROFILE_DIGEST:-}"',
+    }
+    for template in hermes_templates:
+        text = template.read_text(encoding="utf-8")
+        assert '      - "{{ target_home }}/.hermes/.env"' in text
+        assert all(item in text for item in required_environment)
+
+
 def test_probe_uses_fixed_docker_exec_argv_and_bounded_content_free_output() -> None:
     spec = capable_spec(enabled=True)
     seen: list[object] = []
@@ -691,6 +708,54 @@ def test_component_approval_is_separate_exact_product_binding(tmp_path: Path) ->
     assert not retrieval_contract_is_approved(
         tmp_path, "openclaw", contract, product_image_digest=DIGEST_A
     )
+
+
+def test_enabled_production_retrieval_requires_current_exact_approval(
+    tmp_path: Path,
+) -> None:
+    spec = capable_spec(enabled=True)
+    spec["product_image"] = "ghcr.io/epicevent/openclaw-jitech@" + DIGEST_D
+    desired = SimpleNamespace(slot="oc20", family="openclaw", image_spec=spec)
+    with pytest.raises(ValueError, match="requires exact component approval"):
+        require_retrieval_approval(desired, tmp_path)
+
+    contract = spec["retrieval_contract"]
+    assert isinstance(contract, dict)
+    with patch(
+        "agent_runtime_ops.domain.retrieval_contract.os.chown",
+        create=True,
+    ):
+        write_retrieval_approval(
+            tmp_path,
+            "openclaw",
+            contract,
+            product_image_digest=DIGEST_D,
+        )
+    require_retrieval_approval(desired, tmp_path)
+
+    desired.image_spec["product_image"] = (
+        "ghcr.io/epicevent/openclaw-jitech@" + DIGEST_A
+    )
+    with pytest.raises(ValueError, match="requires exact component approval"):
+        require_retrieval_approval(desired, tmp_path)
+
+
+def test_disabled_and_dev_retrieval_do_not_require_production_approval(
+    tmp_path: Path,
+) -> None:
+    disabled = SimpleNamespace(
+        slot="oc20",
+        family="openclaw",
+        image_spec=capable_spec(enabled=False),
+    )
+    require_retrieval_approval(disabled, tmp_path)
+
+    dev = SimpleNamespace(
+        slot="dev-oc-img",
+        family="openclaw",
+        image_spec=capable_spec(enabled=True),
+    )
+    require_retrieval_approval(dev, tmp_path)
 
 
 def test_cli_surface_has_enable_flag_but_no_third_image_or_policy_inputs() -> None:
