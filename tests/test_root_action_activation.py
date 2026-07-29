@@ -12,6 +12,8 @@ import pytest
 from agent_runtime_ops.commands.root_action import cmd_root_action_auth_activate
 from agent_runtime_ops.root_action_activation import (
     ROOT_ACTION_BROKER_SERVICE,
+    ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS,
+    ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS,
     RootActionActivationConfig,
     RootActionActivationError,
     activate_root_action_broker,
@@ -28,13 +30,73 @@ class CommandRecorder:
         self.commands: list[tuple[str, ...]] = []
         self.fail_at = fail_at
 
-    def __call__(self, argv):
+    def __call__(self, argv, timeout_seconds):
         command = tuple(argv)
         self.commands.append(command)
+        assert timeout_seconds in {
+            ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS,
+            ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS,
+        }
         return subprocess.CompletedProcess(
             command,
             1 if self.fail_at == len(self.commands) else 0,
             stdout="4242\n" if command[1] == "show" else "",
+            stderr="not exposed",
+        )
+
+
+class DelayedAttestationRecorder:
+    def __init__(self) -> None:
+        self.commands: list[tuple[str, ...]] = []
+        self.round = 0
+
+    def __call__(self, argv, timeout_seconds):
+        command = tuple(argv)
+        self.commands.append(command)
+        assert timeout_seconds in {
+            ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS,
+            ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS,
+        }
+        returncode = 0
+        stdout = ""
+        if command[1] == "is-enabled":
+            self.round += 1
+        elif command[1] == "is-active" and self.round == 1:
+            returncode = 1
+        elif command[1] == "show":
+            stdout = "0\n" if self.round == 2 else "4242\n"
+        return subprocess.CompletedProcess(
+            command,
+            returncode,
+            stdout=stdout,
+            stderr="not exposed",
+        )
+
+
+class PersistentPostRestartFailureRecorder(CommandRecorder):
+    def __call__(self, argv, timeout_seconds):
+        command = tuple(argv)
+        self.commands.append(command)
+        if command[1] == "is-active":
+            raise subprocess.TimeoutExpired(command, timeout_seconds)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="4242\n" if command[1] == "show" else "",
+            stderr="not exposed",
+        )
+
+
+class MutationTimeoutRecorder(CommandRecorder):
+    def __call__(self, argv, timeout_seconds):
+        command = tuple(argv)
+        self.commands.append(command)
+        if command[1] == "restart":
+            raise subprocess.TimeoutExpired(command, timeout_seconds)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="",
             stderr="not exposed",
         )
 
@@ -173,12 +235,126 @@ def test_activation_reports_systemd_failure_without_exposing_output(
     assert env_path.exists()
 
 
+def test_activation_converts_mutation_timeout_to_bounded_fail_closed(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "agent-runtime-ops"
+    parent.mkdir(mode=0o700)
+    recorder = MutationTimeoutRecorder()
+    with pytest.raises(RootActionActivationError, match="activation failed closed"):
+        activate_root_action_broker(
+            CONFIG,
+            env_path=parent / "root-action-webauthn.env",
+            expected_owner_uid=os.getuid() if hasattr(os, "getuid") else 0,
+            enforce_posix_permissions=os.name == "posix",
+            run_command=recorder,
+            **activation_runtime(tmp_path),
+        )
+    assert [command[1] for command in recorder.commands] == [
+        "daemon-reload",
+        "enable",
+        "restart",
+    ]
+
+
+def test_activation_retries_only_post_restart_attestation_until_all_facts_match(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "agent-runtime-ops"
+    parent.mkdir(mode=0o700)
+    release = tmp_path / "release-under-test"
+    recorder = DelayedAttestationRecorder()
+    sleeps: list[float] = []
+
+    def delayed_environment(_pid: int) -> bytes:
+        if recorder.round == 3:
+            return b"AGENT_RUNTIME_OPS_RELEASE=/opt/old-release\0"
+        return f"AGENT_RUNTIME_OPS_RELEASE={release}\0".encode("utf-8")
+
+    result = activate_root_action_broker(
+        CONFIG,
+        env_path=parent / "root-action-webauthn.env",
+        expected_owner_uid=os.getuid() if hasattr(os, "getuid") else 0,
+        enforce_posix_permissions=os.name == "posix",
+        run_command=recorder,
+        expected_release=release,
+        read_running_environment=delayed_environment,
+        attestation_attempts=4,
+        attestation_interval_seconds=0.25,
+        sleep=sleeps.append,
+    )
+
+    assert result["running_release"] == str(release)
+    assert recorder.round == 4
+    assert sleeps == [0.25, 0.25, 0.25]
+    for mutation in ("daemon-reload", "enable", "restart"):
+        assert sum(command[1] == mutation for command in recorder.commands) == 1
+    assert sum(command[1] == "is-enabled" for command in recorder.commands) == 4
+    assert sum(command[1] == "is-active" for command in recorder.commands) == 4
+    assert sum(command[1] == "show" for command in recorder.commands) == 4
+
+
+def test_activation_fails_closed_after_bounded_persistent_post_restart_timeout(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "agent-runtime-ops"
+    parent.mkdir(mode=0o700)
+    recorder = PersistentPostRestartFailureRecorder()
+    sleeps: list[float] = []
+    with pytest.raises(RootActionActivationError, match="attestation failed closed"):
+        activate_root_action_broker(
+            CONFIG,
+            env_path=parent / "root-action-webauthn.env",
+            expected_owner_uid=os.getuid() if hasattr(os, "getuid") else 0,
+            enforce_posix_permissions=os.name == "posix",
+            run_command=recorder,
+            expected_release=tmp_path / "expected-release",
+            read_running_environment=lambda _pid: (
+                b"AGENT_RUNTIME_OPS_RELEASE=/opt/old-release\0"
+            ),
+            attestation_attempts=3,
+            attestation_interval_seconds=0.25,
+            sleep=sleeps.append,
+        )
+    assert sleeps == [0.25, 0.25]
+    for mutation in ("daemon-reload", "enable", "restart"):
+        assert sum(command[1] == mutation for command in recorder.commands) == 1
+    assert sum(command[1] == "is-active" for command in recorder.commands) == 3
+
+
+def test_activation_fails_closed_after_bounded_persistent_release_mismatch(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "agent-runtime-ops"
+    parent.mkdir(mode=0o700)
+    recorder = CommandRecorder()
+    sleeps: list[float] = []
+    with pytest.raises(RootActionActivationError, match="attestation failed closed"):
+        activate_root_action_broker(
+            CONFIG,
+            env_path=parent / "root-action-webauthn.env",
+            expected_owner_uid=os.getuid() if hasattr(os, "getuid") else 0,
+            enforce_posix_permissions=os.name == "posix",
+            run_command=recorder,
+            expected_release=tmp_path / "expected-release",
+            read_running_environment=lambda _pid: (
+                b"AGENT_RUNTIME_OPS_RELEASE=/opt/old-release\0"
+            ),
+            attestation_attempts=3,
+            attestation_interval_seconds=0.25,
+            sleep=sleeps.append,
+        )
+    assert sleeps == [0.25, 0.25]
+    assert sum(command[1] == "restart" for command in recorder.commands) == 1
+    assert sum(command[1] == "show" for command in recorder.commands) == 3
+
+
 def test_activation_fails_if_running_process_is_not_the_installed_release(
     tmp_path: Path,
 ) -> None:
     parent = tmp_path / "agent-runtime-ops"
     parent.mkdir(mode=0o700)
-    with pytest.raises(RootActionActivationError, match="not running"):
+    with pytest.raises(RootActionActivationError, match="attestation failed closed"):
         activate_root_action_broker(
             CONFIG,
             env_path=parent / "root-action-webauthn.env",
@@ -189,6 +365,8 @@ def test_activation_fails_if_running_process_is_not_the_installed_release(
             read_running_environment=lambda _pid: (
                 b"AGENT_RUNTIME_OPS_RELEASE=/opt/agent-runtime-ops/releases/old\0"
             ),
+            attestation_attempts=1,
+            attestation_interval_seconds=0,
         )
 
 

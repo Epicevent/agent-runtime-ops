@@ -40,6 +40,10 @@ ROOT_ACTION_PUBLIC_ROOT="$ROOT_ACTION_STATE_ROOT/public"
 ROOT_ACTION_RUNTIME_ROOT="/run/agent-runtime-ops"
 ROOT_ACTION_BROKER_SERVICE_FILE="/etc/systemd/system/agent-runtime-root-action-broker.service"
 ROOT_ACTION_TRUSTED_ACCOUNT="svcops"
+ROOT_ACTION_POST_RESTART_ATTESTATION_ATTEMPTS=40
+ROOT_ACTION_POST_RESTART_ATTESTATION_INTERVAL_SECONDS=0.25
+ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS=30
+ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=1
 USAGE_DB_DEFAULTS_FILE="${AGENT_RUNTIME_USAGE_DB_DEFAULTS_FILE:-/etc/agent-runtime-ops/usage-writer.cnf}"
 USAGE_PRICING_DIR="${AGENT_RUNTIME_USAGE_PRICING_DIR:-$STATE_ROOT/usage-pricing}"
 USAGE_PRICING_FILE="${AGENT_RUNTIME_USAGE_PRICING_FILE:-$USAGE_PRICING_DIR/current.json}"
@@ -282,10 +286,40 @@ install_python_env() {
   "$release_dir/.venv/bin/opsctl" profile list >/dev/null
 }
 
+root_action_broker_release_attested() {
+  local service_name="$1"
+  local release_dir="$2"
+  local main_pid
+  /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+    systemctl is-active --quiet "$service_name" || return 1
+  main_pid="$(
+    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+      systemctl show --property=MainPID --value "$service_name"
+  )" \
+    || return 1
+  [[ "$main_pid" =~ ^[1-9][0-9]{0,9}$ ]] || return 1
+  /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+    grep -Fzqx "AGENT_RUNTIME_OPS_RELEASE=$release_dir" "/proc/$main_pid/environ" \
+    || return 1
+}
+
+wait_for_root_action_broker_release() {
+  local service_name="$1"
+  local release_dir="$2"
+  local attempt
+  for ((attempt = 1; attempt <= ROOT_ACTION_POST_RESTART_ATTESTATION_ATTEMPTS; attempt++)); do
+    root_action_broker_release_attested "$service_name" "$release_dir" && return 0
+    if [[ "$attempt" -lt "$ROOT_ACTION_POST_RESTART_ATTESTATION_ATTEMPTS" ]]; then
+      /usr/bin/sleep "$ROOT_ACTION_POST_RESTART_ATTESTATION_INTERVAL_SECONDS"
+    fi
+  done
+  return 1
+}
+
 install_root_action_broker_contract() {
   local release_dir="$1"
   local unit_source="$release_dir/systemd/agent-runtime-root-action-broker.service"
-  local install_root_real current_path unit_tmp main_pid
+  local active_check_rc install_root_real current_path service_name unit_tmp
   [[ -f "$unit_source" && ! -L "$unit_source" ]] \
     || die "missing root-action broker unit source: $unit_source"
   # Resolve the trusted reader by its production account name at install time.
@@ -314,17 +348,23 @@ install_root_action_broker_contract() {
   install -o root -g root -m 0644 "$unit_tmp" "$ROOT_ACTION_BROKER_SERVICE_FILE"
   rm -f "$unit_tmp"
   if command -v systemctl >/dev/null 2>&1; then
-    systemctl daemon-reload >/dev/null
-    if systemctl is-active --quiet "$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")"; then
-      systemctl restart "$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")" >/dev/null
-      systemctl is-active --quiet "$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")" \
-        || die "root-action broker did not remain active after release restart"
-      main_pid="$(systemctl show --property=MainPID --value "$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")")"
-      [[ "$main_pid" =~ ^[1-9][0-9]{0,9}$ ]] \
-        || die "root-action broker MainPID is invalid after release restart"
-      grep -Fzqx "AGENT_RUNTIME_OPS_RELEASE=$release_dir" "/proc/$main_pid/environ" \
-        || die "root-action broker is not running the installed release"
+    [[ -x /usr/bin/timeout ]] || die "missing command: /usr/bin/timeout"
+    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+      systemctl daemon-reload >/dev/null \
+      || die "root-action broker daemon-reload timed out or failed"
+    service_name="$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")"
+    if /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+      systemctl is-active --quiet "$service_name"; then
+      /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+        systemctl restart "$service_name" >/dev/null \
+        || die "root-action broker restart timed out or failed"
+      wait_for_root_action_broker_release "$service_name" "$release_dir" \
+        || die "root-action broker post-restart attestation failed closed"
       info "root_action_broker_update=active_restarted_release_verified"
+    else
+      active_check_rc="$?"
+      [[ "$active_check_rc" -eq 3 ]] \
+        || die "root-action broker active-state probe timed out or failed"
     fi
   fi
   # An inactive broker remains a separate ratified activation boundary. An

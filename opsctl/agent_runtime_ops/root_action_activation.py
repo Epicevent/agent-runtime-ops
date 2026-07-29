@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Callable, Sequence
 from urllib.parse import urlsplit
 
@@ -20,6 +21,10 @@ ROOT_ACTION_RP_NAME = "JI TECH root action"
 ROOT_ACTION_ACTIVATION_SCHEMA = "agent-runtime-root-action-activation/v1"
 ROOT_ACTION_RUNNING_RELEASE_ENV = "AGENT_RUNTIME_OPS_RELEASE"
 ROOT_ACTION_PROCESS_ENV_MAX_BYTES = 64 * 1024
+ROOT_ACTION_POST_RESTART_ATTESTATION_ATTEMPTS = 40
+ROOT_ACTION_POST_RESTART_ATTESTATION_INTERVAL_SECONDS = 0.25
+ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS = 30.0
+ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS = 1.0
 _ENV_KEYS = {
     "ROOT_ACTION_WEBAUTHN_RP_ID",
     "ROOT_ACTION_WEBAUTHN_ORIGINS",
@@ -63,11 +68,14 @@ class RootActionActivationConfig:
             )
 
 
-RunCommand = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
+RunCommand = Callable[[Sequence[str], float], subprocess.CompletedProcess[str]]
 ReadRunningEnvironment = Callable[[int], bytes]
+Sleep = Callable[[float], None]
 
 
-def _run_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
+def _run_command(
+    argv: Sequence[str], timeout_seconds: float
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(argv),
         check=False,
@@ -75,7 +83,25 @@ def _run_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
+        timeout=timeout_seconds,
     )
+
+
+def _bounded_command(
+    run_command: RunCommand,
+    argv: Sequence[str],
+    *,
+    timeout_seconds: float,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        return run_command(argv, timeout_seconds)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            tuple(argv),
+            124,
+            stdout="",
+            stderr="",
+        )
 
 
 def _read_running_environment(pid: int) -> bytes:
@@ -269,7 +295,22 @@ def activate_root_action_broker(
     run_command: RunCommand = _run_command,
     expected_release: Path | None = None,
     read_running_environment: ReadRunningEnvironment = _read_running_environment,
+    attestation_attempts: int = ROOT_ACTION_POST_RESTART_ATTESTATION_ATTEMPTS,
+    attestation_interval_seconds: float = (
+        ROOT_ACTION_POST_RESTART_ATTESTATION_INTERVAL_SECONDS
+    ),
+    sleep: Sleep = time.sleep,
 ) -> dict[str, object]:
+    if (
+        isinstance(attestation_attempts, bool)
+        or not isinstance(attestation_attempts, int)
+        or not 1 <= attestation_attempts <= ROOT_ACTION_POST_RESTART_ATTESTATION_ATTEMPTS
+        or isinstance(attestation_interval_seconds, bool)
+        or not isinstance(attestation_interval_seconds, (int, float))
+        or not 0 <= attestation_interval_seconds
+        <= ROOT_ACTION_POST_RESTART_ATTESTATION_INTERVAL_SECONDS
+    ):
+        raise RootActionActivationError("post-restart attestation bounds are invalid")
     existing_user_id = _read_existing(
         env_path,
         config,
@@ -288,45 +329,75 @@ def activate_root_action_broker(
     )
     if not release.is_absolute():
         raise RootActionActivationError("expected root-action release is invalid")
-    commands = [
+    mutation_commands = [
         ("systemctl", "daemon-reload"),
         ("systemctl", "enable", ROOT_ACTION_BROKER_SERVICE),
         ("systemctl", "restart", ROOT_ACTION_BROKER_SERVICE),
-        ("systemctl", "is-enabled", "--quiet", ROOT_ACTION_BROKER_SERVICE),
-        ("systemctl", "is-active", "--quiet", ROOT_ACTION_BROKER_SERVICE),
-        (
-            "systemctl",
-            "show",
-            "--property=MainPID",
-            "--value",
-            ROOT_ACTION_BROKER_SERVICE,
-        ),
     ]
-    main_pid: int | None = None
-    for command in commands:
-        completed = run_command(command)
+    for command in mutation_commands:
+        completed = _bounded_command(
+            run_command,
+            command,
+            timeout_seconds=ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS,
+        )
         if completed.returncode != 0:
             raise RootActionActivationError(
                 "root-action broker activation failed closed"
             )
-        if command[1] == "show":
-            stdout = completed.stdout
-            if not isinstance(stdout, str) or not re.fullmatch(
-                r"[1-9][0-9]{0,9}\n?", stdout
-            ):
-                raise RootActionActivationError("root-action broker MainPID is invalid")
-            main_pid = int(stdout.strip())
-    if main_pid is None:
-        raise RootActionActivationError("root-action broker MainPID is invalid")
-    raw_environment = read_running_environment(main_pid)
-    if not isinstance(raw_environment, bytes):
-        raise RootActionActivationError(
-            "root-action broker running release could not be verified"
-        )
     marker = f"{ROOT_ACTION_RUNNING_RELEASE_ENV}={release}".encode("utf-8")
-    if marker not in raw_environment.split(b"\x00"):
+    attested = False
+    for attempt in range(attestation_attempts):
+        enabled = _bounded_command(
+            run_command,
+            ("systemctl", "is-enabled", "--quiet", ROOT_ACTION_BROKER_SERVICE),
+            timeout_seconds=ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS,
+        )
+        active = _bounded_command(
+            run_command,
+            ("systemctl", "is-active", "--quiet", ROOT_ACTION_BROKER_SERVICE),
+            timeout_seconds=ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS,
+        )
+        main_pid_result = _bounded_command(
+            run_command,
+            (
+                "systemctl",
+                "show",
+                "--property=MainPID",
+                "--value",
+                ROOT_ACTION_BROKER_SERVICE,
+            ),
+            timeout_seconds=ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS,
+        )
+        stdout = main_pid_result.stdout
+        main_pid = (
+            int(stdout.strip())
+            if main_pid_result.returncode == 0
+            and isinstance(stdout, str)
+            and re.fullmatch(r"[1-9][0-9]{0,9}\n?", stdout)
+            else None
+        )
+        raw_environment: bytes | None = None
+        if main_pid is not None:
+            try:
+                candidate_environment = read_running_environment(main_pid)
+            except (OSError, RootActionActivationError):
+                candidate_environment = None
+            if isinstance(candidate_environment, bytes):
+                raw_environment = candidate_environment
+        if (
+            enabled.returncode == 0
+            and active.returncode == 0
+            and main_pid is not None
+            and raw_environment is not None
+            and marker in raw_environment.split(b"\x00")
+        ):
+            attested = True
+            break
+        if attempt + 1 < attestation_attempts:
+            sleep(float(attestation_interval_seconds))
+    if not attested:
         raise RootActionActivationError(
-            "root-action broker is not running the installed release"
+            "root-action broker post-restart attestation failed closed"
         )
     return {
         "schema": ROOT_ACTION_ACTIVATION_SCHEMA,
