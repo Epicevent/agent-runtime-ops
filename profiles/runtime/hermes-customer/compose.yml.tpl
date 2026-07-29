@@ -9,10 +9,10 @@ services:
       - .env
       - "{{ target_home }}/.hermes/.env"
     environment:
-      JITECH_RETRIEVAL_ENABLED: "${JITECH_RETRIEVAL_ENABLED}"
-      JITECH_RETRIEVAL_COMPONENT_DIGEST: "${JITECH_RETRIEVAL_COMPONENT_DIGEST:-}"
-      JITECH_RETRIEVAL_BINDING_DIGEST: "${JITECH_RETRIEVAL_BINDING_DIGEST}"
-      JITECH_RETRIEVAL_RESOURCE_PROFILE_DIGEST: "${JITECH_RETRIEVAL_RESOURCE_PROFILE_DIGEST:-}"
+      JITECH_RETRIEVAL_ENABLED: "{{ retrieval_enabled }}"
+      JITECH_RETRIEVAL_COMPONENT_DIGEST: "{{ retrieval_component_digest }}"
+      JITECH_RETRIEVAL_BINDING_DIGEST: "{{ retrieval_binding_digest }}"
+      JITECH_RETRIEVAL_RESOURCE_PROFILE_DIGEST: "{{ retrieval_resource_profile_digest }}"
       HERMES_HOME: /opt/data
       HERMES_HOME_MODE: "0750"
       HERMES_DATA_DIR: /opt/data

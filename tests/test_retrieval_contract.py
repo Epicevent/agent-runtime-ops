@@ -628,15 +628,16 @@ def test_hermes_profiles_make_managed_retrieval_intent_authoritative() -> None:
     hermes_templates = sorted(profile_root.glob("hermes-*/compose.yml.tpl"))
     assert len(hermes_templates) == 6
     required_environment = {
-        'JITECH_RETRIEVAL_ENABLED: "${JITECH_RETRIEVAL_ENABLED}"',
-        'JITECH_RETRIEVAL_COMPONENT_DIGEST: "${JITECH_RETRIEVAL_COMPONENT_DIGEST:-}"',
-        'JITECH_RETRIEVAL_BINDING_DIGEST: "${JITECH_RETRIEVAL_BINDING_DIGEST}"',
-        'JITECH_RETRIEVAL_RESOURCE_PROFILE_DIGEST: "${JITECH_RETRIEVAL_RESOURCE_PROFILE_DIGEST:-}"',
+        'JITECH_RETRIEVAL_ENABLED: "{{ retrieval_enabled }}"',
+        'JITECH_RETRIEVAL_COMPONENT_DIGEST: "{{ retrieval_component_digest }}"',
+        'JITECH_RETRIEVAL_BINDING_DIGEST: "{{ retrieval_binding_digest }}"',
+        'JITECH_RETRIEVAL_RESOURCE_PROFILE_DIGEST: "{{ retrieval_resource_profile_digest }}"',
     }
     for template in hermes_templates:
         text = template.read_text(encoding="utf-8")
         assert '      - "{{ target_home }}/.hermes/.env"' in text
         assert all(item in text for item in required_environment)
+        assert "JITECH_RETRIEVAL_ENABLED: \"${" not in text
 
 
 def test_probe_uses_fixed_docker_exec_argv_and_bounded_content_free_output() -> None:
