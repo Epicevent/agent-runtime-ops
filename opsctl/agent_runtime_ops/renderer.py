@@ -44,6 +44,10 @@ def render_compose(profile: RuntimeProfile, desired: RuntimeTarget, variables: d
     template = env.from_string((profile.path / "compose.yml.tpl").read_text(encoding="utf-8"))
     runtime_uid, runtime_gid, data_gid = _runtime_ids(desired.slot)
     gateway_port, bridge_port = _slot_ports(desired)
+    retrieval_contract = desired.image_spec.get("retrieval_contract")
+    retrieval_resource = (
+        retrieval_contract.get("resource") if isinstance(retrieval_contract, dict) else None
+    )
     merged = {
         "slot": desired.slot,
         "instance_id": desired.route.instance_id if desired.route else "",
@@ -62,6 +66,14 @@ def render_compose(profile: RuntimeProfile, desired: RuntimeTarget, variables: d
         "gateway_port": gateway_port,
         "bridge_port": bridge_port,
         "source_output": "${SOURCE_OUTPUT}",
+        "retrieval_enabled": "true" if desired.image_spec.get("retrieval_enabled") is True else "false",
+        "retrieval_component_digest": str(desired.image_spec.get("retrieval_component_digest") or ""),
+        "retrieval_binding_digest": str(desired.image_spec.get("retrieval_binding_digest") or ""),
+        "retrieval_resource_profile_digest": (
+            str(retrieval_resource.get("profileDigest") or "")
+            if isinstance(retrieval_resource, dict)
+            else ""
+        ),
     }
     if variables:
         merged.update(variables)

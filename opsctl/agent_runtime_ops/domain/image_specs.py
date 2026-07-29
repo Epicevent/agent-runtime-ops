@@ -16,6 +16,7 @@ from ..canonical_recipes import (
 from ..image_components import image_component_name as _image_component_name
 from ..image_components import image_repo as _image_repo
 from ..profiles import load_profile
+from .retrieval_contract import retrieval_contract_from_labels
 
 
 def _run_text(command: list[str], timeout: int = 20) -> subprocess.CompletedProcess[str]:
@@ -198,6 +199,16 @@ def image_spec_recipe_payload(image_spec: dict) -> dict[str, object]:
         payload["components"] = {str(key): str(value) for key, value in components.items()}
     if image_recipe:
         payload["image_recipe"] = image_recipe
+    retrieval_contract = image_spec.get("retrieval_contract")
+    if isinstance(retrieval_contract, dict):
+        payload["retrieval_contract"] = retrieval_contract
+    retrieval_binding = image_spec.get("retrieval_binding")
+    if isinstance(retrieval_binding, dict):
+        payload["retrieval_binding"] = retrieval_binding
+        payload["retrieval_binding_digest"] = str(
+            image_spec.get("retrieval_binding_digest") or ""
+        )
+        payload["retrieval_enabled"] = image_spec.get("retrieval_enabled") is True
     return payload
 
 
@@ -433,6 +444,9 @@ def image_recipe_from_wrapper_image(wrapper_image: str, *, family: str, product_
             "validate_timeout_seconds": int(config_validate_timeout) if config_validate_timeout.isdigit() else 120,
             "migrate_timeout_seconds": int(config_migrate_timeout) if config_migrate_timeout.isdigit() else 180,
         }
+    retrieval_contract = retrieval_contract_from_labels(labels)
+    if retrieval_contract is not None:
+        recipe["retrieval_contract"] = retrieval_contract
     for runtime_class, profile_name in recipe["runtime_profiles"].items():
         profile = load_profile(str(profile_name))
         if profile.metadata.get("family") != family:
@@ -486,7 +500,13 @@ def image_spec_from_direct_images(wrapper_image: str, product_image: str) -> dic
             ),
         }
     )
-    return {
+    wrapper_retrieval = image_recipe.get("retrieval_contract")
+    product_retrieval = retrieval_contract_from_labels(
+        image_recipe_labels_from_wrapper(product_image)
+    )
+    if wrapper_retrieval != product_retrieval:
+        raise ValueError("wrapper and product embedded retrieval provenance do not match")
+    result = {
         "family": family,
         "image_name": IMAGE_ROLLOUT_IMAGE_NAME,
         "product_image": product_image,
@@ -497,6 +517,9 @@ def image_spec_from_direct_images(wrapper_image: str, product_image: str) -> dic
         "mode": "wrapped_product_image",
         "image_recipe": image_recipe,
     }
+    if isinstance(wrapper_retrieval, dict):
+        result["retrieval_contract"] = wrapper_retrieval
+    return result
 
 
 def image_spec_recipe(image_spec: dict) -> dict[str, object]:

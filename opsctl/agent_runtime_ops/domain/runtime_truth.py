@@ -5,17 +5,29 @@ from pathlib import Path
 
 from ..apache import parse_apache_route
 from ..canonical_recipes import load_canonical_recipe
+from ..profiles import load_profile
 from ..routing import RuntimeBinding, get_runtime_binding
 from .apache_route_checks import apache_route_checks
 from .common import container_name, run_text
 from .image_specs import (
     IMAGE_RECIPE_SCHEMA,
-    image_spec_recipe_tokens,
-    label_map_from_labels,
-    profile_customer_surface,
-    profile_runtime_contract,
     recipe_label,
 )
+from .retrieval_contract import (
+    RETRIEVAL_LABEL_PREFIX,
+    SHA256_RE,
+    bind_retrieval_intent,
+    retrieval_contract_from_labels,
+)
+
+
+_RETRIEVAL_PROJECTION_LABEL_KEYS = {
+    "agent-runtime.retrieval-enabled",
+    "agent-runtime.retrieval-component-digest",
+    "agent-runtime.retrieval-binding-digest",
+    "agent-runtime.retrieval-resource-profile-digest",
+}
+_RETRIEVAL_PROJECTION_LABEL_PREFIX = "agent-runtime.retrieval-"
 
 
 def local_canonical_recipe_check_from_truth(truth: dict[str, str]) -> tuple[bool, str, str | None]:
@@ -132,6 +144,57 @@ def labels_from_container_info(info: dict) -> dict[str, str]:
 
 def live_image_truth_from_info(binding: RuntimeBinding, info: dict, apache_route) -> dict[str, str]:
     labels = labels_from_container_info(info)
+    retrieval_labels_present = any(
+        key.startswith(RETRIEVAL_LABEL_PREFIX) for key in labels
+    )
+    retrieval_projection_label_keys = {
+        key
+        for key in labels
+        if key.startswith(_RETRIEVAL_PROJECTION_LABEL_PREFIX)
+    }
+    retrieval_projection_labels_present = bool(retrieval_projection_label_keys)
+    retrieval_projection_complete = (
+        retrieval_projection_label_keys == _RETRIEVAL_PROJECTION_LABEL_KEYS
+    )
+    retrieval_contract: dict[str, object] | None = None
+    if retrieval_labels_present:
+        try:
+            retrieval_contract = retrieval_contract_from_labels(labels)
+        except ValueError:
+            retrieval_contract = None
+    retrieval_contract_complete = retrieval_contract is not None
+    projection_enabled = str(labels.get("agent-runtime.retrieval-enabled") or "")
+    projection_component = str(
+        labels.get("agent-runtime.retrieval-component-digest") or ""
+    )
+    projection_binding = str(
+        labels.get("agent-runtime.retrieval-binding-digest") or ""
+    )
+    projection_resource = str(
+        labels.get("agent-runtime.retrieval-resource-profile-digest") or ""
+    )
+    if retrieval_contract is not None:
+        resource = retrieval_contract.get("resource")
+        expected_resource = (
+            str(resource.get("profileDigest") or "")
+            if isinstance(resource, dict)
+            else ""
+        )
+        retrieval_projection_consistent = (
+            retrieval_projection_complete
+            and projection_enabled in {"true", "false"}
+            and projection_component == retrieval_contract.get("component_digest")
+            and SHA256_RE.fullmatch(projection_binding) is not None
+            and projection_resource == expected_resource
+        )
+    else:
+        retrieval_projection_consistent = (
+            retrieval_projection_complete
+            and projection_enabled == "false"
+            and projection_component == ""
+            and SHA256_RE.fullmatch(projection_binding) is not None
+            and projection_resource == ""
+        )
     config = info.get("Config") if isinstance(info, dict) else {}
     image = str((config or {}).get("Image") or "")
     runtime_class = binding.runtime_class
@@ -179,6 +242,32 @@ def live_image_truth_from_info(binding: RuntimeBinding, info: dict, apache_route
         "health_endpoints": recipe_label(labels, "health.endpoints"),
         "health_endpoints_json": recipe_label(labels, "health.endpoints.json"),
         "ops_repo_commit": recipe_label(labels, "ops-repo-commit"),
+        "retrieval_labels_present": "true" if retrieval_labels_present else "false",
+        "retrieval_contract_complete": (
+            "true" if retrieval_contract_complete else "false"
+        ),
+        "retrieval_projection_labels_present": (
+            "true" if retrieval_projection_labels_present else "false"
+        ),
+        "retrieval_projection_complete": (
+            "true" if retrieval_projection_complete else "false"
+        ),
+        "retrieval_projection_consistent": (
+            "true" if retrieval_projection_consistent else "false"
+        ),
+        "retrieval_schema": recipe_label(labels, "retrieval.schema"),
+        "retrieval_transport": recipe_label(labels, "retrieval.transport"),
+        "retrieval_default_enabled": recipe_label(labels, "retrieval.default-enabled"),
+        "retrieval_enabled": str(labels.get("agent-runtime.retrieval-enabled") or ""),
+        "retrieval_component_digest": str(
+            labels.get("agent-runtime.retrieval-component-digest") or ""
+        ),
+        "retrieval_binding_digest": str(
+            labels.get("agent-runtime.retrieval-binding-digest") or ""
+        ),
+        "retrieval_resource_profile_digest": str(
+            labels.get("agent-runtime.retrieval-resource-profile-digest") or ""
+        ),
     }
 
 
@@ -227,6 +316,28 @@ def live_runtime_truth(slot: str, state_root: Path) -> tuple[dict[str, str], lis
         return ({"linux_account": binding.linux_account, "truth_source": "live_image", "truth_status": "parse_failed", "reason": str(exc)}, checks)
     truth = live_image_truth_from_info(binding, info, apache_route)
     labels = labels_from_container_info(info)
+    expected_retrieval_binding_digest = ""
+    retrieval_binding_error = ""
+    try:
+        projected_enabled = truth.get("retrieval_enabled")
+        if projected_enabled not in {"true", "false"}:
+            raise ValueError("retrieval-enabled projection must be true or false")
+        retrieval_contract = retrieval_contract_from_labels(labels)
+        profile = load_profile(str(truth.get("runtime_profile") or ""))
+        expected_spec = bind_retrieval_intent(
+            {"retrieval_contract": retrieval_contract},
+            instance_id=binding.instance_id,
+            family=binding.family,
+            runtime_profile_digest=profile.digest,
+            container_nas_root=str(profile.metadata.get("container_nas_root") or ""),
+            enabled=projected_enabled == "true",
+        )
+        expected_retrieval_binding_digest = str(
+            expected_spec.get("retrieval_binding_digest") or ""
+        )
+    except Exception as exc:
+        retrieval_binding_error = str(exc)
+    truth["retrieval_expected_binding_digest"] = expected_retrieval_binding_digest
     checks.extend(
         [
             (truth["truth_status"] == "ok", "truth_image_labeled", truth["truth_status"]),
@@ -244,6 +355,47 @@ def live_runtime_truth(slot: str, state_root: Path) -> tuple[dict[str, str], lis
                 f"label={labels.get('agent-runtime.linux-account') or labels.get('agent-runtime.slot') or 'missing'} binding={binding.linux_account}",
             ),
             local_canonical_recipe_check_from_truth(truth),
+            (
+                truth.get("retrieval_labels_present") != "true"
+                or truth.get("retrieval_contract_complete") == "true",
+                "truth_retrieval_label_set_complete",
+                truth.get("retrieval_contract_complete") or "false",
+            ),
+            (
+                truth.get("retrieval_projection_complete") == "true"
+                and truth.get("retrieval_projection_consistent") == "true",
+                "truth_retrieval_projection_complete_and_consistent",
+                (
+                    "complete"
+                    if truth.get("retrieval_projection_consistent") == "true"
+                    else "invalid"
+                ),
+            ),
+            (
+                bool(expected_retrieval_binding_digest)
+                and truth.get("retrieval_binding_digest")
+                == expected_retrieval_binding_digest,
+                "truth_retrieval_binding_matches_expected",
+                retrieval_binding_error
+                or (
+                    f"projected={truth.get('retrieval_binding_digest') or 'missing'} "
+                    f"expected={expected_retrieval_binding_digest or 'missing'}"
+                ),
+            ),
+            (
+                truth.get("retrieval_enabled") in {"true", "false"},
+                "truth_retrieval_enabled_declared",
+                truth.get("retrieval_enabled") or "capability_absent",
+            ),
+            (
+                truth.get("retrieval_enabled") != "true"
+                or (
+                    truth.get("retrieval_schema") == "jitech-embedded-retrieval/v1"
+                    and truth.get("retrieval_transport") == "in_process"
+                ),
+                "truth_retrieval_in_process_when_enabled",
+                truth.get("retrieval_transport") or "capability_missing",
+            ),
         ]
     )
     return truth, checks

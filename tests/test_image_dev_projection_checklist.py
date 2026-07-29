@@ -214,6 +214,7 @@ class ImageDevProjectionChecklistTests(unittest.TestCase):
             patch("agent_runtime_ops.commands.rollout._is_root", return_value=True),
             patch("agent_runtime_ops.commands.rollout._direct_image_spec_from_args", return_value=image_spec),
             patch("agent_runtime_ops.commands.rollout._desired_from_direct_images", return_value=(desired, profile)),
+            patch("agent_runtime_ops.commands.rollout._ensure_runtime_dir"),
             patch("agent_runtime_ops.commands.rollout._prepare_runtime_env_for_direct_image") as prepare_env,
             patch("agent_runtime_ops.commands.rollout._apply_desired_slot", return_value=0) as apply_slot,
             contextlib.redirect_stdout(output),
@@ -227,10 +228,12 @@ class ImageDevProjectionChecklistTests(unittest.TestCase):
                     allow_first_apply=True,
                 )
             )
+            prepare_env.assert_not_called()
+            apply_slot.call_args.kwargs["prepare_runtime_env"]()
 
         self.assertEqual(rc, 0, output.getvalue())
-        prepare_env.assert_called_once_with(desired, profile)
         apply_slot.assert_called_once()
+        prepare_env.assert_called_once_with(desired, profile)
 
     def test_rollout_promote_rejects_dev_named_source(self) -> None:
         output = io.StringIO()

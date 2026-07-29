@@ -210,6 +210,19 @@ class McpServerTests(unittest.TestCase):
         self.assertNotIn("API_KEY", key_schema["enum"])
         image_plan_tool = next(item for item in tools["result"]["tools"] if item["name"] == "rollout_image_plan")
         self.assertIn("wrapper_image", image_plan_tool["inputSchema"]["properties"])
+        for tool_name in (
+            "rollout_image_plan",
+            "rollout_image_dev_apply",
+            "rollout_image_canary",
+        ):
+            rollout_tool = next(
+                item for item in tools["result"]["tools"] if item["name"] == tool_name
+            )
+            self.assertFalse(
+                rollout_tool["inputSchema"]["properties"]["retrieval_enabled"][
+                    "default"
+                ]
+            )
         document_tools_tool = next(item for item in tools["result"]["tools"] if item["name"] == "document_tools_status")
         self.assertIn("HWP/HWPX", document_tools_tool["description"])
         sanitize_tool = next(item for item in tools["result"]["tools"] if item["name"] == "runtime_config_sanitize")
@@ -342,7 +355,12 @@ class McpServerTests(unittest.TestCase):
         payload = call_tool(
             server,
             "rollout_image_plan",
-            {"wrapper_image": wrapper, "product_image": product, "target": "oc3"},
+            {
+                "wrapper_image": wrapper,
+                "product_image": product,
+                "target": "oc3",
+                "retrieval_enabled": True,
+            },
         )
         self.assertTrue(payload["ok"])
         self.assertEqual(
@@ -358,8 +376,66 @@ class McpServerTests(unittest.TestCase):
                 product,
                 "--target",
                 "oc3",
+                "--retrieval-enabled",
             ],
         )
+
+    def test_rollout_image_apply_tools_forward_typed_retrieval_enablement(self) -> None:
+        wrapper = "ghcr.io/epicevent/agent-runtime-hermes@sha256:" + "a" * 64
+        product = "ghcr.io/epicevent/hermes-runtime@sha256:" + "b" * 64
+        for tool_name, command, target in (
+            ("rollout_image_dev_apply", "image-dev-apply", "dev-hermes-img"),
+            ("rollout_image_canary", "image-canary", "oc20"),
+        ):
+            with self.subTest(tool_name=tool_name):
+                runner = FakeRunner([(0, "apply_status=ok\n", "")])
+                server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
+                payload = call_tool(
+                    server,
+                    tool_name,
+                    {
+                        "target": target,
+                        "wrapper_image": wrapper,
+                        "product_image": product,
+                        "retrieval_enabled": True,
+                    },
+                )
+                self.assertTrue(payload["ok"])
+                self.assertEqual(
+                    runner.calls[0]["argv"],
+                    [
+                        "sudo",
+                        "opsctl",
+                        "rollout",
+                        command,
+                        "--target",
+                        target,
+                        "--wrapper-image",
+                        wrapper,
+                        "--product-image",
+                        product,
+                        "--retrieval-enabled",
+                    ],
+                )
+
+    def test_rollout_image_tools_reject_string_retrieval_enablement(self) -> None:
+        wrapper = "ghcr.io/epicevent/agent-runtime-hermes@sha256:" + "a" * 64
+        product = "ghcr.io/epicevent/hermes-runtime@sha256:" + "b" * 64
+        server = McpServer(runner=FakeRunner(), opsctl="opsctl", sudo="sudo")
+        result = call_tool_result(
+            server,
+            "rollout_image_canary",
+            {
+                "target": "oc20",
+                "wrapper_image": wrapper,
+                "product_image": product,
+                "retrieval_enabled": "false",
+            },
+        )
+        payload = result["structuredContent"]
+        self.assertFalse(payload["ok"])
+        self.assertTrue(result["isError"])
+        self.assertIn("retrieval_enabled must be a boolean", payload["next_action"])
 
     def test_projection_verify_target_uses_existing_opsctl_gate(self) -> None:
         wrapper = "ghcr.io/epicevent/agent-runtime-hermes@sha256:" + "a" * 64

@@ -12,7 +12,6 @@ from .commands.binding import (
     cmd_binding_set_public_host,
     cmd_binding_status,
 )
-from .commands.blocked import cmd_blocked_mutation
 from .commands.check import cmd_check
 from .commands.checklist import cmd_checklist_pack
 from .commands.diagnostics import (
@@ -121,6 +120,7 @@ from .commands.usage import (
     cmd_usage_status,
 )
 from .commands.image import cmd_image_approve, cmd_image_status
+from .commands.retrieval import cmd_retrieval_approve, cmd_retrieval_status
 from .commands.config import cmd_config_validate, cmd_config_migrate
 from .paths import DEFAULT_STATE_ROOT
 from .domain.artifact_probe import ArtifactProbeError, validate_revision
@@ -163,6 +163,19 @@ def build_parser() -> argparse.ArgumentParser:
     image_approve.set_defaults(func=cmd_image_approve)
     image_status = image_sub.add_parser("status")
     image_status.set_defaults(func=cmd_image_status)
+
+    retrieval = sub.add_parser(
+        "retrieval", help="approve and inspect embedded, in-process retrieval provenance"
+    )
+    retrieval_sub = retrieval.add_subparsers(dest="retrieval_command", required=True)
+    retrieval_approve = retrieval_sub.add_parser(
+        "approve", help="root-approve an embedded component in an approved product image"
+    )
+    retrieval_approve.add_argument("family", choices=["openclaw", "hermes"])
+    retrieval_approve.add_argument("product_image", metavar="PRODUCT@sha256:...")
+    retrieval_approve.set_defaults(func=cmd_retrieval_approve)
+    retrieval_status = retrieval_sub.add_parser("status")
+    retrieval_status.set_defaults(func=cmd_retrieval_status)
 
     artifact = sub.add_parser("artifact", help="bounded read-only protected-host artifact observations")
     artifact_sub = artifact.add_subparsers(dest="artifact_command", required=True)
@@ -385,18 +398,25 @@ def build_parser() -> argparse.ArgumentParser:
     rollout_image_plan.add_argument("--product-image", required=True)
     rollout_image_plan.add_argument("--target", dest="slot")
     rollout_image_plan.add_argument("--targets", dest="slots", nargs="*")
+    rollout_image_plan.add_argument(
+        "--retrieval-enabled",
+        action="store_true",
+        help="plan the image-attested in-process retrieval capability (default: disabled)",
+    )
     rollout_image_plan.set_defaults(func=cmd_rollout_image_plan)
     rollout_image_dev_apply = rollout_sub.add_parser("image-dev-apply", help="apply digest-pinned images to a dev target")
     rollout_image_dev_apply.add_argument("--target", dest="slot", required=True)
     rollout_image_dev_apply.add_argument("--wrapper-image", required=True)
     rollout_image_dev_apply.add_argument("--product-image", required=True)
     rollout_image_dev_apply.add_argument("--allow-first-apply", action="store_true")
+    rollout_image_dev_apply.add_argument("--retrieval-enabled", action="store_true")
     rollout_image_dev_apply.set_defaults(func=cmd_rollout_image_dev_apply)
     rollout_image_canary = rollout_sub.add_parser("image-canary", help="apply digest-pinned images to one customer canary target")
     rollout_image_canary.add_argument("--target", dest="slot", required=True)
     rollout_image_canary.add_argument("--wrapper-image", required=True)
     rollout_image_canary.add_argument("--product-image", required=True)
     rollout_image_canary.add_argument("--allow-first-apply", action="store_true")
+    rollout_image_canary.add_argument("--retrieval-enabled", action="store_true")
     rollout_image_canary.set_defaults(func=cmd_rollout_image_canary)
     rollout_image_promote = rollout_sub.add_parser("image-promote", help="promote the exact live canary image to explicit targets")
     rollout_image_promote.add_argument("--from-target", dest="from_slot", required=True)

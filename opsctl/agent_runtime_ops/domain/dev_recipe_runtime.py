@@ -7,6 +7,7 @@ import stat
 
 from ..host.account_files import atomic_write_key_value, read_key_value_file, runtime_ids, slot_uid_gid
 from ..routing import get_runtime_binding
+from .runtime_paths import agent_manifest_path, state_manifest_path
 
 DEV_RECIPE_STAGE_ROOT = "agent-runtime-source"
 
@@ -42,7 +43,13 @@ def assert_child_of(child: Path, parent: Path) -> None:
         raise ValueError(f"path escaped managed root: {child}")
 
 
-def ensure_dev_runtime_dir(slot: str) -> Path:
+def ensure_dev_runtime_dir(
+    slot: str,
+    *,
+    create: bool = True,
+    state_root: Path | None = None,
+    require_existing_manifest: bool = False,
+) -> Path:
     uid, gid = slot_uid_gid(slot)
     home = Path("/home") / slot
     if home.is_symlink():
@@ -52,6 +59,24 @@ def ensure_dev_runtime_dir(slot: str) -> Path:
     runtime_dir = home / "openclaw"
     if runtime_dir.exists() and runtime_dir.is_symlink():
         raise ValueError(f"managed runtime dir must not be symlink: {runtime_dir}")
+    if not create:
+        if not runtime_dir.is_dir():
+            raise FileNotFoundError(runtime_dir)
+        if require_existing_manifest:
+            if state_root is None:
+                raise ValueError(
+                    "state_root is required when an existing runtime manifest is required"
+                )
+            manifest_paths = (
+                agent_manifest_path(runtime_dir),
+                state_manifest_path(state_root, slot),
+            )
+            if not any(path.is_file() and not path.is_symlink() for path in manifest_paths):
+                raise ValueError(
+                    "promotion target is missing an existing runtime manifest: "
+                    f"{slot}"
+                )
+        return runtime_dir
     runtime_dir.mkdir(mode=0o750, parents=True, exist_ok=True)
     os.chown(runtime_dir, uid, gid)
     os.chmod(runtime_dir, 0o750)
@@ -164,10 +189,20 @@ def sync_dev_source_output(slot: str, recipe_name: str, source: Path, *, runtime
     return dest, control_ui_in_dist, control_ui_preserved
 
 
-def upsert_runtime_env_file(path: Path, updates: dict[str, str], uid: int, gid: int) -> None:
+def upsert_runtime_env_file(
+    path: Path,
+    updates: dict[str, str],
+    uid: int,
+    gid: int,
+    *,
+    remove_empty_keys: set[str] | None = None,
+) -> None:
     if path.exists() and path.is_symlink():
         raise ValueError(f"runtime env file must not be symlink: {path}")
     data = read_key_value_file(path) if path.exists() else {}
+    for key in remove_empty_keys or set():
+        if key in updates and not updates[key]:
+            data.pop(key, None)
     data.update({key: value for key, value in updates.items() if value})
     atomic_write_key_value(path, data, 0o640, uid, gid)
 
