@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -34,6 +35,42 @@ def test_runtime_env_backup_is_private_and_restores_exact_prior_bytes(
         assert backup_dir.stat().st_mode & 0o777 == 0o700
         assert (backup_dir / ".env").stat().st_mode & 0o777 == 0o600
         assert env_path.stat().st_mode & 0o777 == 0o640
+
+
+def test_legacy_backup_without_env_metadata_leaves_live_env_untouched(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    env_path = runtime_dir / ".env"
+    current = b"API_SERVER_KEY=current-secret\n"
+    env_path.write_bytes(current)
+    backup_dir = tmp_path / "legacy-backup"
+    backup_dir.mkdir()
+    (backup_dir / "backup.json").write_text(
+        json.dumps({"had_compose": True, "had_manifest": True}),
+        encoding="utf-8",
+    )
+
+    restore_backup_env(runtime_dir, backup_dir)
+
+    assert env_path.read_bytes() == current
+
+
+def test_new_backup_explicitly_without_env_removes_candidate_env_on_restore(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+
+    backup_dir = backup_agent_runtime_state("oc20", runtime_dir, state_root)
+    env_path = runtime_dir / ".env"
+    env_path.write_text("JITECH_RETRIEVAL_ENABLED=false\n", encoding="utf-8")
+    restore_backup_env(runtime_dir, backup_dir)
+
+    assert not env_path.exists()
 
 
 def test_apply_backs_up_env_before_prepare_and_restores_on_pre_dispatch_failure(

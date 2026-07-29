@@ -67,10 +67,12 @@ def backup_agent_runtime_state(slot: str, runtime_dir: Path, state_root: Path) -
 
 def restore_backup_env(runtime_dir: Path, backup_dir: Path) -> None:
     metadata = load_yaml(backup_dir / "backup.json")
+    if "had_env" not in metadata:
+        return
     env_path = runtime_dir / ".env"
     if env_path.is_symlink() or (env_path.exists() and not env_path.is_file()):
         raise ValueError(f"runtime env must be a regular file: {env_path}")
-    if bool(metadata.get("had_env")):
+    if metadata.get("had_env") is True:
         backup_env = backup_dir / ".env"
         if backup_env.is_symlink() or not backup_env.is_file():
             raise ValueError(f"backup runtime env must be a regular file: {backup_env}")
