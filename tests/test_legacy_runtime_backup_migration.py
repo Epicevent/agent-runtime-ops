@@ -112,6 +112,77 @@ def stat_mode(path: Path) -> int:
     return path.stat().st_mode & 0o777
 
 
+def _add_legacy_env_metadata(source: Path, value: bytes | None) -> None:
+    metadata_path = source / "backup.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata.update(
+        {
+            "env_gid": os.getgid(),
+            "env_mode": 0o640,
+            "env_uid": os.getuid(),
+            "had_env": value is not None,
+        }
+    )
+    if value is None:
+        metadata.update({"env_gid": None, "env_mode": None, "env_uid": None})
+    else:
+        env_path = source / ".env"
+        env_path.write_bytes(value)
+        env_path.chmod(0o600)
+    metadata_path.write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    metadata_path.chmod(0o644)
+
+
+@POSIX_ONLY
+def test_intermediate_legacy_env_snapshot_is_imported_and_restored(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    source = _legacy_backup(runtime_dir, diagnostics=False)
+    prior = b"API_SERVER_KEY=prior-secret\nJITECH_RETRIEVAL_ENABLED=false\n"
+    _add_legacy_env_metadata(source, prior)
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    env_path = runtime_dir / ".env"
+    env_path.write_text("API_SERVER_KEY=candidate-secret\n", encoding="utf-8")
+
+    imported = import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root)
+    adopted = imported[0]
+    adopted_metadata = json.loads((adopted / "backup.json").read_text(encoding="utf-8"))
+    assert adopted_metadata["had_env"] is True
+    assert adopted_metadata["env_mode"] == 0o640
+    assert adopted_metadata["artifact_sha256"][".env"].startswith("sha256:")
+    assert stat_mode(adopted / ".env") == 0o600
+
+    restore_backup_env(runtime_dir, adopted)
+
+    assert env_path.read_bytes() == prior
+    assert stat_mode(env_path) == 0o640
+
+
+@POSIX_ONLY
+def test_intermediate_explicit_env_absence_retains_delete_on_rollback(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    source = _legacy_backup(runtime_dir, diagnostics=False)
+    _add_legacy_env_metadata(source, None)
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    imported = import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root)
+    env_path = runtime_dir / ".env"
+    env_path.write_text("JITECH_RETRIEVAL_ENABLED=true\n", encoding="utf-8")
+
+    restore_backup_env(runtime_dir, imported[0])
+
+    assert not env_path.exists()
+
+
 @POSIX_ONLY
 @pytest.mark.parametrize("unsafe_kind", ["symlink", "hardlink", "fifo"])
 def test_unsafe_legacy_artifact_fails_before_publication(
@@ -151,7 +222,7 @@ def test_unexpected_legacy_entry_fails_before_publication(tmp_path: Path) -> Non
     state_root = tmp_path / "state"
     state_root.mkdir()
 
-    with pytest.raises(ValueError, match="unexpected entries"):
+    with pytest.raises(ValueError, match="artifact marker mismatch"):
         import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root)
 
     assert not (state_root / "runtime-recovery").exists()

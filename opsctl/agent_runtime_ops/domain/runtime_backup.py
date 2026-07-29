@@ -60,6 +60,12 @@ _LEGACY_BACKUP_METADATA_KEYS = {
     "had_state_manifest",
     "state_manifest_path",
 }
+_LEGACY_BACKUP_ENV_METADATA_KEYS = {
+    "env_gid",
+    "env_mode",
+    "env_uid",
+    "had_env",
+}
 _LEGACY_BACKUP_ARTIFACTS = {
     ".agent-runtime-manifest": "had_manifest",
     "docker-compose.agent-runtime.yml": "had_compose",
@@ -278,7 +284,13 @@ def _strict_legacy_metadata(value: bytes, path: Path) -> dict[str, object]:
         )
     except (json.JSONDecodeError, UnicodeError) as exc:
         raise ValueError(f"legacy backup metadata is invalid: {path}") from exc
-    if not isinstance(metadata, dict) or set(metadata) != _LEGACY_BACKUP_METADATA_KEYS:
+    if not isinstance(metadata, dict):
+        raise ValueError(f"legacy backup metadata must be an object: {path}")
+    keys = frozenset(metadata)
+    if keys not in {
+        frozenset(_LEGACY_BACKUP_METADATA_KEYS),
+        frozenset(_LEGACY_BACKUP_METADATA_KEYS | _LEGACY_BACKUP_ENV_METADATA_KEYS),
+    }:
         raise ValueError(f"legacy backup metadata keys are invalid: {path}")
     for marker in _LEGACY_BACKUP_ARTIFACTS.values():
         if not isinstance(metadata.get(marker), bool):
@@ -287,6 +299,24 @@ def _strict_legacy_metadata(value: bytes, path: Path) -> dict[str, object]:
         raise ValueError(f"legacy backup created_at is invalid: {path}")
     if not isinstance(metadata.get("state_manifest_path"), str):
         raise ValueError(f"legacy backup state_manifest_path is invalid: {path}")
+    if "had_env" in metadata:
+        had_env = metadata.get("had_env")
+        if not isinstance(had_env, bool):
+            raise ValueError(f"legacy backup had_env marker must be boolean: {path}")
+        for key in ("env_gid", "env_mode", "env_uid"):
+            identity = metadata.get(key)
+            if had_env:
+                if (
+                    not isinstance(identity, int)
+                    or isinstance(identity, bool)
+                    or identity < 0
+                ):
+                    raise ValueError(f"legacy backup {key} is invalid: {path}")
+            elif identity is not None:
+                raise ValueError(f"legacy backup absent env {key} must be null: {path}")
+        env_mode = metadata.get("env_mode")
+        if had_env and isinstance(env_mode, int) and env_mode & ~0o777:
+            raise ValueError(f"legacy backup env_mode is invalid: {path}")
     return metadata
 
 
@@ -681,7 +711,11 @@ def _read_legacy_backup_directory(
     descriptor, before = _open_legacy_directory(backup_name, dir_fd=root_descriptor)
     try:
         entries = set(os.listdir(descriptor))
-        allowed = set(_LEGACY_BACKUP_ARTIFACTS) | {"backup.json", "failed-container"}
+        allowed = set(_LEGACY_BACKUP_ARTIFACTS) | {
+            ".env",
+            "backup.json",
+            "failed-container",
+        }
         unknown = sorted(entries - allowed)
         if unknown:
             raise ValueError(
@@ -720,6 +754,26 @@ def _read_legacy_backup_directory(
             artifact_bytes[name] = value
             artifact_digests[name] = _sha256_bytes(value) if value is not None else None
             total_bytes += len(value or b"")
+
+        had_env = metadata.get("had_env") if "had_env" in metadata else None
+        if (had_env is True) != (".env" in entries):
+            raise ValueError(
+                f"legacy backup artifact marker mismatch: {backup_path / '.env'}"
+            )
+        env_bytes = (
+            _read_legacy_regular_file(
+                descriptor,
+                ".env",
+                display_parent=backup_path,
+            )
+            if had_env is True
+            else None
+        )
+        artifact_bytes[".env"] = env_bytes
+        artifact_digests[".env"] = (
+            _sha256_bytes(env_bytes) if env_bytes is not None else None
+        )
+        total_bytes += len(env_bytes or b"")
 
         diagnostic_bytes: dict[str, bytes] = {}
         diagnostic_digests: dict[str, str] = {}
@@ -909,10 +963,7 @@ def _publish_legacy_backup(
         ):
             raise ValueError("legacy backup source metadata is invalid")
         metadata = {
-            "artifact_sha256": {
-                **source_digests,
-                ".env": None,
-            },
+            "artifact_sha256": source_digests,
             "created_at": source_metadata["created_at"],
             "had_compose": source_metadata["had_compose"],
             "had_manifest": source_metadata["had_manifest"],
@@ -926,6 +977,15 @@ def _publish_legacy_backup(
             "schema": _BACKUP_SCHEMA,
             "state_manifest_path": source_metadata["state_manifest_path"],
         }
+        if "had_env" in source_metadata:
+            metadata.update(
+                {
+                    "env_gid": source_metadata["env_gid"],
+                    "env_mode": source_metadata["env_mode"],
+                    "env_uid": source_metadata["env_uid"],
+                    "had_env": source_metadata["had_env"],
+                }
+            )
         metadata_path = staging_dir / "backup.json"
         metadata_path.write_text(
             json.dumps(metadata, indent=2, sort_keys=True) + "\n",
