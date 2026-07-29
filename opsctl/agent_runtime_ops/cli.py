@@ -12,7 +12,6 @@ from .commands.binding import (
     cmd_binding_set_public_host,
     cmd_binding_status,
 )
-from .commands.blocked import cmd_blocked_mutation
 from .commands.check import cmd_check
 from .commands.checklist import cmd_checklist_pack
 from .commands.diagnostics import (
