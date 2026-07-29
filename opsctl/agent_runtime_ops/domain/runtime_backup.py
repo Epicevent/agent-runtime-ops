@@ -166,7 +166,9 @@ def restore_backup_env(runtime_dir: Path, backup_dir: Path) -> None:
         finally:
             temporary_env.unlink(missing_ok=True)
     else:
-        env_path.unlink(missing_ok=True)
+        if env_path.exists():
+            env_path.unlink()
+            fsync_parent(env_path)
 
 
 def latest_backup(runtime_dir: Path) -> Path | None:

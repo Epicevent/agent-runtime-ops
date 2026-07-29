@@ -145,6 +145,47 @@ def test_new_backup_explicitly_without_env_removes_candidate_env_on_restore(
     assert not env_path.exists()
 
 
+def test_env_absence_restore_syncs_parent_only_after_actual_deletion(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    backup_dir = backup_agent_runtime_state("oc20", runtime_dir, state_root)
+    env_path = runtime_dir / ".env"
+    env_path.write_text("JITECH_RETRIEVAL_ENABLED=false\n", encoding="utf-8")
+    events: list[str] = []
+
+    def sync_parent(path: Path) -> None:
+        assert path == env_path
+        assert not env_path.exists()
+        events.append("parent_sync")
+
+    with patch(
+        "agent_runtime_ops.domain.runtime_backup.fsync_parent",
+        side_effect=sync_parent,
+    ):
+        restore_backup_env(runtime_dir, backup_dir)
+
+    assert events == ["parent_sync"]
+
+
+def test_env_absence_restore_does_not_sync_when_already_absent(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    backup_dir = backup_agent_runtime_state("oc20", runtime_dir, state_root)
+
+    with patch("agent_runtime_ops.domain.runtime_backup.fsync_parent") as sync_parent:
+        restore_backup_env(runtime_dir, backup_dir)
+
+    sync_parent.assert_not_called()
+
+
 @pytest.mark.parametrize("marker", [None, 0, "false"])
 def test_malformed_env_marker_never_deletes_live_env(
     tmp_path: Path, marker: object
