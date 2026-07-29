@@ -13,8 +13,10 @@ from ..domain.runtime_checks import (
     run_live_slot_checks_with_wait as _run_live_slot_checks_with_wait,
 )
 from ..domain.runtime_backup import (
+    finish_rollback_transaction,
     latest_backup,
     load_backup_runtime_contract,
+    pending_rollback_backup,
     restore_backup,
 )
 from ..domain.runtime_manifest import desired_from_runtime_manifest
@@ -57,7 +59,9 @@ def cmd_rollback(args: argparse.Namespace) -> int:
     state_root = _state_root(args)
     try:
         runtime_dir = slot_runtime_dir(args.slot)
-        backup_dir = latest_backup(runtime_dir)
+        backup_dir = pending_rollback_backup(state_root, args.slot)
+        if backup_dir is None:
+            backup_dir = latest_backup(state_root, args.slot)
         if backup_dir is None:
             raise FileNotFoundError("no agent-runtime backup")
         ok, reason = restore_backup(args.slot, runtime_dir, backup_dir, state_root)
@@ -133,6 +137,20 @@ def cmd_rollback(args: argparse.Namespace) -> int:
         print(f"rollback_retrieval_binding_digest={desired.image_spec.get('retrieval_binding_digest') or 'none'}")
         print(f"rollback_retrieval_revocation_status={(status or {}).get('revocationStatus') or 'not_applicable'}")
 
+    try:
+        finish_rollback_transaction(args.slot, state_root, backup_dir)
+    except Exception as exc:
+        print("rollback_status=fail")
+        print(f"reason=rollback_transaction_finish_failed:{exc}")
+        _append_action_log(
+            state_root,
+            "rollback",
+            args.slot,
+            str(backup_dir),
+            "fail",
+            "rollback_transaction_finish_failed",
+        )
+        return 1
     print("rollback_status=ok")
     _append_action_log(state_root, "rollback", args.slot, str(backup_dir), "ok", reason)
     return 0

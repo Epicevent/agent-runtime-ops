@@ -5,6 +5,7 @@ from pathlib import Path
 
 from ..apache import parse_apache_route
 from ..canonical_recipes import load_canonical_recipe
+from ..profiles import load_profile
 from ..routing import RuntimeBinding, get_runtime_binding
 from .apache_route_checks import apache_route_checks
 from .common import container_name, run_text
@@ -15,6 +16,7 @@ from .image_specs import (
 from .retrieval_contract import (
     RETRIEVAL_LABEL_PREFIX,
     SHA256_RE,
+    bind_retrieval_intent,
     retrieval_contract_from_labels,
 )
 
@@ -190,7 +192,7 @@ def live_image_truth_from_info(binding: RuntimeBinding, info: dict, apache_route
             retrieval_projection_complete
             and projection_enabled == "false"
             and projection_component == ""
-            and projection_binding == ""
+            and SHA256_RE.fullmatch(projection_binding) is not None
             and projection_resource == ""
         )
     config = info.get("Config") if isinstance(info, dict) else {}
@@ -314,6 +316,28 @@ def live_runtime_truth(slot: str, state_root: Path) -> tuple[dict[str, str], lis
         return ({"linux_account": binding.linux_account, "truth_source": "live_image", "truth_status": "parse_failed", "reason": str(exc)}, checks)
     truth = live_image_truth_from_info(binding, info, apache_route)
     labels = labels_from_container_info(info)
+    expected_retrieval_binding_digest = ""
+    retrieval_binding_error = ""
+    try:
+        projected_enabled = truth.get("retrieval_enabled")
+        if projected_enabled not in {"true", "false"}:
+            raise ValueError("retrieval-enabled projection must be true or false")
+        retrieval_contract = retrieval_contract_from_labels(labels)
+        profile = load_profile(str(truth.get("runtime_profile") or ""))
+        expected_spec = bind_retrieval_intent(
+            {"retrieval_contract": retrieval_contract},
+            instance_id=binding.instance_id,
+            family=binding.family,
+            runtime_profile_digest=profile.digest,
+            container_nas_root=str(profile.metadata.get("container_nas_root") or ""),
+            enabled=projected_enabled == "true",
+        )
+        expected_retrieval_binding_digest = str(
+            expected_spec.get("retrieval_binding_digest") or ""
+        )
+    except Exception as exc:
+        retrieval_binding_error = str(exc)
+    truth["retrieval_expected_binding_digest"] = expected_retrieval_binding_digest
     checks.extend(
         [
             (truth["truth_status"] == "ok", "truth_image_labeled", truth["truth_status"]),
@@ -338,11 +362,8 @@ def live_runtime_truth(slot: str, state_root: Path) -> tuple[dict[str, str], lis
                 truth.get("retrieval_contract_complete") or "false",
             ),
             (
-                truth.get("retrieval_projection_labels_present") != "true"
-                or (
-                    truth.get("retrieval_projection_complete") == "true"
-                    and truth.get("retrieval_projection_consistent") == "true"
-                ),
+                truth.get("retrieval_projection_complete") == "true"
+                and truth.get("retrieval_projection_consistent") == "true",
                 "truth_retrieval_projection_complete_and_consistent",
                 (
                     "complete"
@@ -351,8 +372,18 @@ def live_runtime_truth(slot: str, state_root: Path) -> tuple[dict[str, str], lis
                 ),
             ),
             (
-                truth.get("retrieval_labels_present") != "true"
-                or truth.get("retrieval_enabled") in {"true", "false"},
+                bool(expected_retrieval_binding_digest)
+                and truth.get("retrieval_binding_digest")
+                == expected_retrieval_binding_digest,
+                "truth_retrieval_binding_matches_expected",
+                retrieval_binding_error
+                or (
+                    f"projected={truth.get('retrieval_binding_digest') or 'missing'} "
+                    f"expected={expected_retrieval_binding_digest or 'missing'}"
+                ),
+            ),
+            (
+                truth.get("retrieval_enabled") in {"true", "false"},
                 "truth_retrieval_enabled_declared",
                 truth.get("retrieval_enabled") or "capability_absent",
             ),

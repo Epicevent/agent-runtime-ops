@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from pathlib import Path
 import re
 import sys
@@ -10,7 +9,7 @@ import sys
 from ..domain.common import is_root as _is_root
 from ..domain.common import run_text
 from ..domain.common import state_root as _state_root
-from ..domain.runtime_paths import agent_backup_root, slot_runtime_dir
+from ..domain.runtime_paths import agent_backup_root
 from ..domain.runtime_truth import find_gateway_container_by_binding
 from ..redaction import redact
 from ..routing import get_runtime_binding, validate_linux_account
@@ -48,8 +47,12 @@ def _is_under_path(path: Path, root: Path) -> bool:
         return False
 
 
-def _resolve_diagnostics_dir(slot: str, value: str | None = None) -> Path:
-    backup_root = agent_backup_root(slot_runtime_dir(slot)).resolve(strict=False)
+def _resolve_diagnostics_dir(
+    state_root: Path,
+    slot: str,
+    value: str | None = None,
+) -> Path:
+    backup_root = agent_backup_root(state_root, slot).resolve(strict=False)
     if value:
         requested = Path(value)
         if not requested.is_absolute():
@@ -275,7 +278,11 @@ def cmd_diagnostics_show(args: argparse.Namespace) -> int:
     try:
         slot = str(args.slot)
         validate_linux_account(slot)
-        diag_dir = _resolve_diagnostics_dir(slot, getattr(args, "dir", None))
+        diag_dir = _resolve_diagnostics_dir(
+            _state_root(args),
+            slot,
+            getattr(args, "dir", None),
+        )
         tail_lines = max(1, min(int(getattr(args, "tail", 120)), 300))
     except Exception as exc:
         print("diagnostics_status=fail")

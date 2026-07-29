@@ -21,7 +21,13 @@ from .runtime_checks import (
 )
 from .config_contract import config_owner_run_as, run_config_validate_in_image
 from .image_specs import image_spec_config_contract
-from .runtime_backup import backup_agent_runtime_state, restore_backup, restore_backup_env
+from .runtime_backup import (
+    backup_agent_runtime_state,
+    finish_rollback_transaction,
+    load_backup_runtime_contract,
+    restore_backup,
+    restore_backup_env,
+)
 from .runtime_manifest import write_slot_manifests
 from .docker_compose import (
     docker_compose_command,
@@ -108,6 +114,53 @@ def write_failed_container_diagnostics(binding: RuntimeBinding, profile, backup_
             return diag_dir
         except Exception:
             return None
+
+
+def _restore_and_verify_backup(
+    *,
+    slot: str,
+    runtime_dir: Path,
+    backup_dir: Path,
+    state_root: Path,
+) -> tuple[bool, str]:
+    restored, reason = restore_backup(slot, runtime_dir, backup_dir, state_root)
+    if not restored:
+        return False, reason
+    try:
+        previous_desired, previous_profile = load_backup_runtime_contract(
+            slot,
+            backup_dir,
+            state_root,
+        )
+        failed = [
+            name
+            for ok, name, _ in run_live_slot_checks_with_wait(
+                previous_desired,
+                previous_profile,
+                state_root,
+                timeout_seconds=profile_startup_timeout_seconds(previous_profile),
+            )
+            if not ok
+        ]
+        if failed:
+            return False, "rollback_live_failed:" + ",".join(sorted(failed))
+        if isinstance(previous_desired.image_spec.get("retrieval_contract"), dict):
+            container, lookup = find_gateway_container(
+                previous_desired.route,
+                previous_profile,
+            )
+            if not container:
+                return False, f"rollback_retrieval_container_failed:{lookup}"
+            status = run_retrieval_status_probe(
+                container,
+                previous_desired.image_spec,
+            )
+            if status is None:
+                return False, "rollback_retrieval_verifier_unavailable"
+        finish_rollback_transaction(slot, state_root, backup_dir)
+    except Exception as exc:
+        return False, f"rollback_verification_failed:{exc}"
+    return True, "rollback_applied_verified"
 
 
 def apply_desired_slot(
@@ -207,7 +260,12 @@ def apply_desired_slot(
         print("phase=compose_config")
     config = run_text_cwd(docker_compose_command(desired.slot, compose_path, "config"), runtime_dir, timeout=60)
     if config.returncode != 0:
-        ok, reason = restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
+        ok, reason = _restore_and_verify_backup(
+            slot=desired.slot,
+            runtime_dir=runtime_dir,
+            backup_dir=backup_dir,
+            state_root=state_root,
+        )
         print("apply_status=fail")
         print_process_result("compose_config_error", config)
         print(f"rollback_status={'ok' if ok else 'fail'}")
@@ -223,7 +281,12 @@ def apply_desired_slot(
         timeout=240,
     )
     if up.returncode != 0:
-        ok, reason = restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
+        ok, reason = _restore_and_verify_backup(
+            slot=desired.slot,
+            runtime_dir=runtime_dir,
+            backup_dir=backup_dir,
+            state_root=state_root,
+        )
         print("apply_status=fail")
         print_process_result("compose_up_error", up)
         print(f"rollback_status={'ok' if ok else 'fail'}")
@@ -234,7 +297,12 @@ def apply_desired_slot(
     try:
         post_guidance_result = ensure_runtime_workspace_guidance(desired.slot, profile)
     except Exception as exc:
-        ok, reason = restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
+        ok, reason = _restore_and_verify_backup(
+            slot=desired.slot,
+            runtime_dir=runtime_dir,
+            backup_dir=backup_dir,
+            state_root=state_root,
+        )
         print("apply_status=fail")
         print(f"reason=workspace_guidance_post_compose_failed:{exc}")
         print(f"rollback_status={'ok' if ok else 'fail'}")
@@ -259,7 +327,12 @@ def apply_desired_slot(
             failed += 1
     if failed:
         diagnostics_dir = write_failed_container_diagnostics(desired.route, profile, backup_dir)
-        ok, reason = restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
+        ok, reason = _restore_and_verify_backup(
+            slot=desired.slot,
+            runtime_dir=runtime_dir,
+            backup_dir=backup_dir,
+            state_root=state_root,
+        )
         print(f"apply_status=fail live_failed={failed}")
         if diagnostics_dir:
             print(f"failure_diagnostics_dir={diagnostics_dir}")
@@ -279,7 +352,12 @@ def apply_desired_slot(
             if retrieval_status is None:
                 raise ValueError("embedded retrieval verifier is unavailable")
         except Exception as exc:
-            ok, reason = restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
+            ok, reason = _restore_and_verify_backup(
+                slot=desired.slot,
+                runtime_dir=runtime_dir,
+                backup_dir=backup_dir,
+                state_root=state_root,
+            )
             print("apply_status=fail")
             print(f"reason=retrieval_postcondition_failed:{exc}")
             print(f"rollback_status={'ok' if ok else 'fail'}")
@@ -302,7 +380,12 @@ def apply_desired_slot(
         try:
             stabilized_guidance_result = ensure_runtime_workspace_guidance(desired.slot, profile)
         except Exception as exc:
-            ok, reason = restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
+            ok, reason = _restore_and_verify_backup(
+                slot=desired.slot,
+                runtime_dir=runtime_dir,
+                backup_dir=backup_dir,
+                state_root=state_root,
+            )
             print("apply_status=fail")
             print(f"reason=workspace_guidance_stabilize_failed:{exc}")
             print(f"rollback_status={'ok' if ok else 'fail'}")
@@ -315,7 +398,12 @@ def apply_desired_slot(
     try:
         final_guidance_result = ensure_runtime_workspace_guidance(desired.slot, profile)
     except Exception as exc:
-        ok, reason = restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
+        ok, reason = _restore_and_verify_backup(
+            slot=desired.slot,
+            runtime_dir=runtime_dir,
+            backup_dir=backup_dir,
+            state_root=state_root,
+        )
         print("apply_status=fail")
         print(f"reason=workspace_guidance_final_failed:{exc}")
         print(f"rollback_status={'ok' if ok else 'fail'}")
@@ -339,7 +427,12 @@ def apply_desired_slot(
         )
         append_action_log(state_root, action_name, desired.slot, desired.image_name, "ok", rendered.sha256)
     except Exception as exc:
-        ok, reason = restore_backup(desired.slot, runtime_dir, backup_dir, state_root)
+        ok, reason = _restore_and_verify_backup(
+            slot=desired.slot,
+            runtime_dir=runtime_dir,
+            backup_dir=backup_dir,
+            state_root=state_root,
+        )
         print("apply_status=fail")
         print(f"reason=manifest_write_failed:{exc}")
         print(f"rollback_status={'ok' if ok else 'fail'}")

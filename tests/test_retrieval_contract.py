@@ -578,12 +578,14 @@ def test_apply_and_rollback_gate_terminal_receipts_before_success() -> None:
     apply_source = (
         repo / "opsctl" / "agent_runtime_ops" / "domain" / "runtime_apply.py"
     ).read_text(encoding="utf-8")
-    probe_index = apply_source.index("run_retrieval_status_probe(")
+    probe_index = apply_source.index(
+        "run_retrieval_status_probe(\n                container, desired.image_spec"
+    )
     manifest_index = apply_source.index("write_slot_manifests(", probe_index)
     success_index = apply_source.index('print("apply_status=ok")', manifest_index)
     assert probe_index < manifest_index < success_index
     assert "retrieval_postcondition_failed" in apply_source
-    assert "restore_backup(desired.slot, runtime_dir, backup_dir, state_root)" in apply_source[
+    assert "_restore_and_verify_backup(" in apply_source[
         probe_index:manifest_index
     ]
 
@@ -591,6 +593,7 @@ def test_apply_and_rollback_gate_terminal_receipts_before_success() -> None:
         repo / "opsctl" / "agent_runtime_ops" / "commands" / "apply.py"
     ).read_text(encoding="utf-8")
     rollback_probe = rollback_source.index("run_retrieval_status_probe(")
+    rollback_finish = rollback_source.index("finish_rollback_transaction(")
     rollback_success = rollback_source.index('print("rollback_status=ok")')
-    assert rollback_probe < rollback_success
+    assert rollback_probe < rollback_finish < rollback_success
     assert "retrieval_disable_observation_failed" in rollback_source

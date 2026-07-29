@@ -3,19 +3,45 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
+import stat
 import subprocess
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
-from agent_runtime_ops.domain.runtime_apply import apply_desired_slot
+from agent_runtime_ops.domain.runtime_apply import (
+    _restore_and_verify_backup,
+    apply_desired_slot,
+)
 from agent_runtime_ops.domain.runtime_backup import (
     _next_backup_path,
     backup_agent_runtime_state,
+    finish_rollback_transaction,
     latest_backup,
+    pending_rollback_backup,
+    restore_backup,
     restore_backup_env,
 )
+from agent_runtime_ops.domain.runtime_paths import (
+    agent_compose_path,
+    agent_manifest_path,
+    state_manifest_path,
+)
+
+
+def recovery_backup_root(state_root: Path, slot: str = "oc20") -> Path:
+    return state_root / "runtime-recovery" / slot / "backups"
+
+
+def rollback_transaction_path(state_root: Path, slot: str = "oc20") -> Path:
+    return (
+        state_root
+        / "runtime-recovery"
+        / slot
+        / ".agent-runtime-rollback-transaction.json"
+    )
 
 
 def test_runtime_env_backup_is_private_and_restores_exact_prior_bytes(
@@ -65,20 +91,326 @@ def test_backup_publication_syncs_files_and_directories_before_return(
             "agent_runtime_ops.domain.runtime_backup._fsync_directory",
             side_effect=lambda path: events.append(("directory", path.name)),
         ),
+        patch(
+            "agent_runtime_ops.domain.runtime_backup.fsync_parent",
+            side_effect=lambda path: events.append(("parent", path.parent.name)),
+        ),
         patch.object(Path, "rename", rename),
     ):
         backup_dir = backup_agent_runtime_state("oc20", runtime_dir, state_root)
 
-    staging_name = events[-2][1]
+    staging_name = next(value for event, value in events if event == "rename")
     assert staging_name.startswith(".staging-")
     assert events == [
+        ("parent", "state"),
+        ("parent", "runtime-recovery"),
+        ("parent", "oc20"),
         ("file", ".env"),
         ("file", "backup.json"),
         ("directory", staging_name),
         ("rename", staging_name),
-        ("directory", ".agent-runtime-backups"),
+        ("directory", "backups"),
     ]
     assert backup_dir.is_dir()
+
+
+def test_backup_and_recovery_identity_live_only_under_controlled_state_root(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "slot-owned-runtime"
+    runtime_dir.mkdir()
+    state_root = tmp_path / "root-controlled-state"
+    state_root.mkdir()
+
+    backup_dir = backup_agent_runtime_state("oc20", runtime_dir, state_root)
+
+    assert backup_dir.parent == recovery_backup_root(state_root)
+    assert not (runtime_dir / ".agent-runtime-backups").exists()
+    assert not (runtime_dir / ".agent-runtime-rollback-transaction.json").exists()
+    if os.name != "nt":
+        expected_uid = os.geteuid()
+        for path in (
+            state_root / "runtime-recovery",
+            state_root / "runtime-recovery" / "oc20",
+            recovery_backup_root(state_root),
+            backup_dir,
+        ):
+            assert path.stat().st_uid == expected_uid
+            assert stat.S_IMODE(path.stat().st_mode) == 0o700
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership/mode contract")
+def test_recovery_parent_owner_and_mode_drift_fail_closed(tmp_path: Path) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    backup_agent_runtime_state("oc20", runtime_dir, state_root)
+    recovery_dir = state_root / "runtime-recovery" / "oc20"
+    recovery_dir.chmod(0o770)
+
+    with pytest.raises(ValueError, match="must not be group/other writable"):
+        pending_rollback_backup(state_root, "oc20")
+
+    recovery_dir.chmod(0o700)
+    with (
+        patch(
+            "agent_runtime_ops.domain.runtime_backup.os.geteuid",
+            return_value=os.geteuid() + 1,
+        ),
+        pytest.raises(ValueError, match="owner mismatch"),
+    ):
+        pending_rollback_backup(state_root, "oc20")
+
+
+def test_restore_backup_replays_exact_transaction_after_mid_restore_crash(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    compose_path = agent_compose_path(runtime_dir)
+    manifest_path = agent_manifest_path(runtime_dir)
+    env_path = runtime_dir / ".env"
+    state_manifest_file = state_manifest_path(state_root, "oc20", create_parent=True)
+    old_values = {
+        compose_path: "services:\n  old: {}\n",
+        manifest_path: "old-manifest\n",
+        env_path: "VALUE=old\n",
+        state_manifest_file: "slot: oc20\nvalue: old\n",
+    }
+    for path, value in old_values.items():
+        path.write_text(value, encoding="utf-8")
+    backup_dir = backup_agent_runtime_state("oc20", runtime_dir, state_root)
+    for path in old_values:
+        path.write_text("candidate\n", encoding="utf-8")
+
+    from agent_runtime_ops.domain import runtime_backup
+
+    original_restore = runtime_backup._restore_regular_file
+    restore_calls = 0
+
+    def crash_after_first_restore(source: Path, target: Path, **kwargs: object) -> None:
+        nonlocal restore_calls
+        restore_calls += 1
+        assert (
+            rollback_transaction_path(state_root)
+        ).is_file()
+        if restore_calls == 2:
+            raise OSError("simulated host crash boundary")
+        original_restore(source, target, **kwargs)
+
+    with (
+        patch(
+            "agent_runtime_ops.domain.runtime_backup._restore_regular_file",
+            side_effect=crash_after_first_restore,
+        ),
+        pytest.raises(OSError, match="simulated host crash boundary"),
+    ):
+        restore_backup("oc20", runtime_dir, backup_dir, state_root)
+
+    transaction_path = rollback_transaction_path(state_root)
+    assert transaction_path.is_file()
+    assert pending_rollback_backup(state_root, "oc20") == backup_dir
+    assert env_path.read_text(encoding="utf-8") == old_values[env_path]
+    assert compose_path.read_text(encoding="utf-8") == "candidate\n"
+    with pytest.raises(RuntimeError, match="rollback transaction must be completed"):
+        backup_agent_runtime_state("oc20", runtime_dir, state_root)
+
+    completed = subprocess.CompletedProcess(["docker"], 0, "", "")
+    with patch(
+        "agent_runtime_ops.domain.runtime_backup.run_text_cwd",
+        return_value=completed,
+    ):
+        ok, reason = restore_backup("oc20", runtime_dir, backup_dir, state_root)
+
+    assert ok is True
+    assert reason == "rollback_applied"
+    assert transaction_path.is_file()
+    assert pending_rollback_backup(state_root, "oc20") == backup_dir
+    for path, value in old_values.items():
+        assert path.read_text(encoding="utf-8") == value
+    finish_rollback_transaction("oc20", state_root, backup_dir)
+    assert not transaction_path.exists()
+    assert pending_rollback_backup(state_root, "oc20") is None
+
+
+def test_restore_transaction_finishes_only_after_live_and_probe_pass(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    compose_path = agent_compose_path(runtime_dir)
+    manifest_path = agent_manifest_path(runtime_dir)
+    state_manifest_file = state_manifest_path(state_root, "oc20", create_parent=True)
+    compose_path.write_text("services: {}\n", encoding="utf-8")
+    manifest_path.write_text("old-manifest\n", encoding="utf-8")
+    state_manifest_file.write_text("slot: oc20\n", encoding="utf-8")
+    backup_dir = backup_agent_runtime_state("oc20", runtime_dir, state_root)
+    compose_path.write_text("candidate\n", encoding="utf-8")
+    previous_desired = SimpleNamespace(
+        image_spec={"retrieval_contract": {"schema": "fixture"}},
+        route=SimpleNamespace(linux_account="oc20"),
+    )
+    previous_profile = SimpleNamespace(name="profile")
+    completed = subprocess.CompletedProcess(["docker"], 0, "", "")
+    transaction_path = rollback_transaction_path(state_root)
+
+    with (
+        patch(
+            "agent_runtime_ops.domain.runtime_backup.run_text_cwd",
+            return_value=completed,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.load_backup_runtime_contract",
+            return_value=(previous_desired, previous_profile),
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.profile_startup_timeout_seconds",
+            return_value=1,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.run_live_slot_checks_with_wait",
+            return_value=[(False, "restored_runtime_unhealthy", "fixture")],
+        ),
+        patch("agent_runtime_ops.domain.runtime_apply.run_retrieval_status_probe") as probe,
+    ):
+        ok, reason = _restore_and_verify_backup(
+            slot="oc20",
+            runtime_dir=runtime_dir,
+            backup_dir=backup_dir,
+            state_root=state_root,
+        )
+
+    assert ok is False
+    assert reason == "rollback_live_failed:restored_runtime_unhealthy"
+    assert transaction_path.is_file()
+    assert pending_rollback_backup(state_root, "oc20") == backup_dir
+    probe.assert_not_called()
+
+    with (
+        patch(
+            "agent_runtime_ops.domain.runtime_backup.run_text_cwd",
+            return_value=completed,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.load_backup_runtime_contract",
+            return_value=(previous_desired, previous_profile),
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.profile_startup_timeout_seconds",
+            return_value=1,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.run_live_slot_checks_with_wait",
+            return_value=[(True, "restored_runtime_healthy", "fixture")],
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.find_gateway_container",
+            return_value=("container-1", "instance_label"),
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.run_retrieval_status_probe",
+            side_effect=ValueError("probe failed"),
+        ),
+    ):
+        ok, reason = _restore_and_verify_backup(
+            slot="oc20",
+            runtime_dir=runtime_dir,
+            backup_dir=backup_dir,
+            state_root=state_root,
+        )
+
+    assert ok is False
+    assert reason == "rollback_verification_failed:probe failed"
+    assert transaction_path.is_file()
+    assert pending_rollback_backup(state_root, "oc20") == backup_dir
+
+    with (
+        patch(
+            "agent_runtime_ops.domain.runtime_backup.run_text_cwd",
+            return_value=completed,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.load_backup_runtime_contract",
+            return_value=(previous_desired, previous_profile),
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.profile_startup_timeout_seconds",
+            return_value=1,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.run_live_slot_checks_with_wait",
+            return_value=[(True, "restored_runtime_healthy", "fixture")],
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.find_gateway_container",
+            return_value=("container-1", "instance_label"),
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.run_retrieval_status_probe",
+            return_value={"bindingDigest": "sha256:" + "1" * 64},
+        ),
+    ):
+        ok, reason = _restore_and_verify_backup(
+            slot="oc20",
+            runtime_dir=runtime_dir,
+            backup_dir=backup_dir,
+            state_root=state_root,
+        )
+
+    assert ok is True
+    assert reason == "rollback_applied_verified"
+    assert not transaction_path.exists()
+    assert pending_rollback_backup(state_root, "oc20") is None
+
+
+def test_pending_transaction_rejects_changed_backup_identity(tmp_path: Path) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    compose_path = agent_compose_path(runtime_dir)
+    compose_path.write_text("services: {}\n", encoding="utf-8")
+    first = backup_agent_runtime_state("oc20", runtime_dir, state_root)
+    from agent_runtime_ops.domain.runtime_backup import _begin_rollback_transaction
+
+    _begin_rollback_transaction("oc20", state_root, first)
+    second = first.parent / "20260729T235959+0000"
+    shutil.copytree(first, second)
+    second.chmod(0o700)
+
+    assert pending_rollback_backup(state_root, "oc20") == first
+    with pytest.raises(RuntimeError, match="another rollback transaction is pending"):
+        _begin_rollback_transaction("oc20", state_root, second)
+
+
+def test_pending_transaction_rejects_backup_artifact_digest_drift(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    compose_path = agent_compose_path(runtime_dir)
+    compose_path.write_text("services: {}\n", encoding="utf-8")
+    backup_dir = backup_agent_runtime_state("oc20", runtime_dir, state_root)
+
+    from agent_runtime_ops.domain.runtime_backup import _begin_rollback_transaction
+
+    _begin_rollback_transaction("oc20", state_root, backup_dir)
+    (backup_dir / "docker-compose.agent-runtime.yml").write_text(
+        "tampered\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="artifact digest mismatch"):
+        pending_rollback_backup(state_root, "oc20")
+    with pytest.raises(ValueError, match="artifact digest mismatch"):
+        restore_backup("oc20", runtime_dir, backup_dir, state_root)
 
 
 def test_env_restore_syncs_parent_after_atomic_replace(tmp_path: Path) -> None:
@@ -260,28 +592,38 @@ def test_incomplete_backup_is_not_published_or_selected(tmp_path: Path) -> None:
     ):
         backup_agent_runtime_state("oc20", runtime_dir, state_root)
 
-    backup_root = runtime_dir / ".agent-runtime-backups"
+    backup_root = recovery_backup_root(state_root)
     assert list(backup_root.iterdir()) == []
-    assert latest_backup(runtime_dir) is None
+    assert latest_backup(state_root, "oc20") is None
 
 
 def test_latest_backup_ignores_incomplete_visible_directory(tmp_path: Path) -> None:
-    runtime_dir = tmp_path / "runtime"
-    backup_root = runtime_dir / ".agent-runtime-backups"
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    backup_root = recovery_backup_root(state_root)
+    backup_root.mkdir(parents=True)
+    (state_root / "runtime-recovery").chmod(0o700)
+    (state_root / "runtime-recovery" / "oc20").chmod(0o700)
+    backup_root.chmod(0o700)
     valid = backup_root / "20260729T000000+0000"
     valid.mkdir(parents=True)
     (valid / "backup.json").write_text("{}", encoding="utf-8")
     incomplete = backup_root / "20260729T000001+0000"
     incomplete.mkdir()
 
-    assert latest_backup(runtime_dir) == valid
+    assert latest_backup(state_root, "oc20") == valid
 
 
 def test_latest_backup_ignores_staging_directory_with_backup_metadata(
     tmp_path: Path,
 ) -> None:
-    runtime_dir = tmp_path / "runtime"
-    backup_root = runtime_dir / ".agent-runtime-backups"
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    backup_root = recovery_backup_root(state_root)
+    backup_root.mkdir(parents=True)
+    (state_root / "runtime-recovery").chmod(0o700)
+    (state_root / "runtime-recovery" / "oc20").chmod(0o700)
+    backup_root.chmod(0o700)
     valid = backup_root / "20260729T000000+0000"
     valid.mkdir(parents=True)
     (valid / "backup.json").write_text("{}", encoding="utf-8")
@@ -289,20 +631,25 @@ def test_latest_backup_ignores_staging_directory_with_backup_metadata(
     staging.mkdir()
     (staging / "backup.json").write_text("{", encoding="utf-8")
 
-    assert latest_backup(runtime_dir) == valid
+    assert latest_backup(state_root, "oc20") == valid
 
 
 def test_latest_backup_orders_same_second_collision_suffix_numerically(
     tmp_path: Path,
 ) -> None:
-    runtime_dir = tmp_path / "runtime"
-    backup_root = runtime_dir / ".agent-runtime-backups"
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    backup_root = recovery_backup_root(state_root)
+    backup_root.mkdir(parents=True)
+    (state_root / "runtime-recovery").chmod(0o700)
+    (state_root / "runtime-recovery" / "oc20").chmod(0o700)
+    backup_root.chmod(0o700)
     for suffix in ("", ".2", ".9", ".10"):
         candidate = backup_root / f"20260729T000000+0000{suffix}"
         candidate.mkdir(parents=True)
         (candidate / "backup.json").write_text("{}", encoding="utf-8")
 
-    assert latest_backup(runtime_dir) == backup_root / "20260729T000000+0000.10"
+    assert latest_backup(state_root, "oc20") == backup_root / "20260729T000000+0000.10"
 
 
 def test_new_backup_suffix_starts_above_highest_same_second_collision(
@@ -338,7 +685,7 @@ def test_apply_backs_up_env_before_prepare_and_restores_on_pre_dispatch_failure(
     observed: dict[str, object] = {}
 
     def prepare() -> None:
-        backups = list((runtime_dir / ".agent-runtime-backups").iterdir())
+        backups = list(recovery_backup_root(state_root).iterdir())
         assert len(backups) == 1
         observed["backup_bytes"] = (backups[0] / ".env").read_text(encoding="utf-8")
         env_path.write_text("JITECH_RETRIEVAL_ENABLED=false\n", encoding="utf-8")

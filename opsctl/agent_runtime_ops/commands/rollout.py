@@ -26,11 +26,16 @@ from ..domain.runtime_apply import apply_desired_slot as _apply_desired_slot
 from ..domain.runtime_checks import run_live_slot_checks as _run_live_slot_checks
 from ..domain.runtime_checks import run_static_slot_checks as _run_static_slot_checks
 from ..domain.runtime_rollup import runtime_manifest_rollup
-from ..domain.retrieval_contract import retrieval_contract_is_approved, retrieval_env
+from ..domain.retrieval_contract import (
+    retrieval_contract_is_approved,
+    retrieval_env,
+    run_retrieval_status_probe,
+)
 from ..domain.runtime_targets import (
     desired_from_direct_images as _desired_from_direct_images,
     desired_from_live_image_truth as _desired_from_live_image_truth,
 )
+from ..domain.runtime_truth import find_gateway_container_by_binding
 from ..renderer import render_compose
 from ..host.account_files import slot_uid_gid
 from ..routing import load_runtime_bindings
@@ -297,6 +302,21 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
                 checklist_failed += 1
         if checklist_failed:
             raise ValueError(f"checklist gate failed: failed={checklist_failed}")
+        if source_desired.image_spec.get("retrieval_enabled") is True:
+            print("phase=retrieval_source_gate")
+            container, lookup = find_gateway_container_by_binding(source_desired.route)
+            if not container:
+                raise ValueError(
+                    f"retrieval promotion source container lookup failed: {lookup}"
+                )
+            status = run_retrieval_status_probe(container, source_desired.image_spec)
+            if status is None:
+                raise ValueError("retrieval promotion source verifier was unavailable")
+            _check_line(
+                True,
+                "promotion_retrieval_source_verified",
+                str(status.get("bindingDigest") or "missing"),
+            )
         wrapper_image = str(source_desired.image_spec.get("wrapper_image") or "")
         product_image = str(source_desired.image_spec.get("product_image") or "")
         image_spec = image_spec_from_direct_images(wrapper_image, product_image)
