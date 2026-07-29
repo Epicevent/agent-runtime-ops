@@ -97,8 +97,10 @@ postcondition fails. Rollback rechecks the restored tuple and reports the conten
 disable/revocation observation when the restored tuple carries the capability.
 
 Apply and rollback are serialized per slot by a persistent root-controlled lock. A
-crash-recovery marker is bound to one immutable backup and is removed only after the
-restored runtime passes its live checks and, when present, the exact retrieval verifier.
+crash-recovery marker is durably bound to one immutable backup before `.env`, compose,
+or manifest mutation. It is removed only after the candidate reaches its successful
+terminal manifest, or after the restored runtime passes its live checks and, when
+present, the exact retrieval verifier.
 If a failed first apply has no prior runtime tuple, rollback removes the candidate
 compose/env/manifests, verifies that the compose project has zero containers, networks,
 and volumes, and only then completes the recovery marker. A crash or residual Docker

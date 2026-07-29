@@ -1297,6 +1297,9 @@ def test_apply_backs_up_env_before_prepare_and_restores_on_pre_dispatch_failure(
         backups = list(recovery_backup_root(state_root).iterdir())
         assert len(backups) == 1
         observed["backup_bytes"] = (backups[0] / ".env").read_text(encoding="utf-8")
+        observed["pending_before_env_mutation"] = pending_rollback_backup(
+            state_root, "oc20"
+        )
         env_path.write_text("JITECH_RETRIEVAL_ENABLED=false\n", encoding="utf-8")
 
     with (
@@ -1320,6 +1323,10 @@ def test_apply_backs_up_env_before_prepare_and_restores_on_pre_dispatch_failure(
 
     assert rc == 1
     assert observed["backup_bytes"] == original
+    assert observed["pending_before_env_mutation"] == pending_rollback_backup(
+        state_root, "oc20"
+    )
+    assert pending_rollback_backup(state_root, "oc20") is not None
     assert env_path.read_text(encoding="utf-8") == original
 
 
@@ -1369,4 +1376,5 @@ def test_apply_keeps_prepared_env_after_successful_dispatch(tmp_path: Path) -> N
         )
 
     assert rc == 0
+    assert pending_rollback_backup(state_root, "oc20") is None
     assert env_path.read_text(encoding="utf-8") == "JITECH_RETRIEVAL_ENABLED=false\n"

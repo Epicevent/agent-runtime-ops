@@ -23,6 +23,7 @@ from .config_contract import config_owner_run_as, run_config_validate_in_image
 from .image_specs import image_spec_config_contract
 from .runtime_backup import (
     backup_agent_runtime_state,
+    begin_rollback_transaction,
     consume_legacy_retrieval_projection_exemption,
     finish_rollback_transaction,
     legacy_retrieval_projection_failures_are_expected,
@@ -295,6 +296,7 @@ def _apply_desired_slot_locked(
                     f"({detail}); migrate first: sudo opsctl config migrate {desired.slot}"
                 )
         backup_dir = backup_agent_runtime_state(desired.slot, runtime_dir, state_root)
+        begin_rollback_transaction(desired.slot, state_root, backup_dir)
         if prepare_runtime_env is not None:
             runtime_env_prepared = True
             prepare_runtime_env()
@@ -511,6 +513,7 @@ def _apply_desired_slot_locked(
             applied_at=applied_at,
             previous_manifest=previous_manifest,
         )
+        finish_rollback_transaction(desired.slot, state_root, backup_dir)
         append_action_log(state_root, action_name, desired.slot, desired.image_name, "ok", rendered.sha256)
     except Exception as exc:
         ok, reason = _restore_and_verify_backup(

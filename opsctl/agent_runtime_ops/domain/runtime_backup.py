@@ -717,6 +717,16 @@ def _finish_rollback_transaction(
     fsync_parent(transaction_path)
 
 
+def begin_rollback_transaction(
+    slot: str,
+    state_root: Path,
+    backup_dir: Path,
+) -> Path:
+    """Durably bind the pre-mutation recovery point for an apply transaction."""
+
+    return _begin_rollback_transaction(slot, state_root, backup_dir)
+
+
 def _metadata_boolean(
     metadata: dict, key: str, *, required: bool = True
 ) -> bool | None:
