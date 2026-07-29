@@ -1308,7 +1308,7 @@ def restore_backup(
     had_compose = _metadata_boolean(metadata, "had_compose")
     had_manifest = _metadata_boolean(metadata, "had_manifest")
     had_state_manifest = _metadata_boolean(metadata, "had_state_manifest")
-    _validate_env_restore_inputs(runtime_dir, backup_dir, metadata)
+    had_env = _validate_env_restore_inputs(runtime_dir, backup_dir, metadata)
 
     restore_plan = (
         (
@@ -1350,12 +1350,9 @@ def restore_backup(
             _remove_regular_file(target)
 
     if not had_compose:
-        active_paths = [
-            runtime_dir / ".env",
-            compose_path,
-            manifest_path,
-            state_manifest_file,
-        ]
+        active_paths = [compose_path, manifest_path, state_manifest_file]
+        if had_env is False:
+            active_paths.append(runtime_dir / ".env")
         if any(path.exists() or path.is_symlink() for path in active_paths):
             return False, "empty_baseline_active_files_remain"
         clean, reason = _empty_baseline_project_residue(slot)

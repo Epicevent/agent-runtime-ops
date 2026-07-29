@@ -13,7 +13,10 @@ from agent_runtime_ops.commands.apply import _cmd_rollback_locked
 from agent_runtime_ops.commands.diagnostics import _resolve_diagnostics_dir
 from agent_runtime_ops.domain import runtime_backup
 from agent_runtime_ops.domain.runtime_backup import (
+    finish_rollback_transaction,
     import_legacy_agent_runtime_backups,
+    pending_rollback_backup,
+    restore_backup,
     restore_backup_env,
 )
 from agent_runtime_ops.install_migrations import migrate_legacy_runtime_backups
@@ -181,6 +184,54 @@ def test_intermediate_explicit_env_absence_retains_delete_on_rollback(
     restore_backup_env(runtime_dir, imported[0])
 
     assert not env_path.exists()
+
+
+@POSIX_ONLY
+def test_earliest_empty_baseline_preserves_unmeasured_env_and_can_finish(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    source = _legacy_backup(runtime_dir, diagnostics=False)
+    metadata_path = source / "backup.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata.update(
+        {
+            "had_compose": False,
+            "had_manifest": False,
+            "had_state_manifest": False,
+        }
+    )
+    metadata_path.write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    metadata_path.chmod(0o644)
+    for name in (
+        "docker-compose.agent-runtime.yml",
+        ".agent-runtime-manifest",
+        "manifest.yaml",
+    ):
+        (source / name).unlink()
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    imported = import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root)
+    env_path = runtime_dir / ".env"
+    current = b"API_SERVER_KEY=unmeasured-existing-secret\n"
+    env_path.write_bytes(current)
+
+    with patch(
+        "agent_runtime_ops.domain.runtime_backup._empty_baseline_project_residue",
+        return_value=(True, "empty_baseline_project_absent"),
+    ):
+        ok, reason = restore_backup("oc20", runtime_dir, imported[0], state_root)
+
+    assert ok is True
+    assert reason == "rollback_empty_baseline_restored"
+    assert env_path.read_bytes() == current
+    assert pending_rollback_backup(state_root, "oc20") == imported[0]
+    finish_rollback_transaction("oc20", state_root, imported[0])
+    assert pending_rollback_backup(state_root, "oc20") is None
 
 
 @POSIX_ONLY
