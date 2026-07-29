@@ -7,6 +7,8 @@ approval exists for it, so deploying the gate is non-breaking).
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -48,6 +50,31 @@ def test_write_merges_and_lookup(tmp_path):
     # provenance recorded
     item = ia.load_image_approvals(tmp_path)["openclaw:product"]
     assert item["source_commit"] == "deadbeef"
+
+
+def test_image_approval_rotation_uses_runtime_host_mutation_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    @contextmanager
+    def locked(_state_root: Path):
+        events.append("lock_enter")
+        yield
+        events.append("lock_exit")
+
+    def write(*_args: object, **_kwargs: object) -> Path:
+        events.append("policy_write")
+        return tmp_path / ia.IMAGE_APPROVAL_POLICY_NAME
+
+    monkeypatch.setattr(ia, "runtime_host_mutation_lock", locked)
+    monkeypatch.setattr(ia, "_write_image_approval_locked", write)
+
+    result = ia.write_image_approval(tmp_path, "openclaw", "product", PRODUCT)
+
+    assert result == tmp_path / ia.IMAGE_APPROVAL_POLICY_NAME
+    assert events == ["lock_enter", "policy_write", "lock_exit"]
 
 
 COMMIT = "9eaf9fb5a46259c76dc5856c6d8847891f5b700e"

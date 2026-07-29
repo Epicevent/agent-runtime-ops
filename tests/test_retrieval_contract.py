@@ -719,9 +719,14 @@ def test_enabled_production_retrieval_requires_current_exact_approval(
 ) -> None:
     spec = capable_spec(enabled=True)
     spec["product_image"] = "ghcr.io/epicevent/openclaw-jitech@" + DIGEST_D
+    spec["wrapper_image"] = "ghcr.io/epicevent/agent-runtime-openclaw@" + DIGEST_A
     desired = SimpleNamespace(slot="oc20", family="openclaw", image_spec=spec)
-    with pytest.raises(ValueError, match="requires exact component approval"):
-        require_retrieval_approval(desired, tmp_path)
+    with patch(
+        "agent_runtime_ops.domain.image_approval_policy.is_image_ref_approved",
+        return_value=True,
+    ):
+        with pytest.raises(ValueError, match="requires exact component approval"):
+            require_retrieval_approval(desired, tmp_path)
 
     contract = spec["retrieval_contract"]
     assert isinstance(contract, dict)
@@ -735,13 +740,44 @@ def test_enabled_production_retrieval_requires_current_exact_approval(
             contract,
             product_image_digest=DIGEST_D,
         )
-    require_retrieval_approval(desired, tmp_path)
+    with patch(
+        "agent_runtime_ops.domain.image_approval_policy.is_image_ref_approved",
+        return_value=True,
+    ):
+        require_retrieval_approval(desired, tmp_path)
 
     desired.image_spec["product_image"] = (
         "ghcr.io/epicevent/openclaw-jitech@" + DIGEST_A
     )
-    with pytest.raises(ValueError, match="requires exact component approval"):
-        require_retrieval_approval(desired, tmp_path)
+    with patch(
+        "agent_runtime_ops.domain.image_approval_policy.is_image_ref_approved",
+        return_value=True,
+    ):
+        with pytest.raises(ValueError, match="requires exact component approval"):
+            require_retrieval_approval(desired, tmp_path)
+
+
+def test_enabled_production_retrieval_requires_product_and_wrapper_approvals(
+    tmp_path: Path,
+) -> None:
+    spec = capable_spec(enabled=True)
+    spec["product_image"] = "ghcr.io/epicevent/openclaw-jitech@" + DIGEST_D
+    spec["wrapper_image"] = "ghcr.io/epicevent/agent-runtime-openclaw@" + DIGEST_A
+    desired = SimpleNamespace(slot="oc20", family="openclaw", image_spec=spec)
+
+    with patch(
+        "agent_runtime_ops.domain.image_approval_policy.is_image_ref_approved",
+        side_effect=lambda _root, _family, role, _image: role == "product",
+    ):
+        with pytest.raises(ValueError, match="wrapper image approval"):
+            require_retrieval_approval(desired, tmp_path)
+
+    with patch(
+        "agent_runtime_ops.domain.image_approval_policy.is_image_ref_approved",
+        side_effect=lambda _root, _family, role, _image: role == "wrapper",
+    ):
+        with pytest.raises(ValueError, match="product image approval"):
+            require_retrieval_approval(desired, tmp_path)
 
 
 def test_disabled_and_dev_retrieval_do_not_require_production_approval(
@@ -875,6 +911,29 @@ def test_missing_approval_document_is_the_only_empty_policy_state(
     tmp_path: Path,
 ) -> None:
     assert load_retrieval_approvals(tmp_path) == {}
+
+
+@pytest.mark.parametrize(
+    "original",
+    [
+        "components: {}\ncomponents: {}\n",
+        "meta:\n  schema: jitech-retrieval-component-approval/v1\n  schema: duplicate\n",
+        "components:\n  hermes:\n    component_digest: sha256:"
+        + "a" * 64
+        + "\n    component_digest: sha256:"
+        + "b" * 64
+        + "\n",
+    ],
+)
+def test_approval_policy_rejects_duplicate_keys_at_every_mapping_level(
+    tmp_path: Path,
+    original: str,
+) -> None:
+    policy = tmp_path / "retrieval-component-approved.yaml"
+    policy.write_text(original, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="duplicate key"):
+        load_retrieval_approvals(tmp_path)
 
 
 def test_cli_surface_has_enable_flag_but_no_third_image_or_policy_inputs() -> None:

@@ -25,6 +25,7 @@ from .image_specs import (
     digest_from_image_ref,
     validate_image_digest_ref,
 )
+from .runtime_backup import runtime_host_mutation_lock
 
 
 IMAGE_APPROVAL_POLICY_NAME = "image-approved.yaml"
@@ -102,7 +103,7 @@ def is_image_ref_approved(state_root: Path, family: str, role: str, image_ref: o
     return bool(digest) and is_image_digest_approved(state_root, family, role, digest)
 
 
-def write_image_approval(
+def _write_image_approval_locked(
     state_root: Path,
     family: str,
     role: str,
@@ -150,3 +151,26 @@ def write_image_approval(
         tmp_path.unlink(missing_ok=True)
         raise
     return policy_path
+
+
+def write_image_approval(
+    state_root: Path,
+    family: str,
+    role: str,
+    image_ref: str,
+    *,
+    source_commit: str = "",
+    revision: str = "",
+) -> Path:
+    """Serialize image trust rotation with runtime apply/rollback admission."""
+    if not state_root.is_dir():
+        raise FileNotFoundError(state_root)
+    with runtime_host_mutation_lock(state_root):
+        return _write_image_approval_locked(
+            state_root,
+            family,
+            role,
+            image_ref,
+            source_commit=source_commit,
+            revision=revision,
+        )

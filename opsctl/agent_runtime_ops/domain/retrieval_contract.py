@@ -9,7 +9,9 @@ import re
 import tempfile
 from typing import Any
 
-from ..yamlio import dump_yaml, load_yaml
+import yaml
+
+from ..yamlio import dump_yaml
 from .common import is_dev_slot
 from .artifact_probe import (
     ArtifactProbeError,
@@ -108,6 +110,30 @@ APPROVAL_ITEM_KEYS = {
     "source_archive_digest",
     "source_revision",
 }
+
+
+class _UniqueKeySafeLoader(yaml.SafeLoader):
+    pass
+
+
+def _construct_unique_mapping(
+    loader: yaml.SafeLoader,
+    node: yaml.nodes.MappingNode,
+    deep: bool = False,
+) -> dict[object, object]:
+    mapping: dict[object, object] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in mapping:
+            raise ValueError(f"retrieval component approval policy has duplicate key: {key}")
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_UniqueKeySafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
 
 
 def _now_iso() -> str:
@@ -444,7 +470,8 @@ def load_retrieval_approvals(state_root: Path) -> dict[str, object]:
         return {}
     if not policy_path.is_file():
         raise ValueError("retrieval component approval policy must be a regular file")
-    data = load_yaml(policy_path)
+    with policy_path.open("r", encoding="utf-8") as fh:
+        data = yaml.load(fh, Loader=_UniqueKeySafeLoader)
     if (
         not isinstance(data, dict)
         or not isinstance(data.get("meta"), dict)
@@ -590,6 +617,21 @@ def require_retrieval_approval(desired: object, state_root: Path) -> None:
     if not SHA256_RE.fullmatch(product_digest):
         raise ValueError("retrieval product image must be pinned by sha256 digest")
     family = str(getattr(desired, "family", "") or "")
+    from .image_approval_policy import is_image_ref_approved
+
+    wrapper_image = image_spec.get("wrapper_image")
+    if not is_image_ref_approved(
+        state_root, family, "wrapper", wrapper_image
+    ):
+        raise ValueError(
+            "production retrieval enablement requires exact wrapper image approval"
+        )
+    if not is_image_ref_approved(
+        state_root, family, "product", product_image
+    ):
+        raise ValueError(
+            "production retrieval enablement requires exact product image approval"
+        )
     if not retrieval_contract_is_approved(
         state_root,
         family,
