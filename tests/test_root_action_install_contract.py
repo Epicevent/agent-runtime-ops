@@ -4,6 +4,7 @@ from pathlib import Path
 import os
 import shutil
 import subprocess
+import time
 
 import pytest
 
@@ -39,6 +40,9 @@ def test_install_places_fixed_root_action_contract_without_activation_or_new_sud
     assert "active_restarted_release_verified" in function
     assert "ROOT_ACTION_POST_RESTART_ATTESTATION_ATTEMPTS=40" in install
     assert "ROOT_ACTION_POST_RESTART_ATTESTATION_INTERVAL_SECONDS=0.25" in install
+    assert "ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS=30" in install
+    assert "ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=1" in install
+    assert "/usr/bin/timeout --kill-after=1" in install
     assert 'systemctl show --property=MainPID --value "$service_name"' in install
     assert 'grep -Fzqx "AGENT_RUNTIME_OPS_RELEASE=$release_dir"' in install
     sudoers_start = install.index("install_ops_sudoers()")
@@ -114,6 +118,49 @@ def test_install_attestation_fails_closed_after_fixed_attempts(tmp_path: Path) -
         "attempt:3",
         "attempt:4",
     ]
+
+
+def test_install_attestation_times_out_a_truly_hanging_systemctl(
+    tmp_path: Path,
+) -> None:
+    if os.name != "posix":
+        pytest.skip("POSIX process semantics are required for this harness")
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("POSIX bash is required for the install attestation harness")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    systemctl = fake_bin / "systemctl"
+    systemctl.write_text(
+        "#!/usr/bin/env bash\nexec /usr/bin/sleep 10\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    systemctl.chmod(0o755)
+    harness = tmp_path / "hanging-systemctl.sh"
+    harness.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "ROOT_ACTION_POST_RESTART_ATTESTATION_ATTEMPTS=2\n"
+        "ROOT_ACTION_POST_RESTART_ATTESTATION_INTERVAL_SECONDS=0\n"
+        "ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=0.1\n"
+        + _install_attestation_functions()
+        + "\nwait_for_root_action_broker_release broker.service /release\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    started = time.monotonic()
+    completed = subprocess.run(
+        [bash, str(harness)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        env={**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+    )
+    elapsed = time.monotonic() - started
+    assert completed.returncode != 0
+    assert elapsed < 3
 
 
 def test_service_is_root_owned_webauthn_broker_and_uses_fixed_paths() -> None:

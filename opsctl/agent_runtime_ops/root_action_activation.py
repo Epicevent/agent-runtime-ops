@@ -23,6 +23,8 @@ ROOT_ACTION_RUNNING_RELEASE_ENV = "AGENT_RUNTIME_OPS_RELEASE"
 ROOT_ACTION_PROCESS_ENV_MAX_BYTES = 64 * 1024
 ROOT_ACTION_POST_RESTART_ATTESTATION_ATTEMPTS = 40
 ROOT_ACTION_POST_RESTART_ATTESTATION_INTERVAL_SECONDS = 0.25
+ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS = 30.0
+ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS = 1.0
 _ENV_KEYS = {
     "ROOT_ACTION_WEBAUTHN_RP_ID",
     "ROOT_ACTION_WEBAUTHN_ORIGINS",
@@ -66,12 +68,14 @@ class RootActionActivationConfig:
             )
 
 
-RunCommand = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
+RunCommand = Callable[[Sequence[str], float], subprocess.CompletedProcess[str]]
 ReadRunningEnvironment = Callable[[int], bytes]
 Sleep = Callable[[float], None]
 
 
-def _run_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
+def _run_command(
+    argv: Sequence[str], timeout_seconds: float
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(argv),
         check=False,
@@ -79,7 +83,25 @@ def _run_command(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
+        timeout=timeout_seconds,
     )
+
+
+def _bounded_command(
+    run_command: RunCommand,
+    argv: Sequence[str],
+    *,
+    timeout_seconds: float,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        return run_command(argv, timeout_seconds)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            tuple(argv),
+            124,
+            stdout="",
+            stderr="",
+        )
 
 
 def _read_running_environment(pid: int) -> bytes:
@@ -279,6 +301,16 @@ def activate_root_action_broker(
     ),
     sleep: Sleep = time.sleep,
 ) -> dict[str, object]:
+    if (
+        isinstance(attestation_attempts, bool)
+        or not isinstance(attestation_attempts, int)
+        or not 1 <= attestation_attempts <= ROOT_ACTION_POST_RESTART_ATTESTATION_ATTEMPTS
+        or isinstance(attestation_interval_seconds, bool)
+        or not isinstance(attestation_interval_seconds, (int, float))
+        or not 0 <= attestation_interval_seconds
+        <= ROOT_ACTION_POST_RESTART_ATTESTATION_INTERVAL_SECONDS
+    ):
+        raise RootActionActivationError("post-restart attestation bounds are invalid")
     existing_user_id = _read_existing(
         env_path,
         config,
@@ -297,23 +329,17 @@ def activate_root_action_broker(
     )
     if not release.is_absolute():
         raise RootActionActivationError("expected root-action release is invalid")
-    if (
-        isinstance(attestation_attempts, bool)
-        or not isinstance(attestation_attempts, int)
-        or not 1 <= attestation_attempts <= ROOT_ACTION_POST_RESTART_ATTESTATION_ATTEMPTS
-        or isinstance(attestation_interval_seconds, bool)
-        or not isinstance(attestation_interval_seconds, (int, float))
-        or not 0 <= attestation_interval_seconds
-        <= ROOT_ACTION_POST_RESTART_ATTESTATION_INTERVAL_SECONDS
-    ):
-        raise RootActionActivationError("post-restart attestation bounds are invalid")
     mutation_commands = [
         ("systemctl", "daemon-reload"),
         ("systemctl", "enable", ROOT_ACTION_BROKER_SERVICE),
         ("systemctl", "restart", ROOT_ACTION_BROKER_SERVICE),
     ]
     for command in mutation_commands:
-        completed = run_command(command)
+        completed = _bounded_command(
+            run_command,
+            command,
+            timeout_seconds=ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS,
+        )
         if completed.returncode != 0:
             raise RootActionActivationError(
                 "root-action broker activation failed closed"
@@ -321,20 +347,26 @@ def activate_root_action_broker(
     marker = f"{ROOT_ACTION_RUNNING_RELEASE_ENV}={release}".encode("utf-8")
     attested = False
     for attempt in range(attestation_attempts):
-        enabled = run_command(
-            ("systemctl", "is-enabled", "--quiet", ROOT_ACTION_BROKER_SERVICE)
+        enabled = _bounded_command(
+            run_command,
+            ("systemctl", "is-enabled", "--quiet", ROOT_ACTION_BROKER_SERVICE),
+            timeout_seconds=ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS,
         )
-        active = run_command(
-            ("systemctl", "is-active", "--quiet", ROOT_ACTION_BROKER_SERVICE)
+        active = _bounded_command(
+            run_command,
+            ("systemctl", "is-active", "--quiet", ROOT_ACTION_BROKER_SERVICE),
+            timeout_seconds=ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS,
         )
-        main_pid_result = run_command(
+        main_pid_result = _bounded_command(
+            run_command,
             (
                 "systemctl",
                 "show",
                 "--property=MainPID",
                 "--value",
                 ROOT_ACTION_BROKER_SERVICE,
-            )
+            ),
+            timeout_seconds=ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS,
         )
         stdout = main_pid_result.stdout
         main_pid = (

@@ -12,6 +12,8 @@ import pytest
 from agent_runtime_ops.commands.root_action import cmd_root_action_auth_activate
 from agent_runtime_ops.root_action_activation import (
     ROOT_ACTION_BROKER_SERVICE,
+    ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS,
+    ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS,
     RootActionActivationConfig,
     RootActionActivationError,
     activate_root_action_broker,
@@ -28,9 +30,13 @@ class CommandRecorder:
         self.commands: list[tuple[str, ...]] = []
         self.fail_at = fail_at
 
-    def __call__(self, argv):
+    def __call__(self, argv, timeout_seconds):
         command = tuple(argv)
         self.commands.append(command)
+        assert timeout_seconds in {
+            ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS,
+            ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS,
+        }
         return subprocess.CompletedProcess(
             command,
             1 if self.fail_at == len(self.commands) else 0,
@@ -44,9 +50,13 @@ class DelayedAttestationRecorder:
         self.commands: list[tuple[str, ...]] = []
         self.round = 0
 
-    def __call__(self, argv):
+    def __call__(self, argv, timeout_seconds):
         command = tuple(argv)
         self.commands.append(command)
+        assert timeout_seconds in {
+            ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS,
+            ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS,
+        }
         returncode = 0
         stdout = ""
         if command[1] == "is-enabled":
@@ -64,13 +74,29 @@ class DelayedAttestationRecorder:
 
 
 class PersistentPostRestartFailureRecorder(CommandRecorder):
-    def __call__(self, argv):
+    def __call__(self, argv, timeout_seconds):
         command = tuple(argv)
         self.commands.append(command)
+        if command[1] == "is-active":
+            raise subprocess.TimeoutExpired(command, timeout_seconds)
         return subprocess.CompletedProcess(
             command,
-            1 if command[1] == "is-active" else 0,
+            0,
             stdout="4242\n" if command[1] == "show" else "",
+            stderr="not exposed",
+        )
+
+
+class MutationTimeoutRecorder(CommandRecorder):
+    def __call__(self, argv, timeout_seconds):
+        command = tuple(argv)
+        self.commands.append(command)
+        if command[1] == "restart":
+            raise subprocess.TimeoutExpired(command, timeout_seconds)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout="",
             stderr="not exposed",
         )
 
@@ -209,6 +235,28 @@ def test_activation_reports_systemd_failure_without_exposing_output(
     assert env_path.exists()
 
 
+def test_activation_converts_mutation_timeout_to_bounded_fail_closed(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "agent-runtime-ops"
+    parent.mkdir(mode=0o700)
+    recorder = MutationTimeoutRecorder()
+    with pytest.raises(RootActionActivationError, match="activation failed closed"):
+        activate_root_action_broker(
+            CONFIG,
+            env_path=parent / "root-action-webauthn.env",
+            expected_owner_uid=os.getuid() if hasattr(os, "getuid") else 0,
+            enforce_posix_permissions=os.name == "posix",
+            run_command=recorder,
+            **activation_runtime(tmp_path),
+        )
+    assert [command[1] for command in recorder.commands] == [
+        "daemon-reload",
+        "enable",
+        "restart",
+    ]
+
+
 def test_activation_retries_only_post_restart_attestation_until_all_facts_match(
     tmp_path: Path,
 ) -> None:
@@ -246,7 +294,7 @@ def test_activation_retries_only_post_restart_attestation_until_all_facts_match(
     assert sum(command[1] == "show" for command in recorder.commands) == 4
 
 
-def test_activation_fails_closed_after_bounded_persistent_post_restart_command_failure(
+def test_activation_fails_closed_after_bounded_persistent_post_restart_timeout(
     tmp_path: Path,
 ) -> None:
     parent = tmp_path / "agent-runtime-ops"
