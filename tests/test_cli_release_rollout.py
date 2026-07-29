@@ -1780,6 +1780,84 @@ class CliReleaseRolloutTests(unittest.TestCase):
         self.assertEqual(truth["retrieval_labels_present"], "true")
         self.assertEqual(truth["retrieval_contract_complete"], "true")
 
+    def test_live_image_truth_rejects_partial_runtime_projection_labels(self) -> None:
+        route = binding("oc20", "hermes", "customer", 30689, 30690)
+        labels = hermes_recipe_labels()
+        labels["agent-runtime.retrieval-component-digest"] = "sha256:" + "1" * 64
+        info = {
+            "Config": {
+                "Image": wrapper_image_ref("agent-runtime-hermes", "3"),
+                "Labels": labels,
+            }
+        }
+
+        truth = live_image_truth_from_info(route, info, route)
+
+        self.assertEqual(truth["retrieval_projection_labels_present"], "true")
+        self.assertEqual(truth["retrieval_projection_complete"], "false")
+        self.assertEqual(truth["retrieval_projection_consistent"], "false")
+
+    def test_live_image_truth_accepts_complete_absent_runtime_projection(self) -> None:
+        route = binding("oc20", "hermes", "customer", 30689, 30690)
+        labels = hermes_recipe_labels()
+        labels.update(
+            {
+                "agent-runtime.retrieval-enabled": "false",
+                "agent-runtime.retrieval-component-digest": "",
+                "agent-runtime.retrieval-binding-digest": "",
+                "agent-runtime.retrieval-resource-profile-digest": "",
+            }
+        )
+        info = {
+            "Config": {
+                "Image": wrapper_image_ref("agent-runtime-hermes", "3"),
+                "Labels": labels,
+            }
+        }
+
+        truth = live_image_truth_from_info(route, info, route)
+
+        self.assertEqual(truth["retrieval_projection_complete"], "true")
+        self.assertEqual(truth["retrieval_projection_consistent"], "true")
+
+    def test_live_image_truth_accepts_exact_capability_projection_binding(self) -> None:
+        route = binding("oc20", "hermes", "customer", 30689, 30690)
+        fixture = json.loads(
+            (
+                Path(__file__).parent
+                / "fixtures"
+                / "kwrag_embedded_retrieval"
+                / "hermes-compatibility-v1.json"
+            ).read_text(encoding="utf-8")
+        )
+        labels = dict(fixture["capabilityLabels"])
+        prefix = "com.epicevent.agent-runtime.retrieval."
+        resource = json.loads(labels[prefix + "resource.json"])
+        labels.update(
+            {
+                "agent-runtime.retrieval-enabled": "false",
+                "agent-runtime.retrieval-component-digest": labels[
+                    prefix + "component-digest"
+                ],
+                "agent-runtime.retrieval-binding-digest": "sha256:" + "9" * 64,
+                "agent-runtime.retrieval-resource-profile-digest": resource[
+                    "profileDigest"
+                ],
+            }
+        )
+        info = {
+            "Config": {
+                "Image": wrapper_image_ref("agent-runtime-hermes", "3"),
+                "Labels": labels,
+            }
+        }
+
+        truth = live_image_truth_from_info(route, info, route)
+
+        self.assertEqual(truth["retrieval_contract_complete"], "true")
+        self.assertEqual(truth["retrieval_projection_complete"], "true")
+        self.assertEqual(truth["retrieval_projection_consistent"], "true")
+
     def test_runtime_truth_compares_image_recipe_digest_to_local_canonical_recipe(self) -> None:
         ok, name, detail = local_canonical_recipe_check_from_truth(
             {

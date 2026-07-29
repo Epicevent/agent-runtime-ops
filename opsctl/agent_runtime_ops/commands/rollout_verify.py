@@ -121,6 +121,12 @@ def cmd_rollout_verify(args: argparse.Namespace) -> int:
                 for key in sorted(status):
                     print(f"retrieval_{key}={status[key]}")
                 _check_line(True, "verify_retrieval_status", str(status.get("consumerHealth")))
+        elif (
+            truth.get("retrieval_projection_labels_present") == "true"
+            and truth.get("retrieval_projection_consistent") != "true"
+        ):
+            _check_line(False, "verify_retrieval_status", "invalid-runtime-projection")
+            ok = False
         else:
             _check_line(True, "verify_retrieval_status", "capability-absent")
 

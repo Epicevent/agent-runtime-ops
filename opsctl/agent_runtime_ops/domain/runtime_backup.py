@@ -43,6 +43,21 @@ def _backup_sort_key(path: Path) -> tuple[datetime, int] | None:
     )
 
 
+def _next_backup_path(backup_root: Path, original_backup_dir: Path) -> Path:
+    original_key = _backup_sort_key(original_backup_dir)
+    if original_key is None:
+        raise ValueError(f"invalid generated backup name: {original_backup_dir.name}")
+    same_second_suffixes = [
+        sort_key[1]
+        for item in backup_root.iterdir()
+        if (sort_key := _backup_sort_key(item)) is not None
+        and sort_key[0] == original_key[0]
+    ]
+    if not same_second_suffixes:
+        return original_backup_dir
+    return Path(f"{original_backup_dir}.{max(same_second_suffixes) + 1}")
+
+
 def _fsync_regular_file(path: Path) -> None:
     flags = os.O_RDWR if os.name == "nt" else os.O_RDONLY
     descriptor = os.open(path, flags)
@@ -117,8 +132,11 @@ def backup_agent_runtime_state(slot: str, runtime_dir: Path, state_root: Path) -
             _fsync_regular_file(staged_file)
         _fsync_directory(staging_dir)
 
-        suffix = 1
-        backup_dir = original_backup_dir
+        backup_dir = _next_backup_path(backup_root, original_backup_dir)
+        suffix = _backup_sort_key(backup_dir)
+        if suffix is None:
+            raise ValueError(f"invalid backup path: {backup_dir}")
+        next_suffix = suffix[1]
         while True:
             try:
                 staging_dir.rename(backup_dir)
@@ -127,8 +145,8 @@ def backup_agent_runtime_state(slot: str, runtime_dir: Path, state_root: Path) -
             except OSError as exc:
                 if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
                     raise
-                suffix += 1
-                backup_dir = Path(f"{original_backup_dir}.{suffix}")
+                next_suffix += 1
+                backup_dir = Path(f"{original_backup_dir}.{next_suffix}")
     except Exception:
         shutil.rmtree(staging_dir, ignore_errors=True)
         raise

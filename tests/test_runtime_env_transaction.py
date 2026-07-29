@@ -11,6 +11,7 @@ import pytest
 
 from agent_runtime_ops.domain.runtime_apply import apply_desired_slot
 from agent_runtime_ops.domain.runtime_backup import (
+    _next_backup_path,
     backup_agent_runtime_state,
     latest_backup,
     restore_backup_env,
@@ -302,6 +303,18 @@ def test_latest_backup_orders_same_second_collision_suffix_numerically(
         (candidate / "backup.json").write_text("{}", encoding="utf-8")
 
     assert latest_backup(runtime_dir) == backup_root / "20260729T000000+0000.10"
+
+
+def test_new_backup_suffix_starts_above_highest_same_second_collision(
+    tmp_path: Path,
+) -> None:
+    backup_root = tmp_path / ".agent-runtime-backups"
+    backup_root.mkdir()
+    original = backup_root / "20260729T000000+0000"
+    for suffix in ("", ".2", ".10"):
+        (backup_root / f"{original.name}{suffix}").mkdir()
+
+    assert _next_backup_path(backup_root, original) == Path(f"{original}.11")
 
 
 def test_apply_backs_up_env_before_prepare_and_restores_on_pre_dispatch_failure(
