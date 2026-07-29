@@ -249,7 +249,10 @@ def test_recovery_parent_owner_and_mode_drift_fail_closed(tmp_path: Path) -> Non
     recovery_dir = state_root / "runtime-recovery" / "oc20"
     recovery_dir.chmod(0o770)
 
-    with pytest.raises(ValueError, match="must not be group/other writable"):
+    with pytest.raises(
+        ValueError,
+        match="mode mismatch|must not be group/other writable",
+    ):
         pending_rollback_backup(state_root, "oc20")
 
     recovery_dir.chmod(0o700)

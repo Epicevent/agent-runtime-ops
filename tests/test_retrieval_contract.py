@@ -671,9 +671,18 @@ def test_retrieval_status_output_rejects_noncanonical_bytes(raw: bytes) -> None:
 def test_component_approval_is_separate_exact_product_binding(tmp_path: Path) -> None:
     contract = retrieval_contract_from_labels(retrieval_labels())
     assert contract is not None
-    write_retrieval_approval(
-        tmp_path, "openclaw", contract, product_image_digest=DIGEST_D
-    )
+    with patch(
+        "agent_runtime_ops.domain.retrieval_contract.os.chown",
+        create=True,
+    ) as chown:
+        write_retrieval_approval(
+            tmp_path,
+            "openclaw",
+            contract,
+            product_image_digest=DIGEST_D,
+        )
+    chown.assert_called_once()
+    assert chown.call_args.args[1] == 0
     approvals = load_retrieval_approvals(tmp_path)
     assert approvals["openclaw"]["component_digest"] == DIGEST_B
     assert retrieval_contract_is_approved(
