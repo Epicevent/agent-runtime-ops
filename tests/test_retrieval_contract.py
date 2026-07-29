@@ -811,6 +811,52 @@ def test_retrieval_approval_rotation_uses_shared_runtime_mutation_lock(
     assert events == ["lock_enter", "policy_write", "lock_exit"]
 
 
+@pytest.mark.parametrize(
+    "existing",
+    [
+        {
+            "meta": {
+                "schema": "unsupported/v0",
+                "scope": "private_server_state",
+                "updated_at": "2026-07-29T00:00:00+00:00",
+            },
+            "components": {},
+        },
+        {
+            "meta": {
+                "schema": "jitech-retrieval-component-approval/v1",
+                "scope": "private_server_state",
+                "updated_at": "2026-07-29T00:00:00+00:00",
+            },
+            "components": {
+                "openclaw": {
+                    "component_digest": DIGEST_A,
+                }
+            },
+        },
+    ],
+)
+def test_approval_update_rejects_invalid_existing_policy_without_rewriting(
+    tmp_path: Path,
+    existing: dict[str, object],
+) -> None:
+    policy = tmp_path / "retrieval-component-approved.yaml"
+    original = json.dumps(existing, sort_keys=True) + "\n"
+    policy.write_text(original, encoding="utf-8")
+    contract = retrieval_contract_from_labels(retrieval_labels())
+    assert contract is not None
+
+    with pytest.raises(ValueError, match="approval"):
+        write_retrieval_approval(
+            tmp_path,
+            "hermes",
+            contract,
+            product_image_digest=DIGEST_D,
+        )
+
+    assert policy.read_text(encoding="utf-8") == original
+
+
 def test_cli_surface_has_enable_flag_but_no_third_image_or_policy_inputs() -> None:
     cli_source = (
         Path(__file__).parents[1] / "opsctl" / "agent_runtime_ops" / "cli.py"

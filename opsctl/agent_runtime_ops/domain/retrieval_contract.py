@@ -97,6 +97,17 @@ STATUS_KEYS = {
 }
 RETRIEVAL_PROBE_TIMEOUT_SECONDS = 15
 RETRIEVAL_PROBE_OUTPUT_LIMIT_BYTES = 64 * 1024
+APPROVAL_ITEM_KEYS = {
+    "approved_at",
+    "approved_by",
+    "component_digest",
+    "component_manifest_digest",
+    "contract_digest",
+    "product_image_digest",
+    "resource_profile_digest",
+    "source_archive_digest",
+    "source_revision",
+}
 
 
 def _now_iso() -> str:
@@ -427,15 +438,42 @@ def retrieval_env(image_spec: dict[str, Any]) -> dict[str, str]:
 
 def load_retrieval_approvals(state_root: Path) -> dict[str, object]:
     data = load_yaml(state_root / RETRIEVAL_APPROVAL_POLICY_NAME, default={})
-    if data and (
+    if not data:
+        return {}
+    if (
         not isinstance(data, dict)
         or not isinstance(data.get("meta"), dict)
         or data["meta"].get("schema") != RETRIEVAL_APPROVAL_SCHEMA
+        or data["meta"].get("scope") != "private_server_state"
+        or set(data["meta"]) != {"schema", "scope", "updated_at"}
+        or not isinstance(data["meta"].get("updated_at"), str)
+        or not data["meta"].get("updated_at")
         or set(data) != {"meta", "components"}
+        or not isinstance(data.get("components"), dict)
     ):
         raise ValueError("retrieval component approval policy is invalid")
-    components = data.get("components") if isinstance(data, dict) else None
-    return components if isinstance(components, dict) else {}
+    components = data["components"]
+    for family, item in components.items():
+        if family not in {"hermes", "openclaw"}:
+            raise ValueError("retrieval component approval family is invalid")
+        if not isinstance(item, dict) or set(item) != APPROVAL_ITEM_KEYS:
+            raise ValueError("retrieval component approval record is invalid")
+        for field in (
+            "component_digest",
+            "component_manifest_digest",
+            "contract_digest",
+            "product_image_digest",
+            "resource_profile_digest",
+            "source_archive_digest",
+        ):
+            _digest(item.get(field), field)
+        if not REVISION_RE.fullmatch(str(item.get("source_revision") or "")):
+            raise ValueError("retrieval component approval source revision is invalid")
+        if not isinstance(item.get("approved_at"), str) or not item["approved_at"]:
+            raise ValueError("retrieval component approval timestamp is invalid")
+        if not isinstance(item.get("approved_by"), str):
+            raise ValueError("retrieval component approval actor is invalid")
+    return dict(components)
 
 
 def write_retrieval_approval(
@@ -452,8 +490,7 @@ def write_retrieval_approval(
         raise FileNotFoundError(state_root)
     product_digest = _digest(product_image_digest, "product_image_digest")
     policy_path = state_root / RETRIEVAL_APPROVAL_POLICY_NAME
-    existing = load_yaml(policy_path, default={})
-    components = dict(existing.get("components") or {}) if isinstance(existing, dict) else {}
+    components = load_retrieval_approvals(state_root)
     components[family] = {
         "component_digest": _digest(contract.get("component_digest"), "component_digest"),
         "component_manifest_digest": _digest(
