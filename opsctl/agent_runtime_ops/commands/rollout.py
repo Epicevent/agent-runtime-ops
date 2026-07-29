@@ -39,7 +39,7 @@ from ..domain.runtime_targets import (
 from ..domain.runtime_truth import find_gateway_container_by_binding
 from ..renderer import render_compose
 from ..host.account_files import slot_uid_gid
-from ..routing import load_runtime_bindings
+from ..routing import get_runtime_binding, load_runtime_bindings
 from ..runtime_secrets import parse_secret_env_text, primary_profile_secret_file
 
 
@@ -306,10 +306,16 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
         slots = [item.strip() for item in str(args.slots).split(",") if item.strip()]
         if not slots:
             raise ValueError("--targets must name the promotion targets explicitly")
-        if len(set(slots)) != len(slots):
+        source_binding = get_runtime_binding(from_slot, state_root)
+        if source_binding != source_desired.route:
+            raise ValueError("image-promote source binding changed during validation")
+        target_bindings = [get_runtime_binding(slot, state_root) for slot in slots]
+        target_instance_ids = [binding.instance_id for binding in target_bindings]
+        if len(set(target_instance_ids)) != len(target_instance_ids):
             raise ValueError("image-promote targets must be unique")
-        if from_slot in slots:
+        if source_binding.instance_id in target_instance_ids:
             raise ValueError("image-promote source must not also be a target")
+        slots = [binding.linux_account for binding in target_bindings]
         source_retrieval_enabled = False
         if source_desired.image_spec.get("retrieval_enabled") is True:
             print("phase=retrieval_source_gate")
@@ -339,15 +345,36 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
             ) -> None:
                 if not source_retrieval_enabled:
                     return
-                container, lookup = find_gateway_container_by_binding(
+                container_before, lookup_before = find_gateway_container_by_binding(
+                    source_desired.route
+                )
+                if not container_before:
+                    raise ValueError(
+                        "retrieval promotion source container lookup failed: "
+                        f"{lookup_before}"
+                    )
+                refreshed_source, _ = _desired_from_live_image_truth(
+                    source_desired.route.instance_id,
+                    state_root,
+                )
+                container, lookup_after = find_gateway_container_by_binding(
                     source_desired.route
                 )
                 if not container:
                     raise ValueError(
-                        f"retrieval promotion source container lookup failed: {lookup}"
+                        "retrieval promotion source container lookup failed: "
+                        f"{lookup_after}"
+                    )
+                if container != container_before:
+                    raise ValueError(
+                        "retrieval promotion source container changed during admission"
+                    )
+                if refreshed_source != source_desired:
+                    raise ValueError(
+                        "retrieval promotion source live tuple changed during promotion"
                     )
                 status = run_retrieval_status_probe(
-                    container, source_desired.image_spec
+                    container, refreshed_source.image_spec
                 )
                 if status is None:
                     raise ValueError(

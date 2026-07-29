@@ -2013,6 +2013,127 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertIn("consumer unhealthy", output.getvalue())
             apply.assert_called_once()
 
+    def test_enabled_promotion_refuses_changed_live_source_tuple_under_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            routes = {
+                item.linux_account: item for item in load_runtime_bindings(root)
+            }
+            source_desired = RuntimeTarget(
+                target="oc3",
+                family="openclaw",
+                runtime_class="customer",
+                image_name="direct-image",
+                image_spec={
+                    "wrapper_image": wrapper_image_ref(
+                        "agent-runtime-openclaw", "9"
+                    ),
+                    "product_image": wrapper_image_ref("openclaw-jitech", "8"),
+                    "retrieval_enabled": True,
+                },
+                runtime_profile="openclaw-customer",
+                route=routes["oc3"],
+            )
+            refreshed_source = RuntimeTarget(
+                target="oc3",
+                family="openclaw",
+                runtime_class="customer",
+                image_name="direct-image",
+                image_spec={
+                    "wrapper_image": wrapper_image_ref(
+                        "agent-runtime-openclaw", "7"
+                    ),
+                    "product_image": wrapper_image_ref("openclaw-jitech", "6"),
+                    "retrieval_enabled": True,
+                },
+                runtime_profile="openclaw-customer",
+                route=routes["oc3"],
+            )
+            target_desired = RuntimeTarget(
+                target="oc4",
+                family="openclaw",
+                runtime_class="customer",
+                image_name="direct-image",
+                image_spec={"retrieval_enabled": True},
+                runtime_profile="openclaw-customer",
+                route=routes["oc4"],
+            )
+
+            def apply_with_admission(**kwargs: object) -> int:
+                admission = kwargs.get("pre_apply_admission")
+                self.assertIsNotNone(admission)
+                assert callable(admission)
+                admission()
+                return 0
+
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.commands.rollout._is_root", return_value=True),
+                patch(
+                    "agent_runtime_ops.commands.rollout._desired_from_live_image_truth",
+                    side_effect=[
+                        (source_desired, load_profile("openclaw-customer")),
+                        (refreshed_source, load_profile("openclaw-customer")),
+                    ],
+                ),
+                patch(
+                    "agent_runtime_ops.commands.rollout._run_static_slot_checks",
+                    return_value=[],
+                ),
+                patch(
+                    "agent_runtime_ops.commands.rollout._run_live_slot_checks",
+                    return_value=[],
+                ),
+                patch(
+                    "agent_runtime_ops.commands.rollout.find_gateway_container_by_binding",
+                    return_value=("source-container", "instance_label"),
+                ),
+                patch(
+                    "agent_runtime_ops.commands.rollout.image_spec_from_direct_images",
+                    return_value={
+                        "wrapper_image": source_desired.image_spec["wrapper_image"],
+                        "product_image": source_desired.image_spec["product_image"],
+                    },
+                ),
+                patch(
+                    "agent_runtime_ops.commands.rollout._desired_from_direct_images",
+                    return_value=(
+                        target_desired,
+                        load_profile("openclaw-customer"),
+                    ),
+                ),
+                patch("agent_runtime_ops.commands.rollout._require_retrieval_approval"),
+                patch("agent_runtime_ops.commands.rollout._ensure_runtime_dir"),
+                patch(
+                    "agent_runtime_ops.commands.rollout.run_retrieval_status_probe"
+                ) as probe,
+                patch(
+                    "agent_runtime_ops.commands.rollout.measure_retrieval_promotion_headroom"
+                ) as headroom,
+                patch(
+                    "agent_runtime_ops.commands.rollout._apply_desired_slot",
+                    side_effect=apply_with_admission,
+                ) as apply,
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_rollout_image_promote(
+                    argparse.Namespace(
+                        state_root=str(root),
+                        from_slot="oc3",
+                        slots="oc4",
+                    )
+                )
+
+            self.assertEqual(rc, 1)
+            self.assertIn(
+                "retrieval promotion source live tuple changed during promotion",
+                output.getvalue(),
+            )
+            apply.assert_called_once()
+            probe.assert_not_called()
+            headroom.assert_not_called()
+
     def test_promotion_rejects_duplicate_or_source_targets_before_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2036,6 +2157,11 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 runtime_profile="openclaw-customer",
                 route=source_route,
             )
+            target_route = next(
+                item
+                for item in load_runtime_bindings(root)
+                if item.linux_account == "oc4"
+            )
             with (
                 patch("agent_runtime_ops.commands.rollout._is_root", return_value=True),
                 patch(
@@ -2056,8 +2182,22 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 patch("agent_runtime_ops.commands.rollout._apply_desired_slot") as apply,
             ):
                 for targets, reason in (
-                    ("oc4,oc4", "image-promote targets must be unique"),
-                    ("oc3", "image-promote source must not also be a target"),
+                    (
+                        f"oc4,{target_route.public_host}",
+                        "image-promote targets must be unique",
+                    ),
+                    (
+                        f"oc4,{target_route.instance_id}",
+                        "image-promote targets must be unique",
+                    ),
+                    (
+                        source_route.public_host,
+                        "image-promote source must not also be a target",
+                    ),
+                    (
+                        source_route.instance_id,
+                        "image-promote source must not also be a target",
+                    ),
                 ):
                     with self.subTest(targets=targets):
                         output = io.StringIO()
@@ -2287,6 +2427,14 @@ class CliReleaseRolloutTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             write_state(root)
+            oc5_route = binding(
+                "oc5", "openclaw", "customer", 32000, 32001
+            )
+            current_bindings = load_runtime_bindings(root)
+            (root / "runtime-bindings.json").write_text(
+                dump_runtime_bindings([*current_bindings, oc5_route]),
+                encoding="utf-8",
+            )
             routes = {
                 item.linux_account: item for item in load_runtime_bindings(root)
             }
@@ -2322,7 +2470,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
                     image_name="direct-image",
                     image_spec={"retrieval_enabled": True},
                     runtime_profile="openclaw-customer",
-                    route=binding("oc5", "openclaw", "customer", 32000, 32001),
+                    route=oc5_route,
                 ),
             ]
             verified_containers: list[str] = []
@@ -2371,6 +2519,8 @@ class CliReleaseRolloutTests(unittest.TestCase):
                     "agent_runtime_ops.commands.rollout.find_gateway_container_by_binding",
                     side_effect=[
                         ("source-container-1", "instance_label"),
+                        ("source-container-1", "instance_label"),
+                        ("source-container-2", "instance_label"),
                         ("source-container-2", "instance_label"),
                     ],
                 ),
