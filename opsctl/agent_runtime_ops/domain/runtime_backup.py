@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+import errno
 import os
 from pathlib import Path
 import shutil
 import stat
+import tempfile
 
 from ..profiles import load_profile
 from ..yamlio import load_yaml
@@ -25,13 +27,9 @@ def backup_agent_runtime_state(slot: str, runtime_dir: Path, state_root: Path) -
     if backup_root.exists() and backup_root.is_symlink():
         raise ValueError(f"backup root must not be symlink: {backup_root}")
     backup_root.mkdir(mode=0o755, exist_ok=True)
-    backup_dir = backup_root / datetime.now(timezone.utc).astimezone().strftime("%Y%m%dT%H%M%S%z")
-    suffix = 1
-    original_backup_dir = backup_dir
-    while backup_dir.exists():
-        suffix += 1
-        backup_dir = Path(f"{original_backup_dir}.{suffix}")
-    backup_dir.mkdir(mode=0o700)
+    original_backup_dir = backup_root / datetime.now(timezone.utc).astimezone().strftime(
+        "%Y%m%dT%H%M%S%z"
+    )
 
     compose_path = agent_compose_path(runtime_dir)
     manifest_path = agent_manifest_path(runtime_dir)
@@ -51,28 +49,52 @@ def backup_agent_runtime_state(slot: str, runtime_dir: Path, state_root: Path) -
         "had_state_manifest": state_manifest_file.is_file() and not state_manifest_file.is_symlink(),
         "state_manifest_path": str(state_manifest_file),
     }
-    if metadata["had_compose"]:
-        shutil.copy2(compose_path, backup_dir / "docker-compose.agent-runtime.yml")
-    if metadata["had_env"]:
-        backup_env = backup_dir / ".env"
-        shutil.copy2(env_path, backup_env)
-        backup_env.chmod(0o600)
-    if metadata["had_manifest"]:
-        shutil.copy2(manifest_path, backup_dir / ".agent-runtime-manifest")
-    if metadata["had_state_manifest"]:
-        shutil.copy2(state_manifest_file, backup_dir / "manifest.yaml")
-    (backup_dir / "backup.json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return backup_dir
+    staging_dir = Path(tempfile.mkdtemp(prefix=".staging-", dir=backup_root))
+    staging_dir.chmod(0o700)
+    try:
+        if metadata["had_compose"]:
+            shutil.copy2(
+                compose_path, staging_dir / "docker-compose.agent-runtime.yml"
+            )
+        if metadata["had_env"]:
+            backup_env = staging_dir / ".env"
+            shutil.copy2(env_path, backup_env)
+            backup_env.chmod(0o600)
+        if metadata["had_manifest"]:
+            shutil.copy2(manifest_path, staging_dir / ".agent-runtime-manifest")
+        if metadata["had_state_manifest"]:
+            shutil.copy2(state_manifest_file, staging_dir / "manifest.yaml")
+        (staging_dir / "backup.json").write_text(
+            json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+        suffix = 1
+        backup_dir = original_backup_dir
+        while True:
+            try:
+                staging_dir.rename(backup_dir)
+                return backup_dir
+            except OSError as exc:
+                if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
+                    raise
+                suffix += 1
+                backup_dir = Path(f"{original_backup_dir}.{suffix}")
+    except Exception:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
 
 
 def restore_backup_env(runtime_dir: Path, backup_dir: Path) -> None:
     metadata = load_yaml(backup_dir / "backup.json")
     if "had_env" not in metadata:
         return
+    if not isinstance(metadata.get("had_env"), bool):
+        raise ValueError("backup had_env marker must be boolean")
     env_path = runtime_dir / ".env"
     if env_path.is_symlink() or (env_path.exists() and not env_path.is_file()):
         raise ValueError(f"runtime env must be a regular file: {env_path}")
-    if metadata.get("had_env") is True:
+    if metadata["had_env"] is True:
         backup_env = backup_dir / ".env"
         if backup_env.is_symlink() or not backup_env.is_file():
             raise ValueError(f"backup runtime env must be a regular file: {backup_env}")
@@ -92,7 +114,16 @@ def latest_backup(runtime_dir: Path) -> Path | None:
     backup_root = agent_backup_root(runtime_dir)
     if not backup_root.is_dir():
         return None
-    backups = sorted([item for item in backup_root.iterdir() if item.is_dir()])
+    backups = sorted(
+        [
+            item
+            for item in backup_root.iterdir()
+            if item.is_dir()
+            and not item.is_symlink()
+            and (item / "backup.json").is_file()
+            and not (item / "backup.json").is_symlink()
+        ]
+    )
     return backups[-1] if backups else None
 
 

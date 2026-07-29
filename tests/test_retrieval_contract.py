@@ -16,6 +16,7 @@ from agent_runtime_ops.domain.retrieval_contract import (
     canonical_digest,
     load_retrieval_approvals,
     matched_retrieval_contract,
+    parse_retrieval_status_output,
     retrieval_contract_from_labels,
     retrieval_contract_is_approved,
     run_retrieval_status_probe,
@@ -225,6 +226,7 @@ def test_hermes_wrapper_workflow_executes_optional_disabled_retrieval_contract()
     assert "JITECH_RETRIEVAL_ENABLED=false" in workflow
     assert '"$image_ref" kwrag-slot status --json > retrieval-status.json' in workflow
     assert "validate_retrieval_status(" in workflow
+    assert "parse_retrieval_status_output(open(sys.argv[2], \"rb\").read())" in workflow
     assert "enabled=False" in workflow
 
 
@@ -491,7 +493,8 @@ def test_probe_uses_fixed_docker_exec_argv_and_bounded_content_free_output() -> 
                 status_payload(spec, enabled=True),
                 sort_keys=True,
                 separators=(",", ":"),
-            ).encode(),
+            ).encode()
+            + b"\n",
             b"",
         )
 
@@ -508,6 +511,20 @@ def test_probe_uses_fixed_docker_exec_argv_and_bounded_content_free_output() -> 
     ]
     assert seen[1] == 15
     assert seen[2] == 64 * 1024
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b'{"schema":"x"}\n\n',
+        b' {"schema":"x"}',
+        b'{"schema":"x"}\r\n',
+        b"\xff",
+    ],
+)
+def test_retrieval_status_output_rejects_noncanonical_bytes(raw: bytes) -> None:
+    with pytest.raises(ValueError):
+        parse_retrieval_status_output(raw)
 
 
 def test_component_approval_is_separate_exact_product_binding(tmp_path: Path) -> None:

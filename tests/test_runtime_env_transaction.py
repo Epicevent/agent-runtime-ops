@@ -7,9 +7,12 @@ import subprocess
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from agent_runtime_ops.domain.runtime_apply import apply_desired_slot
 from agent_runtime_ops.domain.runtime_backup import (
     backup_agent_runtime_state,
+    latest_backup,
     restore_backup_env,
 )
 
@@ -71,6 +74,60 @@ def test_new_backup_explicitly_without_env_removes_candidate_env_on_restore(
     restore_backup_env(runtime_dir, backup_dir)
 
     assert not env_path.exists()
+
+
+@pytest.mark.parametrize("marker", [None, 0, "false"])
+def test_malformed_env_marker_never_deletes_live_env(
+    tmp_path: Path, marker: object
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    env_path = runtime_dir / ".env"
+    current = b"API_SERVER_KEY=current-secret\n"
+    env_path.write_bytes(current)
+    backup_dir = tmp_path / "malformed-backup"
+    backup_dir.mkdir()
+    (backup_dir / "backup.json").write_text(
+        json.dumps({"had_env": marker}), encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="must be boolean"):
+        restore_backup_env(runtime_dir, backup_dir)
+
+    assert env_path.read_bytes() == current
+
+
+def test_incomplete_backup_is_not_published_or_selected(tmp_path: Path) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    (runtime_dir / ".env").write_text("VALUE=old\n", encoding="utf-8")
+
+    with (
+        patch(
+            "agent_runtime_ops.domain.runtime_backup.shutil.copy2",
+            side_effect=OSError("copy failed"),
+        ),
+        pytest.raises(OSError, match="copy failed"),
+    ):
+        backup_agent_runtime_state("oc20", runtime_dir, state_root)
+
+    backup_root = runtime_dir / ".agent-runtime-backups"
+    assert list(backup_root.iterdir()) == []
+    assert latest_backup(runtime_dir) is None
+
+
+def test_latest_backup_ignores_incomplete_visible_directory(tmp_path: Path) -> None:
+    runtime_dir = tmp_path / "runtime"
+    backup_root = runtime_dir / ".agent-runtime-backups"
+    valid = backup_root / "20260729T000000+0000"
+    valid.mkdir(parents=True)
+    (valid / "backup.json").write_text("{}", encoding="utf-8")
+    incomplete = backup_root / "20260729T000001+0000"
+    incomplete.mkdir()
+
+    assert latest_backup(runtime_dir) == valid
 
 
 def test_apply_backs_up_env_before_prepare_and_restores_on_pre_dispatch_failure(

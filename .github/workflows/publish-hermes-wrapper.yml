@@ -199,10 +199,13 @@ jobs:
           import json
           import sys
 
-          from agent_runtime_ops.domain.retrieval_contract import validate_retrieval_status
+          from agent_runtime_ops.domain.retrieval_contract import (
+              parse_retrieval_status_output,
+              validate_retrieval_status,
+          )
 
           contract = json.load(open(sys.argv[1], encoding="utf-8"))
-          status = json.load(open(sys.argv[2], encoding="utf-8"))
+          status = parse_retrieval_status_output(open(sys.argv[2], "rb").read())
           validate_retrieval_status(
               status,
               expected_component_digest=contract["component_digest"],

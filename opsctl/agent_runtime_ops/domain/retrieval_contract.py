@@ -134,6 +134,19 @@ def _strict_canonical_json(raw: str, name: str) -> object:
     return value
 
 
+def parse_retrieval_status_output(raw: bytes | str) -> object:
+    if isinstance(raw, bytes):
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("retrieval verifier output is not UTF-8") from exc
+    else:
+        text = raw
+    if text.endswith("\n"):
+        text = text[:-1]
+    return _strict_canonical_json(text, "retrieval verifier output")
+
+
 def _label(labels: dict[str, str], name: str) -> str:
     return str(labels.get(RETRIEVAL_LABEL_PREFIX + name) or "")
 
@@ -606,9 +619,8 @@ def run_retrieval_status_probe(
     if result.returncode != 0:
         raise ValueError(f"retrieval verifier exited nonzero: rc={result.returncode}")
     try:
-        raw = result.stdout.decode("utf-8")
-        value = _strict_canonical_json(raw, "retrieval verifier output")
-    except (UnicodeDecodeError, ValueError) as exc:
+        value = parse_retrieval_status_output(result.stdout)
+    except ValueError as exc:
         raise ValueError("retrieval verifier output is not strict UTF-8 JSON") from exc
     resource = contract.get("resource")
     return validate_retrieval_status(
