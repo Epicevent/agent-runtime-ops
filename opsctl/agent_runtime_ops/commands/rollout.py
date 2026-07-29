@@ -326,6 +326,18 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
                     "image-promote target must not be a dev target: "
                     f"{binding.linux_account}"
                 )
+            if binding.runtime_class != "customer":
+                raise ValueError(
+                    "promotion target is not a customer target: "
+                    f"{binding.linux_account}"
+                )
+            if binding.family != source_binding.family:
+                raise ValueError(
+                    "promotion target family does not match source: "
+                    f"target={binding.linux_account} "
+                    f"target_family={binding.family} "
+                    f"source_family={source_binding.family}"
+                )
         target_instance_ids = [binding.instance_id for binding in target_bindings]
         if len(set(target_instance_ids)) != len(target_instance_ids):
             raise ValueError("image-promote targets must be unique")
@@ -339,20 +351,27 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
         wrapper_image = str(source_desired.image_spec.get("wrapper_image") or "")
         product_image = str(source_desired.image_spec.get("product_image") or "")
         image_spec = image_spec_from_direct_images(wrapper_image, product_image)
-        applied: list[str] = []
-        headroom_observation_digests: list[str] = []
+        target_plans = []
         for slot in slots:
-            if _is_dev_named_target(slot):
-                raise ValueError(f"image-promote target must not be a dev target: {slot}")
             desired, profile = _desired_from_direct_images(
                 slot,
                 image_spec,
                 state_root,
-                retrieval_enabled=source_desired.image_spec.get("retrieval_enabled") is True,
+                retrieval_enabled=(
+                    source_desired.image_spec.get("retrieval_enabled") is True
+                ),
             )
             if desired.runtime_class != "customer":
                 raise ValueError(f"promotion target is not a customer target: {slot}")
             _require_retrieval_approval(desired, state_root)
+            target_plans.append((slot, desired, profile))
+        applied: list[str] = []
+        headroom_observation_digests: list[str] = []
+        for slot, desired, profile in target_plans:
+            if _is_dev_named_target(slot):
+                raise ValueError(f"image-promote target must not be a dev target: {slot}")
+            if desired.runtime_class != "customer":
+                raise ValueError(f"promotion target is not a customer target: {slot}")
 
             def verify_headroom_before_apply(
                 *,

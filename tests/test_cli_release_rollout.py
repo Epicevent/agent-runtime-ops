@@ -2171,9 +2171,34 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 gateway_port=32004,
                 bridge_port=32005,
             )
+            other_family_route = RuntimeBinding(
+                instance_id=str(uuid.uuid5(uuid.NAMESPACE_DNS, "oc5")),
+                linux_account="oc5",
+                public_host="oc5.ji-tech.co.kr",
+                family="hermes",
+                runtime_class="customer",
+                gateway_port=32006,
+                bridge_port=32007,
+            )
+            dev_class_route = RuntimeBinding(
+                instance_id=str(uuid.uuid5(uuid.NAMESPACE_DNS, "oc6")),
+                linux_account="oc6",
+                public_host="oc6.ji-tech.co.kr",
+                family="openclaw",
+                runtime_class="dev",
+                gateway_port=32008,
+                bridge_port=32009,
+            )
             current_bindings = load_runtime_bindings(root)
             (root / "runtime-bindings.json").write_text(
-                dump_runtime_bindings([*current_bindings, dev_target_route]),
+                dump_runtime_bindings(
+                    [
+                        *current_bindings,
+                        dev_target_route,
+                        other_family_route,
+                        dev_class_route,
+                    ]
+                ),
                 encoding="utf-8",
             )
             with (
@@ -2222,6 +2247,15 @@ class CliReleaseRolloutTests(unittest.TestCase):
                         "image-promote target must not be a dev target: "
                         "dev-target-img",
                     ),
+                    (
+                        f"oc4,{other_family_route.public_host}",
+                        "promotion target family does not match source: "
+                        "target=oc5 target_family=hermes source_family=openclaw",
+                    ),
+                    (
+                        f"oc4,{dev_class_route.instance_id}",
+                        "promotion target is not a customer target: oc6",
+                    ),
                 ):
                     with self.subTest(targets=targets):
                         output = io.StringIO()
@@ -2236,6 +2270,92 @@ class CliReleaseRolloutTests(unittest.TestCase):
                         self.assertEqual(rc, 1)
                         self.assertIn(reason, output.getvalue())
                 apply.assert_not_called()
+
+    def test_promotion_preflights_every_target_plan_before_any_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            oc5_route = binding(
+                "oc5", "openclaw", "customer", 32000, 32001
+            )
+            current_bindings = load_runtime_bindings(root)
+            (root / "runtime-bindings.json").write_text(
+                dump_runtime_bindings([*current_bindings, oc5_route]),
+                encoding="utf-8",
+            )
+            routes = {
+                item.linux_account: item for item in load_runtime_bindings(root)
+            }
+            source_desired = RuntimeTarget(
+                target="oc3",
+                family="openclaw",
+                runtime_class="customer",
+                image_name="direct-image",
+                image_spec={
+                    "wrapper_image": wrapper_image_ref(
+                        "agent-runtime-openclaw", "9"
+                    ),
+                    "product_image": wrapper_image_ref("openclaw-jitech", "8"),
+                },
+                runtime_profile="openclaw-customer",
+                route=routes["oc3"],
+            )
+            first_target = RuntimeTarget(
+                target="oc4",
+                family="openclaw",
+                runtime_class="customer",
+                image_name="direct-image",
+                image_spec={"retrieval_enabled": False},
+                runtime_profile="openclaw-customer",
+                route=routes["oc4"],
+            )
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.commands.rollout._is_root", return_value=True),
+                patch(
+                    "agent_runtime_ops.commands.rollout._desired_from_live_image_truth",
+                    return_value=(
+                        source_desired,
+                        load_profile("openclaw-customer"),
+                    ),
+                ),
+                patch(
+                    "agent_runtime_ops.commands.rollout._run_static_slot_checks",
+                    return_value=[],
+                ),
+                patch(
+                    "agent_runtime_ops.commands.rollout._run_live_slot_checks",
+                    return_value=[],
+                ),
+                patch(
+                    "agent_runtime_ops.commands.rollout.image_spec_from_direct_images",
+                    return_value={
+                        "wrapper_image": source_desired.image_spec["wrapper_image"],
+                        "product_image": source_desired.image_spec["product_image"],
+                    },
+                ),
+                patch(
+                    "agent_runtime_ops.commands.rollout._desired_from_direct_images",
+                    side_effect=[
+                        (first_target, load_profile("openclaw-customer")),
+                        ValueError("second target plan is invalid"),
+                    ],
+                ),
+                patch("agent_runtime_ops.commands.rollout._require_retrieval_approval"),
+                patch("agent_runtime_ops.commands.rollout._apply_desired_slot") as apply,
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_rollout_image_promote(
+                    argparse.Namespace(
+                        state_root=str(root),
+                        from_slot="oc3",
+                        slots="oc4,oc5",
+                    )
+                )
+
+            self.assertEqual(rc, 1)
+            self.assertIn("second target plan is invalid", output.getvalue())
+            apply.assert_not_called()
 
     def test_promotion_rejects_canonical_dev_source_alias_before_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
