@@ -23,6 +23,7 @@ from ..domain.image_specs import (
 from ..domain.dev_recipe_runtime import ensure_dev_runtime_dir as _ensure_runtime_dir
 from ..domain.dev_recipe_runtime import upsert_runtime_env_file as _upsert_runtime_env_file
 from ..domain.runtime_apply import apply_desired_slot as _apply_desired_slot
+from ..domain.runtime_backup import pending_rollback_backup as _pending_rollback_backup
 from ..domain.runtime_checks import run_live_slot_checks as _run_live_slot_checks
 from ..domain.runtime_checks import run_static_slot_checks as _run_static_slot_checks
 from ..domain.runtime_rollup import runtime_manifest_rollup
@@ -379,6 +380,12 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
                 state_root=state_root,
                 require_existing_manifest=True,
             )
+            pending_backup = _pending_rollback_backup(state_root, slot)
+            if pending_backup is not None:
+                raise ValueError(
+                    "promotion target has a pending rollback transaction: "
+                    f"target={slot} backup={pending_backup.name}"
+                )
             target_rendered = render_compose(profile, desired)
             target_projection_failed = 0
             for ok, name, detail in _run_static_slot_checks(
@@ -416,6 +423,12 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
                     state_root=state_root,
                     require_existing_manifest=True,
                 )
+                pending_backup = _pending_rollback_backup(state_root, target)
+                if pending_backup is not None:
+                    raise ValueError(
+                        "promotion target has a pending rollback transaction: "
+                        f"target={target} backup={pending_backup.name}"
+                    )
                 container_before, lookup_before = find_gateway_container_by_binding(
                     source_desired.route
                 )
