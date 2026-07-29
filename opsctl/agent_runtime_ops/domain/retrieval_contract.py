@@ -437,9 +437,14 @@ def retrieval_env(image_spec: dict[str, Any]) -> dict[str, str]:
 
 
 def load_retrieval_approvals(state_root: Path) -> dict[str, object]:
-    data = load_yaml(state_root / RETRIEVAL_APPROVAL_POLICY_NAME, default={})
-    if not data:
+    policy_path = state_root / RETRIEVAL_APPROVAL_POLICY_NAME
+    if policy_path.is_symlink():
+        raise ValueError("retrieval component approval policy must not be a symlink")
+    if not policy_path.exists():
         return {}
+    if not policy_path.is_file():
+        raise ValueError("retrieval component approval policy must be a regular file")
+    data = load_yaml(policy_path)
     if (
         not isinstance(data, dict)
         or not isinstance(data.get("meta"), dict)

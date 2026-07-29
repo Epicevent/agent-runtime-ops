@@ -857,6 +857,26 @@ def test_approval_update_rejects_invalid_existing_policy_without_rewriting(
     assert policy.read_text(encoding="utf-8") == original
 
 
+@pytest.mark.parametrize("original", ["", "false\n", "[]\n", "{}\n"])
+def test_existing_falsey_approval_document_is_not_treated_as_absent(
+    tmp_path: Path,
+    original: str,
+) -> None:
+    policy = tmp_path / "retrieval-component-approved.yaml"
+    policy.write_text(original, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="approval policy is invalid"):
+        load_retrieval_approvals(tmp_path)
+
+    assert policy.read_text(encoding="utf-8") == original
+
+
+def test_missing_approval_document_is_the_only_empty_policy_state(
+    tmp_path: Path,
+) -> None:
+    assert load_retrieval_approvals(tmp_path) == {}
+
+
 def test_cli_surface_has_enable_flag_but_no_third_image_or_policy_inputs() -> None:
     cli_source = (
         Path(__file__).parents[1] / "opsctl" / "agent_runtime_ops" / "cli.py"
