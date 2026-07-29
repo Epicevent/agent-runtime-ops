@@ -26,6 +26,9 @@ RETRIEVAL_LABEL_PREFIX = "com.epicevent.agent-runtime.retrieval."
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_./:@+=,-]+$")
+ALLOWED_VERIFY_ARGV = {
+    ("hermes", "kwrag-slot", "status", "--json"),
+}
 RESOURCE_KEYS = {
     "cpuReservationMillicores",
     "gpuAccess",
@@ -152,6 +155,8 @@ def _parse_verify_argv(raw: str) -> list[str]:
         if not text or len(text) > 256 or not SAFE_TOKEN_RE.fullmatch(text):
             raise ValueError("retrieval verify argv contains an unsafe item")
         argv.append(text)
+    if tuple(argv) not in ALLOWED_VERIFY_ARGV:
+        raise ValueError("retrieval verify argv is not an allowed product verifier")
     return argv
 
 

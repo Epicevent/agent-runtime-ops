@@ -4,6 +4,7 @@ import json
 import subprocess
 import time
 from pathlib import Path
+from typing import Callable
 
 import os
 
@@ -20,7 +21,7 @@ from .runtime_checks import (
 )
 from .config_contract import config_owner_run_as, run_config_validate_in_image
 from .image_specs import image_spec_config_contract
-from .runtime_backup import backup_agent_runtime_state, restore_backup
+from .runtime_backup import backup_agent_runtime_state, restore_backup, restore_backup_env
 from .runtime_manifest import write_slot_manifests
 from .docker_compose import (
     docker_compose_command,
@@ -117,7 +118,10 @@ def apply_desired_slot(
     allow_first_apply: bool,
     action_name: str = "apply",
     emit_progress: bool = False,
+    prepare_runtime_env: Callable[[], None] | None = None,
 ) -> int:
+    backup_dir: Path | None = None
+    runtime_env_prepared = False
     try:
         rendered = render_compose(profile, desired)
         static_failures = [
@@ -129,12 +133,6 @@ def apply_desired_slot(
         compose_path = agent_compose_path(runtime_dir)
         manifest_path = agent_manifest_path(runtime_dir)
         state_manifest_file = state_manifest_path(state_root, desired.slot)
-        env_path = runtime_dir / ".env"
-        required = required_compose_variables(rendered.text)
-        present = env_file_keys(env_path)
-        missing = sorted(required - present)
-        if missing:
-            raise ValueError(f"missing required .env keys: {','.join(missing)}")
         if not manifest_path.exists() and not state_manifest_file.exists() and not allow_first_apply:
             raise ValueError("first agent-runtime apply requires --allow-first-apply")
         previous_manifest = state_manifest_file if state_manifest_file.exists() else manifest_path if manifest_path.exists() else None
@@ -158,13 +156,36 @@ def apply_desired_slot(
                     f"({detail}); migrate first: sudo opsctl config migrate {desired.slot}"
                 )
         backup_dir = backup_agent_runtime_state(desired.slot, runtime_dir, state_root)
+        if prepare_runtime_env is not None:
+            runtime_env_prepared = True
+            prepare_runtime_env()
+        env_path = runtime_dir / ".env"
+        required = required_compose_variables(rendered.text)
+        present = env_file_keys(env_path)
+        missing = sorted(required - present)
+        if missing:
+            raise ValueError(f"missing required .env keys: {','.join(missing)}")
         atomic_write(compose_path, rendered.text, 0o644)
     except Exception as exc:
+        restore_error = ""
+        if backup_dir is not None and runtime_env_prepared:
+            try:
+                restore_backup_env(runtime_dir, backup_dir)
+            except Exception as restore_exc:
+                restore_error = f"; runtime_env_restore_failed:{restore_exc}"
+        failure_reason = f"{exc}{restore_error}"
         print(f"target={getattr(desired, 'slot', '')}")
         print("apply_status=fail")
-        print(f"reason={exc}")
+        print(f"reason={failure_reason}")
         try:
-            append_action_log(state_root, action_name, getattr(desired, "slot", ""), getattr(desired, "slot", ""), "fail", str(exc))
+            append_action_log(
+                state_root,
+                action_name,
+                getattr(desired, "slot", ""),
+                getattr(desired, "slot", ""),
+                "fail",
+                failure_reason,
+            )
         except Exception:
             pass
         return 1

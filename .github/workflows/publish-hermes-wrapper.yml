@@ -135,8 +135,11 @@ jobs:
             docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.health.endpoints.json" }}' | grep -Fx '{"dashboard":"http://127.0.0.1:9119/api/status","gateway":"http://127.0.0.1:8642/health","workspace":"http://127.0.0.1:3000/"}'
           fi
           docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.product-image" }}' | grep -Fx "${{ inputs.product_image }}"
-          retrieval_schema="$(docker inspect "$image_ref" --format '{{ index .Config.Labels "com.epicevent.agent-runtime.retrieval.schema" }}')"
-          if [[ -n "$retrieval_schema" && "$retrieval_schema" != "<no value>" ]]; then
+          retrieval_label_count="$(
+            docker inspect "$image_ref" --format '{{ range $key, $value := .Config.Labels }}{{ println $key }}{{ end }}' \
+              | awk '/^com[.]epicevent[.]agent-runtime[.]retrieval[.]/{count++} END{print count+0}'
+          )"
+          if (( retrieval_label_count > 0 )); then
             docker pull "${{ inputs.product_image }}" >/dev/null
             python - "$image_ref" "${{ inputs.product_image }}" <<'PY' > retrieval-contract.json
           import json

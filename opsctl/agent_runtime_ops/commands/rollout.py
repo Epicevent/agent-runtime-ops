@@ -225,7 +225,7 @@ def _cmd_rollout_image_apply_slot(args: argparse.Namespace, *, required_runtime_
         if desired.runtime_class != required_runtime_class:
             raise ValueError(f"{action_name} requires runtime_class={required_runtime_class}: {slot}")
         _require_retrieval_approval(desired, state_root)
-        _prepare_runtime_env_for_direct_image(desired, profile)
+        _ensure_runtime_dir(desired.slot)
     except Exception as exc:
         print(f"rollout_{action_name.replace('-', '_')}_status=fail")
         print(f"reason={exc}")
@@ -248,6 +248,9 @@ def _cmd_rollout_image_apply_slot(args: argparse.Namespace, *, required_runtime_
         state_root=state_root,
         allow_first_apply=bool(getattr(args, "allow_first_apply", False)),
         action_name=f"rollout_{action_name}",
+        prepare_runtime_env=lambda: _prepare_runtime_env_for_direct_image(
+            desired, profile
+        ),
     )
     if rc == 0:
         print(f"rollout_{action_name.replace('-', '_')}_status=ok")
@@ -313,12 +316,16 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
             if desired.runtime_class != "customer":
                 raise ValueError(f"promotion target is not a customer target: {slot}")
             _require_retrieval_approval(desired, state_root)
+            _ensure_runtime_dir(desired.slot)
             rc = _apply_desired_slot(
                 desired=desired,
                 profile=profile,
                 state_root=state_root,
                 allow_first_apply=False,
                 action_name="rollout_image_promote",
+                prepare_runtime_env=lambda desired=desired, profile=profile: (
+                    _prepare_runtime_env_for_direct_image(desired, profile)
+                ),
             )
             if rc != 0:
                 print("rollout_image_promote_status=partial")

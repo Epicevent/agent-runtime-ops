@@ -1242,7 +1242,8 @@ class CliReleaseRolloutTests(unittest.TestCase):
             with (
                 patch("agent_runtime_ops.commands.rollout._is_root", return_value=True),
                 patch("agent_runtime_ops.domain.image_specs.image_recipe_labels_from_wrapper", return_value=hermes_recipe_labels(product_image=product)),
-                patch("agent_runtime_ops.commands.rollout._prepare_runtime_env_for_direct_image"),
+                patch("agent_runtime_ops.commands.rollout._ensure_runtime_dir"),
+                patch("agent_runtime_ops.commands.rollout._prepare_runtime_env_for_direct_image") as prepare,
                 patch("agent_runtime_ops.commands.rollout._apply_desired_slot", return_value=0) as apply,
                 contextlib.redirect_stdout(output),
             ):
@@ -1254,6 +1255,12 @@ class CliReleaseRolloutTests(unittest.TestCase):
                         product_image=product,
                         allow_first_apply=False,
                     )
+                )
+                prepare.assert_not_called()
+                apply.call_args.kwargs["prepare_runtime_env"]()
+                prepare.assert_called_once_with(
+                    apply.call_args.kwargs["desired"],
+                    apply.call_args.kwargs["profile"],
                 )
 
             self.assertEqual(rc, 0, output.getvalue())
@@ -1276,7 +1283,8 @@ class CliReleaseRolloutTests(unittest.TestCase):
             with (
                 patch("agent_runtime_ops.commands.rollout._is_root", return_value=True),
                 patch("agent_runtime_ops.domain.image_specs.image_recipe_labels_from_wrapper", return_value=hermes_recipe_labels(product_image=product)),
-                patch("agent_runtime_ops.commands.rollout._prepare_runtime_env_for_direct_image"),
+                patch("agent_runtime_ops.commands.rollout._ensure_runtime_dir"),
+                patch("agent_runtime_ops.commands.rollout._prepare_runtime_env_for_direct_image") as prepare,
                 patch("agent_runtime_ops.commands.rollout._apply_desired_slot", return_value=0) as apply,
                 contextlib.redirect_stdout(output),
             ):
@@ -1288,6 +1296,12 @@ class CliReleaseRolloutTests(unittest.TestCase):
                         product_image=product,
                         allow_first_apply=True,
                     )
+                )
+                prepare.assert_not_called()
+                apply.call_args.kwargs["prepare_runtime_env"]()
+                prepare.assert_called_once_with(
+                    apply.call_args.kwargs["desired"],
+                    apply.call_args.kwargs["profile"],
                 )
 
             self.assertEqual(rc, 0, output.getvalue())
@@ -1327,6 +1341,8 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 ),
                 patch("agent_runtime_ops.commands.rollout._run_static_slot_checks", return_value=[]),
                 patch("agent_runtime_ops.commands.rollout._run_live_slot_checks", return_value=[]),
+                patch("agent_runtime_ops.commands.rollout._ensure_runtime_dir"),
+                patch("agent_runtime_ops.commands.rollout._prepare_runtime_env_for_direct_image") as prepare,
                 patch("agent_runtime_ops.commands.rollout._apply_desired_slot", return_value=0) as apply,
                 contextlib.redirect_stdout(output),
             ):
@@ -1337,10 +1353,17 @@ class CliReleaseRolloutTests(unittest.TestCase):
                         slots="oc3,oc4",
                     )
                 )
+                prepare.assert_not_called()
+                for call in apply.call_args_list:
+                    call.kwargs["prepare_runtime_env"]()
 
             self.assertEqual(rc, 0, output.getvalue())
             self.assertEqual([call.kwargs["desired"].slot for call in apply.call_args_list], ["oc3", "oc4"])
             self.assertEqual([call.kwargs["desired"].image_name for call in apply.call_args_list], ["direct-image", "direct-image"])
+            self.assertEqual(
+                [call.args[0].slot for call in prepare.call_args_list],
+                ["oc3", "oc4"],
+            )
             self.assertIn(f"wrapper_image={wrapper}", output.getvalue())
             self.assertIn(f"product_image={product}", output.getvalue())
 

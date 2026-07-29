@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 import shutil
+import stat
 
 from ..profiles import load_profile
 from ..yamlio import load_yaml
@@ -29,26 +31,59 @@ def backup_agent_runtime_state(slot: str, runtime_dir: Path, state_root: Path) -
     while backup_dir.exists():
         suffix += 1
         backup_dir = Path(f"{original_backup_dir}.{suffix}")
-    backup_dir.mkdir(mode=0o755)
+    backup_dir.mkdir(mode=0o700)
 
     compose_path = agent_compose_path(runtime_dir)
     manifest_path = agent_manifest_path(runtime_dir)
     state_manifest_file = state_manifest_path(state_root, slot)
+    env_path = runtime_dir / ".env"
+    if env_path.is_symlink() or (env_path.exists() and not env_path.is_file()):
+        raise ValueError(f"runtime env must be a regular file: {env_path}")
+    env_stat = env_path.stat() if env_path.is_file() else None
     metadata = {
         "created_at": now_iso(),
         "had_compose": compose_path.is_file() and not compose_path.is_symlink(),
+        "had_env": env_stat is not None,
+        "env_gid": env_stat.st_gid if env_stat is not None else None,
+        "env_mode": stat.S_IMODE(env_stat.st_mode) if env_stat is not None else None,
+        "env_uid": env_stat.st_uid if env_stat is not None else None,
         "had_manifest": manifest_path.is_file() and not manifest_path.is_symlink(),
         "had_state_manifest": state_manifest_file.is_file() and not state_manifest_file.is_symlink(),
         "state_manifest_path": str(state_manifest_file),
     }
     if metadata["had_compose"]:
         shutil.copy2(compose_path, backup_dir / "docker-compose.agent-runtime.yml")
+    if metadata["had_env"]:
+        backup_env = backup_dir / ".env"
+        shutil.copy2(env_path, backup_env)
+        backup_env.chmod(0o600)
     if metadata["had_manifest"]:
         shutil.copy2(manifest_path, backup_dir / ".agent-runtime-manifest")
     if metadata["had_state_manifest"]:
         shutil.copy2(state_manifest_file, backup_dir / "manifest.yaml")
     (backup_dir / "backup.json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return backup_dir
+
+
+def restore_backup_env(runtime_dir: Path, backup_dir: Path) -> None:
+    metadata = load_yaml(backup_dir / "backup.json")
+    env_path = runtime_dir / ".env"
+    if env_path.is_symlink() or (env_path.exists() and not env_path.is_file()):
+        raise ValueError(f"runtime env must be a regular file: {env_path}")
+    if bool(metadata.get("had_env")):
+        backup_env = backup_dir / ".env"
+        if backup_env.is_symlink() or not backup_env.is_file():
+            raise ValueError(f"backup runtime env must be a regular file: {backup_env}")
+        shutil.copy2(backup_env, env_path)
+        env_path.chmod(int(metadata.get("env_mode") or 0o600))
+        if hasattr(os, "chown"):
+            os.chown(
+                env_path,
+                int(metadata.get("env_uid")),
+                int(metadata.get("env_gid")),
+            )
+    else:
+        env_path.unlink(missing_ok=True)
 
 
 def latest_backup(runtime_dir: Path) -> Path | None:
@@ -67,6 +102,8 @@ def restore_backup(slot: str, runtime_dir: Path, backup_dir: Path, state_root: P
     had_compose = bool(metadata.get("had_compose"))
     had_manifest = bool(metadata.get("had_manifest"))
     had_state_manifest = bool(metadata.get("had_state_manifest"))
+
+    restore_backup_env(runtime_dir, backup_dir)
 
     if had_compose:
         shutil.copy2(backup_dir / "docker-compose.agent-runtime.yml", compose_path)

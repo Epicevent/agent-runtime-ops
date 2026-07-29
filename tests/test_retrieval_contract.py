@@ -65,7 +65,7 @@ def retrieval_labels(**overrides: str) -> dict[str, str]:
         "nas-read-only": "true",
         "resource.json": json.dumps(resource_envelope(), sort_keys=True, separators=(",", ":")),
         "verify-command.json": json.dumps(
-            ["python", "-m", "kwrag.runtime_verify", "--json"], separators=(",", ":")
+            ["hermes", "kwrag-slot", "status", "--json"], separators=(",", ":")
         ),
     }
     values.update(overrides)
@@ -212,6 +212,10 @@ def test_hermes_wrapper_workflow_executes_optional_disabled_retrieval_contract()
     ).read_text(
         encoding="utf-8"
     )
+    assert "retrieval_label_count" in workflow
+    assert "agent-runtime[.]retrieval[.]" in workflow
+    assert "if (( retrieval_label_count > 0 )); then" in workflow
+    assert "retrieval_schema=" not in workflow
     assert "matched_retrieval_contract(labels(sys.argv[1]), labels(sys.argv[2]))" in workflow
     assert 'contract["verify_argv"] != ["hermes", "kwrag-slot", "status", "--json"]' in workflow
     assert 'docker pull "${{ inputs.product_image }}" >/dev/null' in workflow
@@ -259,7 +263,7 @@ def test_capability_is_default_off_in_process_and_resource_digest_bound() -> Non
         {"default-enabled": "true"},
         {"host-port-count": "1"},
         {"nas-read-only": "false"},
-        {"verify-command.json": '["sh","-c","curl example.com"]'},
+        {"verify-command.json": '["sh","-c","id"]'},
     ],
 )
 def test_capability_rejects_transport_network_and_shell_shapes(overrides: dict[str, str]) -> None:
@@ -288,10 +292,38 @@ def test_partial_unknown_and_noncanonical_capability_labels_fail_closed() -> Non
     with pytest.raises(ValueError, match="unexpected"):
         retrieval_contract_from_labels(unknown)
     noncanonical = retrieval_labels(
-        **{"verify-command.json": '["python", "-m", "kwrag.runtime_verify", "--json"]'}
+        **{"verify-command.json": '["hermes", "kwrag-slot", "status", "--json"]'}
     )
     with pytest.raises(ValueError, match="canonical"):
         retrieval_contract_from_labels(noncanonical)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["sh", "-c", "id"],
+        ["python", "-m", "kwrag.runtime_verify", "--json"],
+        ["curl", "https://example.com"],
+        ["cat", "/etc/shadow"],
+    ],
+)
+def test_capability_rejects_unapproved_product_verifier_argv(argv: list[str]) -> None:
+    with pytest.raises(ValueError, match="allowed product verifier"):
+        retrieval_contract_from_labels(
+            retrieval_labels(
+                **{
+                    "verify-command.json": json.dumps(
+                        argv, separators=(",", ":")
+                    )
+                }
+            )
+        )
+
+
+def test_capability_accepts_only_exact_hermes_product_verifier() -> None:
+    contract = retrieval_contract_from_labels(retrieval_labels())
+    assert contract is not None
+    assert contract["verify_argv"] == ["hermes", "kwrag-slot", "status", "--json"]
 
 
 def test_binding_is_target_specific_and_enabling_requires_capability() -> None:
@@ -469,9 +501,9 @@ def test_probe_uses_fixed_docker_exec_argv_and_bounded_content_free_output() -> 
         "docker",
         "exec",
         "container-id",
-        "python",
-        "-m",
-        "kwrag.runtime_verify",
+        "hermes",
+        "kwrag-slot",
+        "status",
         "--json",
     ]
     assert seen[1] == 15
