@@ -2153,6 +2153,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
                     return_value=(target_desired, load_profile("openclaw-customer")),
                 ),
                 patch("agent_runtime_ops.commands.rollout._require_retrieval_approval"),
+                patch("agent_runtime_ops.commands.rollout._ensure_runtime_dir"),
                 patch(
                     "agent_runtime_ops.commands.rollout.measure_retrieval_promotion_headroom",
                     side_effect=ValueError(
