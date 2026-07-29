@@ -306,23 +306,14 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
         slots = [item.strip() for item in str(args.slots).split(",") if item.strip()]
         if not slots:
             raise ValueError("--targets must name the promotion targets explicitly")
-        source_retrieval_container: str | None = None
+        if len(set(slots)) != len(slots):
+            raise ValueError("image-promote targets must be unique")
+        if from_slot in slots:
+            raise ValueError("image-promote source must not also be a target")
+        source_retrieval_enabled = False
         if source_desired.image_spec.get("retrieval_enabled") is True:
             print("phase=retrieval_source_gate")
-            container, lookup = find_gateway_container_by_binding(source_desired.route)
-            if not container:
-                raise ValueError(
-                    f"retrieval promotion source container lookup failed: {lookup}"
-                )
-            status = run_retrieval_status_probe(container, source_desired.image_spec)
-            if status is None:
-                raise ValueError("retrieval promotion source verifier was unavailable")
-            source_retrieval_container = container
-            _check_line(
-                True,
-                "promotion_retrieval_source_verified",
-                str(status.get("bindingDigest") or "missing"),
-            )
+            source_retrieval_enabled = True
         wrapper_image = str(source_desired.image_spec.get("wrapper_image") or "")
         product_image = str(source_desired.image_spec.get("product_image") or "")
         image_spec = image_spec_from_direct_images(wrapper_image, product_image)
@@ -346,10 +337,29 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
                 target: str = slot,
                 target_image_spec: dict[str, object] = desired.image_spec,
             ) -> None:
-                if source_retrieval_container is None:
+                if not source_retrieval_enabled:
                     return
+                container, lookup = find_gateway_container_by_binding(
+                    source_desired.route
+                )
+                if not container:
+                    raise ValueError(
+                        f"retrieval promotion source container lookup failed: {lookup}"
+                    )
+                status = run_retrieval_status_probe(
+                    container, source_desired.image_spec
+                )
+                if status is None:
+                    raise ValueError(
+                        "retrieval promotion source verifier was unavailable"
+                    )
+                _check_line(
+                    True,
+                    "promotion_retrieval_source_verified",
+                    str(status.get("bindingDigest") or "missing"),
+                )
                 headroom = measure_retrieval_promotion_headroom(
-                    source_retrieval_container,
+                    container,
                     target_image_spec,
                 )
                 for key in sorted(headroom):
