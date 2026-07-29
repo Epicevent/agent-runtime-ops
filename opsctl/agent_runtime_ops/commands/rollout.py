@@ -320,6 +320,12 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
         if source_binding != source_desired.route:
             raise ValueError("image-promote source binding changed during validation")
         target_bindings = [get_runtime_binding(slot, state_root) for slot in slots]
+        for binding in target_bindings:
+            if _is_dev_named_target(binding.linux_account):
+                raise ValueError(
+                    "image-promote target must not be a dev target: "
+                    f"{binding.linux_account}"
+                )
         target_instance_ids = [binding.instance_id for binding in target_bindings]
         if len(set(target_instance_ids)) != len(target_instance_ids):
             raise ValueError("image-promote targets must be unique")

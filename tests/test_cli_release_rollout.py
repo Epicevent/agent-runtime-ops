@@ -2162,6 +2162,20 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 for item in load_runtime_bindings(root)
                 if item.linux_account == "oc4"
             )
+            dev_target_route = RuntimeBinding(
+                instance_id=str(uuid.uuid5(uuid.NAMESPACE_DNS, "dev-target-img")),
+                linux_account="dev-target-img",
+                public_host="image-target.ji-tech.co.kr",
+                family="openclaw",
+                runtime_class="customer",
+                gateway_port=32004,
+                bridge_port=32005,
+            )
+            current_bindings = load_runtime_bindings(root)
+            (root / "runtime-bindings.json").write_text(
+                dump_runtime_bindings([*current_bindings, dev_target_route]),
+                encoding="utf-8",
+            )
             with (
                 patch("agent_runtime_ops.commands.rollout._is_root", return_value=True),
                 patch(
@@ -2197,6 +2211,16 @@ class CliReleaseRolloutTests(unittest.TestCase):
                     (
                         source_route.instance_id,
                         "image-promote source must not also be a target",
+                    ),
+                    (
+                        f"oc4,{dev_target_route.public_host}",
+                        "image-promote target must not be a dev target: "
+                        "dev-target-img",
+                    ),
+                    (
+                        f"oc4,{dev_target_route.instance_id}",
+                        "image-promote target must not be a dev target: "
+                        "dev-target-img",
                     ),
                 ):
                     with self.subTest(targets=targets):
