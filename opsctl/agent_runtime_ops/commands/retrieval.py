@@ -17,6 +17,7 @@ from ..domain.retrieval_contract import (
     retrieval_contract_from_labels,
     write_retrieval_approval,
 )
+from ..domain.runtime_backup import runtime_host_mutation_lock
 
 
 def cmd_retrieval_approve(args: argparse.Namespace) -> int:
@@ -28,24 +29,31 @@ def cmd_retrieval_approve(args: argparse.Namespace) -> int:
         return 2
     state_root = _state_root(args)
     try:
-        validate_image_digest_ref(args.product_image)
-        if not allowed_image_ref(args.family, "product", args.product_image):
-            raise ValueError("product image repository is not allowed for this family")
-        if not is_image_ref_approved(
-            state_root, args.family, "product", args.product_image
-        ):
-            raise ValueError("exact product image must be root-approved before its retrieval component")
-        contract = retrieval_contract_from_labels(
-            image_recipe_labels_from_wrapper(args.product_image)
-        )
-        if contract is None:
-            raise ValueError("product image declares no embedded retrieval component")
-        policy_path = write_retrieval_approval(
-            state_root,
-            args.family,
-            contract,
-            product_image_digest=validate_image_digest_ref(args.product_image),
-        )
+        # Approval rotation and runtime mutation share one persistent host lock.
+        # An apply that revalidates approval under this lock therefore observes
+        # either the complete old policy or the complete new policy, never a
+        # policy change between its authoritative check and dispatch.
+        with runtime_host_mutation_lock(state_root):
+            validate_image_digest_ref(args.product_image)
+            if not allowed_image_ref(args.family, "product", args.product_image):
+                raise ValueError("product image repository is not allowed for this family")
+            if not is_image_ref_approved(
+                state_root, args.family, "product", args.product_image
+            ):
+                raise ValueError(
+                    "exact product image must be root-approved before its retrieval component"
+                )
+            contract = retrieval_contract_from_labels(
+                image_recipe_labels_from_wrapper(args.product_image)
+            )
+            if contract is None:
+                raise ValueError("product image declares no embedded retrieval component")
+            policy_path = write_retrieval_approval(
+                state_root,
+                args.family,
+                contract,
+                product_image_digest=validate_image_digest_ref(args.product_image),
+            )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

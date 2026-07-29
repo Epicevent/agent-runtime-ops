@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 from pathlib import Path
@@ -27,6 +29,7 @@ from agent_runtime_ops.domain.retrieval_contract import (
     write_retrieval_approval,
 )
 from agent_runtime_ops.domain import image_specs
+from agent_runtime_ops.commands.retrieval import cmd_retrieval_approve
 from agent_runtime_ops.domain.runtime_manifest import desired_from_runtime_manifest
 from agent_runtime_ops.routing import RuntimeBinding
 from agent_runtime_ops.state import RuntimeTarget
@@ -757,6 +760,55 @@ def test_disabled_and_dev_retrieval_do_not_require_production_approval(
         image_spec=capable_spec(enabled=True),
     )
     require_retrieval_approval(dev, tmp_path)
+
+
+def test_retrieval_approval_rotation_uses_shared_runtime_mutation_lock(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    product_image = "ghcr.io/epicevent/openclaw-jitech@" + DIGEST_D
+    contract = retrieval_contract_from_labels(retrieval_labels())
+    assert contract is not None
+
+    @contextmanager
+    def locked(_state_root: Path):
+        events.append("lock_enter")
+        yield
+        events.append("lock_exit")
+
+    def write(*_args: object, **_kwargs: object) -> Path:
+        events.append("policy_write")
+        return tmp_path / "retrieval-component-approved.yaml"
+
+    with (
+        patch("agent_runtime_ops.commands.retrieval._is_root", return_value=True),
+        patch(
+            "agent_runtime_ops.commands.retrieval.runtime_host_mutation_lock",
+            side_effect=locked,
+        ),
+        patch(
+            "agent_runtime_ops.commands.retrieval.is_image_ref_approved",
+            return_value=True,
+        ),
+        patch(
+            "agent_runtime_ops.commands.retrieval.image_recipe_labels_from_wrapper",
+            return_value=retrieval_labels(),
+        ),
+        patch(
+            "agent_runtime_ops.commands.retrieval.write_retrieval_approval",
+            side_effect=write,
+        ),
+    ):
+        rc = cmd_retrieval_approve(
+            argparse.Namespace(
+                state_root=str(tmp_path),
+                family="openclaw",
+                product_image=product_image,
+            )
+        )
+
+    assert rc == 0
+    assert events == ["lock_enter", "policy_write", "lock_exit"]
 
 
 def test_cli_surface_has_enable_flag_but_no_third_image_or_policy_inputs() -> None:
