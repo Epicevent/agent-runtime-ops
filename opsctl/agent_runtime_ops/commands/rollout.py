@@ -306,6 +306,11 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
         slots = [item.strip() for item in str(args.slots).split(",") if item.strip()]
         if not slots:
             raise ValueError("--targets must name the promotion targets explicitly")
+        for slot in slots:
+            if _is_dev_named_target(slot):
+                raise ValueError(
+                    f"image-promote target must not be a dev target: {slot}"
+                )
         source_binding = get_runtime_binding(from_slot, state_root)
         if source_binding != source_desired.route:
             raise ValueError("image-promote source binding changed during validation")
