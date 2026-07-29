@@ -130,6 +130,21 @@ def test_latest_backup_ignores_incomplete_visible_directory(tmp_path: Path) -> N
     assert latest_backup(runtime_dir) == valid
 
 
+def test_latest_backup_ignores_staging_directory_with_backup_metadata(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    backup_root = runtime_dir / ".agent-runtime-backups"
+    valid = backup_root / "20260729T000000+0000"
+    valid.mkdir(parents=True)
+    (valid / "backup.json").write_text("{}", encoding="utf-8")
+    staging = backup_root / ".staging-interrupted"
+    staging.mkdir()
+    (staging / "backup.json").write_text("{", encoding="utf-8")
+
+    assert latest_backup(runtime_dir) == valid
+
+
 def test_apply_backs_up_env_before_prepare_and_restores_on_pre_dispatch_failure(
     tmp_path: Path,
 ) -> None:

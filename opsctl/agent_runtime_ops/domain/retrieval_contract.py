@@ -543,7 +543,13 @@ def validate_retrieval_status(
         raise ValueError("retrieval status binding digest mismatch")
     if value.get("resourceProfileDigest") != expected_resource_profile_digest:
         raise ValueError("retrieval status resource profile digest mismatch")
-    if value.get("hostPortCount") != 0 or value.get("mountReadOnly") is not True:
+    host_port_count = value.get("hostPortCount")
+    if (
+        not isinstance(host_port_count, int)
+        or isinstance(host_port_count, bool)
+        or host_port_count != 0
+        or value.get("mountReadOnly") is not True
+    ):
         raise ValueError("retrieval status violates slot-local port/mount boundary")
     if value.get("resourceStatus") not in {"within_declared_reservation", "unavailable"}:
         raise ValueError("retrieval status resourceStatus is invalid")

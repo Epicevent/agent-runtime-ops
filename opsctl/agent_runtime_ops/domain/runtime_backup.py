@@ -118,7 +118,8 @@ def latest_backup(runtime_dir: Path) -> Path | None:
         [
             item
             for item in backup_root.iterdir()
-            if item.is_dir()
+            if not item.name.startswith(".staging-")
+            and item.is_dir()
             and not item.is_symlink()
             and (item / "backup.json").is_file()
             and not (item / "backup.json").is_symlink()

@@ -428,6 +428,25 @@ def test_status_is_content_free_exact_and_distinguishes_linkage_from_revocation(
         )
 
 
+@pytest.mark.parametrize("host_port_count", [False, 0.0])
+def test_status_rejects_non_integer_zero_host_port_count(
+    host_port_count: object,
+) -> None:
+    disabled = capable_spec(enabled=False)
+    raw = status_payload(disabled, enabled=False)
+    raw["hostPortCount"] = host_port_count
+
+    with pytest.raises(ValueError, match="slot-local port/mount boundary"):
+        validate_retrieval_status(
+            raw,
+            expected_component_digest=DIGEST_B,
+            expected_binding_digest=str(disabled["retrieval_binding_digest"]),
+            expected_resource_profile_digest=str(resource_envelope()["profileDigest"]),
+            expected_gpu_access="none",
+            enabled=False,
+        )
+
+
 def test_private_runtime_manifest_round_trips_component_binding_without_public_schema_change() -> None:
     spec = capable_spec(enabled=True)
     manifest = {
