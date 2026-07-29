@@ -203,6 +203,27 @@ def test_exact_hermes_compatibility_fixture_matches_product_and_ops_contract() -
     }
 
 
+def test_hermes_wrapper_workflow_executes_optional_disabled_retrieval_contract() -> None:
+    workflow = (
+        Path(__file__).parent.parent
+        / ".github"
+        / "workflows"
+        / "publish-hermes-wrapper.yml"
+    ).read_text(
+        encoding="utf-8"
+    )
+    assert "matched_retrieval_contract(labels(sys.argv[1]), labels(sys.argv[2]))" in workflow
+    assert 'contract["verify_argv"] != ["hermes", "kwrag-slot", "status", "--json"]' in workflow
+    assert 'docker pull "${{ inputs.product_image }}" >/dev/null' in workflow
+    assert "--network none" in workflow
+    assert "--read-only" in workflow
+    assert "dst=/workspace/nas_docs,readonly" in workflow
+    assert "JITECH_RETRIEVAL_ENABLED=false" in workflow
+    assert '"$image_ref" kwrag-slot status --json > retrieval-status.json' in workflow
+    assert "validate_retrieval_status(" in workflow
+    assert "enabled=False" in workflow
+
+
 def test_hermes_enabled_compatibility_fixture_does_not_relax_live_evidence_gate() -> None:
     fixture = json.loads(HERMES_COMPATIBILITY_FIXTURE.read_text(encoding="utf-8"))
     labels = fixture["capabilityLabels"]
