@@ -62,7 +62,7 @@ def cmd_rollout_verify(args: argparse.Namespace) -> int:
                 _check_line(approved, f"verify_{role}_digest_approved", str(image_ref))
                 ok = ok and approved
 
-        if truth.get("retrieval_schema"):
+        if truth.get("retrieval_labels_present") == "true":
             desired, _ = desired_from_live_image_truth(slot, state_root)
             retrieval_contract = desired.image_spec.get("retrieval_contract")
             if not isinstance(retrieval_contract, dict):

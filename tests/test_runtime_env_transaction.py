@@ -97,6 +97,42 @@ def test_malformed_env_marker_never_deletes_live_env(
     assert env_path.read_bytes() == current
 
 
+def test_env_restore_copy_failure_preserves_live_bytes_and_removes_temporary(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    env_path = runtime_dir / ".env"
+    current = b"API_SERVER_KEY=current-secret\n"
+    env_path.write_bytes(current)
+    backup_dir = tmp_path / "backup"
+    backup_dir.mkdir()
+    (backup_dir / "backup.json").write_text(
+        json.dumps(
+            {
+                "had_env": True,
+                "env_mode": 0o600,
+                "env_uid": env_path.stat().st_uid,
+                "env_gid": env_path.stat().st_gid,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (backup_dir / ".env").write_bytes(b"API_SERVER_KEY=restored-secret\n")
+
+    with (
+        patch(
+            "agent_runtime_ops.domain.runtime_backup.shutil.copy2",
+            side_effect=OSError("restore copy failed"),
+        ),
+        pytest.raises(OSError, match="restore copy failed"),
+    ):
+        restore_backup_env(runtime_dir, backup_dir)
+
+    assert env_path.read_bytes() == current
+    assert list(runtime_dir.glob(".env.restore-*")) == []
+
+
 def test_incomplete_backup_is_not_published_or_selected(tmp_path: Path) -> None:
     runtime_dir = tmp_path / "runtime"
     runtime_dir.mkdir()
@@ -143,6 +179,19 @@ def test_latest_backup_ignores_staging_directory_with_backup_metadata(
     (staging / "backup.json").write_text("{", encoding="utf-8")
 
     assert latest_backup(runtime_dir) == valid
+
+
+def test_latest_backup_orders_same_second_collision_suffix_numerically(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    backup_root = runtime_dir / ".agent-runtime-backups"
+    for suffix in ("", ".2", ".9", ".10"):
+        candidate = backup_root / f"20260729T000000+0000{suffix}"
+        candidate.mkdir(parents=True)
+        (candidate / "backup.json").write_text("{}", encoding="utf-8")
+
+    assert latest_backup(runtime_dir) == backup_root / "20260729T000000+0000.10"
 
 
 def test_apply_backs_up_env_before_prepare_and_restores_on_pre_dispatch_failure(

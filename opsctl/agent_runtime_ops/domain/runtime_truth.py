@@ -12,6 +12,10 @@ from .image_specs import (
     IMAGE_RECIPE_SCHEMA,
     recipe_label,
 )
+from .retrieval_contract import (
+    RETRIEVAL_LABEL_PREFIX,
+    retrieval_contract_from_labels,
+)
 
 
 def local_canonical_recipe_check_from_truth(truth: dict[str, str]) -> tuple[bool, str, str | None]:
@@ -128,6 +132,17 @@ def labels_from_container_info(info: dict) -> dict[str, str]:
 
 def live_image_truth_from_info(binding: RuntimeBinding, info: dict, apache_route) -> dict[str, str]:
     labels = labels_from_container_info(info)
+    retrieval_labels_present = any(
+        key.startswith(RETRIEVAL_LABEL_PREFIX) for key in labels
+    )
+    retrieval_contract_complete = False
+    if retrieval_labels_present:
+        try:
+            retrieval_contract_complete = (
+                retrieval_contract_from_labels(labels) is not None
+            )
+        except ValueError:
+            retrieval_contract_complete = False
     config = info.get("Config") if isinstance(info, dict) else {}
     image = str((config or {}).get("Image") or "")
     runtime_class = binding.runtime_class
@@ -175,6 +190,10 @@ def live_image_truth_from_info(binding: RuntimeBinding, info: dict, apache_route
         "health_endpoints": recipe_label(labels, "health.endpoints"),
         "health_endpoints_json": recipe_label(labels, "health.endpoints.json"),
         "ops_repo_commit": recipe_label(labels, "ops-repo-commit"),
+        "retrieval_labels_present": "true" if retrieval_labels_present else "false",
+        "retrieval_contract_complete": (
+            "true" if retrieval_contract_complete else "false"
+        ),
         "retrieval_schema": recipe_label(labels, "retrieval.schema"),
         "retrieval_transport": recipe_label(labels, "retrieval.transport"),
         "retrieval_default_enabled": recipe_label(labels, "retrieval.default-enabled"),
@@ -254,7 +273,13 @@ def live_runtime_truth(slot: str, state_root: Path) -> tuple[dict[str, str], lis
             ),
             local_canonical_recipe_check_from_truth(truth),
             (
-                not truth.get("retrieval_schema")
+                truth.get("retrieval_labels_present") != "true"
+                or truth.get("retrieval_contract_complete") == "true",
+                "truth_retrieval_label_set_complete",
+                truth.get("retrieval_contract_complete") or "false",
+            ),
+            (
+                truth.get("retrieval_labels_present") != "true"
                 or truth.get("retrieval_enabled") in {"true", "false"},
                 "truth_retrieval_enabled_declared",
                 truth.get("retrieval_enabled") or "capability_absent",

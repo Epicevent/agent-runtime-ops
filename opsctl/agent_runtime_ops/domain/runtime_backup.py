@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import errno
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import tempfile
@@ -20,6 +21,25 @@ from .runtime_paths import (
     agent_manifest_path,
     state_manifest_path,
 )
+
+
+_BACKUP_NAME = re.compile(
+    r"^(?P<timestamp>\d{8}T\d{6}[+-]\d{4})(?:\.(?P<suffix>\d+))?$"
+)
+
+
+def _backup_sort_key(path: Path) -> tuple[datetime, int] | None:
+    match = _BACKUP_NAME.fullmatch(path.name)
+    if match is None:
+        return None
+    suffix_text = match.group("suffix")
+    suffix = int(suffix_text or 1)
+    if suffix_text is not None and suffix < 2:
+        return None
+    return (
+        datetime.strptime(match.group("timestamp"), "%Y%m%dT%H%M%S%z"),
+        suffix,
+    )
 
 
 def backup_agent_runtime_state(slot: str, runtime_dir: Path, state_root: Path) -> Path:
@@ -98,14 +118,23 @@ def restore_backup_env(runtime_dir: Path, backup_dir: Path) -> None:
         backup_env = backup_dir / ".env"
         if backup_env.is_symlink() or not backup_env.is_file():
             raise ValueError(f"backup runtime env must be a regular file: {backup_env}")
-        shutil.copy2(backup_env, env_path)
-        env_path.chmod(int(metadata.get("env_mode") or 0o600))
-        if hasattr(os, "chown"):
-            os.chown(
-                env_path,
-                int(metadata.get("env_uid")),
-                int(metadata.get("env_gid")),
-            )
+        handle, temporary_name = tempfile.mkstemp(prefix=".env.restore-", dir=runtime_dir)
+        os.close(handle)
+        temporary_env = Path(temporary_name)
+        try:
+            shutil.copy2(backup_env, temporary_env)
+            temporary_env.chmod(int(metadata.get("env_mode") or 0o600))
+            if hasattr(os, "chown"):
+                os.chown(
+                    temporary_env,
+                    int(metadata.get("env_uid")),
+                    int(metadata.get("env_gid")),
+                )
+            with temporary_env.open("r+b") as restored:
+                os.fsync(restored.fileno())
+            os.replace(temporary_env, env_path)
+        finally:
+            temporary_env.unlink(missing_ok=True)
     else:
         env_path.unlink(missing_ok=True)
 
@@ -116,16 +145,17 @@ def latest_backup(runtime_dir: Path) -> Path | None:
         return None
     backups = sorted(
         [
-            item
+            (item, sort_key)
             for item in backup_root.iterdir()
-            if not item.name.startswith(".staging-")
+            if (sort_key := _backup_sort_key(item)) is not None
             and item.is_dir()
             and not item.is_symlink()
             and (item / "backup.json").is_file()
             and not (item / "backup.json").is_symlink()
-        ]
+        ],
+        key=lambda item: item[1],
     )
-    return backups[-1] if backups else None
+    return backups[-1][0] if backups else None
 
 
 def restore_backup(slot: str, runtime_dir: Path, backup_dir: Path, state_root: Path) -> tuple[bool, str]:
