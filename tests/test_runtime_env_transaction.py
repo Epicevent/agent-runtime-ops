@@ -40,6 +40,75 @@ def test_runtime_env_backup_is_private_and_restores_exact_prior_bytes(
         assert env_path.stat().st_mode & 0o777 == 0o640
 
 
+def test_backup_publication_syncs_files_and_directories_before_return(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    (runtime_dir / ".env").write_text("VALUE=old\n", encoding="utf-8")
+    events: list[tuple[str, str]] = []
+    original_rename = Path.rename
+
+    def rename(source: Path, target: Path) -> Path:
+        events.append(("rename", source.name))
+        return original_rename(source, target)
+
+    with (
+        patch(
+            "agent_runtime_ops.domain.runtime_backup._fsync_regular_file",
+            side_effect=lambda path: events.append(("file", path.name)),
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_backup._fsync_directory",
+            side_effect=lambda path: events.append(("directory", path.name)),
+        ),
+        patch.object(Path, "rename", rename),
+    ):
+        backup_dir = backup_agent_runtime_state("oc20", runtime_dir, state_root)
+
+    staging_name = events[-2][1]
+    assert staging_name.startswith(".staging-")
+    assert events == [
+        ("file", ".env"),
+        ("file", "backup.json"),
+        ("directory", staging_name),
+        ("rename", staging_name),
+        ("directory", ".agent-runtime-backups"),
+    ]
+    assert backup_dir.is_dir()
+
+
+def test_env_restore_syncs_parent_after_atomic_replace(tmp_path: Path) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    env_path = runtime_dir / ".env"
+    env_path.write_text("VALUE=old\n", encoding="utf-8")
+    backup_dir = backup_agent_runtime_state("oc20", runtime_dir, state_root)
+    env_path.write_text("VALUE=new\n", encoding="utf-8")
+    events: list[str] = []
+    original_replace = os.replace
+
+    def replace(source: Path, target: Path) -> None:
+        events.append("replace")
+        original_replace(source, target)
+
+    with (
+        patch("agent_runtime_ops.domain.runtime_backup.os.replace", side_effect=replace),
+        patch(
+            "agent_runtime_ops.domain.runtime_backup.fsync_parent",
+            side_effect=lambda path: events.append("parent_sync"),
+        ),
+    ):
+        restore_backup_env(runtime_dir, backup_dir)
+
+    assert events == ["replace", "parent_sync"]
+    assert env_path.read_text(encoding="utf-8") == "VALUE=old\n"
+
+
 def test_legacy_backup_without_env_metadata_leaves_live_env_untouched(
     tmp_path: Path,
 ) -> None:

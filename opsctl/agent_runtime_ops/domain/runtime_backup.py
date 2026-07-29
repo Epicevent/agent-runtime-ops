@@ -12,6 +12,7 @@ import tempfile
 
 from ..profiles import load_profile
 from ..yamlio import load_yaml
+from ..host.files import fsync_parent
 from .common import now_iso, run_text_cwd
 from .runtime_manifest import desired_from_manifest, read_legacy_slot_manifest
 from .docker_compose import docker_compose_command
@@ -40,6 +41,25 @@ def _backup_sort_key(path: Path) -> tuple[datetime, int] | None:
         datetime.strptime(match.group("timestamp"), "%Y%m%dT%H%M%S%z"),
         suffix,
     )
+
+
+def _fsync_regular_file(path: Path) -> None:
+    flags = os.O_RDWR if os.name == "nt" else os.O_RDONLY
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_directory(path: Path) -> None:
+    if not hasattr(os, "O_DIRECTORY"):
+        return
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def backup_agent_runtime_state(slot: str, runtime_dir: Path, state_root: Path) -> Path:
@@ -88,12 +108,21 @@ def backup_agent_runtime_state(slot: str, runtime_dir: Path, state_root: Path) -
             json.dumps(metadata, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+        staged_files = sorted(
+            item
+            for item in staging_dir.iterdir()
+            if not item.is_symlink() and item.is_file()
+        )
+        for staged_file in staged_files:
+            _fsync_regular_file(staged_file)
+        _fsync_directory(staging_dir)
 
         suffix = 1
         backup_dir = original_backup_dir
         while True:
             try:
                 staging_dir.rename(backup_dir)
+                _fsync_directory(backup_root)
                 return backup_dir
             except OSError as exc:
                 if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
@@ -133,6 +162,7 @@ def restore_backup_env(runtime_dir: Path, backup_dir: Path) -> None:
             with temporary_env.open("r+b") as restored:
                 os.fsync(restored.fileno())
             os.replace(temporary_env, env_path)
+            fsync_parent(env_path)
         finally:
             temporary_env.unlink(missing_ok=True)
     else:
