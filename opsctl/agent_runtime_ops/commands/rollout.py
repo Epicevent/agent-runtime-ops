@@ -365,6 +365,26 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
                 raise ValueError(f"promotion target is not a customer target: {slot}")
             _require_retrieval_approval(desired, state_root)
             target_plans.append((slot, desired, profile))
+        for slot, desired, profile in target_plans:
+            _ensure_runtime_dir(slot, create=False)
+            target_rendered = render_compose(profile, desired)
+            target_projection_failed = 0
+            for ok, name, detail in _run_static_slot_checks(
+                desired,
+                profile,
+                target_rendered,
+                state_root=state_root,
+            ):
+                _check_line(ok, f"target_{slot}_{name}", detail)
+                if not ok:
+                    target_projection_failed += 1
+            if not target_rendered.text.strip():
+                target_projection_failed += 1
+            if target_projection_failed:
+                raise ValueError(
+                    "promotion target projection gate failed: "
+                    f"target={slot} failed={target_projection_failed}"
+                )
         applied: list[str] = []
         headroom_observation_digests: list[str] = []
         for slot, desired, profile in target_plans:

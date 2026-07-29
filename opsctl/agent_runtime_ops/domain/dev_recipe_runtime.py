@@ -42,7 +42,7 @@ def assert_child_of(child: Path, parent: Path) -> None:
         raise ValueError(f"path escaped managed root: {child}")
 
 
-def ensure_dev_runtime_dir(slot: str) -> Path:
+def ensure_dev_runtime_dir(slot: str, *, create: bool = True) -> Path:
     uid, gid = slot_uid_gid(slot)
     home = Path("/home") / slot
     if home.is_symlink():
@@ -52,6 +52,8 @@ def ensure_dev_runtime_dir(slot: str) -> Path:
     runtime_dir = home / "openclaw"
     if runtime_dir.exists() and runtime_dir.is_symlink():
         raise ValueError(f"managed runtime dir must not be symlink: {runtime_dir}")
+    if not create:
+        return runtime_dir
     runtime_dir.mkdir(mode=0o750, parents=True, exist_ok=True)
     os.chown(runtime_dir, uid, gid)
     os.chmod(runtime_dir, 0o750)
