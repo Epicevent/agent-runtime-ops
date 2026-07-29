@@ -403,6 +403,12 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
                 target: str = slot,
                 target_image_spec: dict[str, object] = desired.image_spec,
             ) -> None:
+                _ensure_runtime_dir(
+                    target,
+                    create=False,
+                    state_root=state_root,
+                    require_existing_manifest=True,
+                )
                 if not source_retrieval_enabled:
                     return
                 container_before, lookup_before = find_gateway_container_by_binding(
@@ -455,7 +461,6 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
                 headroom_observation_digests.append(digest)
                 _check_line(True, "promotion_retrieval_headroom_verified", digest)
 
-            _ensure_runtime_dir(desired.slot)
             rc = _apply_desired_slot(
                 desired=desired,
                 profile=profile,
