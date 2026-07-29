@@ -137,7 +137,7 @@ def test_exact_hermes_compatibility_fixture_matches_product_and_ops_contract() -
         "78bd91c3139fa6ba64c021252a81ad3ec628ca3d"
     )
     assert fixture["productSourceRevision"] == (
-        "2ba1ef8ca1793a8447691ae252d43c3462f13f2f"
+        "cb91d9c5e9be609d62c48cf8ccc26c471230638e"
     )
 
     labels = fixture["capabilityLabels"]
