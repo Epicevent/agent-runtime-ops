@@ -2590,6 +2590,10 @@ class CliReleaseRolloutTests(unittest.TestCase):
                         (targets[1], load_profile("openclaw-customer")),
                     ],
                 ),
+                patch(
+                    "agent_runtime_ops.commands.rollout.find_gateway_container_by_binding",
+                    return_value=("source-container", "instance_label"),
+                ),
                 patch("agent_runtime_ops.commands.rollout._require_retrieval_approval"),
                 patch(
                     "agent_runtime_ops.commands.rollout._ensure_runtime_dir",
@@ -2621,6 +2625,120 @@ class CliReleaseRolloutTests(unittest.TestCase):
             for item in ensure_runtime.call_args_list:
                 self.assertFalse(item.kwargs["create"])
                 self.assertTrue(item.kwargs["require_existing_manifest"])
+
+    def test_default_off_promotion_revalidates_live_source_inside_apply_lock(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            routes = {
+                item.linux_account: item for item in load_runtime_bindings(root)
+            }
+            source_desired = RuntimeTarget(
+                target="oc3",
+                family="openclaw",
+                runtime_class="customer",
+                image_name="direct-image",
+                image_spec={
+                    "wrapper_image": wrapper_image_ref(
+                        "agent-runtime-openclaw", "9"
+                    ),
+                    "product_image": wrapper_image_ref("openclaw-jitech", "8"),
+                    "retrieval_enabled": False,
+                },
+                runtime_profile="openclaw-customer",
+                route=routes["oc3"],
+            )
+            changed_source = RuntimeTarget(
+                target="oc3",
+                family="openclaw",
+                runtime_class="customer",
+                image_name="direct-image",
+                image_spec={
+                    "wrapper_image": wrapper_image_ref(
+                        "agent-runtime-openclaw", "9"
+                    ),
+                    "product_image": wrapper_image_ref("openclaw-jitech", "7"),
+                    "retrieval_enabled": False,
+                },
+                runtime_profile="openclaw-customer",
+                route=routes["oc3"],
+            )
+            target = RuntimeTarget(
+                target="oc4",
+                family="openclaw",
+                runtime_class="customer",
+                image_name="direct-image",
+                image_spec={"retrieval_enabled": False},
+                runtime_profile="openclaw-customer",
+                route=routes["oc4"],
+            )
+            applied: list[str] = []
+
+            def apply_with_admission(**kwargs: object) -> int:
+                admission = kwargs.get("pre_apply_admission")
+                self.assertIsNotNone(admission)
+                assert callable(admission)
+                admission()
+                applied.append("oc4")
+                return 0
+
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.commands.rollout._is_root", return_value=True),
+                patch(
+                    "agent_runtime_ops.commands.rollout._desired_from_live_image_truth",
+                    side_effect=[
+                        (source_desired, load_profile("openclaw-customer")),
+                        (changed_source, load_profile("openclaw-customer")),
+                    ],
+                ),
+                patch(
+                    "agent_runtime_ops.commands.rollout._run_static_slot_checks",
+                    return_value=[],
+                ),
+                patch(
+                    "agent_runtime_ops.commands.rollout._run_live_slot_checks",
+                    return_value=[],
+                ),
+                patch(
+                    "agent_runtime_ops.commands.rollout.find_gateway_container_by_binding",
+                    return_value=("source-container", "instance_label"),
+                ),
+                patch(
+                    "agent_runtime_ops.commands.rollout.image_spec_from_direct_images",
+                    return_value={
+                        "wrapper_image": source_desired.image_spec["wrapper_image"],
+                        "product_image": source_desired.image_spec["product_image"],
+                    },
+                ),
+                patch(
+                    "agent_runtime_ops.commands.rollout._desired_from_direct_images",
+                    return_value=(target, load_profile("openclaw-customer")),
+                ),
+                patch("agent_runtime_ops.commands.rollout._require_retrieval_approval"),
+                patch("agent_runtime_ops.commands.rollout._ensure_runtime_dir"),
+                patch(
+                    "agent_runtime_ops.commands.rollout._apply_desired_slot",
+                    side_effect=apply_with_admission,
+                ),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_rollout_image_promote(
+                    argparse.Namespace(
+                        state_root=str(root),
+                        from_slot="oc3",
+                        slots="oc4",
+                    )
+                )
+
+            self.assertEqual(rc, 1)
+            self.assertIn(
+                "retrieval promotion source live tuple changed during promotion",
+                output.getvalue(),
+            )
+            self.assertEqual(applied, [])
 
     def test_promotion_rejects_canonical_dev_source_alias_before_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

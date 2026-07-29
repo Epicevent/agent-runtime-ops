@@ -135,7 +135,8 @@ def _prepare_runtime_env_for_direct_image(desired, profile) -> None:
         "OPENCLAW_GATEWAY_PORT": str(desired.route.gateway_port if desired.route else ""),
         "OPENCLAW_BRIDGE_PORT": str(desired.route.bridge_port if desired.route else ""),
     }
-    updates.update(retrieval_env(desired.image_spec))
+    retrieval_updates = retrieval_env(desired.image_spec)
+    updates.update(retrieval_updates)
     secret_file = primary_profile_secret_file(profile, desired.slot)
     if secret_file.path.exists():
         if secret_file.path.is_symlink() or not secret_file.path.is_file():
@@ -146,7 +147,13 @@ def _prepare_runtime_env_for_direct_image(desired, profile) -> None:
         )
         if values.get("API_SERVER_KEY"):
             updates["API_SERVER_KEY"] = values["API_SERVER_KEY"]
-    _upsert_runtime_env_file(runtime_dir / ".env", updates, uid, gid)
+    _upsert_runtime_env_file(
+        runtime_dir / ".env",
+        updates,
+        uid,
+        gid,
+        remove_empty_keys=set(retrieval_updates),
+    )
 
 
 def cmd_rollout_image_plan(args: argparse.Namespace) -> int:
@@ -409,8 +416,6 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
                     state_root=state_root,
                     require_existing_manifest=True,
                 )
-                if not source_retrieval_enabled:
-                    return
                 container_before, lookup_before = find_gateway_container_by_binding(
                     source_desired.route
                 )
@@ -439,6 +444,8 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
                     raise ValueError(
                         "retrieval promotion source live tuple changed during promotion"
                     )
+                if not source_retrieval_enabled:
+                    return
                 status = run_retrieval_status_probe(
                     container, refreshed_source.image_spec
                 )

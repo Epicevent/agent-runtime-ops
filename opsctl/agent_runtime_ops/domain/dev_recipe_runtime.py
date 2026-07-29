@@ -189,10 +189,20 @@ def sync_dev_source_output(slot: str, recipe_name: str, source: Path, *, runtime
     return dest, control_ui_in_dist, control_ui_preserved
 
 
-def upsert_runtime_env_file(path: Path, updates: dict[str, str], uid: int, gid: int) -> None:
+def upsert_runtime_env_file(
+    path: Path,
+    updates: dict[str, str],
+    uid: int,
+    gid: int,
+    *,
+    remove_empty_keys: set[str] | None = None,
+) -> None:
     if path.exists() and path.is_symlink():
         raise ValueError(f"runtime env file must not be symlink: {path}")
     data = read_key_value_file(path) if path.exists() else {}
+    for key in remove_empty_keys or set():
+        if key in updates and not updates[key]:
+            data.pop(key, None)
     data.update({key: value for key, value in updates.items() if value})
     atomic_write_key_value(path, data, 0o640, uid, gid)
 
