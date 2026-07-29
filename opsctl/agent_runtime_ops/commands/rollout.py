@@ -31,6 +31,7 @@ from ..domain.retrieval_contract import (
     retrieval_env,
     run_retrieval_status_probe,
 )
+from ..domain.retrieval_resources import measure_retrieval_promotion_headroom
 from ..domain.runtime_targets import (
     desired_from_direct_images as _desired_from_direct_images,
     desired_from_live_image_truth as _desired_from_live_image_truth,
@@ -302,6 +303,10 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
                 checklist_failed += 1
         if checklist_failed:
             raise ValueError(f"checklist gate failed: failed={checklist_failed}")
+        slots = [item.strip() for item in str(args.slots).split(",") if item.strip()]
+        if not slots:
+            raise ValueError("--targets must name the promotion targets explicitly")
+        source_retrieval_container: str | None = None
         if source_desired.image_spec.get("retrieval_enabled") is True:
             print("phase=retrieval_source_gate")
             container, lookup = find_gateway_container_by_binding(source_desired.route)
@@ -312,6 +317,7 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
             status = run_retrieval_status_probe(container, source_desired.image_spec)
             if status is None:
                 raise ValueError("retrieval promotion source verifier was unavailable")
+            source_retrieval_container = container
             _check_line(
                 True,
                 "promotion_retrieval_source_verified",
@@ -320,10 +326,8 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
         wrapper_image = str(source_desired.image_spec.get("wrapper_image") or "")
         product_image = str(source_desired.image_spec.get("product_image") or "")
         image_spec = image_spec_from_direct_images(wrapper_image, product_image)
-        slots = [item.strip() for item in str(args.slots).split(",") if item.strip()]
-        if not slots:
-            raise ValueError("--targets must name the promotion targets explicitly")
         applied: list[str] = []
+        headroom_observation_digests: list[str] = []
         for slot in slots:
             if _is_dev_named_target(slot):
                 raise ValueError(f"image-promote target must not be a dev target: {slot}")
@@ -336,6 +340,16 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
             if desired.runtime_class != "customer":
                 raise ValueError(f"promotion target is not a customer target: {slot}")
             _require_retrieval_approval(desired, state_root)
+            if source_retrieval_container is not None:
+                headroom = measure_retrieval_promotion_headroom(
+                    source_retrieval_container,
+                    source_desired.image_spec,
+                )
+                for key in sorted(headroom):
+                    print(f"retrieval_headroom[{slot}].{key}={headroom[key]}")
+                digest = str(headroom["observationDigest"])
+                headroom_observation_digests.append(digest)
+                _check_line(True, "promotion_retrieval_headroom_verified", digest)
             _ensure_runtime_dir(desired.slot)
             rc = _apply_desired_slot(
                 desired=desired,
@@ -366,5 +380,17 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
     print(f"targets={','.join(applied)}")
     print(f"wrapper_image={image_spec.get('wrapper_image')}")
     print(f"product_image={image_spec.get('product_image')}")
-    _append_action_log(state_root, "rollout_image_promote", from_slot, str(image_spec.get("wrapper_image") or ""), "ok", f"targets={len(applied)}")
+    if headroom_observation_digests:
+        print(
+            "retrieval_headroom_observation_digests="
+            + ",".join(headroom_observation_digests)
+        )
+    _append_action_log(
+        state_root,
+        "rollout_image_promote",
+        from_slot,
+        str(image_spec.get("wrapper_image") or ""),
+        "ok",
+        f"targets={len(applied)} headroom={','.join(headroom_observation_digests) or 'not_applicable'}",
+    )
     return 0

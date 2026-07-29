@@ -2009,6 +2009,14 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 events.append("source_verified")
                 return {"bindingDigest": "sha256:" + "1" * 64}
 
+            def verified_headroom(*args: object, **kwargs: object) -> dict[str, object]:
+                events.append("headroom_verified")
+                return {
+                    "schema": "agent-runtime-retrieval-headroom/v1",
+                    "status": "within_required_headroom",
+                    "observationDigest": "sha256:" + "2" * 64,
+                }
+
             def applied(**kwargs: object) -> int:
                 events.append("target_applied")
                 return 0
@@ -2035,6 +2043,10 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 patch(
                     "agent_runtime_ops.commands.rollout.run_retrieval_status_probe",
                     side_effect=verified_status,
+                ),
+                patch(
+                    "agent_runtime_ops.commands.rollout.measure_retrieval_promotion_headroom",
+                    side_effect=verified_headroom,
                 ),
                 patch(
                     "agent_runtime_ops.commands.rollout.image_spec_from_direct_images",
@@ -2067,8 +2079,89 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 )
 
             self.assertEqual(rc, 0, output.getvalue())
-            self.assertEqual(events, ["source_verified", "target_applied"])
+            self.assertEqual(events, ["source_verified", "headroom_verified", "target_applied"])
             self.assertIn("PASS promotion_retrieval_source_verified", output.getvalue())
+            self.assertIn("PASS promotion_retrieval_headroom_verified", output.getvalue())
+
+    def test_enabled_promotion_refuses_insufficient_headroom_before_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            routes = {item.linux_account: item for item in load_runtime_bindings(root)}
+            source_desired = RuntimeTarget(
+                target="oc3",
+                family="openclaw",
+                runtime_class="customer",
+                image_name="direct-image",
+                image_spec={
+                    "wrapper_image": wrapper_image_ref("agent-runtime-openclaw", "9"),
+                    "product_image": wrapper_image_ref("openclaw-jitech", "8"),
+                    "retrieval_enabled": True,
+                },
+                runtime_profile="openclaw-customer",
+                route=routes["oc3"],
+            )
+            target_desired = RuntimeTarget(
+                target="oc4",
+                family="openclaw",
+                runtime_class="customer",
+                image_name="direct-image",
+                image_spec={"retrieval_enabled": True},
+                runtime_profile="openclaw-customer",
+                route=routes["oc4"],
+            )
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.commands.rollout._is_root", return_value=True),
+                patch(
+                    "agent_runtime_ops.commands.rollout._desired_from_live_image_truth",
+                    return_value=(source_desired, load_profile("openclaw-customer")),
+                ),
+                patch("agent_runtime_ops.commands.rollout._run_static_slot_checks", return_value=[]),
+                patch("agent_runtime_ops.commands.rollout._run_live_slot_checks", return_value=[]),
+                patch(
+                    "agent_runtime_ops.commands.rollout.find_gateway_container_by_binding",
+                    return_value=("container-1", "instance_label"),
+                ),
+                patch(
+                    "agent_runtime_ops.commands.rollout.run_retrieval_status_probe",
+                    return_value={"bindingDigest": "sha256:" + "1" * 64},
+                ),
+                patch(
+                    "agent_runtime_ops.commands.rollout.image_spec_from_direct_images",
+                    return_value={
+                        "wrapper_image": source_desired.image_spec["wrapper_image"],
+                        "product_image": source_desired.image_spec["product_image"],
+                    },
+                ),
+                patch(
+                    "agent_runtime_ops.commands.rollout._desired_from_direct_images",
+                    return_value=(target_desired, load_profile("openclaw-customer")),
+                ),
+                patch("agent_runtime_ops.commands.rollout._require_retrieval_approval"),
+                patch(
+                    "agent_runtime_ops.commands.rollout.measure_retrieval_promotion_headroom",
+                    side_effect=ValueError(
+                        "host memory headroom is below retrieval reservation"
+                    ),
+                ),
+                patch("agent_runtime_ops.commands.rollout._apply_desired_slot") as apply,
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_rollout_image_promote(
+                    argparse.Namespace(
+                        state_root=str(root),
+                        from_slot="oc3",
+                        slots="oc4",
+                    )
+                )
+
+            self.assertEqual(rc, 1)
+            self.assertIn(
+                "host memory headroom is below retrieval reservation",
+                output.getvalue(),
+            )
+            apply.assert_not_called()
 
     def test_runtime_truth_compares_image_recipe_digest_to_local_canonical_recipe(self) -> None:
         ok, name, detail = local_canonical_recipe_check_from_truth(

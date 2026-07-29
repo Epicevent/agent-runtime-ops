@@ -38,6 +38,15 @@ not proof that a target host has enough headroom. The product verifier must retu
 `within_declared_reservation` or `unavailable`; a bounded canary must separately
 measure live host/container headroom before promotion.
 
+For enabled promotion, `opsctl rollout image-promote` runs the fixed product verifier
+and then performs a direct, shell-free observation before every target mutation. It
+compares source-container CPU, memory, and PID usage to the declared envelope and
+requires current host CPU, memory, and PID headroom for one more reservation. The
+content-free observation and its digest are printed with the promotion receipt. This
+is an instantaneous admission gate, not a capacity guarantee. `shared_stateless` GPU
+profiles fail closed until a direct GPU headroom observer is defined. Default-off
+canary and promotion do not invoke this enabled-only gate.
+
 The verifier argv is image-attested, contains no shell, and accepts no query, path,
 backend, network, grant, projection, or credential argument from the operator.
 

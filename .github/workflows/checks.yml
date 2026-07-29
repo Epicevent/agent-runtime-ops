@@ -32,6 +32,7 @@ jobs:
           python -m pytest -q \
             tests/test_legacy_runtime_backup_migration.py \
             tests/test_retrieval_contract.py \
+            tests/test_retrieval_resources.py \
             tests/test_runtime_env_transaction.py
 
       - name: Run root-action Linux contracts
