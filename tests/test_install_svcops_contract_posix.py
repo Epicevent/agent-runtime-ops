@@ -32,6 +32,40 @@ def _function(name: str) -> str:
     return INSTALL[start:end]
 
 
+def _function_block(name: str, next_name: str) -> str:
+    start = INSTALL.index(f"{name}() {{")
+    end = INSTALL.index(f"\n{next_name}() {{", start)
+    return INSTALL[start:end] + "\n"
+
+
+def test_validate_install_root_named_block_is_complete_and_syntax_valid(
+    tmp_path: Path,
+) -> None:
+    body = _function_block("validate_install_root", "with_install_lock")
+    assert body.startswith("validate_install_root() {")
+    assert body.rstrip().endswith("}")
+    assert body.count("<<'PY'") == 1
+    assert body.count("\nPY\n") == 1
+
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is required for extracted shell syntax validation")
+    script = tmp_path / "validate-install-root.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n" + body,
+        encoding="utf-8",
+        newline="\n",
+    )
+    completed = subprocess.run(
+        [bash, "-n", str(script)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 def _reader() -> Any:
     if pwd is None or os.name != "posix" or os.geteuid() != 0:
         pytest.skip("root POSIX ownership semantics are required")
@@ -295,7 +329,7 @@ def _validate_install_paths(tree: dict[str, Any]) -> subprocess.CompletedProcess
         "die() { exit 23; }\n"
         + _function("require_canonical_absolute_path_string")
         + _function("validate_activation_path_strings")
-        + _function("validate_install_root")
+        + _function_block("validate_install_root", "with_install_lock")
         + "\nvalidate_install_root\n",
     )
 
@@ -361,6 +395,36 @@ def _run_tx(tree: dict[str, Any], command: str, *extra: str) -> subprocess.Compl
         text=True,
         timeout=10,
     )
+
+
+def _fault_injected_tx_argv(
+    tree: dict[str, Any], child: str, command: str, *extra: str
+) -> list[str]:
+    transaction = _tx_argv(tree, command, *extra)
+    return [transaction[0], "-c", child, *transaction[1:]]
+
+
+def test_fault_injected_argv_preserves_helper_and_command_positions() -> None:
+    tree = {
+        "tx": Path("/install/.activation-transaction.pending"),
+        "ops_gid": 1234,
+        "paths": {
+            "opsctl": Path("/bin/opsctl"),
+            "mcp": Path("/bin/mcp"),
+            "gemini": Path("/bin/gemini"),
+            "manifest": Path("/install/.agent-runtime-ops-manifest"),
+            "current": Path("/install/current"),
+        },
+        "broker_unit": Path("/etc/systemd/system/broker.service"),
+    }
+    argv = _fault_injected_tx_argv(tree, "child-code", "recover")
+    assert argv[:5] == [
+        sys.executable,
+        "-c",
+        "child-code",
+        str(ACTIVATION_HELPER),
+        "recover",
+    ]
 
 
 def _begin(tree: dict[str, Any]) -> subprocess.CompletedProcess[str]:
@@ -710,7 +774,7 @@ def test_activation_sigkill_each_publication_boundary_recovers_fresh_process(kil
             "raise SystemExit(mod.main())\n"
         )
         killed = subprocess.run(
-            [sys.executable, "-c", child, *_tx_argv(tree, "publish")],
+            _fault_injected_tx_argv(tree, child, "publish"),
             check=False, capture_output=True, text=True, timeout=10,
         )
         assert killed.returncode == -signal.SIGKILL
@@ -747,7 +811,7 @@ def test_activation_sigkill_during_baseline_restore_is_replay_safe(kill_after: i
             "raise SystemExit(mod.main())\n"
         )
         killed = subprocess.run(
-            [sys.executable, "-c", child, *_tx_argv(tree, "recover")],
+            _fault_injected_tx_argv(tree, child, "recover"),
             check=False,
             capture_output=True,
             text=True,
@@ -779,7 +843,7 @@ def test_activation_sigkill_after_broker_publication_recovers_unit() -> None:
             "raise SystemExit(mod.main())\n"
         )
         killed = subprocess.run(
-            [sys.executable, "-c", child, *_tx_argv(tree, "publish-broker")],
+            _fault_injected_tx_argv(tree, child, "publish-broker"),
             check=False,
             capture_output=True,
             text=True,
@@ -814,7 +878,7 @@ def test_activation_sigkill_between_symlink_create_and_lchown_replays(
             "raise SystemExit(mod.main())\n"
         )
         killed = subprocess.run(
-            [sys.executable, "-c", child, *_tx_argv(tree, command)],
+            _fault_injected_tx_argv(tree, child, command),
             check=False,
             capture_output=True,
             text=True,
@@ -868,7 +932,7 @@ def test_activation_kill_at_recovered_marker_is_terminal_and_replayable() -> Non
             "raise SystemExit(mod.main())\n"
         )
         killed = subprocess.run(
-            [sys.executable, "-c", child, *_tx_argv(tree, "recover")],
+            _fault_injected_tx_argv(tree, child, "recover"),
             check=False,
             capture_output=True,
             text=True,
@@ -903,7 +967,9 @@ def test_activation_finalize_rename_kill_leaves_restartable_complete_tombstone()
             "raise SystemExit(mod.main())\n"
         )
         killed = subprocess.run(
-            [sys.executable, "-c", child, *_tx_argv(tree, "finalize", "--expect", "baseline")],
+            _fault_injected_tx_argv(
+                tree, child, "finalize", "--expect", "baseline"
+            ),
             check=False,
             capture_output=True,
             text=True,
@@ -933,17 +999,13 @@ def test_activation_finalize_rename_kill_leaves_restartable_complete_tombstone()
             "raise SystemExit(mod.main())\n"
         )
         killed_ack = subprocess.run(
-            [
-                sys.executable,
-                "-c",
+            _fault_injected_tx_argv(
+                tree,
                 child,
-                *_tx_argv(
-                    tree,
-                    "ack-recovered",
-                    "--expected-commit",
-                    ACTIVATION_COMMIT,
-                ),
-            ],
+                "ack-recovered",
+                "--expected-commit",
+                ACTIVATION_COMMIT,
+            ),
             check=False,
             capture_output=True,
             text=True,
@@ -965,17 +1027,13 @@ def test_activation_finalize_rename_kill_leaves_restartable_complete_tombstone()
             "raise SystemExit(mod.main())\n"
         )
         killed_retire = subprocess.run(
-            [
-                sys.executable,
-                "-c",
+            _fault_injected_tx_argv(
+                tree,
                 retire_child,
-                *_tx_argv(
-                    tree,
-                    "ack-recovered",
-                    "--expected-commit",
-                    ACTIVATION_COMMIT,
-                ),
-            ],
+                "ack-recovered",
+                "--expected-commit",
+                ACTIVATION_COMMIT,
+            ),
             check=False,
             capture_output=True,
             text=True,
