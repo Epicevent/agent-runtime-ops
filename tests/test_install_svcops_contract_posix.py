@@ -1276,6 +1276,7 @@ def test_recovery_finalizes_only_after_broker_and_cli_attestation() -> None:
         completed = _run_contract_script(
             root,
             f"TRACE={str(trace)!r}\n"
+            "quiesce_root_action_broker_before_recovery() { printf 'quiesce\\n' >>\"$TRACE\"; }\n"
             "run_activation_transaction() { printf 'tx:%s\\n' \"$2\" >>\"$TRACE\"; }\n"
             "restore_broker_service_from_transaction() { printf 'broker\\n' >>\"$TRACE\"; }\n"
             "attest_restored_cli_as_ops() { printf 'cli\\n' >>\"$TRACE\"; }\n"
@@ -1284,10 +1285,79 @@ def test_recovery_finalizes_only_after_broker_and_cli_attestation() -> None:
         )
         assert completed.returncode == 0, completed.stderr
         assert trace.read_text(encoding="utf-8").splitlines() == [
+            "quiesce",
             "tx:recover",
             "broker",
             "cli",
             "tx:finalize",
+        ]
+
+
+@pytest.mark.parametrize("journal_state", ("active", "inactive", "absent"))
+def test_recovery_sigkill_after_filesystem_restore_leaves_broker_quiesced(
+    journal_state: str,
+) -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        fake_bin = root / "fake-bin"
+        fake_bin.mkdir(mode=0o750)
+        os.chown(fake_bin, 0, reader.pw_gid)
+        trace = root / "trace"
+        state = root / "broker-state"
+        state.write_text("active\n", encoding="utf-8")
+        tx_marker = root / "transaction-preserved"
+        tx_marker.write_text("pending\n", encoding="utf-8")
+        systemctl = fake_bin / "systemctl"
+        systemctl.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "printf 'systemctl:%s\\n' \"$*\" >>\"$TRACE\"\n"
+            "case \"$1\" in\n"
+            "  is-active) [[ \"$(cat \"$STATE\")\" == active ]] && exit 0; exit 3 ;;\n"
+            "  stop) printf 'inactive\\n' >\"$STATE\"; exit 0 ;;\n"
+            "  show) printf '0\\n'; exit 0 ;;\n"
+            "  *) exit 19 ;;\n"
+            "esac\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        os.chown(systemctl, 0, reader.pw_gid)
+        systemctl.chmod(0o750)
+        completed = _run_contract_script(
+            root,
+            f"TRACE={str(trace)!r}\n"
+            f"STATE={str(state)!r}\n"
+            f"TX_MARKER={str(tx_marker)!r}\n"
+            "export TRACE STATE TX_MARKER\n"
+            f"PATH={str(fake_bin)!r}:/usr/bin:/bin\n"
+            "ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS=1\n"
+            "ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=1\n"
+            "run_activation_transaction() {\n"
+            "  if [[ \"$2\" == show ]]; then\n"
+            f"    [[ \"$4\" == broker_state ]] && printf '{journal_state}\\n' || printf 'broker.service\\n'\n"
+            "  elif [[ \"$2\" == recover ]]; then\n"
+            "    printf 'filesystem-recover\\n' >>\"$TRACE\"\n"
+            "    kill -KILL $$\n"
+            "  elif [[ \"$2\" == finalize ]]; then\n"
+            "    rm -f \"$TX_MARKER\"\n"
+            "  fi\n"
+            "}\n"
+            "restore_broker_service_from_transaction() { printf 'unexpected-restore\\n' >>\"$TRACE\"; }\n"
+            "attest_restored_cli_as_ops() { printf 'unexpected-cli\\n' >>\"$TRACE\"; }\n"
+            + _function("root_action_broker_quiesced_attested")
+            + _function("quiesce_root_action_broker_before_recovery")
+            + _function("recover_and_attest_activation_baseline")
+            + f"\nrecover_and_attest_activation_baseline /helper {ACTIVATION_COMMIT} /previous\n",
+        )
+        assert completed.returncode == -signal.SIGKILL
+        assert state.read_text(encoding="utf-8") == "inactive\n"
+        assert tx_marker.read_text(encoding="utf-8") == "pending\n"
+        assert trace.read_text(encoding="utf-8").splitlines() == [
+            "systemctl:is-active --quiet broker.service",
+            "systemctl:stop broker.service",
+            "systemctl:is-active --quiet broker.service",
+            "systemctl:show --property=MainPID --value broker.service",
+            "filesystem-recover",
         ]
 
 

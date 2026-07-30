@@ -528,6 +528,28 @@ root_action_broker_absent_attested() {
   [[ "$active_check_rc" -eq 4 ]]
 }
 
+root_action_broker_quiesced_attested() {
+  local service_name="$1"
+  local active_check_rc main_pid
+  if /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+    systemctl is-active --quiet "$service_name"; then
+    return 1
+  else
+    active_check_rc="$?"
+  fi
+  case "$active_check_rc" in
+    3)
+      main_pid="$(
+        /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+          systemctl show --property=MainPID --value "$service_name"
+      )" || return 1
+      [[ "$main_pid" == 0 ]]
+      ;;
+    4) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 restart_root_action_broker_for_release() {
   local service_name="$1"
   local release_dir="$2"
@@ -1228,10 +1250,41 @@ restore_broker_service_from_transaction() {
   esac
 }
 
+quiesce_root_action_broker_before_recovery() {
+  local helper="$1"
+  local broker_state service_name active_rc
+  broker_state="$(
+    run_activation_transaction "$helper" show --field broker_state
+  )" || return 1
+  service_name="$(
+    run_activation_transaction "$helper" show --field broker_service_name
+  )" || return 1
+  case "$broker_state" in
+    unavailable)
+      ! command -v systemctl >/dev/null 2>&1
+      return
+      ;;
+    active|inactive|absent) ;;
+    *) return 1 ;;
+  esac
+  command -v systemctl >/dev/null 2>&1 || return 1
+  [[ -x /usr/bin/timeout ]] || return 1
+  if /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+    systemctl is-active --quiet "$service_name"; then
+    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+      systemctl stop "$service_name" >/dev/null || return 1
+  else
+    active_rc="$?"
+    [[ "$active_rc" -eq 3 || "$active_rc" -eq 4 ]] || return 1
+  fi
+  root_action_broker_quiesced_attested "$service_name"
+}
+
 recover_and_attest_activation_baseline() {
   local helper="$1"
   local expected_commit="$2"
   local previous_release="$3"
+  quiesce_root_action_broker_before_recovery "$helper" || return 1
   run_activation_transaction "$helper" recover || return 1
   restore_broker_service_from_transaction "$helper" "$previous_release" || return 1
   if [[ -n "$previous_release" ]]; then

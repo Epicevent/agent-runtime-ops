@@ -104,6 +104,8 @@ def test_svcops_attestations_are_bounded_minimal_and_prune_is_last() -> None:
     recovery = _function("recover_and_attest_activation_baseline")
     broker_restart = _function("restart_root_action_broker_for_release")
     quiesce = _function("quiesce_root_action_broker_for_publication")
+    recovery_quiesce = _function("quiesce_root_action_broker_before_recovery")
+    quiesced_attestation = _function("root_action_broker_quiesced_attested")
     package = _function("install_package")
     assert "/usr/bin/timeout --kill-after=1" in runner
     assert "runuser -u \"$OPS_USER\" -- env -i" in runner
@@ -115,6 +117,9 @@ def test_svcops_attestations_are_bounded_minimal_and_prune_is_last() -> None:
     assert '"$helper" "$commit" "$previous_release"' in finalizer
     assert "previous active identity restored" in finalizer
     assert 'run_activation_transaction "$helper" recover' in recovery
+    assert recovery.index('quiesce_root_action_broker_before_recovery "$helper"') < recovery.index(
+        'run_activation_transaction "$helper" recover'
+    )
     assert 'restore_broker_service_from_transaction "$helper" "$previous_release"' in recovery
     assert 'attest_restored_cli_as_ops "$previous_release" "$expected_commit"' in recovery
     assert 'run_activation_transaction "$helper" finalize --expect baseline' in recovery
@@ -125,6 +130,10 @@ def test_svcops_attestations_are_bounded_minimal_and_prune_is_last() -> None:
     )
     assert 'systemctl stop "$service_name"' in quiesce
     assert "attest_quiesced_root_action_broker_state" in quiesce
+    assert 'systemctl stop "$service_name"' in recovery_quiesce
+    assert "root_action_broker_quiesced_attested" in recovery_quiesce
+    assert "systemctl show --property=MainPID --value" in quiesced_attestation
+    assert '[[ "$main_pid" == 0 ]]' in quiesced_attestation
     assert "recover_and_attest_activation_baseline" in broker_finalizer
     assert "finalize --expect candidate" in broker_finalizer
     assert package.index('previous_active_release="$(capture_previous_active_release "$commit")"') < package.index(
