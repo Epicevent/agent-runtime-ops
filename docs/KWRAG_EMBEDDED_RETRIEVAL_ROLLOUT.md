@@ -126,7 +126,13 @@ also recognizes only the exact nested-suffix residue produced by the superseded 
 atomically renames it to the next canonical name, validates the complete root-controlled
 backup, and preserves the original legacy source. Validation failure restores the residue
 to its prior name. Any other non-canonical entry in the managed backup root aborts the
-upgrade instead of being silently skipped.
+upgrade instead of being silently skipped. Backup allocation and latest-backup selection
+apply the same exact-name rule; an incomplete canonical entry or abandoned staging name is
+reported rather than hidden behind a newer valid backup. If validation fails and even the
+rename back to the historical residue name fails, activation stops with both paths in the
+error and leaves the moved root-controlled entry visible for operator recovery. It is not
+silently deleted or treated as quarantined, and no automatic-recovery guarantee is claimed
+for that double-failure case.
 For the first upgrade only, a backup whose manifest and compose bytes prove that it
 predates all retrieval fields may complete rollback when live truth also proves both the
 capability and runtime projection labels are wholly absent; partial, extra, current

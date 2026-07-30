@@ -134,16 +134,26 @@ def _backup_path_for_suffix(original_backup_dir: Path, suffix: int) -> Path:
     return original_backup_dir.parent / name
 
 
-def _next_backup_path(backup_root: Path, original_backup_dir: Path) -> Path:
+def _next_backup_path(
+    backup_root: Path,
+    original_backup_dir: Path,
+    *,
+    ignored_entries: frozenset[Path] = frozenset(),
+) -> Path:
     original_key = _backup_sort_key(original_backup_dir)
     if original_key is None:
         raise ValueError(f"invalid generated backup name: {original_backup_dir.name}")
-    same_second_suffixes = [
-        sort_key[1]
-        for item in backup_root.iterdir()
-        if (sort_key := _backup_sort_key(item)) is not None
-        and sort_key[0] == original_key[0]
-    ]
+    same_second_suffixes: list[int] = []
+    for item in backup_root.iterdir():
+        if item in ignored_entries:
+            continue
+        sort_key = _backup_sort_key(item)
+        if sort_key is None:
+            raise ValueError(f"unexpected managed backup entry: {item}")
+        if item.is_symlink() or not item.is_dir():
+            raise ValueError(f"managed backup entry must be a directory: {item}")
+        if sort_key[0] == original_key[0]:
+            same_second_suffixes.append(sort_key[1])
     if not same_second_suffixes:
         return original_backup_dir
     return _backup_path_for_suffix(
@@ -1052,6 +1062,7 @@ def _recover_interrupted_legacy_publications(
     """
 
     recovered: list[Path] = []
+    interrupted: list[tuple[Path, re.Match[str]]] = []
     for item in sorted(backup_root.iterdir()):
         if _backup_sort_key(item) is not None:
             continue
@@ -1065,8 +1076,16 @@ def _recover_interrupted_legacy_publications(
                 f"interrupted legacy publication must be a directory: {item}"
             )
         _validate_controlled_directory(item, exact_mode=0o700)
+        interrupted.append((item, match))
+
+    ignored_entries = frozenset(item for item, _match in interrupted)
+    for item, match in interrupted:
         canonical_base = backup_root / match.group("timestamp")
-        target = _next_backup_path(backup_root, canonical_base)
+        target = _next_backup_path(
+            backup_root,
+            canonical_base,
+            ignored_entries=ignored_entries,
+        )
         item.rename(target)
         _fsync_directory(backup_root)
         try:
@@ -1384,6 +1403,7 @@ def backup_agent_runtime_state(slot: str, runtime_dir: Path, state_root: Path) -
     original_backup_dir = backup_root / datetime.now(
         timezone.utc
     ).astimezone().strftime("%Y%m%dT%H%M%S%z")
+    backup_dir = _next_backup_path(backup_root, original_backup_dir)
 
     compose_path = agent_compose_path(runtime_dir)
     manifest_path = agent_manifest_path(runtime_dir)
@@ -1435,7 +1455,6 @@ def backup_agent_runtime_state(slot: str, runtime_dir: Path, state_root: Path) -
             _fsync_regular_file(staged_file)
         _fsync_directory(staging_dir)
 
-        backup_dir = _next_backup_path(backup_root, original_backup_dir)
         suffix = _backup_sort_key(backup_dir)
         if suffix is None:
             raise ValueError(f"invalid backup path: {backup_dir}")
@@ -1493,18 +1512,20 @@ def latest_backup(state_root: Path, slot: str) -> Path | None:
     if not backup_root.is_dir():
         return None
     _validate_controlled_directory(backup_root, exact_mode=0o700)
-    backups = sorted(
-        [
-            (item, sort_key)
-            for item in backup_root.iterdir()
-            if (sort_key := _backup_sort_key(item)) is not None
-            and item.is_dir()
-            and not item.is_symlink()
-            and (item / "backup.json").is_file()
-            and not (item / "backup.json").is_symlink()
-        ],
-        key=lambda item: item[1],
-    )
+    backups: list[tuple[Path, tuple[datetime, int]]] = []
+    for item in backup_root.iterdir():
+        sort_key = _backup_sort_key(item)
+        if sort_key is None:
+            raise ValueError(f"unexpected managed backup entry: {item}")
+        if item.is_symlink() or not item.is_dir():
+            raise ValueError(f"managed backup entry must be a directory: {item}")
+        metadata_path = item / "backup.json"
+        if metadata_path.is_symlink() or not metadata_path.is_file():
+            raise ValueError(
+                f"managed backup entry must contain regular backup metadata: {item}"
+            )
+        backups.append((item, sort_key))
+    backups.sort(key=lambda item: item[1])
     return backups[-1][0] if backups else None
 
 

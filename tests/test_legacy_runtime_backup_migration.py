@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -641,7 +642,12 @@ def test_nested_suffix_residue_is_renamed_canonically_without_reimport(
     runtime_dir = tmp_path / "runtime"
     runtime_dir.mkdir()
     timestamp = "20260713T234730+0900"
-    source = _legacy_backup(
+    base_source = _legacy_backup(
+        runtime_dir,
+        name=timestamp,
+        diagnostics=False,
+    )
+    suffixed_source = _legacy_backup(
         runtime_dir,
         name=f"{timestamp}.2",
         diagnostics=False,
@@ -649,23 +655,26 @@ def test_nested_suffix_residue_is_renamed_canonically_without_reimport(
     state_root = tmp_path / "state"
     state_root.mkdir()
     imported = import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root)
-    assert len(imported) == 1
-    malformed = imported[0].with_name(f"{timestamp}.2.2")
-    imported[0].rename(malformed)
+    assert [item.name for item in imported] == [timestamp, f"{timestamp}.2"]
+    base_import = imported[0]
+    malformed = imported[1].with_name(f"{timestamp}.2.2")
+    imported[1].rename(malformed)
     before_digest = hashlib.sha256(
         (malformed / "backup.json").read_bytes()
     ).hexdigest()
 
     repeated = import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root)
 
-    recovered = malformed.parent / timestamp
+    recovered = malformed.parent / f"{timestamp}.2"
     assert repeated == []
+    assert base_import.is_dir()
     assert recovered.is_dir()
     assert not malformed.exists()
     assert hashlib.sha256((recovered / "backup.json").read_bytes()).hexdigest() == (
         before_digest
     )
-    assert source.is_dir()
+    assert base_source.is_dir()
+    assert suffixed_source.is_dir()
     assert import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root) == []
 
 
@@ -776,6 +785,81 @@ def test_post_rename_validation_failure_removes_only_the_import_copy(
     assert not observed[0].exists()
     assert list(backup_root.iterdir()) == []
     assert source.is_dir()
+
+
+@POSIX_ONLY
+def test_forced_publication_collisions_retry_with_canonical_suffixes(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    source = _legacy_backup(runtime_dir, diagnostics=False)
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    original_rename = Path.rename
+    attempted_targets: list[str] = []
+
+    def collide_twice(path: Path, target: Path) -> Path:
+        if path.name.startswith(".legacy-import-"):
+            attempted_targets.append(target.name)
+            if len(attempted_targets) <= 2:
+                raise OSError(errno.EEXIST, "forced publication collision")
+        return original_rename(path, target)
+
+    with patch.object(Path, "rename", collide_twice):
+        imported = import_legacy_agent_runtime_backups(
+            "oc20", runtime_dir, state_root
+        )
+
+    assert attempted_targets == [
+        "20260728T120000+0000",
+        "20260728T120000+0000.2",
+        "20260728T120000+0000.3",
+    ]
+    assert [path.name for path in imported] == ["20260728T120000+0000.3"]
+    assert source.is_dir()
+
+
+@POSIX_ONLY
+def test_interrupted_recovery_rollback_failure_remains_visible(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    _legacy_backup(runtime_dir, diagnostics=False)
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    backup_root = state_root / "runtime-recovery" / "oc20" / "backups"
+    backup_root.mkdir(parents=True, mode=0o700)
+    (state_root / "runtime-recovery").chmod(0o700)
+    (state_root / "runtime-recovery" / "oc20").chmod(0o700)
+    backup_root.chmod(0o700)
+    malformed = backup_root / "20260713T234730+0900.2.2"
+    malformed.mkdir(mode=0o700)
+    metadata = malformed / "backup.json"
+    metadata.write_text("{}\n", encoding="utf-8")
+    metadata.chmod(0o600)
+    canonical = backup_root / "20260713T234730+0900"
+    original_rename = Path.rename
+
+    def fail_recovery_rollback(path: Path, target: Path) -> Path:
+        if path == canonical and target == malformed:
+            raise OSError("forced recovery rollback failure")
+        return original_rename(path, target)
+
+    with (
+        patch.object(Path, "rename", fail_recovery_rollback),
+        pytest.raises(
+            RuntimeError,
+            match="interrupted legacy publication recovery rollback failed",
+        ),
+    ):
+        import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root)
+
+    assert canonical.is_dir()
+    assert not malformed.exists()
+    with pytest.raises(ValueError, match="metadata schema is invalid"):
+        import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root)
 
 
 def test_install_migration_uses_binding_account_and_reports_import_count(
