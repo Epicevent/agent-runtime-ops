@@ -559,6 +559,13 @@ def _coherence_observation(
     fields = runtime.get("fields")
     if not isinstance(fields, dict):
         return {"status": "unavailable"}
+    rollout_retrieval_enabled = (
+        "true" if initial_rollout.get("retrieval_enabled") is True else "false"
+    )
+    rollout_component_digest = (
+        initial_rollout.get("retrieval_component_digest") or ""
+    )
+    rollout_binding_digest = initial_rollout.get("retrieval_binding_digest") or ""
     matches = all(
         (
             fields.get("instance_id") == initial_binding.get("instance_id"),
@@ -571,6 +578,9 @@ def _coherence_observation(
             fields.get("runtime_profile") == initial_rollout.get("runtime_profile"),
             fields.get("wrapper_image") == initial_rollout.get("wrapper_image"),
             fields.get("product_image") == initial_rollout.get("product_image"),
+            fields.get("retrieval_enabled") == rollout_retrieval_enabled,
+            fields.get("retrieval_component_digest") == rollout_component_digest,
+            fields.get("retrieval_binding_digest") == rollout_binding_digest,
         )
     )
     return {"status": "consistent" if matches else "mixed_snapshot"}

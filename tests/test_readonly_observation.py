@@ -691,6 +691,57 @@ def test_transaction_change_during_observation_is_not_mixed_into_one_snapshot(
     }
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("retrieval_enabled", "true"),
+        ("retrieval_component_digest", "sha256:" + "9" * 64),
+        ("retrieval_binding_digest", "sha256:" + "8" * 64),
+    ],
+)
+def test_rollout_retrieval_intent_must_match_live_runtime(
+    capsys, tmp_path: Path, field: str, value: str
+) -> None:
+    truth, checks = runtime_truth()
+    truth[field] = value
+    rc, _raw, result = run_observation(
+        capsys,
+        tmp_path,
+        contract_patches(truth=(truth, checks)),
+    )
+    assert rc == 1
+    assert result["result"] == "degraded"
+    assert result["observations"]["coherence"] == {"status": "mixed_snapshot"}
+
+
+def test_capability_absent_rollout_intent_matches_coherent_live_absence(
+    capsys, tmp_path: Path
+) -> None:
+    truth, checks = runtime_truth()
+    for field in (
+        "retrieval_schema",
+        "retrieval_transport",
+        "retrieval_default_enabled",
+        "retrieval_component_digest",
+        "retrieval_resource_profile_digest",
+    ):
+        truth[field] = ""
+    truth["retrieval_labels_present"] = "false"
+    truth["retrieval_contract_complete"] = "false"
+    target = runtime_target()
+    image_spec = dict(target.image_spec)
+    image_spec["retrieval_component_digest"] = ""
+    target = replace(target, image_spec=image_spec)
+    rc, _raw, result = run_observation(
+        capsys,
+        tmp_path,
+        contract_patches(truth=(truth, checks), target=target),
+    )
+    assert rc == 0
+    assert result["result"] == "observed"
+    assert result["observations"]["coherence"] == {"status": "consistent"}
+
+
 def test_malformed_approval_does_not_leak_raw_value(capsys, tmp_path: Path) -> None:
     bad = approvals()
     bad["hermes:wrapper"] = {
