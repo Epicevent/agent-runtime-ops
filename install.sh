@@ -28,6 +28,7 @@ ACTIVATION_TRANSACTION_DIR="$INSTALL_ROOT/.activation-transaction.pending"
 ACTIVATION_CANDIDATE_DIR="$INSTALL_ROOT/.activation-candidate.prepare"
 ACTIVATION_HELPER_BLOB=""
 RESTORED_CLI_RESULT=""
+RESTORED_BROKER_RESULT=""
 LEGACY_RESTRICTIVE_UMASK_BASELINE_REF="443c5fdaac231a1c62d4a927ca93e19d055e400a"
 LEGACY_RESTRICTIVE_UMASK_SOURCE_PROJECTION_SHA256="c615067ad8d61a09f116bd9f9e22d949d45b9603af8de184fd90718ebf27765e"
 LEGACY_RESTRICTIVE_UMASK_SOURCE_FILE_COUNT=322
@@ -1284,6 +1285,37 @@ restore_broker_service_from_transaction() {
   esac
 }
 
+restore_broker_service_after_baseline_validation() {
+  local helper="$1"
+  local previous_release="$2"
+  local broker_state service_name
+  RESTORED_BROKER_RESULT=""
+  broker_state="$(
+    run_activation_transaction "$helper" show --field broker_state
+  )" || return 1
+  case "$RESTORED_CLI_RESULT" in
+    restored_exact_but_preexisting_unrunnable|\
+    restored_admissible_preexisting_runnable_unexecuted)
+      if [[ "$broker_state" == active ]]; then
+        service_name="$(
+          run_activation_transaction "$helper" show --field broker_service_name
+        )" || return 1
+        command -v systemctl >/dev/null 2>&1 || return 1
+        [[ -x /usr/bin/timeout ]] || return 1
+        /usr/bin/timeout --kill-after=1 \
+          "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+          systemctl daemon-reload >/dev/null || return 1
+        root_action_broker_inactive_attested "$service_name" || return 1
+        RESTORED_BROKER_RESULT="restored_unit_preexisting_active_left_quiesced"
+        return 0
+      fi
+      ;;
+  esac
+  restore_broker_service_from_transaction "$helper" "$previous_release" \
+    || return 1
+  RESTORED_BROKER_RESULT="restored_recorded_$broker_state"
+}
+
 quiesce_root_action_broker_for_transaction() {
   local helper="$1"
   local broker_state service_name tuple
@@ -1333,14 +1365,16 @@ recover_and_attest_activation_baseline() {
   local previous_release="$3"
   quiesce_root_action_broker_before_recovery "$helper" || return 1
   run_activation_transaction "$helper" recover || return 1
-  restore_broker_service_from_transaction "$helper" "$previous_release" || return 1
   if [[ -n "$previous_release" ]]; then
-    attest_restored_cli_or_exact_preexisting_unrunnable \
+    attest_restored_cli_or_exact_preexisting_legacy \
       "$previous_release" "$expected_commit" || return 1
   else
     RESTORED_CLI_RESULT="first_install_absent"
   fi
+  restore_broker_service_after_baseline_validation \
+    "$helper" "$previous_release" || return 1
   info "ops_cli_restoration=$RESTORED_CLI_RESULT"
+  info "broker_restoration=$RESTORED_BROKER_RESULT"
   run_activation_transaction "$helper" finalize --expect baseline || return 1
 }
 
@@ -1366,8 +1400,9 @@ recover_pending_activation_transaction() {
     || cleanup_rc="$?"
   [[ "$cleanup_rc" -eq 2 ]] \
     || die "activation baseline recovered but durable completion acknowledgement failed"
-  info "activation_recovery=previous_identity_restored_exactly"
+  info "activation_recovery=journaled_managed_baseline_restored"
   info "activation_recovery_cli_state=$RESTORED_CLI_RESULT"
+  info "activation_recovery_broker_state=$RESTORED_BROKER_RESULT"
   return 0
 }
 
@@ -1649,6 +1684,17 @@ path_is_not_executable_as_ops() {
       /usr/bin/test ! -x "$path"
 }
 
+path_is_executable_as_ops() {
+  local path="$1"
+  /usr/bin/timeout --kill-after=1 "$OPS_CLI_ATTESTATION_COMMAND_TIMEOUT_SECONDS" \
+    runuser -u "$OPS_USER" -- env -i \
+      HOME="$OPS_HOME" \
+      USER="$OPS_USER" \
+      LOGNAME="$OPS_USER" \
+      PATH=/usr/local/bin:/usr/bin:/bin \
+      /usr/bin/test -x "$path"
+}
+
 validate_update_status_output() {
   local output="$1"
   local expected_ref="$2"
@@ -1767,10 +1813,12 @@ attest_restored_cli_as_ops() {
   [[ -x "$MCP_BIN_LINK" ]] || return 1
 }
 
-legacy_restrictive_umask_baseline_is_shaped() {
+legacy_baseline_requires_exact_admission() {
   local release_dir="$1"
+  local legacy_identity_rc=0
   /usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/python3 -I - \
-    "$release_dir" "$LEGACY_RESTRICTIVE_UMASK_BASELINE_REF" <<'PY'
+    "$release_dir" "$LEGACY_RESTRICTIVE_UMASK_BASELINE_REF" <<'PY' \
+    || legacy_identity_rc="$?"
 import os
 import re
 import stat
@@ -1783,7 +1831,7 @@ manifest = os.path.join(release_raw, ".agent-runtime-ops-manifest")
 
 
 def fail_closed() -> None:
-    raise SystemExit(0 if legacy_named else 2)
+    raise SystemExit(2)
 
 
 try:
@@ -1850,24 +1898,29 @@ source_refs = [
     for line in text.splitlines()
     if line.startswith("source_commit=")
 ]
-if source_refs == [legacy_ref] or legacy_named:
-    raise SystemExit(0)
 if len(source_refs) != 1 or re.fullmatch(r"[0-9a-f]{40}", source_refs[0]) is None:
+    raise SystemExit(2)
+if legacy_named:
+    raise SystemExit(0 if source_refs == [legacy_ref] else 2)
+if source_refs[0] == legacy_ref:
     raise SystemExit(2)
 raise SystemExit(1)
 PY
+  return "$legacy_identity_rc"
 }
 
-exact_preexisting_unrunnable_cli_baseline_identity() {
+exact_preexisting_legacy_cli_baseline_identity() {
   local release_dir="$1"
   local expected_ref="$2"
+  local mode_profile="$3"
   local ops_gid
   ops_gid="$(/usr/bin/id -g "$OPS_USER")" || return 1
   [[ "$ops_gid" =~ ^[0-9]+$ ]] || return 1
   /usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/python3 -I - \
     "$release_dir" "$RELEASES_DIR" "$CURRENT_LINK" \
     "$BIN_LINK" "$MCP_BIN_LINK" "$GEMINI_BIN_LINK" "$MANIFEST" \
-    "$STATE_ROOT/ops-update.yaml" "$REPO_URL" "$expected_ref" "$ops_gid" \
+    "$STATE_ROOT/ops-update.yaml" "$REPO_URL" "$expected_ref" \
+    "$mode_profile" "$ops_gid" \
     "$OPS_USER" "$OPS_GROUP" "$INSTALL_ROOT" "$STATE_ROOT" "$GEMINI_HOME" \
     "$LEGACY_RESTRICTIVE_UMASK_BASELINE_REF" \
     "$LEGACY_RESTRICTIVE_UMASK_SOURCE_PROJECTION_SHA256" \
@@ -1893,6 +1946,7 @@ import sys
     policy_raw,
     expected_repo,
     expected_ref,
+    mode_profile,
     ops_gid_raw,
     ops_user,
     ops_group,
@@ -1905,6 +1959,11 @@ import sys
     expected_source_dirs_raw,
     expected_source_bytes_raw,
 ) = sys.argv[1:]
+if mode_profile not in ("restrictive", "runnable"):
+    raise SystemExit(1)
+generated_dir_mode = 0o700 if mode_profile == "restrictive" else 0o755
+generated_data_mode = 0o600 if mode_profile == "restrictive" else 0o644
+generated_exec_mode = 0o700 if mode_profile == "restrictive" else 0o755
 release = os.path.realpath(release_raw)
 releases = os.path.realpath(releases_raw)
 ops_gid = int(ops_gid_raw)
@@ -2045,7 +2104,7 @@ def read_regular_bytes(path: str, mode: int, maximum: int) -> bytes:
     return b"".join(chunks)
 
 
-def require_generated_dir(path: str) -> None:
+def require_generated_dir(path: str, exact_mode: int | None = None) -> None:
     value = lstat(path)
     if (
         not stat.S_ISDIR(value.st_mode)
@@ -2054,6 +2113,10 @@ def require_generated_dir(path: str) -> None:
         or value.st_gid != ops_gid
         or value.st_nlink < 2
         or (stat.S_IMODE(value.st_mode) & 0o022) != 0
+        or (
+            exact_mode is not None
+            and stat.S_IMODE(value.st_mode) != exact_mode
+        )
     ):
         raise SystemExit(1)
 
@@ -2064,10 +2127,10 @@ def validate_source_projection() -> str:
     source_dirs = 0
     source_bytes = 0
     generated_roots = {
-        ".venv",
-        "agent-clis/gemini-cli/node_modules",
-        "build",
-        "opsctl/agent_runtime_ops.egg-info",
+        ".venv": generated_dir_mode,
+        "agent-clis/gemini-cli/node_modules": generated_dir_mode,
+        "build": None,
+        "opsctl/agent_runtime_ops.egg-info": None,
     }
 
     def visit(directory: str, relative: str) -> None:
@@ -2080,7 +2143,10 @@ def validate_source_projection() -> str:
             child_relative = entry.name if not relative else f"{relative}/{entry.name}"
             if not relative and entry.name == ".agent-runtime-ops-manifest":
                 continue
-            if child_relative in generated_roots or entry.name == "__pycache__":
+            if child_relative in generated_roots:
+                require_generated_dir(entry.path, generated_roots[child_relative])
+                continue
+            if entry.name == "__pycache__":
                 require_generated_dir(entry.path)
                 continue
             value = lstat(entry.path)
@@ -2230,7 +2296,7 @@ if manifest_keys != expected_manifest_keys:
 required_manifest = {
     "source_summary": (
         "Merge pull request #71 from Epicevent/"
-        "codex/kwrag-legacy-backup-collision-recovery"
+        "codex/kwrag-legacy-backup-collision-recovery "
     ),
     "installed_dir": release,
     "install_root": install_root,
@@ -2257,7 +2323,7 @@ if (
     or stat.S_ISLNK(venv_meta.st_mode)
     or venv_meta.st_uid != 0
     or venv_meta.st_gid != ops_gid
-    or stat.S_IMODE(venv_meta.st_mode) != 0o700
+    or stat.S_IMODE(venv_meta.st_mode) != generated_dir_mode
 ):
     raise SystemExit(1)
 venv_bin = os.path.join(venv, "bin")
@@ -2268,7 +2334,7 @@ if (
     or venv_bin_meta.st_uid != 0
     or venv_bin_meta.st_gid != ops_gid
     or venv_bin_meta.st_nlink < 2
-    or (stat.S_IMODE(venv_bin_meta.st_mode) & 0o022) != 0
+    or stat.S_IMODE(venv_bin_meta.st_mode) != generated_dir_mode
 ):
     raise SystemExit(1)
 venv_opsctl = os.path.join(venv, "bin", "opsctl")
@@ -2283,8 +2349,8 @@ def require_console_entrypoint(path: str, import_target: str) -> str:
         "# -*- coding: utf-8 -*-\n"
         "import re\n"
         "import sys\n"
+        f"from {import_target} import main\n"
         "if __name__ == '__main__':\n"
-        f"    from {import_target} import main\n"
         "    sys.argv[0] = re.sub(r'(-script\\.pyw|\\.exe)?$', '', sys.argv[0])\n"
         "    sys.exit(main())\n"
     )
@@ -2314,7 +2380,9 @@ require_symlink(gemini_link, "../@google/gemini-cli/bundle/gemini.js")
 gemini_package = os.path.join(
     gemini_cli_root, "node_modules", "@google", "gemini-cli", "package.json"
 )
-gemini_package_text = read_regular(gemini_package, 0o600, 256 * 1024)
+gemini_package_text = read_regular(
+    gemini_package, generated_data_mode, 256 * 1024
+)
 try:
     gemini_package_data = json.loads(gemini_package_text)
 except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -2334,45 +2402,46 @@ gemini_bundle = os.path.join(
     "bundle",
     "gemini.js",
 )
-gemini_bundle_bytes = read_regular_bytes(gemini_bundle, 0o700, 16 * 1024 * 1024)
+gemini_bundle_bytes = read_regular_bytes(
+    gemini_bundle, generated_exec_mode, 16 * 1024 * 1024
+)
 if not gemini_bundle_bytes.startswith(b"#!/usr/bin/env node\n"):
     raise SystemExit(1)
 
 policy_text = read_regular(policy_raw, 0o640, 256 * 1024)
-policy_lines = policy_text.splitlines()
-updates_seen = 0
-agent_seen = 0
-repo_rows = []
-approved_rows = []
-in_updates = False
-in_agent = False
-for line in policy_lines:
-    if line == "updates:":
-        updates_seen += 1
-        in_updates = True
-        in_agent = False
-        continue
-    if line and not line.startswith(" "):
-        in_updates = False
-        in_agent = False
-        continue
-    if in_updates and line == "  agent-runtime-ops:":
-        agent_seen += 1
-        in_agent = True
-        continue
-    if in_agent and line.startswith("  ") and not line.startswith("    "):
-        in_agent = False
-        continue
-    if in_agent and line.startswith("    repo_url: "):
-        repo_rows.append(line.removeprefix("    repo_url: "))
-    if in_agent and line.startswith("    approved_ref: "):
-        approved_rows.append(line.removeprefix("    approved_ref: "))
 if (
-    updates_seen != 1
-    or agent_seen != 1
-    or repo_rows != [expected_repo]
-    or approved_rows != [expected_ref]
+    "\r" in policy_text
+    or not policy_text.endswith("\n")
+    or policy_text.count("\n") != 10
 ):
+    raise SystemExit(1)
+policy_lines = policy_text.splitlines()
+timestamp_scalar = r"'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}'"
+approved_by_scalar = r"(?:''|[A-Za-z_][A-Za-z0-9_.-]{0,63})"
+if len(policy_lines) != 10:
+    raise SystemExit(1)
+expected_policy_lines = (
+    "meta:",
+    "  schema_version: 1",
+    None,
+    "  scope: private_server_state",
+    "updates:",
+    "  agent-runtime-ops:",
+    f"    repo_url: {expected_repo}",
+    f"    approved_ref: {expected_ref}",
+    None,
+    None,
+)
+if any(
+    expected is not None and observed != expected
+    for observed, expected in zip(policy_lines, expected_policy_lines)
+):
+    raise SystemExit(1)
+if re.fullmatch(f"  updated_at: {timestamp_scalar}", policy_lines[2]) is None:
+    raise SystemExit(1)
+if re.fullmatch(f"    approved_at: {timestamp_scalar}", policy_lines[8]) is None:
+    raise SystemExit(1)
+if re.fullmatch(f"    approved_by: {approved_by_scalar}", policy_lines[9]) is None:
     raise SystemExit(1)
 identity_paths = (
     release,
@@ -2392,6 +2461,7 @@ identity_paths = (
     policy_raw,
 )
 identity_rows = []
+identity_rows.append(mode_profile)
 for path in identity_paths:
     value = lstat(path)
     identity_rows.append(
@@ -2435,35 +2505,58 @@ attest_exact_preexisting_unrunnable_cli_baseline() {
   local expected_ref="$2"
   local before_identity after_identity
   before_identity="$(
-    exact_preexisting_unrunnable_cli_baseline_identity \
-      "$release_dir" "$expected_ref"
+    exact_preexisting_legacy_cli_baseline_identity \
+      "$release_dir" "$expected_ref" restrictive
   )" || return 1
   [[ "$before_identity" =~ ^[0-9a-f]{64}$ ]] || return 1
   path_is_not_executable_as_ops "$release_dir/.venv/bin/opsctl" \
     >/dev/null 2>&1 || return 1
   after_identity="$(
-    exact_preexisting_unrunnable_cli_baseline_identity \
-      "$release_dir" "$expected_ref"
+    exact_preexisting_legacy_cli_baseline_identity \
+      "$release_dir" "$expected_ref" restrictive
   )" || return 1
   [[ "$after_identity" == "$before_identity" ]]
 }
 
-attest_restored_cli_or_exact_preexisting_unrunnable() {
+attest_exact_preexisting_runnable_cli_baseline_without_execution() {
   local release_dir="$1"
   local expected_ref="$2"
-  local legacy_shape_rc=0
+  local before_identity after_probe_identity
+  before_identity="$(
+    exact_preexisting_legacy_cli_baseline_identity \
+      "$release_dir" "$expected_ref" runnable
+  )" || return 1
+  [[ "$before_identity" =~ ^[0-9a-f]{64}$ ]] || return 1
+  path_is_executable_as_ops "$release_dir/.venv/bin/opsctl" \
+    >/dev/null 2>&1 || return 1
+  after_probe_identity="$(
+    exact_preexisting_legacy_cli_baseline_identity \
+      "$release_dir" "$expected_ref" runnable
+  )" || return 1
+  [[ "$after_probe_identity" == "$before_identity" ]]
+}
+
+attest_restored_cli_or_exact_preexisting_legacy() {
+  local release_dir="$1"
+  local expected_ref="$2"
+  local legacy_admission_rc=0
   RESTORED_CLI_RESULT=""
-  if legacy_restrictive_umask_baseline_is_shaped "$release_dir"; then
+  if legacy_baseline_requires_exact_admission "$release_dir"; then
     if attest_exact_preexisting_unrunnable_cli_baseline \
       "$release_dir" "$expected_ref"; then
       RESTORED_CLI_RESULT="restored_exact_but_preexisting_unrunnable"
       return 0
     fi
+    if attest_exact_preexisting_runnable_cli_baseline_without_execution \
+      "$release_dir" "$expected_ref"; then
+      RESTORED_CLI_RESULT="restored_admissible_preexisting_runnable_unexecuted"
+      return 0
+    fi
     return 1
   else
-    legacy_shape_rc="$?"
+    legacy_admission_rc="$?"
   fi
-  [[ "$legacy_shape_rc" -eq 1 ]] || return 1
+  [[ "$legacy_admission_rc" -eq 1 ]] || return 1
   if attest_restored_cli_as_ops "$release_dir" "$expected_ref"; then
     RESTORED_CLI_RESULT="svcops_verified"
     return 0
@@ -2495,9 +2588,9 @@ capture_previous_active_release() {
     || die "current release resolves outside the releases directory"
   [[ -d "$previous_release" && ! -L "$previous_release" ]] \
     || die "current release target is not a fixed release directory"
-  attest_restored_cli_or_exact_preexisting_unrunnable \
+  attest_restored_cli_or_exact_preexisting_legacy \
     "$previous_release" "$expected_ref" \
-    || die "previous active CLI is neither svcops-verifiable nor an exact restrictive-umask baseline"
+    || die "previous active CLI is neither svcops-verifiable nor an exact admissible legacy baseline"
   printf 'previous_active_cli_state=%s\n' "$RESTORED_CLI_RESULT" >&2
   printf '%s\n' "$previous_release"
 }
@@ -2566,11 +2659,12 @@ activate_and_attest_cli_or_restore() {
     if [[ -e "$ACTIVATION_TRANSACTION_DIR" || -L "$ACTIVATION_TRANSACTION_DIR" ]]; then
       recover_and_attest_activation_baseline \
         "$helper" "$commit" "$previous_release" \
-        || die "activation failed and durable previous identity restoration failed"
+        || die "activation failed and durable journaled-baseline recovery failed"
     else
       RESTORED_CLI_RESULT="unchanged_prepublication"
+      RESTORED_BROKER_RESULT="unchanged_prepublication"
     fi
-    die "post-activation svcops CLI attestation failed; baseline_state=$RESTORED_CLI_RESULT"
+    die "post-activation svcops CLI attestation failed; baseline_cli_state=$RESTORED_CLI_RESULT; baseline_broker_state=$RESTORED_BROKER_RESULT"
   fi
   info "ops_cli_post_activation=svcops_verified"
 }
@@ -2603,8 +2697,8 @@ install_root_action_broker_or_restore() {
     return 0
   fi
   recover_and_attest_activation_baseline "$helper" "$commit" "$previous_release" \
-    || die "root-action broker setup failed and durable previous identity restoration failed"
-  die "root-action broker setup failed; previous active identity restored exactly; recovery_state=$RESTORED_CLI_RESULT"
+    || die "root-action broker setup failed and durable journaled-baseline recovery failed"
+  die "root-action broker setup failed; baseline_cli_state=$RESTORED_CLI_RESULT; baseline_broker_state=$RESTORED_BROKER_RESULT"
 }
 
 register_codex_mcp() {
@@ -2661,7 +2755,7 @@ install_package() {
   )" || die "activation helper does not match the exact source commit"
   with_install_lock
   if recover_pending_activation_transaction "$activation_helper" "$commit"; then
-    die "pending activation recovered to the previous identity; rerun install to begin a new activation"
+    die "pending activation recovered its journaled managed baseline; rerun install to begin a new activation"
   fi
   cleanup_abandoned_activation_staging "$activation_helper" "$commit" \
     || activation_cleanup_rc="$?"
