@@ -71,6 +71,37 @@ def test_validate_install_root_named_block_is_complete_and_syntax_valid(
     assert completed.returncode == 0, completed.stderr
 
 
+def test_exact_legacy_identity_named_block_is_complete_and_syntax_valid(
+    tmp_path: Path,
+) -> None:
+    body = _function_block(
+        "exact_preexisting_unrunnable_cli_baseline_identity",
+        "attest_exact_preexisting_unrunnable_cli_baseline",
+    )
+    assert body.startswith("exact_preexisting_unrunnable_cli_baseline_identity() {")
+    assert body.rstrip().endswith("}")
+    assert body.count("<<'PY'") == 1
+    assert body.count("\nPY\n") == 1
+
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is required for extracted shell syntax validation")
+    script = tmp_path / "exact-legacy-identity.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n" + body,
+        encoding="utf-8",
+        newline="\n",
+    )
+    completed = subprocess.run(
+        [bash, "-n", str(script)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 def _reader() -> Any:
     if pwd is None or os.name != "posix" or os.geteuid() != 0:
         pytest.skip("root POSIX ownership semantics are required")
@@ -834,7 +865,10 @@ def _legacy_capture_body(reader: Any, tree: dict[str, Any]) -> str:
         + _function("validate_update_status_output")
         + _function("attest_restored_cli_as_ops")
         + _function("legacy_restrictive_umask_baseline_is_shaped")
-        + _function("exact_preexisting_unrunnable_cli_baseline_identity")
+        + _function_block(
+            "exact_preexisting_unrunnable_cli_baseline_identity",
+            "attest_exact_preexisting_unrunnable_cli_baseline",
+        )
         + _function("attest_exact_preexisting_unrunnable_cli_baseline")
         + _function("attest_restored_cli_or_exact_preexisting_unrunnable")
         + _function("capture_previous_active_release")
@@ -929,7 +963,10 @@ def test_exact_legacy_0700_recovery_finalizes_with_honest_degraded_state() -> No
             + _function("validate_update_status_output")
             + _function("attest_restored_cli_as_ops")
             + _function("legacy_restrictive_umask_baseline_is_shaped")
-            + _function("exact_preexisting_unrunnable_cli_baseline_identity")
+            + _function_block(
+                "exact_preexisting_unrunnable_cli_baseline_identity",
+                "attest_exact_preexisting_unrunnable_cli_baseline",
+            )
             + _function("attest_exact_preexisting_unrunnable_cli_baseline")
             + _function("attest_restored_cli_or_exact_preexisting_unrunnable")
             + _function("recover_and_attest_activation_baseline")
@@ -1167,7 +1204,10 @@ def test_legacy_baseline_identity_drift_during_nonexecuting_probe_is_rejected(
             "local original_mode; original_mode=\"$(/usr/bin/stat -c %a -- \"$DRIFT_PATH\")\"; "
             "/usr/bin/chmod 0600 \"$DRIFT_PATH\"; "
             "/usr/bin/chmod \"$original_mode\" \"$DRIFT_PATH\"; return 0; }\n"
-            + _function("exact_preexisting_unrunnable_cli_baseline_identity")
+            + _function_block(
+                "exact_preexisting_unrunnable_cli_baseline_identity",
+                "attest_exact_preexisting_unrunnable_cli_baseline",
+            )
             + _function("attest_exact_preexisting_unrunnable_cli_baseline")
             + f"\nattest_exact_preexisting_unrunnable_cli_baseline {str(tree['release'])!r} {ACTIVATION_COMMIT}\n"
         )
