@@ -1259,7 +1259,7 @@ def test_incomplete_backup_is_not_published_or_selected(tmp_path: Path) -> None:
     assert latest_backup(state_root, "oc20") is None
 
 
-def test_latest_backup_ignores_incomplete_visible_directory(tmp_path: Path) -> None:
+def test_latest_backup_rejects_incomplete_visible_directory(tmp_path: Path) -> None:
     state_root = tmp_path / "state"
     state_root.mkdir()
     backup_root = recovery_backup_root(state_root)
@@ -1273,10 +1273,11 @@ def test_latest_backup_ignores_incomplete_visible_directory(tmp_path: Path) -> N
     incomplete = backup_root / "20260729T000001+0000"
     incomplete.mkdir()
 
-    assert latest_backup(state_root, "oc20") == valid
+    with pytest.raises(ValueError, match="must contain regular backup metadata"):
+        latest_backup(state_root, "oc20")
 
 
-def test_latest_backup_ignores_staging_directory_with_backup_metadata(
+def test_latest_backup_rejects_staging_directory_with_backup_metadata(
     tmp_path: Path,
 ) -> None:
     state_root = tmp_path / "state"
@@ -1293,7 +1294,8 @@ def test_latest_backup_ignores_staging_directory_with_backup_metadata(
     staging.mkdir()
     (staging / "backup.json").write_text("{", encoding="utf-8")
 
-    assert latest_backup(state_root, "oc20") == valid
+    with pytest.raises(ValueError, match="unexpected managed backup entry"):
+        latest_backup(state_root, "oc20")
 
 
 def test_latest_backup_orders_same_second_collision_suffix_numerically(
@@ -1324,6 +1326,31 @@ def test_new_backup_suffix_starts_above_highest_same_second_collision(
         (backup_root / f"{original.name}{suffix}").mkdir()
 
     assert _next_backup_path(backup_root, original) == Path(f"{original}.11")
+
+
+def test_already_suffixed_backup_collision_stays_canonical(tmp_path: Path) -> None:
+    backup_root = tmp_path / ".agent-runtime-backups"
+    backup_root.mkdir()
+    timestamp = "20260729T000000+0000"
+    for suffix in ("", ".2", ".3"):
+        (backup_root / f"{timestamp}{suffix}").mkdir()
+
+    original = backup_root / f"{timestamp}.2"
+    allocated = _next_backup_path(backup_root, original)
+
+    assert allocated == backup_root / f"{timestamp}.4"
+    assert allocated.name != f"{timestamp}.2.4"
+
+
+def test_backup_allocator_rejects_unknown_managed_entry(tmp_path: Path) -> None:
+    backup_root = tmp_path / ".agent-runtime-backups"
+    backup_root.mkdir()
+    timestamp = "20260729T000000+0000"
+    (backup_root / timestamp).mkdir()
+    (backup_root / ".staging-abandoned").mkdir()
+
+    with pytest.raises(ValueError, match="unexpected managed backup entry"):
+        _next_backup_path(backup_root, backup_root / timestamp)
 
 
 def test_apply_backs_up_env_before_prepare_and_restores_on_pre_dispatch_failure(

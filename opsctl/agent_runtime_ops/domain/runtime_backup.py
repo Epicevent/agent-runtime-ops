@@ -32,7 +32,13 @@ from .runtime_paths import (
 
 
 _BACKUP_NAME = re.compile(
-    r"^(?P<timestamp>\d{8}T\d{6}[+-]\d{4})(?:\.(?P<suffix>\d+))?$"
+    r"^(?P<timestamp>\d{8}T\d{6}[+-]\d{4})"
+    r"(?:\.(?P<suffix>(?:[2-9]|[1-9]\d+)))?$"
+)
+_INTERRUPTED_LEGACY_PUBLICATION_NAME = re.compile(
+    r"^(?P<timestamp>\d{8}T\d{6}[+-]\d{4})"
+    r"\.(?P<source_suffix>(?:[2-9]|[1-9]\d+))"
+    r"\.(?P<retry_suffix>(?:[2-9]|[1-9]\d+))$"
 )
 _ROLLBACK_TRANSACTION_SCHEMA = "agent-runtime-rollback-transaction/v2"
 _ROLLBACK_TRANSACTION_NAME = ".agent-runtime-rollback-transaction.json"
@@ -113,27 +119,47 @@ def _backup_sort_key(path: Path) -> tuple[datetime, int] | None:
         return None
     suffix_text = match.group("suffix")
     suffix = int(suffix_text or 1)
-    if suffix_text is not None and suffix < 2:
-        return None
     return (
         datetime.strptime(match.group("timestamp"), "%Y%m%dT%H%M%S%z"),
         suffix,
     )
 
 
-def _next_backup_path(backup_root: Path, original_backup_dir: Path) -> Path:
+def _backup_path_for_suffix(original_backup_dir: Path, suffix: int) -> Path:
+    match = _BACKUP_NAME.fullmatch(original_backup_dir.name)
+    if match is None or suffix < 1:
+        raise ValueError(f"invalid generated backup name: {original_backup_dir.name}")
+    timestamp = match.group("timestamp")
+    name = timestamp if suffix == 1 else f"{timestamp}.{suffix}"
+    return original_backup_dir.parent / name
+
+
+def _next_backup_path(
+    backup_root: Path,
+    original_backup_dir: Path,
+    *,
+    ignored_entries: frozenset[Path] = frozenset(),
+) -> Path:
     original_key = _backup_sort_key(original_backup_dir)
     if original_key is None:
         raise ValueError(f"invalid generated backup name: {original_backup_dir.name}")
-    same_second_suffixes = [
-        sort_key[1]
-        for item in backup_root.iterdir()
-        if (sort_key := _backup_sort_key(item)) is not None
-        and sort_key[0] == original_key[0]
-    ]
+    same_second_suffixes: list[int] = []
+    for item in backup_root.iterdir():
+        if item in ignored_entries:
+            continue
+        sort_key = _backup_sort_key(item)
+        if sort_key is None:
+            raise ValueError(f"unexpected managed backup entry: {item}")
+        if item.is_symlink() or not item.is_dir():
+            raise ValueError(f"managed backup entry must be a directory: {item}")
+        if sort_key[0] == original_key[0]:
+            same_second_suffixes.append(sort_key[1])
     if not same_second_suffixes:
         return original_backup_dir
-    return Path(f"{original_backup_dir}.{max(same_second_suffixes) + 1}")
+    return _backup_path_for_suffix(
+        original_backup_dir,
+        max(same_second_suffixes) + 1,
+    )
 
 
 def _fsync_regular_file(path: Path) -> None:
@@ -599,17 +625,34 @@ def _validate_backup_dir(state_root: Path, slot: str, backup_dir: Path) -> Path:
     return backup_dir
 
 
+def _load_validated_backup_metadata(backup_dir: Path) -> tuple[dict, str]:
+    metadata_path = backup_dir / "backup.json"
+    if metadata_path.is_symlink() or not metadata_path.is_file():
+        raise ValueError(
+            f"rollback backup metadata must be a regular file: {metadata_path}"
+        )
+    metadata_stat = metadata_path.stat()
+    if metadata_stat.st_nlink != 1:
+        raise ValueError(
+            f"rollback backup metadata must have one link: {metadata_path}"
+        )
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is not None and metadata_stat.st_uid != geteuid():
+        raise ValueError(f"rollback backup metadata owner mismatch: {metadata_path}")
+    metadata_digest = _sha256_file(metadata_path)
+    metadata = load_yaml(metadata_path)
+    if not isinstance(metadata, dict) or metadata.get("schema") != _BACKUP_SCHEMA:
+        raise ValueError("rollback backup metadata schema is invalid")
+    return metadata, metadata_digest
+
+
 def _validate_backup_integrity(
     state_root: Path,
     slot: str,
     backup_dir: Path,
 ) -> tuple[dict, str]:
     backup_dir = _validate_backup_dir(state_root, slot, backup_dir)
-    metadata_path = backup_dir / "backup.json"
-    metadata_digest = _sha256_file(metadata_path)
-    metadata = load_yaml(metadata_path)
-    if not isinstance(metadata, dict) or metadata.get("schema") != _BACKUP_SCHEMA:
-        raise ValueError("rollback backup metadata schema is invalid")
+    metadata, metadata_digest = _load_validated_backup_metadata(backup_dir)
     legacy_import = _legacy_import_metadata(metadata)
     artifact_digests = metadata.get("artifact_sha256")
     if not isinstance(artifact_digests, dict) or set(artifact_digests) != set(
@@ -1004,10 +1047,11 @@ def _existing_legacy_imports(
     slot: str,
     backup_root: Path,
 ) -> dict[str, tuple[str, Path]]:
+    _recover_interrupted_legacy_publications(state_root, slot, backup_root)
     result: dict[str, tuple[str, Path]] = {}
     for item in sorted(backup_root.iterdir()):
         if _backup_sort_key(item) is None:
-            continue
+            raise ValueError(f"unexpected managed backup entry: {item}")
         metadata, _ = _validate_backup_integrity(state_root, slot, item)
         legacy = _legacy_import_metadata(metadata)
         if legacy is None:
@@ -1020,6 +1064,80 @@ def _existing_legacy_imports(
             )
         result[backup_name] = (identity, item)
     return result
+
+
+def _recover_interrupted_legacy_publications(
+    state_root: Path,
+    slot: str,
+    backup_root: Path,
+) -> tuple[Path, ...]:
+    """Canonicalize only the nested-suffix residue created by the old publisher.
+
+    The old collision retry appended a suffix to an already-suffixed source name,
+    published that directory durably, and then failed its normal path validator.
+    Every other non-canonical managed-root entry remains a hard failure.
+    """
+
+    recovered: list[Path] = []
+    interrupted: list[tuple[Path, re.Match[str]]] = []
+    for item in sorted(backup_root.iterdir()):
+        if _backup_sort_key(item) is not None:
+            continue
+        match = _INTERRUPTED_LEGACY_PUBLICATION_NAME.fullmatch(item.name)
+        if match is None:
+            raise ValueError(f"unexpected managed backup entry: {item}")
+        if item.parent != backup_root:
+            raise ValueError(f"interrupted legacy publication parent mismatch: {item}")
+        if item.is_symlink() or not item.is_dir():
+            raise ValueError(
+                f"interrupted legacy publication must be a directory: {item}"
+            )
+        _validate_controlled_directory(item, exact_mode=0o700)
+        interrupted.append((item, match))
+
+    ignored_entries = frozenset(item for item, _match in interrupted)
+    for item, match in interrupted:
+        expected_source_name = (
+            f"{match.group('timestamp')}.{match.group('source_suffix')}"
+        )
+        candidate_metadata, _ = _load_validated_backup_metadata(item)
+        candidate_legacy = _legacy_import_metadata(candidate_metadata)
+        if (
+            candidate_legacy is None
+            or candidate_legacy["backup_name"] != expected_source_name
+        ):
+            raise ValueError(
+                "interrupted legacy publication source identity mismatch: "
+                f"{item}"
+            )
+        canonical_base = backup_root / match.group("timestamp")
+        target = _next_backup_path(
+            backup_root,
+            canonical_base,
+            ignored_entries=ignored_entries,
+        )
+        item.rename(target)
+        _fsync_directory(backup_root)
+        try:
+            metadata, _ = _validate_backup_integrity(state_root, slot, target)
+            legacy = _legacy_import_metadata(metadata)
+            if legacy is None or legacy["backup_name"] != expected_source_name:
+                raise ValueError(
+                    "interrupted legacy publication source identity mismatch: "
+                    f"{target}"
+                )
+        except Exception as validation_error:
+            try:
+                target.rename(item)
+                _fsync_directory(backup_root)
+            except Exception as rollback_error:
+                raise RuntimeError(
+                    "interrupted legacy publication recovery rollback failed: "
+                    f"{target} -> {item}: {rollback_error}"
+                ) from validation_error
+            raise
+        recovered.append(target)
+    return tuple(recovered)
 
 
 def _publish_legacy_backup(
@@ -1115,17 +1233,35 @@ def _publish_legacy_backup(
                 _fsync_regular_file(item)
         _fsync_directory(staging_dir)
         next_suffix = (_backup_sort_key(backup_dir) or (None, 1))[1]
+        moved_path: Path | None = None
         while True:
             try:
                 staging_dir.rename(backup_dir)
-                _fsync_directory(backup_root)
-                _validate_backup_integrity(state_root, slot, backup_dir)
-                return backup_dir
             except OSError as exc:
                 if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
                     raise
                 next_suffix += 1
-                backup_dir = Path(f"{original_backup_dir}.{next_suffix}")
+                backup_dir = _backup_path_for_suffix(
+                    original_backup_dir,
+                    next_suffix,
+                )
+                continue
+            moved_path = backup_dir
+            try:
+                _fsync_directory(backup_root)
+                _validate_backup_integrity(state_root, slot, backup_dir)
+            except Exception as validation_error:
+                try:
+                    moved_path.rename(staging_dir)
+                    _fsync_directory(backup_root)
+                    moved_path = None
+                except Exception as rollback_error:
+                    raise RuntimeError(
+                        "legacy backup publication rollback failed: "
+                        f"{backup_dir} -> {staging_dir}: {rollback_error}"
+                    ) from validation_error
+                raise
+            return backup_dir
     except Exception:
         shutil.rmtree(staging_dir, ignore_errors=True)
         raise
@@ -1294,6 +1430,7 @@ def backup_agent_runtime_state(slot: str, runtime_dir: Path, state_root: Path) -
     original_backup_dir = backup_root / datetime.now(
         timezone.utc
     ).astimezone().strftime("%Y%m%dT%H%M%S%z")
+    backup_dir = _next_backup_path(backup_root, original_backup_dir)
 
     compose_path = agent_compose_path(runtime_dir)
     manifest_path = agent_manifest_path(runtime_dir)
@@ -1345,7 +1482,6 @@ def backup_agent_runtime_state(slot: str, runtime_dir: Path, state_root: Path) -
             _fsync_regular_file(staged_file)
         _fsync_directory(staging_dir)
 
-        backup_dir = _next_backup_path(backup_root, original_backup_dir)
         suffix = _backup_sort_key(backup_dir)
         if suffix is None:
             raise ValueError(f"invalid backup path: {backup_dir}")
@@ -1359,7 +1495,10 @@ def backup_agent_runtime_state(slot: str, runtime_dir: Path, state_root: Path) -
                 if exc.errno not in {errno.EEXIST, errno.ENOTEMPTY}:
                     raise
                 next_suffix += 1
-                backup_dir = Path(f"{original_backup_dir}.{next_suffix}")
+                backup_dir = _backup_path_for_suffix(
+                    original_backup_dir,
+                    next_suffix,
+                )
     except Exception:
         shutil.rmtree(staging_dir, ignore_errors=True)
         raise
@@ -1400,18 +1539,20 @@ def latest_backup(state_root: Path, slot: str) -> Path | None:
     if not backup_root.is_dir():
         return None
     _validate_controlled_directory(backup_root, exact_mode=0o700)
-    backups = sorted(
-        [
-            (item, sort_key)
-            for item in backup_root.iterdir()
-            if (sort_key := _backup_sort_key(item)) is not None
-            and item.is_dir()
-            and not item.is_symlink()
-            and (item / "backup.json").is_file()
-            and not (item / "backup.json").is_symlink()
-        ],
-        key=lambda item: item[1],
-    )
+    backups: list[tuple[Path, tuple[datetime, int]]] = []
+    for item in backup_root.iterdir():
+        sort_key = _backup_sort_key(item)
+        if sort_key is None:
+            raise ValueError(f"unexpected managed backup entry: {item}")
+        if item.is_symlink() or not item.is_dir():
+            raise ValueError(f"managed backup entry must be a directory: {item}")
+        metadata_path = item / "backup.json"
+        if metadata_path.is_symlink() or not metadata_path.is_file():
+            raise ValueError(
+                f"managed backup entry must contain regular backup metadata: {item}"
+            )
+        backups.append((item, sort_key))
+    backups.sort(key=lambda item: item[1])
     return backups[-1][0] if backups else None
 
 
