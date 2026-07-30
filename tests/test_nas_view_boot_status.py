@@ -95,7 +95,20 @@ class StatusBootSectionTest(unittest.TestCase):
             Path(__file__).parent / "fixtures" / "nas-view-status-v1-degraded.txt"
         ).read_text(encoding="utf-8")
         self.assertEqual(code, 1)
-        self.assertEqual(out, fixture)
+        grant_prefixes = (
+            "view_1_grant_evidence_applicable=",
+            "view_1_grant_evidence_count=",
+            "view_1_grant_evidence_json=",
+            "view_1_grant_evidence_complete=",
+        )
+        legacy_projection = "\n".join(
+            line for line in out.splitlines() if not line.startswith(grant_prefixes)
+        ) + "\n"
+        self.assertEqual(legacy_projection, fixture)
+        self.assertIn("view_1_grant_evidence_applicable=no", out)
+        self.assertIn("view_1_grant_evidence_count=0", out)
+        self.assertIn("view_1_grant_evidence_json=[]", out)
+        self.assertIn("view_1_grant_evidence_complete=yes", out)
 
     def test_all_persistent_passes(self) -> None:
         code, out = _status_output(fstab_text=FSTAB_OK, is_root=True)

@@ -7,6 +7,7 @@ import os
 import sqlite3
 import stat
 import sys
+import time
 from pathlib import Path
 
 from ..domain.actions import append_action_log as _append_action_log
@@ -38,6 +39,7 @@ from ..domain.nas_views import (
     save_views_state,
     slot_entry,
     slot_views_root,
+    path_alias,
     validate_user_id,
     view_root,
 )
@@ -46,7 +48,12 @@ from ..host.account_files import (
     read_password_from_stdin,
     write_credential_file,
 )
-from ..host.bind_mounts import bind_ro, unmount_tree
+from ..host.bind_mounts import (
+    bind_ro,
+    observe_mount_targets_under,
+    observe_ro_view_grant,
+    unmount_tree,
+)
 from ..host.nas_ready import failed_cifs_mount_units, wait_for_nas_ready
 from ..host.fstab import (
     read_managed_fstab_entries as _read_managed_fstab_entries,
@@ -70,6 +77,74 @@ from ..nas import (
 _MASTER_MODE_PER_SLOT = "per_slot_cifs"
 _MASTER_MODE_SHARED = "shared_policy_mount"
 _KAKAO_PACKAGE_ROOT = Path("/mnt/nas/kakao-work")
+_GRANT_EVIDENCE_MAX_PATHS = 64
+_GRANT_EVIDENCE_TIMEOUT_SECONDS = 15.0
+
+
+def _view_grant_evidence(
+    slot: str,
+    corpus: str,
+    record: dict,
+    master: Path,
+) -> tuple[str, list[dict], bool, bool]:
+    """Observe granted child mounts; recorded paths remain intent, never proof."""
+    try:
+        _, spec = corpus_named(corpus)
+    except ValueError:
+        return "no", [], True, True
+    if spec.layout != "granted_paths":
+        return "no", [], True, True
+    raw_paths = record.get("paths") or []
+    if not isinstance(raw_paths, list) or len(raw_paths) > _GRANT_EVIDENCE_MAX_PATHS:
+        return "yes", [], False, False
+    if not raw_paths:
+        return "yes", [], False, False
+    deadline = time.monotonic() + _GRANT_EVIDENCE_TIMEOUT_SECONDS
+    evidence: list[dict] = []
+    complete = True
+    green = True
+    seen_paths: set[str] = set()
+    seen_aliases: set[str] = set()
+    expected_entries: set[str] = set()
+    for raw_path in raw_paths:
+        if not isinstance(raw_path, str):
+            return "yes", [], False, False
+        try:
+            rel = raw_path
+            alias = path_alias(rel)
+        except ValueError:
+            return "yes", [], False, False
+        if rel in seen_paths or alias in seen_aliases:
+            return "yes", [], False, False
+        seen_paths.add(rel)
+        seen_aliases.add(alias)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return "yes", evidence, False, False
+        entry = slot_entry(slot, corpus) / alias
+        expected_entries.add(entry.as_posix())
+        item, item_complete, item_green = observe_ro_view_grant(
+            master / rel,
+            entry,
+            slot,
+            allow_account_probe=_is_root(),
+            timeout=min(3.0, remaining),
+        )
+        item["path"] = rel
+        evidence.append(item)
+        complete = complete and item_complete
+        green = green and item_green
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return "yes", evidence, False, False
+    targets, inventory_gap = observe_mount_targets_under(
+        slot_entry(slot, corpus), min(3.0, remaining)
+    )
+    expected_targets = {slot_entry(slot, corpus).as_posix(), *expected_entries}
+    if inventory_gap is not None or targets != expected_targets:
+        complete = False
+        green = False
+    return "yes", evidence, complete, green
 
 
 def _require_root(command: str) -> bool:
@@ -618,6 +693,23 @@ def cmd_nas_view_status(args: argparse.Namespace) -> int:
         print(f"{prefix}_entry_mounted={'yes' if entry_mounted else 'no'}")
         print(f"{prefix}_entry_mounted_readonly={'yes' if entry_readonly else 'no'}")
         if not entry_mounted or not entry_readonly:
+            healthy = False
+        (
+            evidence_applicable,
+            grant_evidence,
+            grant_evidence_complete,
+            grant_evidence_green,
+        ) = _view_grant_evidence(slot, corpus, record, master)
+        print(f"{prefix}_grant_evidence_applicable={evidence_applicable}")
+        print(f"{prefix}_grant_evidence_count={len(grant_evidence)}")
+        print(
+            f"{prefix}_grant_evidence_json="
+            + json.dumps(grant_evidence, ensure_ascii=False, separators=(",", ":"))
+        )
+        print(f"{prefix}_grant_evidence_complete={'yes' if grant_evidence_complete else 'no'}")
+        if evidence_applicable == "yes" and not grant_evidence_complete:
+            observation_gaps.append("grant_evidence_incomplete")
+        if evidence_applicable == "yes" and not grant_evidence_green:
             healthy = False
         print(f"{prefix}_healthy={'yes' if healthy else 'no'}")
         if not healthy:

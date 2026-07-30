@@ -6,11 +6,13 @@ import io
 import json
 import os
 import sqlite3
+import subprocess
 from pathlib import Path
 import tempfile
+import time
 import unittest
 import uuid
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from agent_runtime_ops.commands.nas_view import (
     _apply_binds,
@@ -31,6 +33,7 @@ from agent_runtime_ops.domain.nas_views import (
     resolve_granted_dirs,
     save_views_state,
     validate_room_id,
+    validate_relative_path,
     validate_user_id,
 )
 from agent_runtime_ops.nas import parse_smb_share
@@ -629,6 +632,274 @@ class BindRoTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "bind_source_changed_during_mount")
         unmount.assert_called_once_with(target)
+
+
+class GrantEvidenceProbeTests(unittest.TestCase):
+    def test_account_probe_uses_fixed_argv_without_shell(self) -> None:
+        from agent_runtime_ops.host import bind_mounts
+
+        with patch.object(bind_mounts, "_run_text", return_value=FakeProc(stdout="allow\n")) as run:
+            value, gap = bind_mounts._probe_slot_access(
+                "oc16", Path("/home/oc16/nas_docs/groupware/mails_user"), "-r", 1.5
+            )
+        self.assertTrue(value)
+        self.assertIsNone(gap)
+        run.assert_called_once_with(
+            [
+                "/usr/sbin/runuser", "-u", "oc16", "--", "/usr/bin/python3", "-I", "-c",
+                ANY, "r", "/home/oc16/nas_docs/groupware/mails_user",
+            ],
+            timeout=1.5,
+        )
+
+    def test_account_probe_timeout_is_an_observation_gap(self) -> None:
+        from agent_runtime_ops.host import bind_mounts
+
+        with patch.object(
+            bind_mounts,
+            "_run_text",
+            side_effect=subprocess.TimeoutExpired(["runuser"], 1),
+        ):
+            value, gap = bind_mounts._probe_slot_access(
+                "oc16", Path("/entry"), "-x", 1.0
+            )
+        self.assertIsNone(value)
+        self.assertEqual(gap, "probe_timeout")
+
+    def test_account_probe_does_not_misclassify_runuser_failure_as_denied(self) -> None:
+        from agent_runtime_ops.host import bind_mounts
+
+        for returncode, stdout in ((1, ""), (126, ""), (127, ""), (-9, ""), (0, "forged")):
+            with patch.object(
+                bind_mounts,
+                "_run_text",
+                return_value=FakeProc(returncode=returncode, stdout=stdout),
+            ):
+                value, gap = bind_mounts._probe_slot_access(
+                    "oc16", Path("/entry"), "-x", 1.0
+                )
+            self.assertIsNone(value)
+            self.assertEqual(gap, "probe_unavailable")
+
+    def test_account_probe_distinguishes_explicit_denial(self) -> None:
+        from agent_runtime_ops.host import bind_mounts
+
+        with patch.object(bind_mounts, "_run_text", return_value=FakeProc(stdout="deny\n")):
+            value, gap = bind_mounts._probe_slot_access(
+                "oc16", Path("/entry"), "-x", 1.0
+            )
+        self.assertFalse(value)
+        self.assertIsNone(gap)
+
+    def test_findmnt_probe_is_fixed_argv_and_bounded(self) -> None:
+        from agent_runtime_ops.host import bind_mounts
+
+        stdout = (
+            'TARGET="/home/oc16/nas_docs/groupware/mails_user" '
+            'SOURCE="/master/mails/user" FSTYPE="none" '
+            'OPTIONS="ro,nosuid,nodev,bind" PROPAGATION="private"\n'
+        )
+        with patch.object(bind_mounts, "_run_text", return_value=FakeProc(stdout=stdout)) as run:
+            rc, rows = bind_mounts._findmnt_exact(
+                Path("/home/oc16/nas_docs/groupware/mails_user"), 2.25
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(rows[0]["target"], "/home/oc16/nas_docs/groupware/mails_user")
+        run.assert_called_once_with(
+            [
+                "/usr/bin/findmnt", "-M", "/home/oc16/nas_docs/groupware/mails_user",
+                "-P", "-o", "TARGET,SOURCE,FSTYPE,OPTIONS,PROPAGATION",
+            ],
+            timeout=2.25,
+        )
+
+    def test_mount_inventory_is_fixed_argv_bounded_and_exact(self) -> None:
+        from agent_runtime_ops.host import bind_mounts
+
+        stdout = (
+            'TARGET="/home/oc16/nas_docs/groupware"\n'
+            'TARGET="/home/oc16/nas_docs/groupware/mails_user"\n'
+        )
+        with patch.object(bind_mounts, "_run_text", return_value=FakeProc(stdout=stdout)) as run:
+            targets, gap = bind_mounts.observe_mount_targets_under(
+                Path("/home/oc16/nas_docs/groupware"), 2.0
+            )
+        self.assertIsNone(gap)
+        self.assertEqual(targets, {
+            "/home/oc16/nas_docs/groupware",
+            "/home/oc16/nas_docs/groupware/mails_user",
+        })
+        run.assert_called_once_with(
+            [
+                "/usr/bin/findmnt", "-R", "-M", "/home/oc16/nas_docs/groupware",
+                "-P", "-o", "TARGET",
+            ],
+            timeout=2.0,
+        )
+
+    def test_relative_path_rejects_control_characters(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unsafe path"):
+            validate_relative_path("mails/user\nforged")
+
+
+@unittest.skipUnless(os.name == "posix", "requires POSIX no-follow directory descriptors")
+class GrantEvidencePosixTests(unittest.TestCase):
+    def test_valid_grant_captures_identity_modes_and_access(self) -> None:
+        from agent_runtime_ops.host import bind_mounts
+
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = Path(tmp) / "entry"
+            entry.mkdir(mode=0o750)
+            row = {
+                "target": entry.as_posix(), "source": "/master/mails/user", "fstype": "none",
+                "options": "ro,nosuid,nodev,bind", "propagation": "private",
+            }
+            with (
+                patch.object(bind_mounts, "_findmnt_exact", return_value=(0, [row])),
+                patch.object(bind_mounts, "_slot_account_identity", return_value=(1003, 1003)),
+                patch.object(bind_mounts, "_probe_slot_access", return_value=(True, None)) as access,
+            ):
+                item, complete, green = bind_mounts._observe_ro_view_grant_core(
+                    entry, entry, "oc3", allow_account_probe=True, timeout=3.0
+                )
+        self.assertTrue(complete)
+        self.assertTrue(green)
+        self.assertEqual(item["source_uid"], item["entry_uid"])
+        self.assertEqual(item["source_gid"], item["entry_gid"])
+        self.assertEqual(item["source_mode"], item["entry_mode"])
+        self.assertEqual(item["account_uid"], 1003)
+        self.assertEqual([call.args[2] for call in access.call_args_list], ["-x", "-r"])
+
+    def test_parent_only_mount_and_denied_access_are_explicit(self) -> None:
+        from agent_runtime_ops.host import bind_mounts
+
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = Path(tmp) / "entry"
+            entry.mkdir()
+            row = {
+                "target": str(entry.parent), "source": "/master", "fstype": "none",
+                "options": "ro,nosuid,nodev,bind", "propagation": "private",
+            }
+            with (
+                patch.object(bind_mounts, "_findmnt_exact", return_value=(0, [row])),
+                patch.object(bind_mounts, "_slot_account_identity", return_value=(1003, 1003)),
+                patch.object(bind_mounts, "_probe_slot_access", return_value=(False, None)),
+            ):
+                item, complete, green = bind_mounts._observe_ro_view_grant_core(
+                    entry, entry, "oc3", allow_account_probe=True, timeout=3.0
+                )
+        self.assertTrue(complete)
+        self.assertFalse(green)
+        self.assertIn("path_not_mounted", item["issues"])
+        self.assertIn("account_traverse_denied", item["issues"])
+        self.assertIn("account_read_denied", item["issues"])
+
+    def test_wrong_source_identity_and_symlink_fail_closed(self) -> None:
+        from agent_runtime_ops.host import bind_mounts
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            entry = root / "entry"
+            source.mkdir()
+            entry.mkdir()
+            row = {
+                "target": entry.as_posix(), "source": source.as_posix(), "fstype": "none",
+                "options": "ro,nosuid,nodev,bind", "propagation": "private",
+            }
+            with (
+                patch.object(bind_mounts, "_findmnt_exact", return_value=(0, [row])),
+                patch.object(bind_mounts, "_slot_account_identity", return_value=(1003, 1003)),
+                patch.object(bind_mounts, "_probe_slot_access", return_value=(True, None)),
+            ):
+                item, complete, green = bind_mounts._observe_ro_view_grant_core(
+                    source, entry, "oc3", allow_account_probe=True, timeout=3.0
+                )
+            self.assertTrue(complete)
+            self.assertFalse(green)
+            self.assertIn("source_identity_mismatch", item["issues"])
+
+            link = root / "link"
+            link.symlink_to(source, target_is_directory=True)
+            item, complete, green = bind_mounts._observe_ro_view_grant_core(
+                link, entry, "oc3", allow_account_probe=False, timeout=3.0
+            )
+        self.assertFalse(complete)
+        self.assertFalse(green)
+        self.assertIn("metadata_invalid", item["issues"])
+
+    def test_findmnt_timeout_is_incomplete_not_a_crash(self) -> None:
+        from agent_runtime_ops.host import bind_mounts
+
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = Path(tmp) / "entry"
+            entry.mkdir()
+            with (
+                patch.object(
+                    bind_mounts,
+                    "_findmnt_exact",
+                    side_effect=subprocess.TimeoutExpired(["findmnt"], 1),
+                ),
+                patch.object(bind_mounts, "_slot_account_identity", return_value=(1003, 1003)),
+            ):
+                item, complete, green = bind_mounts._observe_ro_view_grant_core(
+                    entry, entry, "oc3", allow_account_probe=False, timeout=3.0
+                )
+        self.assertFalse(complete)
+        self.assertFalse(green)
+        self.assertIn("probe_timeout", item["gaps"])
+        self.assertIn("account_probe_requires_root", item["gaps"])
+
+    def test_path_replacement_between_mount_reads_never_turns_green(self) -> None:
+        from agent_runtime_ops.host import bind_mounts
+
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = Path(tmp) / "entry"
+            old = Path(tmp) / "entry-old"
+            entry.mkdir()
+            row = {
+                "target": entry.as_posix(), "source": entry.as_posix(), "fstype": "none",
+                "options": "ro,nosuid,nodev,bind", "propagation": "private",
+            }
+            calls = 0
+
+            def replace_then_observe(_entry: Path, _timeout: float):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    entry.rename(old)
+                    entry.mkdir()
+                return 0, [row]
+
+            with (
+                patch.object(bind_mounts, "_findmnt_exact", side_effect=replace_then_observe),
+                patch.object(bind_mounts, "_slot_account_identity", return_value=(1003, 1003)),
+                patch.object(bind_mounts, "_probe_slot_access", return_value=(True, None)),
+            ):
+                item, complete, green = bind_mounts._observe_ro_view_grant_core(
+                    entry, entry, "oc3", allow_account_probe=True, timeout=3.0
+                )
+        self.assertTrue(complete)
+        self.assertFalse(green)
+        self.assertIn("source_identity_mismatch", item["issues"])
+
+    def test_whole_probe_hard_timeout_kills_hanging_worker(self) -> None:
+        from agent_runtime_ops.host import bind_mounts
+
+        def hang(*_args, **_kwargs):
+            time.sleep(5)
+
+        started = time.monotonic()
+        with patch.object(bind_mounts, "_observe_ro_view_grant_core", side_effect=hang):
+            item, complete, green = bind_mounts.observe_ro_view_grant(
+                Path("/source"), Path("/entry"), "oc3",
+                allow_account_probe=True, timeout=0.2,
+            )
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 1.5)
+        self.assertFalse(complete)
+        self.assertFalse(green)
+        self.assertEqual(item["gaps"], ["probe_timeout"])
 
 
 if __name__ == "__main__":
