@@ -906,9 +906,26 @@ deactivate_first_release() {
   local path
   [[ "$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)" == "$release_dir" ]] \
     || return 1
-  [[ -f "$GEMINI_BIN_LINK" ]] \
-    && grep -q 'agent-runtime-ops managed gemini wrapper' "$GEMINI_BIN_LINK" \
-    || return 1
+  if [[ -e "$BIN_LINK" || -L "$BIN_LINK" ]]; then
+    [[ -f "$BIN_LINK" && ! -L "$BIN_LINK" ]] || return 1
+    grep -Fqx "exec \"$CURRENT_LINK/.venv/bin/opsctl\" \"\$@\"" "$BIN_LINK" \
+      || return 1
+  fi
+  if [[ -e "$MCP_BIN_LINK" || -L "$MCP_BIN_LINK" ]]; then
+    [[ -f "$MCP_BIN_LINK" && ! -L "$MCP_BIN_LINK" ]] || return 1
+    grep -Fqx "exec \"$CURRENT_LINK/.venv/bin/agent-runtime-ops-mcp\" \"\$@\"" "$MCP_BIN_LINK" \
+      || return 1
+  fi
+  if [[ -e "$GEMINI_BIN_LINK" || -L "$GEMINI_BIN_LINK" ]]; then
+    [[ -f "$GEMINI_BIN_LINK" && ! -L "$GEMINI_BIN_LINK" ]] || return 1
+    grep -Fq 'agent-runtime-ops managed gemini wrapper' "$GEMINI_BIN_LINK" \
+      || return 1
+  fi
+  if [[ -e "$MANIFEST" || -L "$MANIFEST" ]]; then
+    [[ -L "$MANIFEST" ]] || return 1
+    [[ "$(readlink "$MANIFEST")" == "current/.agent-runtime-ops-manifest" ]] \
+      || return 1
+  fi
   for path in "$BIN_LINK" "$MCP_BIN_LINK" "$GEMINI_BIN_LINK" "$MANIFEST" "$CURRENT_LINK"; do
     rm -f -- "$path" || return 1
     [[ ! -e "$path" && ! -L "$path" ]] || return 1

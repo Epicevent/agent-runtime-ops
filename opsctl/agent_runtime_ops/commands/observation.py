@@ -302,20 +302,26 @@ def _rollout_observation(
 
 def _retrieval_projection_identity_is_exact(fields: dict[str, str]) -> bool:
     enabled = fields.get("retrieval_enabled")
+    capability_declared = fields.get("retrieval_contract_complete") == "true"
     component = fields.get("retrieval_component_digest") or ""
     binding = fields.get("retrieval_binding_digest") or ""
     expected_binding = fields.get("retrieval_expected_binding_digest") or ""
     resource = fields.get("retrieval_resource_profile_digest") or ""
-    return bool(
+    common_binding_exact = bool(
         enabled in {"true", "false"}
         and fields.get("retrieval_projection_complete") == "true"
         and fields.get("retrieval_projection_consistent") == "true"
-        and SHA256_RE.fullmatch(component)
         and SHA256_RE.fullmatch(binding)
         and SHA256_RE.fullmatch(expected_binding)
         and binding == expected_binding
-        and SHA256_RE.fullmatch(resource)
     )
+    if not common_binding_exact:
+        return False
+    if capability_declared:
+        return bool(
+            SHA256_RE.fullmatch(component) and SHA256_RE.fullmatch(resource)
+        )
+    return enabled == "false" and component == "" and resource == ""
 
 
 def _runtime_observation(state_root: Any, target: str) -> dict[str, object]:
@@ -389,6 +395,12 @@ def _validate_runtime_fields(fields: dict[str, str], target: str) -> None:
     ):
         if fields.get(field) not in {"true", "false"}:
             raise ReadonlyObservationError(f"runtime_{field}_invalid")
+    if fields.get("nas_read_only") != "true":
+        raise ReadonlyObservationError("runtime_nas_read_only_policy_mismatch")
+    if fields.get("retrieval_default_enabled") != "false":
+        raise ReadonlyObservationError(
+            "runtime_retrieval_default_enabled_policy_mismatch"
+        )
     for field in ("wrapper_image", "product_image"):
         value = fields.get(field) or ""
         _validated_image_digest(value, f"runtime_{field}")

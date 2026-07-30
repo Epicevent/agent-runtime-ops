@@ -291,3 +291,50 @@ def test_broker_unit_partial_replacement_restores_exact_previous_bytes() -> None
         assert meta.st_uid == 0
         assert meta.st_gid == 0
         assert stat.S_IMODE(meta.st_mode) == 0o644
+
+
+def test_first_install_failure_before_gemini_creation_restores_all_absent() -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        install_root = root / "install"
+        releases = install_root / "releases"
+        candidate = releases / "candidate"
+        backup = root / "backup"
+        bin_dir = root / "bin"
+        for path in (candidate, backup, bin_dir):
+            path.mkdir(parents=True, exist_ok=True)
+        backup.chmod(0o700)
+        (backup / "state").write_text("first_install\n", encoding="utf-8")
+        (backup / "state").chmod(0o600)
+        current = install_root / "current"
+        current.symlink_to("releases/candidate")
+        opsctl = bin_dir / "opsctl"
+        mcp = bin_dir / "agent-runtime-ops-mcp"
+        gemini = bin_dir / "gemini"
+        manifest = install_root / ".agent-runtime-ops-manifest"
+        opsctl.write_text(
+            "#!/usr/bin/env bash\n"
+            f'exec "{current}/.venv/bin/opsctl" "$@"\n',
+            encoding="utf-8",
+        )
+        mcp.write_text(
+            "#!/usr/bin/env bash\n"
+            f'exec "{current}/.venv/bin/agent-runtime-ops-mcp" "$@"\n',
+            encoding="utf-8",
+        )
+        assert not gemini.exists()
+        assert not manifest.exists()
+        completed = _run_contract_script(
+            root,
+            f"CURRENT_LINK={str(current)!r}\n"
+            f"BIN_LINK={str(opsctl)!r}\n"
+            f"MCP_BIN_LINK={str(mcp)!r}\n"
+            f"GEMINI_BIN_LINK={str(gemini)!r}\n"
+            f"MANIFEST={str(manifest)!r}\n"
+            + _function("deactivate_first_release")
+            + _function("restore_previous_activation_identity")
+            + f"\nrestore_previous_activation_identity {str(candidate)!r} '' {str(backup)!r}\n",
+        )
+        assert completed.returncode == 0, completed.stderr
+        for path in (current, opsctl, mcp, gemini, manifest):
+            assert not path.exists() and not path.is_symlink()

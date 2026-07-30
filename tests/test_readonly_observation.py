@@ -367,6 +367,56 @@ def test_default_off_rejects_empty_or_unbound_projection_identity(
     } in runtime["checks"]
 
 
+def test_capability_absent_disabled_projection_accepts_empty_optional_digests(
+    capsys, tmp_path: Path
+) -> None:
+    truth, checks = runtime_truth()
+    truth["retrieval_contract_complete"] = "false"
+    truth["retrieval_component_digest"] = ""
+    truth["retrieval_resource_profile_digest"] = ""
+    target = runtime_target()
+    image_spec = dict(target.image_spec)
+    image_spec["retrieval_component_digest"] = ""
+    target = replace(target, image_spec=image_spec)
+    rc, _raw, value = run_observation(
+        capsys,
+        tmp_path,
+        contract_patches(truth=(truth, checks), target=target),
+    )
+    assert rc == 0
+    assert value["result"] == "observed"
+    assert {
+        "name": "observation_retrieval_projection_identity",
+        "passed": True,
+    } in value["observations"]["runtime"]["checks"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("retrieval_component_digest", COMPONENT),
+        ("retrieval_resource_profile_digest", RESOURCE),
+        ("retrieval_enabled", "true"),
+    ],
+)
+def test_capability_absent_projection_rejects_partial_or_enabled_state(
+    capsys, tmp_path: Path, field: str, value: str
+) -> None:
+    truth, checks = runtime_truth()
+    truth["retrieval_contract_complete"] = "false"
+    truth["retrieval_component_digest"] = ""
+    truth["retrieval_resource_profile_digest"] = ""
+    truth[field] = value
+    rc, _raw, result = run_observation(
+        capsys, tmp_path, contract_patches(truth=(truth, checks))
+    )
+    assert rc == 1
+    assert {
+        "name": "observation_retrieval_projection_identity",
+        "passed": False,
+    } in result["observations"]["runtime"]["checks"]
+
+
 def test_runtime_check_failure_is_observed_without_raw_detail(
     capsys, tmp_path: Path
 ) -> None:
@@ -439,6 +489,8 @@ def test_control_or_oversized_runtime_field_fails_surface_closed(
         ("retrieval_schema", "attacker-controlled/v9"),
         ("retrieval_transport", "attacker_controlled"),
         ("container_nas_root", "/attacker/controlled/path"),
+        ("nas_read_only", "false"),
+        ("retrieval_default_enabled", "true"),
     ],
 )
 def test_malformed_label_controlled_runtime_fields_fail_closed_without_relay(
