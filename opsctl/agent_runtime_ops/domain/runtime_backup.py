@@ -13,7 +13,7 @@ import shutil
 import stat
 import tempfile
 import threading
-from typing import Iterator
+from typing import Callable, Iterator
 
 from ..profiles import load_profile
 from ..yamlio import load_yaml
@@ -113,6 +113,14 @@ _WINDOWS_LOCKS: dict[str, threading.Lock] = {}
 _WINDOWS_LOCKS_GUARD = threading.Lock()
 
 
+class MarkerBoundRecoveryError(RuntimeError):
+    """A caller-supplied rollback identity did not match durable root state."""
+
+    def __init__(self, reason_code: str) -> None:
+        super().__init__(reason_code)
+        self.reason_code = reason_code
+
+
 def _backup_sort_key(path: Path) -> tuple[datetime, int] | None:
     match = _BACKUP_NAME.fullmatch(path.name)
     if match is None:
@@ -181,12 +189,74 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def _read_stable_regular_file(
+    path: Path,
+    *,
+    maximum_bytes: int | None = None,
+) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    flags |= getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ValueError(f"managed artifact could not be opened safely: {path}") from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError(f"managed artifact must be a regular file: {path}")
+        if before.st_nlink != 1:
+            raise ValueError(f"managed artifact must have one link: {path}")
+        geteuid = getattr(os, "geteuid", None)
+        if geteuid is not None and before.st_uid != geteuid():
+            raise ValueError(f"managed artifact owner mismatch: {path}")
+        if maximum_bytes is not None and before.st_size > maximum_bytes:
+            raise ValueError(f"managed artifact is too large: {path}")
+        chunks: list[bytes] = []
+        observed_bytes = 0
+        while True:
+            read_size = 1024 * 1024
+            if maximum_bytes is not None:
+                read_size = min(read_size, maximum_bytes + 1 - observed_bytes)
+                if read_size <= 0:
+                    raise ValueError(f"managed artifact is too large: {path}")
+            chunk = os.read(descriptor, read_size)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            observed_bytes += len(chunk)
+        raw = b"".join(chunks)
+        if maximum_bytes is not None and len(raw) > maximum_bytes:
+            raise ValueError(f"managed artifact is too large: {path}")
+        after = os.fstat(descriptor)
+        linked = os.stat(path, follow_symlinks=False)
+        linked_identity_matches = (
+            not path.is_symlink()
+            and stat.S_ISREG(linked.st_mode)
+            and (
+                os.name == "nt"
+                or _stat_identity(after) == _stat_identity(linked)
+            )
+        )
+        if (
+            not linked_identity_matches
+            or len(raw) != before.st_size
+            or _stat_identity(before) != _stat_identity(after)
+        ):
+            raise ValueError(f"managed artifact changed while reading: {path}")
+        return raw
+    finally:
+        os.close(descriptor)
+
+
 def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(1024 * 1024):
-            digest.update(chunk)
-    return "sha256:" + digest.hexdigest()
+    return _sha256_bytes(
+        _read_stable_regular_file(
+            path,
+            maximum_bytes=_LEGACY_BACKUP_MAX_FILE_BYTES,
+        )
+    )
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -257,6 +327,7 @@ def _read_legacy_regular_file(
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
     flags |= getattr(os, "O_NONBLOCK", 0)
+    flags |= getattr(os, "O_BINARY", 0)
     display = display_parent / name
     try:
         descriptor = os.open(name, flags, dir_fd=dir_descriptor)
@@ -497,6 +568,51 @@ def runtime_host_mutation_lock(state_root: Path) -> Iterator[Path]:
         os.close(descriptor)
 
 
+@contextmanager
+def existing_runtime_host_mutation_lock(state_root: Path) -> Iterator[Path]:
+    """Acquire the root-managed host lock without creating any filesystem state."""
+
+    _validate_controlled_directory(state_root)
+    recovery_root = state_root / "runtime-recovery"
+    _validate_controlled_directory(recovery_root, exact_mode=0o700)
+    lock_path = _runtime_host_mutation_lock_path(state_root)
+    if lock_path.is_symlink():
+        raise ValueError(f"runtime host mutation lock must not be a symlink: {lock_path}")
+    flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(lock_path, flags)
+    windows_lock: threading.Lock | None = None
+    windows_lock_held = False
+    posix_lock_held = False
+    try:
+        _validate_runtime_lock_descriptor(descriptor, lock_path)
+        if lock_path.parent != recovery_root:
+            raise ValueError(f"runtime host mutation lock parent mismatch: {lock_path}")
+        if os.name == "nt":
+            key = str(lock_path.resolve(strict=False)).casefold()
+            with _WINDOWS_LOCKS_GUARD:
+                windows_lock = _WINDOWS_LOCKS.setdefault(key, threading.Lock())
+            if not windows_lock.acquire(blocking=False):
+                raise RuntimeError("another runtime host mutation is active")
+            windows_lock_held = True
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise RuntimeError("another runtime host mutation is active") from exc
+            posix_lock_held = True
+        yield lock_path
+    finally:
+        if windows_lock_held and windows_lock is not None:
+            windows_lock.release()
+        if posix_lock_held:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
 def _validate_runtime_lock_descriptor(descriptor: int, path: Path) -> None:
     descriptor_stat = os.fstat(descriptor)
     if not stat.S_ISREG(descriptor_stat.st_mode):
@@ -562,19 +678,124 @@ def runtime_transaction_lock(state_root: Path, slot: str) -> Iterator[Path]:
         os.close(descriptor)
 
 
-def _strict_json_object(path: Path, *, maximum_bytes: int = 4096) -> dict[str, object]:
-    if path.is_symlink() or not path.is_file():
-        raise ValueError(f"rollback transaction must be a regular file: {path}")
-    file_stat = path.stat()
-    if file_stat.st_nlink != 1:
-        raise ValueError(f"rollback transaction must have one link: {path}")
-    if os.name != "nt" and stat.S_IMODE(file_stat.st_mode) != 0o600:
-        raise ValueError(f"rollback transaction mode must be 0600: {path}")
-    geteuid = getattr(os, "geteuid", None)
-    if geteuid is not None and file_stat.st_uid != geteuid():
-        raise ValueError(f"rollback transaction owner mismatch: {path}")
-    if file_stat.st_size > maximum_bytes:
-        raise ValueError(f"rollback transaction is too large: {path}")
+@contextmanager
+def existing_runtime_transaction_lock(
+    state_root: Path, slot: str
+) -> Iterator[Path]:
+    """Acquire a root-managed slot lock without creating directories or lock files."""
+
+    _validate_controlled_directory(state_root)
+    recovery_root = state_root / "runtime-recovery"
+    _validate_controlled_directory(recovery_root, exact_mode=0o700)
+    recovery_dir = runtime_recovery_dir(state_root, slot)
+    _validate_controlled_directory(recovery_dir, exact_mode=0o700)
+    if recovery_dir.parent != recovery_root:
+        raise ValueError(
+            f"root-controlled path parent mismatch: {recovery_dir}"
+        )
+    lock_path = _runtime_transaction_lock_path(state_root, slot)
+    if lock_path.is_symlink():
+        raise ValueError(f"runtime transaction lock must not be a symlink: {lock_path}")
+    flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(lock_path, flags)
+    windows_lock: threading.Lock | None = None
+    windows_lock_held = False
+    posix_lock_held = False
+    try:
+        _validate_runtime_lock_descriptor(descriptor, lock_path)
+        if lock_path.parent != recovery_dir:
+            raise ValueError(f"runtime transaction lock parent mismatch: {lock_path}")
+        if os.name == "nt":
+            key = str(lock_path.resolve(strict=False)).casefold()
+            with _WINDOWS_LOCKS_GUARD:
+                windows_lock = _WINDOWS_LOCKS.setdefault(key, threading.Lock())
+            if not windows_lock.acquire(blocking=False):
+                raise RuntimeError(f"another runtime transaction is active: {slot}")
+            windows_lock_held = True
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise RuntimeError(
+                    f"another runtime transaction is active: {slot}"
+                ) from exc
+            posix_lock_held = True
+        yield lock_path
+    finally:
+        if windows_lock_held and windows_lock is not None:
+            windows_lock.release()
+        if posix_lock_held:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def _strict_json_object_with_digest(
+    path: Path,
+    *,
+    maximum_bytes: int = 4096,
+) -> tuple[dict[str, object], str]:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    flags |= getattr(os, "O_BINARY", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ValueError(
+            f"rollback transaction could not be opened safely: {path}"
+        ) from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError(
+                f"rollback transaction must be a regular file: {path}"
+            )
+        if before.st_nlink != 1:
+            raise ValueError(f"rollback transaction must have one link: {path}")
+        if os.name != "nt" and stat.S_IMODE(before.st_mode) != 0o600:
+            raise ValueError(f"rollback transaction mode must be 0600: {path}")
+        geteuid = getattr(os, "geteuid", None)
+        if geteuid is not None and before.st_uid != geteuid():
+            raise ValueError(f"rollback transaction owner mismatch: {path}")
+        if before.st_size > maximum_bytes:
+            raise ValueError(f"rollback transaction is too large: {path}")
+
+        chunks: list[bytes] = []
+        observed_bytes = 0
+        while observed_bytes <= maximum_bytes:
+            chunk = os.read(
+                descriptor,
+                min(65536, maximum_bytes + 1 - observed_bytes),
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            observed_bytes += len(chunk)
+        raw = b"".join(chunks)
+        if len(raw) > maximum_bytes:
+            raise ValueError(f"rollback transaction is too large: {path}")
+        after = os.fstat(descriptor)
+        linked = os.stat(path, follow_symlinks=False)
+        linked_identity_matches = (
+            not path.is_symlink()
+            and stat.S_ISREG(linked.st_mode)
+            and (
+                os.name == "nt"
+                or _stat_identity(after) == _stat_identity(linked)
+            )
+        )
+        if (
+            not linked_identity_matches
+            or len(raw) != before.st_size
+            or _stat_identity(before) != _stat_identity(after)
+        ):
+            raise ValueError(f"rollback transaction changed while reading: {path}")
+    finally:
+        os.close(descriptor)
 
     def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
         result: dict[str, object] = {}
@@ -586,13 +807,18 @@ def _strict_json_object(path: Path, *, maximum_bytes: int = 4096) -> dict[str, o
 
     try:
         value = json.loads(
-            path.read_text(encoding="utf-8"),
+            raw.decode("utf-8"),
             object_pairs_hook=reject_duplicate_keys,
         )
     except (json.JSONDecodeError, UnicodeError) as exc:
         raise ValueError(f"invalid rollback transaction: {path}") from exc
     if not isinstance(value, dict):
         raise ValueError("rollback transaction must be an object")
+    return value, _sha256_bytes(raw)
+
+
+def _strict_json_object(path: Path, *, maximum_bytes: int = 4096) -> dict[str, object]:
+    value, _ = _strict_json_object_with_digest(path, maximum_bytes=maximum_bytes)
     return value
 
 
@@ -639,8 +865,23 @@ def _load_validated_backup_metadata(backup_dir: Path) -> tuple[dict, str]:
     geteuid = getattr(os, "geteuid", None)
     if geteuid is not None and metadata_stat.st_uid != geteuid():
         raise ValueError(f"rollback backup metadata owner mismatch: {metadata_path}")
-    metadata_digest = _sha256_file(metadata_path)
-    metadata = load_yaml(metadata_path)
+    metadata_raw = _read_stable_regular_file(metadata_path, maximum_bytes=1024 * 1024)
+    metadata_digest = _sha256_bytes(metadata_raw)
+    def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        value: dict[str, object] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"duplicate rollback backup metadata key: {key}")
+            value[key] = item
+        return value
+
+    try:
+        metadata = json.loads(
+            metadata_raw.decode("utf-8"),
+            object_pairs_hook=reject_duplicate_keys,
+        )
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        raise ValueError("rollback backup metadata is invalid") from exc
     if not isinstance(metadata, dict) or metadata.get("schema") != _BACKUP_SCHEMA:
         raise ValueError("rollback backup metadata schema is invalid")
     return metadata, metadata_digest
@@ -703,10 +944,10 @@ def _validate_backup_integrity(
     return metadata, metadata_digest
 
 
-def _load_rollback_transaction(
+def _load_rollback_transaction_with_identity(
     state_root: Path,
     slot: str,
-) -> dict[str, object] | None:
+) -> tuple[dict[str, object], str] | None:
     recovery_dir = runtime_recovery_dir(state_root, slot)
     if not recovery_dir.exists() and not recovery_dir.is_symlink():
         return None
@@ -714,7 +955,7 @@ def _load_rollback_transaction(
     transaction_path = _rollback_transaction_path(state_root, slot)
     if not transaction_path.exists() and not transaction_path.is_symlink():
         return None
-    transaction = _strict_json_object(transaction_path)
+    transaction, marker_digest = _strict_json_object_with_digest(transaction_path)
     if set(transaction) != _ROLLBACK_TRANSACTION_KEYS:
         raise ValueError("rollback transaction keys do not match the exact schema")
     if transaction.get("schema") != _ROLLBACK_TRANSACTION_SCHEMA:
@@ -738,7 +979,86 @@ def _load_rollback_transaction(
     _, metadata_digest = _validate_backup_integrity(state_root, slot, backup_dir)
     if transaction.get("backup_metadata_sha256") != metadata_digest:
         raise ValueError("rollback transaction backup metadata digest mismatch")
-    return transaction
+    return transaction, marker_digest
+
+
+def _load_rollback_transaction(
+    state_root: Path,
+    slot: str,
+) -> dict[str, object] | None:
+    loaded = _load_rollback_transaction_with_identity(state_root, slot)
+    return loaded[0] if loaded is not None else None
+
+
+def pending_rollback_identity(
+    state_root: Path,
+    slot: str,
+) -> dict[str, str] | None:
+    """Return the fully validated, content-free pending rollback identity."""
+
+    loaded = _load_rollback_transaction_with_identity(state_root, slot)
+    if loaded is None:
+        return None
+    transaction, marker_digest = loaded
+    return {
+        "backup_metadata_sha256": str(transaction["backup_metadata_sha256"]),
+        "backup_name": str(transaction["backup_name"]),
+        "marker_sha256": marker_digest,
+        "transaction_id": str(transaction["transaction_id"]),
+    }
+
+
+def validate_expected_rollback_identity(expected: dict[str, str]) -> None:
+    if re.fullmatch(r"[0-9a-f]{64}", expected.get("transaction_id", "")) is None:
+        raise MarkerBoundRecoveryError("expected_transaction_id_invalid")
+    if _BACKUP_NAME.fullmatch(expected.get("backup_name", "")) is None:
+        raise MarkerBoundRecoveryError("expected_backup_name_invalid")
+    for field in ("marker_sha256", "backup_metadata_sha256"):
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", expected.get(field, "")) is None:
+            raise MarkerBoundRecoveryError(f"expected_{field}_invalid")
+
+
+def require_exact_pending_rollback(
+    state_root: Path,
+    slot: str,
+    expected: dict[str, str],
+) -> tuple[Path, dict[str, str]]:
+    """Fail closed unless the locked durable marker matches every expected field."""
+
+    validate_expected_rollback_identity(expected)
+    try:
+        observed = pending_rollback_identity(state_root, slot)
+    except Exception as exc:
+        raise MarkerBoundRecoveryError("pending_transaction_invalid") from exc
+    if observed is None:
+        raise MarkerBoundRecoveryError("pending_transaction_absent")
+    for field in (
+        "transaction_id",
+        "backup_name",
+        "backup_metadata_sha256",
+        "marker_sha256",
+    ):
+        if observed[field] != expected[field]:
+            raise MarkerBoundRecoveryError(f"{field}_mismatch")
+    backup_dir = agent_backup_root(state_root, slot) / observed["backup_name"]
+    _validate_backup_integrity(state_root, slot, backup_dir)
+    return backup_dir, observed
+
+
+def finish_exact_rollback_transaction(
+    slot: str,
+    state_root: Path,
+    backup_dir: Path,
+    expected: dict[str, str],
+) -> None:
+    """Remove only the exact transaction that was admitted under the slot lock."""
+
+    observed_backup, _ = require_exact_pending_rollback(state_root, slot, expected)
+    if observed_backup != backup_dir:
+        raise MarkerBoundRecoveryError("backup_identity_changed_before_completion")
+    transaction_path = _rollback_transaction_path(state_root, slot)
+    transaction_path.unlink()
+    fsync_parent(transaction_path)
 
 
 def pending_rollback_backup(state_root: Path, slot: str) -> Path | None:
@@ -1557,13 +1877,19 @@ def latest_backup(state_root: Path, slot: str) -> Path | None:
 
 
 def restore_backup(
-    slot: str, runtime_dir: Path, backup_dir: Path, state_root: Path
+    slot: str,
+    runtime_dir: Path,
+    backup_dir: Path,
+    state_root: Path,
+    *,
+    expected_transaction: dict[str, str] | None = None,
+    on_mutation_started: Callable[[], None] | None = None,
 ) -> tuple[bool, str]:
     backup_dir = _validate_backup_dir(state_root, slot, backup_dir)
     metadata, _ = _validate_backup_integrity(state_root, slot, backup_dir)
     compose_path = agent_compose_path(runtime_dir)
     manifest_path = agent_manifest_path(runtime_dir)
-    state_manifest_file = state_manifest_path(state_root, slot, create_parent=True)
+    state_manifest_file = state_manifest_path(state_root, slot, create_parent=False)
     had_compose = _metadata_boolean(metadata, "had_compose")
     had_manifest = _metadata_boolean(metadata, "had_manifest")
     had_state_manifest = _metadata_boolean(
@@ -1581,14 +1907,37 @@ def restore_backup(
         (had_manifest, backup_dir / ".agent-runtime-manifest", manifest_path),
         (had_state_manifest, backup_dir / "manifest.yaml", state_manifest_file),
     )
+    if expected_transaction is None:
+        state_manifest_path(state_root, slot, create_parent=True)
     for had_file, source, target in restore_plan:
         if had_file is None:
             continue
-        _validate_managed_target(target)
+        if not (
+            expected_transaction is not None
+            and target == state_manifest_file
+            and not target.parent.exists()
+        ):
+            _validate_managed_target(target)
         if had_file and (source.is_symlink() or not source.is_file()):
             raise ValueError(f"backup restore source must be a regular file: {source}")
 
-    _begin_rollback_transaction(slot, state_root, backup_dir)
+    if expected_transaction is None:
+        _begin_rollback_transaction(slot, state_root, backup_dir)
+    else:
+        exact_backup, _ = require_exact_pending_rollback(
+            state_root,
+            slot,
+            expected_transaction,
+        )
+        if exact_backup != backup_dir:
+            raise MarkerBoundRecoveryError("backup_identity_changed_before_restore")
+        # The exact marker and backup must still match under both runtime locks
+        # immediately before the first filesystem write.  Parent creation is a
+        # mutation too, so it belongs strictly after this final admission gate.
+        if on_mutation_started is not None:
+            on_mutation_started()
+        state_manifest_path(state_root, slot, create_parent=True)
+        _validate_managed_target(state_manifest_file)
 
     if not had_compose and compose_path.is_file():
         down = run_text_cwd(

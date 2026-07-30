@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
 from pathlib import Path
 import shutil
 import stat
@@ -24,6 +25,7 @@ from agent_runtime_ops.domain.runtime_backup import (
     legacy_retrieval_projection_failures_may_be_expected,
     latest_backup,
     pending_rollback_backup,
+    pending_rollback_identity,
     restore_backup,
     restore_backup_env,
     runtime_host_mutation_lock,
@@ -69,6 +71,40 @@ def legacy_migration_path(state_root: Path, slot: str = "oc20") -> Path:
         / slot
         / ".agent-runtime-legacy-retrieval-migration.json"
     )
+
+
+def exact_rollback_args(identity: dict[str, str], slot: str = "oc20") -> SimpleNamespace:
+    return SimpleNamespace(
+        slot=slot,
+        expected_backup_metadata_sha256=identity["backup_metadata_sha256"],
+        expected_backup_name=identity["backup_name"],
+        expected_marker_sha256=identity["marker_sha256"],
+        expected_transaction_id=identity["transaction_id"],
+    )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="the production CLI imports POSIX pwd")
+def test_cli_exposes_all_four_exact_marker_expectations_without_finish_surface() -> None:
+    from agent_runtime_ops.cli import build_parser
+
+    parser = build_parser()
+    parsed = parser.parse_args(
+        [
+            "rollback",
+            "dev-hermes-img",
+            "--expected-transaction-id",
+            "a" * 64,
+            "--expected-marker-sha256",
+            "sha256:" + "b" * 64,
+            "--expected-backup-name",
+            "20260730T010203+0900",
+            "--expected-backup-metadata-sha256",
+            "sha256:" + "c" * 64,
+        ]
+    )
+    assert parsed.func is cmd_rollback
+    assert parsed.expected_transaction_id == "a" * 64
+    assert "finish" not in parser.format_help()
 
 
 def test_runtime_env_backup_is_private_and_restores_exact_prior_bytes(
@@ -674,6 +710,678 @@ def test_manual_rollback_finishes_verified_empty_baseline(
     assert "rollback_status=ok" in output
     assert "rollback_empty_baseline=yes" in output
     assert str(backup_dir) in output
+
+
+def _prepare_exact_pending_rollback(
+    tmp_path: Path,
+    *,
+    with_env: bool = False,
+) -> tuple[Path, Path, Path, dict[str, str]]:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    if with_env:
+        (runtime_dir / ".env").write_text("VALUE=prior\n", encoding="utf-8")
+    backup_dir = backup_agent_runtime_state("oc20", runtime_dir, state_root)
+    # Normal runtime mutation establishes the persistent root-managed lock plane.
+    # Exact recovery is intentionally forbidden from creating it.
+    with runtime_host_mutation_lock(state_root):
+        with runtime_transaction_lock(state_root, "oc20"):
+            pass
+    from agent_runtime_ops.domain.runtime_backup import _begin_rollback_transaction
+
+    _begin_rollback_transaction("oc20", state_root, backup_dir)
+    identity = pending_rollback_identity(state_root, "oc20")
+    assert identity is not None
+    return runtime_dir, state_root, backup_dir, identity
+
+
+def test_exact_marker_bound_rollback_rejects_noncanonical_target_before_state_access(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    expected = {
+        "backup_metadata_sha256": "sha256:" + "a" * 64,
+        "backup_name": "20260730T010203+0900",
+        "marker_sha256": "sha256:" + "b" * 64,
+        "transaction_id": "c" * 64,
+    }
+    request = exact_rollback_args(expected, slot="../root")
+    with (
+        patch("agent_runtime_ops.commands.apply._is_root", return_value=True),
+        patch("agent_runtime_ops.commands.apply._state_root") as state_root,
+    ):
+        rc = cmd_rollback(request)
+    assert rc == 2
+    state_root.assert_not_called()
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["reason_code"] == "exact_target_invalid"
+    assert receipt["target"] == "unavailable"
+    assert receipt["writes"] == 0
+
+
+def test_exact_marker_bound_rollback_rejects_partial_or_invalid_expectations_safely(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    request = SimpleNamespace(
+        slot="dev-hermes-img",
+        expected_backup_metadata_sha256=None,
+        expected_backup_name=None,
+        expected_marker_sha256="SECRET\nnot-a-digest",
+        expected_transaction_id=None,
+    )
+    with (
+        patch("agent_runtime_ops.commands.apply._is_root") as is_root,
+        patch("agent_runtime_ops.commands.apply._state_root") as state_root,
+    ):
+        rc = cmd_rollback(request)
+    assert rc == 2
+    is_root.assert_not_called()
+    state_root.assert_not_called()
+    raw = capsys.readouterr().out
+    assert "SECRET" not in raw
+    receipt = json.loads(raw)
+    assert receipt["reason_code"] == "exact_expectation_set_incomplete"
+    assert receipt["marker_sha256"] == "unavailable"
+    assert receipt["writes"] == 0
+
+
+def test_exact_marker_bound_rollback_rejects_alias_before_lock_or_restore(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _runtime_dir, state_root, _backup_dir, identity = _prepare_exact_pending_rollback(
+        tmp_path
+    )
+    request = exact_rollback_args(identity, slot="image-canary")
+    binding = SimpleNamespace(enabled=True, linux_account="dev-hermes-img")
+    with (
+        patch("agent_runtime_ops.commands.apply._is_root", return_value=True),
+        patch("agent_runtime_ops.commands.apply._state_root", return_value=state_root),
+        patch(
+            "agent_runtime_ops.commands.apply.get_runtime_binding",
+            return_value=binding,
+        ),
+        patch(
+            "agent_runtime_ops.commands.apply.existing_runtime_host_mutation_lock"
+        ) as lock,
+        patch("agent_runtime_ops.commands.apply.restore_backup") as restore,
+    ):
+        rc = cmd_rollback(request)
+    assert rc == 1
+    lock.assert_not_called()
+    restore.assert_not_called()
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["reason_code"] == "exact_target_not_canonical"
+    assert receipt["writes"] == 0
+
+
+def test_exact_marker_bound_rollback_commits_only_the_expected_transaction(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runtime_dir, state_root, _backup_dir, identity = _prepare_exact_pending_rollback(
+        tmp_path
+    )
+    agent_compose_path(runtime_dir).write_text("candidate\n", encoding="utf-8")
+    completed = subprocess.CompletedProcess(["docker"], 0, "", "")
+    with (
+        patch("agent_runtime_ops.commands.apply._validate_exact_recovery_target"),
+        patch("agent_runtime_ops.commands.apply._is_root", return_value=True),
+        patch("agent_runtime_ops.commands.apply._state_root", return_value=state_root),
+        patch(
+            "agent_runtime_ops.commands.apply.slot_runtime_dir",
+            return_value=runtime_dir,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_backup.run_text_cwd",
+            return_value=completed,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_backup.run_text",
+            return_value=completed,
+        ),
+        patch("agent_runtime_ops.commands.apply.latest_backup") as latest,
+        patch("agent_runtime_ops.commands.apply._append_action_log"),
+    ):
+        rc = cmd_rollback(exact_rollback_args(identity))
+
+    assert rc == 0
+    assert pending_rollback_identity(state_root, "oc20") is None
+    latest.assert_not_called()
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt == {
+        "backup_metadata_sha256": identity["backup_metadata_sha256"],
+        "backup_name": identity["backup_name"],
+        "marker_sha256": identity["marker_sha256"],
+        "reason_code": "recovery_committed",
+        "result": "complete",
+        "runtime_mutation_started": True,
+        "schema": "agent-runtime-marker-bound-recovery/v1",
+        "target": "oc20",
+        "terminal_state": "complete",
+        "transaction_id": identity["transaction_id"],
+        "transaction_state": "committed",
+        "writes": 1,
+    }
+
+
+def test_exact_marker_bound_missing_marker_on_pristine_state_writes_nothing(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    expected = {
+        "backup_metadata_sha256": "sha256:" + "a" * 64,
+        "backup_name": "20260730T010203+0900",
+        "marker_sha256": "sha256:" + "b" * 64,
+        "transaction_id": "c" * 64,
+    }
+    before = sorted(path.relative_to(state_root) for path in state_root.rglob("*"))
+    with (
+        patch("agent_runtime_ops.commands.apply._validate_exact_recovery_target"),
+        patch("agent_runtime_ops.commands.apply._is_root", return_value=True),
+        patch("agent_runtime_ops.commands.apply._state_root", return_value=state_root),
+    ):
+        rc = cmd_rollback(exact_rollback_args(expected))
+    after = sorted(path.relative_to(state_root) for path in state_root.rglob("*"))
+    assert rc == 1
+    assert after == before == []
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["reason_code"] == "pending_transaction_absent"
+    assert receipt["runtime_mutation_started"] is False
+    assert receipt["writes"] == 0
+
+
+def test_exact_marker_bound_rollback_reports_committed_write_when_action_log_fails(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runtime_dir, state_root, _backup_dir, identity = _prepare_exact_pending_rollback(
+        tmp_path
+    )
+    candidate = agent_compose_path(runtime_dir)
+    candidate.write_text("candidate\n", encoding="utf-8")
+    completed = subprocess.CompletedProcess(["docker"], 0, "", "")
+    with (
+        patch("agent_runtime_ops.commands.apply._validate_exact_recovery_target"),
+        patch("agent_runtime_ops.commands.apply._is_root", return_value=True),
+        patch("agent_runtime_ops.commands.apply._state_root", return_value=state_root),
+        patch(
+            "agent_runtime_ops.commands.apply.slot_runtime_dir",
+            return_value=runtime_dir,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_backup.run_text_cwd",
+            return_value=completed,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_backup.run_text",
+            return_value=completed,
+        ),
+        patch(
+            "agent_runtime_ops.commands.apply._append_action_log",
+            side_effect=OSError("action log unavailable"),
+        ),
+    ):
+        rc = cmd_rollback(exact_rollback_args(identity))
+
+    assert rc == 1
+    assert not candidate.exists()
+    assert pending_rollback_identity(state_root, "oc20") is None
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["result"] == "failed"
+    assert receipt["reason_code"] == "recovery_committed_action_log_failed"
+    assert receipt["runtime_mutation_started"] is True
+    assert receipt["transaction_state"] == "committed"
+    assert receipt["terminal_state"] == "incomplete"
+    assert receipt["writes"] == 1
+
+
+def test_exact_recovery_completion_state_is_captured_under_both_locks(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _runtime_dir, state_root, backup_dir, identity = _prepare_exact_pending_rollback(
+        tmp_path
+    )
+    lock_state = {"host": False, "slot": False}
+    replacement_race = {"new_transaction_after_unlock": False}
+
+    @contextmanager
+    def host_lock(_state_root):
+        lock_state["host"] = True
+        try:
+            yield
+        finally:
+            lock_state["host"] = False
+            replacement_race["new_transaction_after_unlock"] = True
+
+    @contextmanager
+    def slot_lock(_state_root, _slot):
+        assert lock_state["host"] is True
+        lock_state["slot"] = True
+        try:
+            yield
+        finally:
+            lock_state["slot"] = False
+
+    def execute(*_args, on_mutation_started=None, **_kwargs):
+        assert on_mutation_started is not None
+        on_mutation_started()
+        return 0
+
+    def post_state(*_args, **_kwargs):
+        assert lock_state == {"host": True, "slot": True}
+        assert replacement_race["new_transaction_after_unlock"] is False
+        return "committed", "complete"
+
+    with (
+        patch("agent_runtime_ops.commands.apply._validate_exact_recovery_target"),
+        patch("agent_runtime_ops.commands.apply._is_root", return_value=True),
+        patch("agent_runtime_ops.commands.apply._state_root", return_value=state_root),
+        patch(
+            "agent_runtime_ops.commands.apply.existing_runtime_host_mutation_lock",
+            side_effect=host_lock,
+        ),
+        patch(
+            "agent_runtime_ops.commands.apply.existing_runtime_transaction_lock",
+            side_effect=slot_lock,
+        ),
+        patch(
+            "agent_runtime_ops.commands.apply.require_exact_pending_rollback",
+            return_value=(backup_dir, {}),
+        ),
+        patch(
+            "agent_runtime_ops.commands.apply._cmd_rollback_locked",
+            side_effect=execute,
+        ),
+        patch(
+            "agent_runtime_ops.commands.apply._exact_recovery_post_state",
+            side_effect=post_state,
+        ) as observed,
+    ):
+        rc = cmd_rollback(exact_rollback_args(identity))
+
+    assert rc == 0
+    observed.assert_called_once()
+    assert lock_state == {"host": False, "slot": False}
+    assert replacement_race["new_transaction_after_unlock"] is True
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["result"] == "complete"
+    assert receipt["transaction_state"] == "committed"
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("transaction_id", "f" * 64),
+        ("marker_sha256", "sha256:" + "e" * 64),
+        ("backup_name", "20260730T235959+0900"),
+        ("backup_metadata_sha256", "sha256:" + "d" * 64),
+    ],
+)
+def test_exact_marker_bound_rollback_rejects_every_identity_mismatch_without_restore(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    field: str,
+    replacement: str,
+) -> None:
+    _runtime_dir, state_root, _backup_dir, identity = _prepare_exact_pending_rollback(
+        tmp_path
+    )
+    expected = dict(identity)
+    expected[field] = replacement
+    with (
+        patch("agent_runtime_ops.commands.apply._validate_exact_recovery_target"),
+        patch("agent_runtime_ops.commands.apply._is_root", return_value=True),
+        patch("agent_runtime_ops.commands.apply._state_root", return_value=state_root),
+        patch("agent_runtime_ops.commands.apply.restore_backup") as restore,
+        patch("agent_runtime_ops.commands.apply.latest_backup") as latest,
+    ):
+        rc = cmd_rollback(exact_rollback_args(expected))
+
+    assert rc == 1
+    restore.assert_not_called()
+    latest.assert_not_called()
+    assert pending_rollback_identity(state_root, "oc20") == identity
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["result"] == "rejected"
+    assert receipt["runtime_mutation_started"] is False
+    assert receipt["writes"] == 0
+    assert receipt["terminal_state"] == "incomplete"
+
+
+def test_exact_marker_bound_rollback_rejects_marker_disappearance_under_lock(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _runtime_dir, state_root, _backup_dir, identity = _prepare_exact_pending_rollback(
+        tmp_path
+    )
+    rollback_transaction_path(state_root).unlink()
+    with (
+        patch("agent_runtime_ops.commands.apply._validate_exact_recovery_target"),
+        patch("agent_runtime_ops.commands.apply._is_root", return_value=True),
+        patch("agent_runtime_ops.commands.apply._state_root", return_value=state_root),
+        patch("agent_runtime_ops.commands.apply.restore_backup") as restore,
+        patch("agent_runtime_ops.commands.apply.latest_backup") as latest,
+    ):
+        rc = cmd_rollback(exact_rollback_args(identity))
+
+    assert rc == 1
+    restore.assert_not_called()
+    latest.assert_not_called()
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["reason_code"] == "pending_transaction_absent"
+    assert receipt["transaction_state"] == "absent"
+    assert receipt["terminal_state"] == "incomplete"
+    assert receipt["writes"] == 0
+
+
+def test_exact_marker_is_revalidated_immediately_before_restore_with_zero_writes(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runtime_dir, state_root, _backup_dir, identity = _prepare_exact_pending_rollback(
+        tmp_path
+    )
+    candidate = agent_compose_path(runtime_dir)
+    candidate.write_text("candidate\n", encoding="utf-8")
+    state_slot_dir = state_root / "runtime" / "oc20"
+    assert not state_slot_dir.exists()
+    from agent_runtime_ops.domain.runtime_backup import MarkerBoundRecoveryError
+
+    with (
+        patch("agent_runtime_ops.commands.apply._validate_exact_recovery_target"),
+        patch("agent_runtime_ops.commands.apply._is_root", return_value=True),
+        patch("agent_runtime_ops.commands.apply._state_root", return_value=state_root),
+        patch(
+            "agent_runtime_ops.commands.apply.slot_runtime_dir",
+            return_value=runtime_dir,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_backup.require_exact_pending_rollback",
+            side_effect=MarkerBoundRecoveryError("marker_sha256_mismatch"),
+        ),
+        patch("agent_runtime_ops.commands.apply._append_action_log") as action_log,
+    ):
+        rc = cmd_rollback(exact_rollback_args(identity))
+
+    assert rc == 1
+    assert candidate.read_text(encoding="utf-8") == "candidate\n"
+    assert not state_slot_dir.exists()
+    assert pending_rollback_identity(state_root, "oc20") == identity
+    action_log.assert_not_called()
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["reason_code"] == "marker_sha256_mismatch"
+    assert receipt["runtime_mutation_started"] is False
+    assert receipt["writes"] == 0
+
+
+def test_exact_recovery_validation_failure_before_first_write_stays_write_free(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runtime_dir, state_root, _backup_dir, identity = _prepare_exact_pending_rollback(
+        tmp_path
+    )
+    with (
+        patch("agent_runtime_ops.commands.apply._validate_exact_recovery_target"),
+        patch("agent_runtime_ops.commands.apply._is_root", return_value=True),
+        patch("agent_runtime_ops.commands.apply._state_root", return_value=state_root),
+        patch(
+            "agent_runtime_ops.commands.apply.slot_runtime_dir",
+            return_value=runtime_dir,
+        ),
+        patch(
+            "agent_runtime_ops.commands.apply.restore_backup",
+            side_effect=ValueError("backup validation failed"),
+        ),
+        patch("agent_runtime_ops.commands.apply._append_action_log") as action_log,
+    ):
+        rc = cmd_rollback(exact_rollback_args(identity))
+
+    assert rc == 1
+    action_log.assert_not_called()
+    assert pending_rollback_identity(state_root, "oc20") == identity
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["result"] == "rejected"
+    assert receipt["reason_code"] == "recovery_execution_failed_before_mutation"
+    assert receipt["runtime_mutation_started"] is False
+    assert receipt["transaction_state"] == "pending"
+    assert receipt["terminal_state"] == "incomplete"
+    assert receipt["writes"] == 0
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX link/mode contract")
+@pytest.mark.parametrize("attack", ["hardlink", "symlink", "mode"])
+def test_exact_marker_bound_rollback_rejects_marker_filesystem_identity_drift(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    attack: str,
+) -> None:
+    _runtime_dir, state_root, _backup_dir, identity = _prepare_exact_pending_rollback(
+        tmp_path
+    )
+    marker = rollback_transaction_path(state_root)
+    if attack == "hardlink":
+        os.link(marker, marker.with_name("marker-hardlink"))
+    elif attack == "symlink":
+        replacement = marker.with_name("marker-replacement")
+        replacement.write_bytes(marker.read_bytes())
+        replacement.chmod(0o600)
+        marker.unlink()
+        marker.symlink_to(replacement)
+    else:
+        marker.chmod(0o640)
+    with (
+        patch("agent_runtime_ops.commands.apply._validate_exact_recovery_target"),
+        patch("agent_runtime_ops.commands.apply._is_root", return_value=True),
+        patch("agent_runtime_ops.commands.apply._state_root", return_value=state_root),
+        patch("agent_runtime_ops.commands.apply.restore_backup") as restore,
+    ):
+        rc = cmd_rollback(exact_rollback_args(identity))
+
+    assert rc == 1
+    restore.assert_not_called()
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["reason_code"] == "pending_transaction_invalid"
+    assert receipt["writes"] == 0
+
+
+def test_exact_marker_bound_rollback_rejects_fresh_transaction_for_same_backup(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _runtime_dir, state_root, backup_dir, old_identity = (
+        _prepare_exact_pending_rollback(tmp_path)
+    )
+    finish_rollback_transaction("oc20", state_root, backup_dir)
+    from agent_runtime_ops.domain.runtime_backup import _begin_rollback_transaction
+
+    _begin_rollback_transaction("oc20", state_root, backup_dir)
+    new_identity = pending_rollback_identity(state_root, "oc20")
+    assert new_identity is not None
+    assert new_identity["transaction_id"] != old_identity["transaction_id"]
+    with (
+        patch("agent_runtime_ops.commands.apply._validate_exact_recovery_target"),
+        patch("agent_runtime_ops.commands.apply._is_root", return_value=True),
+        patch("agent_runtime_ops.commands.apply._state_root", return_value=state_root),
+        patch("agent_runtime_ops.commands.apply.restore_backup") as restore,
+        patch("agent_runtime_ops.commands.apply.latest_backup") as latest,
+    ):
+        rc = cmd_rollback(exact_rollback_args(old_identity))
+
+    assert rc == 1
+    restore.assert_not_called()
+    latest.assert_not_called()
+    assert pending_rollback_identity(state_root, "oc20") == new_identity
+    assert json.loads(capsys.readouterr().out)["writes"] == 0
+
+
+def test_exact_marker_bound_rollback_rejects_backup_integrity_drift_before_restore(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _runtime_dir, state_root, backup_dir, identity = _prepare_exact_pending_rollback(
+        tmp_path,
+        with_env=True,
+    )
+    (backup_dir / ".env").write_text("VALUE=tampered\n", encoding="utf-8")
+    with (
+        patch("agent_runtime_ops.commands.apply._validate_exact_recovery_target"),
+        patch("agent_runtime_ops.commands.apply._is_root", return_value=True),
+        patch("agent_runtime_ops.commands.apply._state_root", return_value=state_root),
+        patch("agent_runtime_ops.commands.apply.restore_backup") as restore,
+        patch("agent_runtime_ops.commands.apply.latest_backup") as latest,
+    ):
+        rc = cmd_rollback(exact_rollback_args(identity))
+
+    assert rc == 1
+    restore.assert_not_called()
+    latest.assert_not_called()
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["reason_code"] == "pending_transaction_invalid"
+    assert receipt["writes"] == 0
+
+
+def test_exact_marker_bound_rollback_rejects_competing_host_lock_without_restore(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _runtime_dir, state_root, _backup_dir, identity = _prepare_exact_pending_rollback(
+        tmp_path
+    )
+    with (
+        runtime_host_mutation_lock(state_root),
+        patch("agent_runtime_ops.commands.apply._validate_exact_recovery_target"),
+        patch("agent_runtime_ops.commands.apply._is_root", return_value=True),
+        patch("agent_runtime_ops.commands.apply._state_root", return_value=state_root),
+        patch("agent_runtime_ops.commands.apply.restore_backup") as restore,
+    ):
+        rc = cmd_rollback(exact_rollback_args(identity))
+
+    assert rc == 1
+    restore.assert_not_called()
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["reason_code"] == "lock_unavailable"
+    assert receipt["writes"] == 0
+
+
+def test_exact_marker_bound_rollback_preserves_failed_transaction_and_retries(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runtime_dir, state_root, _backup_dir, identity = _prepare_exact_pending_rollback(
+        tmp_path
+    )
+    agent_compose_path(runtime_dir).write_text("candidate\n", encoding="utf-8")
+    completed = subprocess.CompletedProcess(["docker"], 0, "", "")
+    residue = subprocess.CompletedProcess(["docker"], 0, "container-id\n", "")
+    with (
+        patch("agent_runtime_ops.commands.apply._validate_exact_recovery_target"),
+        patch("agent_runtime_ops.commands.apply._is_root", return_value=True),
+        patch("agent_runtime_ops.commands.apply._state_root", return_value=state_root),
+        patch(
+            "agent_runtime_ops.commands.apply.slot_runtime_dir",
+            return_value=runtime_dir,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_backup.run_text_cwd",
+            return_value=completed,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_backup.run_text",
+            side_effect=[residue, completed, completed, completed],
+        ),
+        patch("agent_runtime_ops.commands.apply.latest_backup") as latest,
+        patch("agent_runtime_ops.commands.apply._append_action_log"),
+    ):
+        first_rc = cmd_rollback(exact_rollback_args(identity))
+        first_receipt = json.loads(capsys.readouterr().out)
+        assert pending_rollback_identity(state_root, "oc20") == identity
+        second_rc = cmd_rollback(exact_rollback_args(identity))
+        second_receipt = json.loads(capsys.readouterr().out)
+
+    assert first_rc == 1
+    assert first_receipt["result"] == "failed"
+    assert first_receipt["transaction_state"] == "pending"
+    assert second_rc == 0
+    assert second_receipt["result"] == "complete"
+    assert pending_rollback_identity(state_root, "oc20") is None
+    latest.assert_not_called()
+
+
+def test_exact_marker_bound_rollback_retries_after_failed_live_verification(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    agent_compose_path(runtime_dir).write_text("services: {}\n", encoding="utf-8")
+    backup_dir = backup_agent_runtime_state("oc20", runtime_dir, state_root)
+    with runtime_host_mutation_lock(state_root):
+        with runtime_transaction_lock(state_root, "oc20"):
+            pass
+    from agent_runtime_ops.domain.runtime_backup import _begin_rollback_transaction
+
+    _begin_rollback_transaction("oc20", state_root, backup_dir)
+    identity = pending_rollback_identity(state_root, "oc20")
+    assert identity is not None
+    agent_compose_path(runtime_dir).write_text("candidate\n", encoding="utf-8")
+    completed = subprocess.CompletedProcess(["docker"], 0, "", "")
+    desired = SimpleNamespace(image_spec={}, route=None)
+    profile = SimpleNamespace(name="fixture")
+    with (
+        patch("agent_runtime_ops.commands.apply._validate_exact_recovery_target"),
+        patch("agent_runtime_ops.commands.apply._is_root", return_value=True),
+        patch("agent_runtime_ops.commands.apply._state_root", return_value=state_root),
+        patch(
+            "agent_runtime_ops.commands.apply.slot_runtime_dir",
+            return_value=runtime_dir,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_backup.run_text_cwd",
+            return_value=completed,
+        ),
+        patch(
+            "agent_runtime_ops.commands.apply.load_backup_runtime_contract",
+            return_value=(desired, profile),
+        ),
+        patch(
+            "agent_runtime_ops.commands.apply._profile_startup_timeout_seconds",
+            return_value=1,
+        ),
+        patch(
+            "agent_runtime_ops.commands.apply._run_live_slot_checks_with_wait",
+            side_effect=[
+                [(False, "restored_runtime_unhealthy", "SECRET-detail")],
+                [(True, "restored_runtime_healthy", "content-free")],
+            ],
+        ),
+        patch("agent_runtime_ops.commands.apply.latest_backup") as latest,
+        patch("agent_runtime_ops.commands.apply._append_action_log"),
+    ):
+        first_rc = cmd_rollback(exact_rollback_args(identity))
+        first_raw = capsys.readouterr().out
+        first_receipt = json.loads(first_raw)
+        assert pending_rollback_identity(state_root, "oc20") == identity
+        second_rc = cmd_rollback(exact_rollback_args(identity))
+        second_receipt = json.loads(capsys.readouterr().out)
+
+    assert first_rc == 1
+    assert first_receipt["result"] == "failed"
+    assert first_receipt["transaction_state"] == "pending"
+    assert "SECRET-detail" not in first_raw
+    assert second_rc == 0
+    assert second_receipt["result"] == "complete"
+    assert pending_rollback_identity(state_root, "oc20") is None
+    latest.assert_not_called()
 
 
 @pytest.mark.parametrize(

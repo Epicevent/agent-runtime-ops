@@ -8,7 +8,7 @@ from ..canonical_recipes import load_canonical_recipe
 from ..profiles import load_profile
 from ..routing import RuntimeBinding, get_runtime_binding
 from .apache_route_checks import apache_route_checks
-from .common import container_name, run_text
+from .common import container_name, run_readonly_docker
 from .image_specs import (
     IMAGE_RECIPE_SCHEMA,
     recipe_label,
@@ -28,6 +28,10 @@ _RETRIEVAL_PROJECTION_LABEL_KEYS = {
     "agent-runtime.retrieval-resource-profile-digest",
 }
 _RETRIEVAL_PROJECTION_LABEL_PREFIX = "agent-runtime.retrieval-"
+
+# Compatibility name retained for focused tests and downstream monkeypatches. The
+# implementation is the fixed Docker ps/inspect-only bounded runner.
+run_text = run_readonly_docker
 
 
 def local_canonical_recipe_check_from_truth(truth: dict[str, str]) -> tuple[bool, str, str | None]:

@@ -44,6 +44,7 @@ ROOT_ACTION_POST_RESTART_ATTESTATION_ATTEMPTS=40
 ROOT_ACTION_POST_RESTART_ATTESTATION_INTERVAL_SECONDS=0.25
 ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS=30
 ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=1
+OPS_CLI_ATTESTATION_COMMAND_TIMEOUT_SECONDS=10
 USAGE_DB_DEFAULTS_FILE="${AGENT_RUNTIME_USAGE_DB_DEFAULTS_FILE:-/etc/agent-runtime-ops/usage-writer.cnf}"
 USAGE_PRICING_DIR="${AGENT_RUNTIME_USAGE_PRICING_DIR:-$STATE_ROOT/usage-pricing}"
 USAGE_PRICING_FILE="${AGENT_RUNTIME_USAGE_PRICING_FILE:-$USAGE_PRICING_DIR/current.json}"
@@ -133,6 +134,7 @@ require_commands() {
   command -v python3 >/dev/null || die "missing command: python3"
   command -v rsync >/dev/null || die "missing command: rsync"
   command -v runuser >/dev/null || die "missing command: runuser"
+  [[ -x /usr/bin/timeout ]] || die "missing executable: /usr/bin/timeout"
   command -v node >/dev/null || die "missing command: node"
   command -v npm >/dev/null || die "missing command: npm"
 }
@@ -303,6 +305,39 @@ root_action_broker_release_attested() {
     || return 1
 }
 
+root_action_broker_inactive_attested() {
+  local service_name="$1"
+  local active_check_rc
+  if /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+    systemctl is-active --quiet "$service_name"; then
+    return 1
+  else
+    active_check_rc="$?"
+  fi
+  [[ "$active_check_rc" -eq 3 ]]
+}
+
+root_action_broker_absent_attested() {
+  local service_name="$1"
+  local active_check_rc
+  if /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+    systemctl is-active --quiet "$service_name"; then
+    return 1
+  else
+    active_check_rc="$?"
+  fi
+  [[ "$active_check_rc" -eq 4 ]]
+}
+
+restart_root_action_broker_for_release() {
+  local service_name="$1"
+  local release_dir="$2"
+  /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+    systemctl restart "$service_name" >/dev/null \
+    || return 1
+  wait_for_root_action_broker_release "$service_name" "$release_dir"
+}
+
 wait_for_root_action_broker_release() {
   local service_name="$1"
   local release_dir="$2"
@@ -320,57 +355,107 @@ install_root_action_broker_contract() {
   local release_dir="$1"
   local unit_source="$release_dir/systemd/agent-runtime-root-action-broker.service"
   local active_check_rc install_root_real current_path service_name unit_tmp
-  [[ -f "$unit_source" && ! -L "$unit_source" ]] \
-    || die "missing root-action broker unit source: $unit_source"
+  [[ -f "$unit_source" && ! -L "$unit_source" ]] || return 1
   # Resolve the trusted reader by its production account name at install time.
   # Numeric IDs are host facts and must never be embedded in the release.
-  getent passwd "$ROOT_ACTION_TRUSTED_ACCOUNT" >/dev/null \
-    || die "missing trusted root-action reader account: $ROOT_ACTION_TRUSTED_ACCOUNT"
-  getent group "$ROOT_ACTION_TRUSTED_ACCOUNT" >/dev/null \
-    || die "missing trusted root-action reader group: $ROOT_ACTION_TRUSTED_ACCOUNT"
+  getent passwd "$ROOT_ACTION_TRUSTED_ACCOUNT" >/dev/null || return 1
+  getent group "$ROOT_ACTION_TRUSTED_ACCOUNT" >/dev/null || return 1
   [[ "$(id -gn "$ROOT_ACTION_TRUSTED_ACCOUNT")" == "$ROOT_ACTION_TRUSTED_ACCOUNT" ]] \
-    || die "trusted root-action reader primary group must match its account name"
-  install_root_real="$(realpath -m "$INSTALL_ROOT")"
+    || return 1
+  install_root_real="$(realpath -m "$INSTALL_ROOT")" || return 1
   current_path="$install_root_real/current"
-  [[ "$current_path" =~ ^/[A-Za-z0-9._/-]+$ ]] \
-    || die "root-action broker current path must be an absolute control-free system path"
-  install -d -o root -g "$ROOT_ACTION_TRUSTED_ACCOUNT" -m 0750 "$ROOT_ACTION_STATE_ROOT"
-  install -d -o root -g root -m 0700 "$ROOT_ACTION_PRIVATE_ROOT"
-  install -d -o root -g "$ROOT_ACTION_TRUSTED_ACCOUNT" -m 0750 "$ROOT_ACTION_PUBLIC_ROOT"
-  install -d -o root -g "$ROOT_ACTION_TRUSTED_ACCOUNT" -m 0750 "$ROOT_ACTION_RUNTIME_ROOT"
-  unit_tmp="$(mktemp)"
+  [[ "$current_path" =~ ^/[A-Za-z0-9._/-]+$ ]] || return 1
+  install -d -o root -g "$ROOT_ACTION_TRUSTED_ACCOUNT" -m 0750 "$ROOT_ACTION_STATE_ROOT" \
+    || return 1
+  install -d -o root -g root -m 0700 "$ROOT_ACTION_PRIVATE_ROOT" || return 1
+  install -d -o root -g "$ROOT_ACTION_TRUSTED_ACCOUNT" -m 0750 "$ROOT_ACTION_PUBLIC_ROOT" \
+    || return 1
+  install -d -o root -g "$ROOT_ACTION_TRUSTED_ACCOUNT" -m 0750 "$ROOT_ACTION_RUNTIME_ROOT" \
+    || return 1
+  unit_tmp="$(mktemp)" || return 1
   sed \
     -e "s|@@CURRENT_LINK@@|$current_path|g" \
     -e "s|@@RELEASE_DIR@@|$release_dir|g" \
-    "$unit_source" >"$unit_tmp"
+    "$unit_source" >"$unit_tmp" || { rm -f -- "$unit_tmp"; return 1; }
   ! grep -Eq '@@(CURRENT_LINK|RELEASE_DIR)@@' "$unit_tmp" \
-    || die "root-action broker unit placeholder was not fully materialized"
-  install -o root -g root -m 0644 "$unit_tmp" "$ROOT_ACTION_BROKER_SERVICE_FILE"
-  rm -f "$unit_tmp"
+    || { rm -f -- "$unit_tmp"; return 1; }
+  install -o root -g root -m 0644 "$unit_tmp" "$ROOT_ACTION_BROKER_SERVICE_FILE" \
+    || { rm -f -- "$unit_tmp"; return 1; }
+  rm -f -- "$unit_tmp" || return 1
   if command -v systemctl >/dev/null 2>&1; then
-    [[ -x /usr/bin/timeout ]] || die "missing command: /usr/bin/timeout"
+    [[ -x /usr/bin/timeout ]] || return 1
     /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
       systemctl daemon-reload >/dev/null \
-      || die "root-action broker daemon-reload timed out or failed"
-    service_name="$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")"
+      || return 1
+    service_name="$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")" || return 1
     if /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
       systemctl is-active --quiet "$service_name"; then
       /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
         systemctl restart "$service_name" >/dev/null \
-        || die "root-action broker restart timed out or failed"
+        || return 1
       wait_for_root_action_broker_release "$service_name" "$release_dir" \
-        || die "root-action broker post-restart attestation failed closed"
-      info "root_action_broker_update=active_restarted_release_verified"
+        || return 1
+      info "root_action_broker_update=active_restarted_release_verified" || return 1
     else
       active_check_rc="$?"
-      [[ "$active_check_rc" -eq 3 ]] \
-        || die "root-action broker active-state probe timed out or failed"
+      [[ "$active_check_rc" -eq 3 ]] || return 1
     fi
   fi
   # An inactive broker remains a separate ratified activation boundary. An
   # already-active broker must move with self-update so old code can be pruned.
-  info "root_action_broker_unit=$ROOT_ACTION_BROKER_SERVICE_FILE"
-  info "root_action_broker_activation=deferred_not_enabled_or_started"
+  info "root_action_broker_unit=$ROOT_ACTION_BROKER_SERVICE_FILE" || return 1
+  info "root_action_broker_activation=deferred_not_enabled_or_started" || return 1
+}
+
+capture_root_action_broker_unit_backup() {
+  local backup_dir="$1"
+  local backup="$backup_dir/broker-unit"
+  local state="$backup_dir/broker-unit-state"
+  if [[ ! -e "$ROOT_ACTION_BROKER_SERVICE_FILE" && ! -L "$ROOT_ACTION_BROKER_SERVICE_FILE" ]]; then
+    printf 'absent\n' >"$state" || return 1
+    chmod 0600 "$state" || return 1
+    return 0
+  fi
+  [[ -f "$ROOT_ACTION_BROKER_SERVICE_FILE" && ! -L "$ROOT_ACTION_BROKER_SERVICE_FILE" ]] \
+    || return 1
+  [[ "$(stat -c '%a:%h:%u:%g' "$ROOT_ACTION_BROKER_SERVICE_FILE" 2>/dev/null || true)" == "644:1:0:0" ]] \
+    || return 1
+  install -m 0600 "$ROOT_ACTION_BROKER_SERVICE_FILE" "$backup" || return 1
+  cmp -s "$ROOT_ACTION_BROKER_SERVICE_FILE" "$backup" || return 1
+  printf 'present\n' >"$state" || return 1
+  chmod 0600 "$state" || return 1
+}
+
+restore_root_action_broker_unit_backup() {
+  local backup_dir="$1"
+  local backup="$backup_dir/broker-unit"
+  local state_file="$backup_dir/broker-unit-state"
+  local state
+  [[ -f "$state_file" && ! -L "$state_file" ]] || return 1
+  state="$(<"$state_file")"
+  case "$state" in
+    present)
+      [[ -f "$backup" && ! -L "$backup" ]] || return 1
+      [[ "$(stat -c '%a:%h:%u' "$backup" 2>/dev/null || true)" == "600:1:$(id -u)" ]] \
+        || return 1
+      [[ ! -L "$ROOT_ACTION_BROKER_SERVICE_FILE" ]] || return 1
+      rm -f -- "$ROOT_ACTION_BROKER_SERVICE_FILE" || return 1
+      install -m 0644 "$backup" "$ROOT_ACTION_BROKER_SERVICE_FILE" || return 1
+      chown root:root "$ROOT_ACTION_BROKER_SERVICE_FILE" || return 1
+      cmp -s "$backup" "$ROOT_ACTION_BROKER_SERVICE_FILE" || return 1
+      ;;
+    absent)
+      rm -f -- "$ROOT_ACTION_BROKER_SERVICE_FILE" || return 1
+      [[ ! -e "$ROOT_ACTION_BROKER_SERVICE_FILE" && ! -L "$ROOT_ACTION_BROKER_SERVICE_FILE" ]] \
+        || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  if command -v systemctl >/dev/null 2>&1; then
+    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+      systemctl daemon-reload >/dev/null \
+      || return 1
+  fi
 }
 
 install_gemini_cli() {
@@ -380,6 +465,24 @@ install_gemini_cli() {
   (cd "$package_dir" && npm ci --omit=dev --audit=false --fund=false) >/dev/null
   "$package_dir/node_modules/.bin/gemini" --version >/dev/null
   info "gemini_cli=$package_dir"
+}
+
+normalize_generated_runtime_tree_permissions() {
+  local tree="$1"
+  local unexpected
+  [[ -d "$tree" && ! -L "$tree" ]] || return 1
+  unexpected="$(
+    find "$tree" -xdev -mindepth 1 \
+      ! -type d ! -type f ! -type l -print -quit
+  )" || return 1
+  [[ -z "$unexpected" ]] || return 1
+  # The installer may be invoked below a restrictive operator umask.  Keep
+  # generated code private to root + the operating group, while making the
+  # exact svcops command surface independent of that caller state.  find does
+  # not follow the intentional Python/npm symlinks in these trees.
+  find "$tree" -xdev -type d -exec chmod 0750 {} + || return 1
+  find "$tree" -xdev -type f -perm /0111 -exec chmod 0750 {} + || return 1
+  find "$tree" -xdev -type f ! -perm /0111 -exec chmod 0640 {} + || return 1
 }
 
 install_boot_restore_unit() {
@@ -611,6 +714,7 @@ install_ops_sudoers() {
     printf '%s ALL=(root) NOPASSWD: %s usage status *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s usage cost-estimate *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s artifact probe kwrag-product --revision *\n' "$OPS_USER" "$BIN_LINK"
+    printf '%s ALL=(root) NOPASSWD: %s observation status *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s mitigation *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s config validate *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s config migrate *\n' "$OPS_USER" "$BIN_LINK"
@@ -735,33 +839,56 @@ archive_legacy_state_files() {
   fi
 }
 
+cleanup_activation_staging() {
+  local failed=0 path
+  for path in "$@"; do
+    [[ -n "$path" ]] || continue
+    rm -f -- "$path" || failed=1
+    [[ ! -e "$path" && ! -L "$path" ]] || failed=1
+  done
+  [[ "$failed" -eq 0 ]]
+}
+
 activate_release() {
   local release_dir="$1"
-  local release_name
-  release_name="$(basename "$release_dir")"
-  local next_link="$INSTALL_ROOT/.current.next"
-  [[ -d "$release_dir" ]] || die "missing release dir: $release_dir"
-  ln -sfn "releases/$release_name" "$next_link"
-  mv -Tf "$next_link" "$CURRENT_LINK"
-  rm -f "$BIN_LINK"
-  cat >"$BIN_LINK" <<EOF
+  local release_name bin_tmp="" mcp_tmp="" gemini_tmp=""
+  release_name="$(basename "$release_dir")" || return 1
+  local next_link="$INSTALL_ROOT/.current.next.$$"
+  local manifest_tmp="$INSTALL_ROOT/.manifest.next.$$"
+  [[ -d "$release_dir" ]] || return 1
+  for path in "$next_link" "$manifest_tmp"; do
+    [[ ! -e "$path" && ! -L "$path" ]] || return 1
+  done
+  bin_tmp="$(mktemp "${BIN_LINK}.next.XXXXXX")" || return 1
+  mcp_tmp="$(mktemp "${MCP_BIN_LINK}.next.XXXXXX")" \
+    || { cleanup_activation_staging "$bin_tmp"; return 1; }
+  gemini_tmp="$(mktemp "${GEMINI_BIN_LINK}.next.XXXXXX")" \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp"; return 1; }
+  cat >"$bin_tmp" <<EOF \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp"; return 1; }
 #!/usr/bin/env bash
 set -euo pipefail
 exec "$CURRENT_LINK/.venv/bin/opsctl" "\$@"
 EOF
-  chmod 0755 "$BIN_LINK"
-  rm -f "$MCP_BIN_LINK"
-  cat >"$MCP_BIN_LINK" <<EOF
+  chmod 0755 "$bin_tmp" \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp"; return 1; }
+  cat >"$mcp_tmp" <<EOF \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp"; return 1; }
 #!/usr/bin/env bash
 set -euo pipefail
 exec "$CURRENT_LINK/.venv/bin/agent-runtime-ops-mcp" "\$@"
 EOF
-  chmod 0755 "$MCP_BIN_LINK"
-  if [[ -e "$GEMINI_BIN_LINK" ]] && ! grep -q 'agent-runtime-ops managed gemini wrapper' "$GEMINI_BIN_LINK" 2>/dev/null; then
-    die "refusing to overwrite unmanaged Gemini wrapper: $GEMINI_BIN_LINK"
+  chmod 0755 "$mcp_tmp" \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp"; return 1; }
+  if [[ -e "$GEMINI_BIN_LINK" || -L "$GEMINI_BIN_LINK" ]]; then
+    if [[ ! -f "$GEMINI_BIN_LINK" || -L "$GEMINI_BIN_LINK" ]] \
+      || ! grep -q 'agent-runtime-ops managed gemini wrapper' "$GEMINI_BIN_LINK" 2>/dev/null; then
+      cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp" || true
+      return 1
+    fi
   fi
-  rm -f "$GEMINI_BIN_LINK"
-  cat >"$GEMINI_BIN_LINK" <<EOF
+  cat >"$gemini_tmp" <<EOF \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp"; return 1; }
 #!/usr/bin/env bash
 set -euo pipefail
 # agent-runtime-ops managed gemini wrapper
@@ -800,12 +927,155 @@ if [[ "\$(id -un 2>/dev/null || true)" == "\$OPS_USER" ]]; then
 fi
 exec "$CURRENT_LINK/agent-clis/gemini-cli/node_modules/.bin/gemini" "\$@"
 EOF
-  chmod 0755 "$GEMINI_BIN_LINK"
-  ln -sfn "current/.agent-runtime-ops-manifest" "$MANIFEST"
-  chown root:"$OPS_GROUP" "$BIN_LINK" 2>/dev/null || true
-  chown root:"$OPS_GROUP" "$MCP_BIN_LINK" 2>/dev/null || true
-  chown root:"$OPS_GROUP" "$GEMINI_BIN_LINK" 2>/dev/null || true
-  chown -h root:"$OPS_GROUP" "$CURRENT_LINK" "$MANIFEST" 2>/dev/null || true
+  chmod 0755 "$gemini_tmp" \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp"; return 1; }
+  chown root:"$OPS_GROUP" "$bin_tmp" "$mcp_tmp" "$gemini_tmp" \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp"; return 1; }
+  ln -s "current/.agent-runtime-ops-manifest" "$manifest_tmp" \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp" "$manifest_tmp"; return 1; }
+  ln -s "releases/$release_name" "$next_link" \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp" "$manifest_tmp" "$next_link"; return 1; }
+  mv -Tf "$bin_tmp" "$BIN_LINK" \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp" "$manifest_tmp" "$next_link"; return 1; }
+  mv -Tf "$mcp_tmp" "$MCP_BIN_LINK" \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp" "$manifest_tmp" "$next_link"; return 1; }
+  mv -Tf "$gemini_tmp" "$GEMINI_BIN_LINK" \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp" "$manifest_tmp" "$next_link"; return 1; }
+  mv -Tf "$manifest_tmp" "$MANIFEST" \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp" "$manifest_tmp" "$next_link"; return 1; }
+  mv -Tf "$next_link" "$CURRENT_LINK" \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp" "$manifest_tmp" "$next_link"; return 1; }
+  chown -h root:"$OPS_GROUP" "$CURRENT_LINK" "$MANIFEST" \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp" "$manifest_tmp" "$next_link"; return 1; }
+  cleanup_activation_staging \
+    "$bin_tmp" "$mcp_tmp" "$gemini_tmp" "$manifest_tmp" "$next_link"
+}
+
+deactivate_first_release() {
+  local release_dir="$1"
+  local current_release path
+  if [[ -e "$CURRENT_LINK" || -L "$CURRENT_LINK" ]]; then
+    [[ -L "$CURRENT_LINK" ]] || return 1
+    current_release="$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)"
+    [[ "$current_release" == "$release_dir" ]] || return 1
+  fi
+  if [[ -e "$BIN_LINK" || -L "$BIN_LINK" ]]; then
+    [[ -f "$BIN_LINK" && ! -L "$BIN_LINK" ]] || return 1
+    grep -Fqx "exec \"$CURRENT_LINK/.venv/bin/opsctl\" \"\$@\"" "$BIN_LINK" \
+      || return 1
+  fi
+  if [[ -e "$MCP_BIN_LINK" || -L "$MCP_BIN_LINK" ]]; then
+    [[ -f "$MCP_BIN_LINK" && ! -L "$MCP_BIN_LINK" ]] || return 1
+    grep -Fqx "exec \"$CURRENT_LINK/.venv/bin/agent-runtime-ops-mcp\" \"\$@\"" "$MCP_BIN_LINK" \
+      || return 1
+  fi
+  if [[ -e "$GEMINI_BIN_LINK" || -L "$GEMINI_BIN_LINK" ]]; then
+    [[ -f "$GEMINI_BIN_LINK" && ! -L "$GEMINI_BIN_LINK" ]] || return 1
+    grep -Fq 'agent-runtime-ops managed gemini wrapper' "$GEMINI_BIN_LINK" \
+      || return 1
+  fi
+  if [[ -e "$MANIFEST" || -L "$MANIFEST" ]]; then
+    [[ -L "$MANIFEST" ]] || return 1
+    [[ "$(readlink "$MANIFEST")" == "current/.agent-runtime-ops-manifest" ]] \
+      || return 1
+  fi
+  for path in "$BIN_LINK" "$MCP_BIN_LINK" "$GEMINI_BIN_LINK" "$MANIFEST" "$CURRENT_LINK"; do
+    rm -f -- "$path" || return 1
+    [[ ! -e "$path" && ! -L "$path" ]] || return 1
+  done
+}
+
+capture_previous_activation_identity() {
+  local previous_release="$1"
+  local backup_dir="$2"
+  local gid name source target
+  [[ -d "$backup_dir" && ! -L "$backup_dir" ]] || return 1
+  [[ "$(stat -c '%a:%h:%u' "$backup_dir" 2>/dev/null || true)" == "700:1:$(id -u)" ]] \
+    || return 1
+  if [[ -z "$previous_release" ]]; then
+    printf 'first_install\n' >"$backup_dir/state" || return 1
+    chmod 0600 "$backup_dir/state" || return 1
+    return 0
+  fi
+  gid="$(id -g "$OPS_USER")" || return 1
+  for name in opsctl mcp gemini; do
+    case "$name" in
+      opsctl) source="$BIN_LINK" ;;
+      mcp) source="$MCP_BIN_LINK" ;;
+      gemini) source="$GEMINI_BIN_LINK" ;;
+      *) return 1 ;;
+    esac
+    [[ -f "$source" && ! -L "$source" ]] || return 1
+    [[ "$(stat -c '%a:%h:%u:%g' "$source" 2>/dev/null || true)" == "755:1:0:$gid" ]] \
+      || return 1
+    target="$backup_dir/$name"
+    install -m 0600 "$source" "$target" || return 1
+    cmp -s "$source" "$target" || return 1
+  done
+  [[ -L "$MANIFEST" ]] || return 1
+  [[ "$(readlink "$MANIFEST")" == "current/.agent-runtime-ops-manifest" ]] \
+    || return 1
+  printf 'previous\n' >"$backup_dir/state" || return 1
+  printf 'current/.agent-runtime-ops-manifest\n' >"$backup_dir/manifest-target" \
+    || return 1
+  chmod 0600 "$backup_dir/state" "$backup_dir/manifest-target" || return 1
+}
+
+restore_previous_activation_identity() {
+  local failed_release="$1"
+  local previous_release="$2"
+  local backup_dir="$3"
+  local backup destination name next_link release_name state target
+  [[ -f "$backup_dir/state" && ! -L "$backup_dir/state" ]] || return 1
+  state="$(<"$backup_dir/state")"
+  if [[ "$state" == "first_install" ]]; then
+    [[ -z "$previous_release" ]] || return 1
+    deactivate_first_release "$failed_release" || return 1
+    return 0
+  fi
+  [[ "$state" == "previous" && -n "$previous_release" ]] || return 1
+  [[ -d "$previous_release" && ! -L "$previous_release" ]] || return 1
+  release_name="$(basename "$previous_release")"
+  [[ "$previous_release" == "$(realpath -m "$RELEASES_DIR")/$release_name" ]] \
+    || return 1
+  next_link="$INSTALL_ROOT/.current.restore.$$"
+  ln -s "releases/$release_name" "$next_link" || return 1
+  mv -Tf "$next_link" "$CURRENT_LINK" || return 1
+  for name in opsctl mcp gemini; do
+    backup="$backup_dir/$name"
+    case "$name" in
+      opsctl) destination="$BIN_LINK" ;;
+      mcp) destination="$MCP_BIN_LINK" ;;
+      gemini) destination="$GEMINI_BIN_LINK" ;;
+      *) return 1 ;;
+    esac
+    [[ -f "$backup" && ! -L "$backup" ]] || return 1
+    [[ "$(stat -c '%a:%h:%u' "$backup" 2>/dev/null || true)" == "600:1:$(id -u)" ]] \
+      || return 1
+    rm -f -- "$destination" || return 1
+    install -m 0755 "$backup" "$destination" || return 1
+    chown root:"$OPS_GROUP" "$destination" || return 1
+    cmp -s "$backup" "$destination" || return 1
+  done
+  [[ -f "$backup_dir/manifest-target" && ! -L "$backup_dir/manifest-target" ]] \
+    || return 1
+  target="$(<"$backup_dir/manifest-target")"
+  [[ "$target" == "current/.agent-runtime-ops-manifest" ]] || return 1
+  rm -f -- "$MANIFEST" || return 1
+  ln -s "$target" "$MANIFEST" || return 1
+  chown -h root:"$OPS_GROUP" "$CURRENT_LINK" "$MANIFEST" || return 1
+  [[ "$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)" == "$previous_release" ]] \
+    || return 1
+}
+
+cleanup_activation_identity_backup() {
+  local backup_dir="$1"
+  local path
+  [[ -d "$backup_dir" && ! -L "$backup_dir" ]] || return 1
+  for path in state manifest-target opsctl mcp gemini broker-unit broker-unit-state; do
+    rm -f -- "$backup_dir/$path" || return 1
+  done
+  rmdir "$backup_dir"
 }
 
 install_ops_home_agents() {
@@ -964,6 +1234,275 @@ run_as_ops() {
   runuser -u "$OPS_USER" -- env HOME="$OPS_HOME" USER="$OPS_USER" LOGNAME="$OPS_USER" CODEX_HOME="$CODEX_HOME" "$@"
 }
 
+run_cli_as_ops() {
+  local cli="$1"
+  shift
+  /usr/bin/timeout --kill-after=1 "$OPS_CLI_ATTESTATION_COMMAND_TIMEOUT_SECONDS" \
+    runuser -u "$OPS_USER" -- env -i \
+      HOME="$OPS_HOME" \
+      USER="$OPS_USER" \
+      LOGNAME="$OPS_USER" \
+      PATH=/usr/local/bin:/usr/bin:/bin \
+      "$cli" "$@"
+}
+
+validate_update_status_output() {
+  local output="$1"
+  local expected_ref="$2"
+  local require_current="$3"
+  local line key value
+  local update_status="" installed_ref="" repo_url="" approved_ref="" matches=""
+  declare -A seen=()
+  while IFS= read -r line; do
+    [[ -n "$line" && "$line" == *=* ]] || return 1
+    key="${line%%=*}"
+    value="${line#*=}"
+    [[ -z "${seen[$key]:-}" ]] || return 1
+    seen[$key]=1
+    case "$key" in
+      update_status) update_status="$value" ;;
+      installed_ref) installed_ref="$value" ;;
+      repo_url) repo_url="$value" ;;
+      approved_ref) approved_ref="$value" ;;
+      approved_matches_installed) matches="$value" ;;
+      *) return 1 ;;
+    esac
+  done <<<"$output"
+  [[ -n "${seen[update_status]:-}" ]] || return 1
+  [[ -n "${seen[repo_url]:-}" ]] || return 1
+  [[ -n "${seen[approved_ref]:-}" ]] || return 1
+  [[ -n "${seen[approved_matches_installed]:-}" ]] || return 1
+  [[ "$repo_url" == "$REPO_URL" ]] || return 1
+  [[ "$approved_ref" == "$expected_ref" ]] || return 1
+  [[ "$installed_ref" =~ ^[0-9a-f]{40}$ || -z "$installed_ref" ]] || return 1
+  if [[ "$require_current" == "yes" ]]; then
+    [[ "$installed_ref" == "$expected_ref" ]] || return 1
+    [[ "$update_status" == "current" && "$matches" == "yes" ]] || return 1
+    return 0
+  fi
+  if [[ "$installed_ref" == "$expected_ref" ]]; then
+    [[ "$update_status" == "current" && "$matches" == "yes" ]] || return 1
+  else
+    [[ "$update_status" == "ready" && "$matches" == "no" ]] || return 1
+  fi
+}
+
+attest_candidate_cli_as_ops() {
+  local release_dir="$1"
+  local commit="$2"
+  local output
+  if [[ -f "$STATE_ROOT/ops-update.yaml" ]]; then
+    output="$(
+      run_cli_as_ops "$release_dir/.venv/bin/opsctl" \
+        --state-root "$STATE_ROOT" update status
+    )" || return 1
+    validate_update_status_output "$output" "$commit" no || return 1
+  else
+    /usr/bin/timeout --kill-after=1 "$OPS_CLI_ATTESTATION_COMMAND_TIMEOUT_SECONDS" \
+      runuser -u "$OPS_USER" -- env -i \
+        HOME="$OPS_HOME" \
+        USER="$OPS_USER" \
+        LOGNAME="$OPS_USER" \
+        PATH=/usr/local/bin:/usr/bin:/bin \
+        AGENT_RUNTIME_OPS_DEV=1 \
+        AGENT_RUNTIME_OPS_ROOT="$release_dir" \
+        "$release_dir/.venv/bin/opsctl" profile list >/dev/null \
+      || return 1
+  fi
+  run_cli_as_ops \
+    "$release_dir/agent-clis/gemini-cli/node_modules/.bin/gemini" \
+    --version >/dev/null || return 1
+}
+
+prepare_release_for_activation() {
+  local release_dir="$1"
+  local commit="$2"
+  if ! normalize_generated_runtime_tree_permissions "$release_dir/.venv" \
+    || ! normalize_generated_runtime_tree_permissions \
+      "$release_dir/agent-clis/gemini-cli/node_modules" \
+    || ! attest_candidate_cli_as_ops "$release_dir" "$commit"; then
+    rm -rf --one-file-system "$release_dir"
+    die "generated runtime permissions or pre-activation svcops attestation failed"
+  fi
+  info "ops_cli_pre_activation=svcops_verified"
+}
+
+attest_active_cli_as_ops() {
+  local release_dir="$1"
+  local commit="$2"
+  local output
+  [[ "$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)" == "$release_dir" ]] \
+    || return 1
+  if [[ -f "$STATE_ROOT/ops-update.yaml" ]]; then
+    output="$(
+      run_cli_as_ops "$BIN_LINK" --state-root "$STATE_ROOT" update status
+    )" || return 1
+    validate_update_status_output "$output" "$commit" yes || return 1
+  else
+    run_cli_as_ops "$BIN_LINK" profile list >/dev/null || return 1
+  fi
+}
+
+attest_restored_cli_as_ops() {
+  local release_dir="$1"
+  local expected_ref="$2"
+  local previous_ref output
+  [[ "$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)" == "$release_dir" ]] \
+    || return 1
+  previous_ref="$(manifest_value "$release_dir/.agent-runtime-ops-manifest" source_commit)"
+  require_full_sha "$previous_ref"
+  if [[ -f "$STATE_ROOT/ops-update.yaml" ]]; then
+    output="$(
+      run_cli_as_ops "$BIN_LINK" --state-root "$STATE_ROOT" update status
+    )" || return 1
+    validate_update_status_output "$output" "$expected_ref" no || return 1
+    grep -Fqx "installed_ref=$previous_ref" <<<"$output" || return 1
+  else
+    run_cli_as_ops "$BIN_LINK" profile list >/dev/null || return 1
+  fi
+  run_cli_as_ops "$GEMINI_BIN_LINK" --version >/dev/null || return 1
+  [[ -x "$MCP_BIN_LINK" ]] || return 1
+}
+
+capture_previous_active_release() {
+  local expected_ref="$1"
+  local previous_release releases_real
+  if [[ ! -L "$CURRENT_LINK" ]]; then
+    [[ ! -e "$CURRENT_LINK" ]] || die "current release path exists but is not a symlink"
+    [[ ! -e "$BIN_LINK" && ! -e "$MCP_BIN_LINK" && ! -e "$MANIFEST" ]] \
+      || die "first install requires absent managed current wrappers"
+    if [[ -e "$GEMINI_BIN_LINK" ]]; then
+      grep -q 'agent-runtime-ops managed gemini wrapper' "$GEMINI_BIN_LINK" \
+        || die "refusing first install with unmanaged Gemini wrapper"
+      die "first install requires absent managed current wrappers"
+    fi
+    printf '\n'
+    return 0
+  fi
+  previous_release="$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)"
+  releases_real="$(realpath -m "$RELEASES_DIR")"
+  [[ -n "$previous_release" && "$previous_release" == "$releases_real"/* ]] \
+    || die "current release resolves outside the releases directory"
+  [[ -d "$previous_release" && ! -L "$previous_release" ]] \
+    || die "current release target is not a fixed release directory"
+  attest_restored_cli_as_ops "$previous_release" "$expected_ref" \
+    || die "previous active svcops CLI identity is not restorable"
+  printf '%s\n' "$previous_release"
+}
+
+capture_root_action_broker_state() {
+  local previous_release="$1"
+  local active_check_rc service_name
+  if ! command -v systemctl >/dev/null 2>&1; then
+    printf 'unavailable\n'
+    return 0
+  fi
+  service_name="$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")"
+  if /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+    systemctl is-active --quiet "$service_name"; then
+    [[ -n "$previous_release" ]] \
+      || die "active root-action broker has no previous active release"
+    root_action_broker_release_attested "$service_name" "$previous_release" \
+      || die "previous root-action broker release is not exactly attested"
+    printf 'active\n'
+    return 0
+  else
+    active_check_rc="$?"
+  fi
+  case "$active_check_rc" in
+    3) printf 'inactive\n' ;;
+    4) printf 'absent\n' ;;
+    *) die "root-action broker pre-activation state probe failed" ;;
+  esac
+}
+
+restore_previous_active_identity() {
+  local failed_release="$1"
+  local expected_ref="$2"
+  local previous_release="$3"
+  local broker_state="$4"
+  local backup_dir="$5"
+  local service_name
+  restore_previous_activation_identity \
+    "$failed_release" "$previous_release" "$backup_dir" || return 1
+  if [[ -n "$previous_release" ]]; then
+    attest_restored_cli_as_ops "$previous_release" "$expected_ref" || return 1
+  fi
+  case "$broker_state" in
+    active)
+      service_name="$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")"
+      restart_root_action_broker_for_release "$service_name" "$previous_release" \
+        || return 1
+      ;;
+    inactive)
+      service_name="$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")"
+      root_action_broker_inactive_attested "$service_name" || return 1
+      ;;
+    absent)
+      service_name="$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")" || return 1
+      root_action_broker_absent_attested "$service_name" || return 1
+      ;;
+    unavailable) ;;
+    *) return 1 ;;
+  esac
+  info "activation_rollback=previous_identity_restored"
+}
+
+activate_and_attest_cli_or_restore() {
+  local release_dir="$1"
+  local commit="$2"
+  local previous_release="$3"
+  local broker_state="$4"
+  local backup_dir="$5"
+  local activation_rc=0
+  activate_release "$release_dir" || activation_rc="$?"
+  if [[ "$activation_rc" -eq 0 ]]; then
+    attest_active_cli_as_ops "$release_dir" "$commit" || activation_rc="$?"
+  fi
+  if [[ "$activation_rc" -ne 0 ]]; then
+    restore_previous_active_identity \
+      "$release_dir" "$commit" "$previous_release" "$broker_state" "$backup_dir" \
+      || die "post-activation svcops CLI attestation failed and previous identity restoration failed"
+    cleanup_activation_identity_backup "$backup_dir" \
+      || die "previous active identity restored but activation backup cleanup failed"
+    die "post-activation svcops CLI attestation failed; previous active identity restored"
+  fi
+  info "ops_cli_post_activation=svcops_verified"
+}
+
+install_root_action_broker_or_restore() {
+  local release_dir="$1"
+  local commit="$2"
+  local previous_release="$3"
+  local broker_state="$4"
+  local backup_dir="$5"
+  local broker_install_rc=0 identity_restore_rc=0 unit_restore_rc=0
+  if ! capture_root_action_broker_unit_backup "$backup_dir"; then
+    restore_previous_active_identity \
+      "$release_dir" "$commit" "$previous_release" "$broker_state" "$backup_dir" \
+      || die "broker unit capture failed and previous identity restoration failed"
+    cleanup_activation_identity_backup "$backup_dir" \
+      || die "previous active identity restored but activation backup cleanup failed"
+    die "broker unit capture failed; previous active identity restored"
+  fi
+  install_root_action_broker_contract "$release_dir" || broker_install_rc="$?"
+  if [[ "$broker_install_rc" -eq 0 ]]; then
+    cleanup_activation_identity_backup "$backup_dir" \
+      || die "broker installed but activation backup cleanup failed"
+    return 0
+  fi
+  restore_root_action_broker_unit_backup "$backup_dir" || unit_restore_rc="$?"
+  restore_previous_active_identity \
+    "$release_dir" "$commit" "$previous_release" "$broker_state" "$backup_dir" \
+    || identity_restore_rc="$?"
+  if [[ "$unit_restore_rc" -ne 0 || "$identity_restore_rc" -ne 0 ]]; then
+    die "root-action broker setup failed and previous active identity restoration failed"
+  fi
+  cleanup_activation_identity_backup "$backup_dir" \
+    || die "previous active identity restored but activation backup cleanup failed"
+  die "root-action broker setup failed; previous active identity restored"
+}
+
 register_codex_mcp() {
   if ! command -v codex >/dev/null 2>&1; then
     info "codex_mcp=codex_missing"
@@ -979,6 +1518,7 @@ register_codex_mcp() {
 
 install_package() {
   local src commit summary release_name tmp_release release_dir
+  local activation_backup_dir previous_active_release previous_broker_state
   if ! src="$(repo_root)"; then
     bootstrap_from_git
   fi
@@ -1014,6 +1554,7 @@ install_package() {
   fi
   write_manifest "$release_dir" "$src" "$commit" "$summary"
   chown -R root:"$OPS_GROUP" "$release_dir"
+  prepare_release_for_activation "$release_dir" "$commit"
 
   # Import recovery points with the new release before changing current.  A
   # malformed slot-owned legacy tree aborts the update, while successful
@@ -1021,8 +1562,21 @@ install_package() {
   # later fails.
   migrate_legacy_runtime_backups "$release_dir"
 
-  activate_release "$release_dir"
-  install_root_action_broker_contract "$release_dir"
+  previous_active_release="$(capture_previous_active_release "$commit")"
+  previous_broker_state="$(capture_root_action_broker_state "$previous_active_release")"
+  activation_backup_dir="$(mktemp -d)" \
+    || die "failed to create activation identity backup directory"
+  if ! capture_previous_activation_identity \
+    "$previous_active_release" "$activation_backup_dir"; then
+    cleanup_activation_identity_backup "$activation_backup_dir" || true
+    die "failed to capture exact previous activation identity"
+  fi
+  activate_and_attest_cli_or_restore \
+    "$release_dir" "$commit" "$previous_active_release" \
+    "$previous_broker_state" "$activation_backup_dir"
+  install_root_action_broker_or_restore \
+    "$release_dir" "$commit" "$previous_active_release" \
+    "$previous_broker_state" "$activation_backup_dir"
   install_ops_sudoers
   install_boot_restore_unit
   install_usage_collect_timer

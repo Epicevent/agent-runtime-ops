@@ -145,6 +145,13 @@ Docker compose 직접 수정
 /srv/openclaw-ops        root:svcops
 ```
 
+`self-update`는 호출자의 `umask`와 무관하게 생성된 Python `.venv`와 Gemini
+`node_modules`를 `root:svcops`로 고정한다. 디렉터리와 실행 파일은 `0750`, 그 외
+일반 파일은 `0640`이며 world 권한은 없다. 설치기는 activation 전에 새 release의
+CLI를 실제 `svcops` 계정으로 실행하고, activation 뒤에는
+`/usr/local/bin/opsctl update status`를 같은 계정으로 다시 검증한다. 이 검증이
+끝나기 전에는 이전 release code를 prune하지 않는다.
+
 ## 다음 확인
 
 `opsctl status oc1`까지 확인하려면 `/srv/openclaw-ops`에 아래 파일들이
@@ -156,6 +163,18 @@ slot-registry.json
 runtime/<slot>/manifest.yaml
 nas-policy.yaml
 ```
+
+## Privileged activation continuity
+
+The installer captures the exact previously active release and whether the
+root-action broker was active before changing `current`. It immediately runs the
+candidate CLI as `svcops`. If that attestation fails, it restores the previous
+`current` link and generated wrappers, re-runs the previous CLI attestation, and
+restarts and re-attests the broker at the exact previous release when the broker
+was already active. A previously inactive broker remains inactive. On a failed
+first install, candidate links are removed rather than left as the active
+identity. The previous release is not pruned until the candidate CLI and broker
+contract have both been verified.
 
 Old slot/lane/release files may still exist as migration or compatibility inputs, but new image
 rollout verification should use runtime bindings, runtime manifests, and live image truth.

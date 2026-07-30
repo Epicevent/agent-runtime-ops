@@ -120,6 +120,7 @@ from .commands.usage import (
     cmd_usage_status,
 )
 from .commands.image import cmd_image_approve, cmd_image_status
+from .commands.observation import cmd_observation_status
 from .commands.retrieval import cmd_retrieval_approve, cmd_retrieval_status
 from .commands.config import cmd_config_validate, cmd_config_migrate
 from .paths import DEFAULT_STATE_ROOT
@@ -236,6 +237,20 @@ def build_parser() -> argparse.ArgumentParser:
     root_action_wait.add_argument("--wait-timeout", type=wait_timeout_arg, default=900.0)
     root_action_wait.add_argument("--poll-interval", type=poll_interval_arg, default=0.25)
     root_action_wait.set_defaults(func=cmd_root_action_wait)
+
+    observation = sub.add_parser(
+        "observation",
+        help="emit bounded sanitized read-only operational observations",
+    )
+    observation_sub = observation.add_subparsers(
+        dest="observation_command", required=True
+    )
+    observation_status = observation_sub.add_parser(
+        "status",
+        help="observe one exact configured runtime target without mutation",
+    )
+    observation_status.add_argument("target", metavar="TARGET")
+    observation_status.set_defaults(func=cmd_observation_status)
 
     config = sub.add_parser("config")
     config_sub = config.add_subparsers(dest="config_command", required=True)
@@ -367,6 +382,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     rollback = sub.add_parser("rollback")
     rollback.add_argument("slot", metavar="target")
+    rollback.add_argument("--expected-transaction-id")
+    rollback.add_argument("--expected-marker-sha256")
+    rollback.add_argument("--expected-backup-name")
+    rollback.add_argument("--expected-backup-metadata-sha256")
     rollback.set_defaults(func=cmd_rollback)
 
     diagnostics = sub.add_parser("diagnostics")
