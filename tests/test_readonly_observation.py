@@ -342,16 +342,16 @@ def test_production_target_requires_approvals_matching_exact_rollout_digests(
 
 
 @pytest.mark.parametrize(
-    "field",
+    ("field", "expected_status"),
     [
-        "retrieval_component_digest",
-        "retrieval_binding_digest",
-        "retrieval_expected_binding_digest",
-        "retrieval_resource_profile_digest",
+        ("retrieval_component_digest", "unavailable"),
+        ("retrieval_binding_digest", "degraded"),
+        ("retrieval_expected_binding_digest", "degraded"),
+        ("retrieval_resource_profile_digest", "unavailable"),
     ],
 )
 def test_default_off_rejects_empty_or_unbound_projection_identity(
-    capsys, tmp_path: Path, field: str
+    capsys, tmp_path: Path, field: str, expected_status: str
 ) -> None:
     truth, checks = runtime_truth()
     truth[field] = ""
@@ -360,11 +360,14 @@ def test_default_off_rejects_empty_or_unbound_projection_identity(
     )
     assert rc == 1
     runtime = value["observations"]["runtime"]
-    assert runtime["status"] == "degraded"
-    assert {
-        "name": "observation_retrieval_projection_identity",
-        "passed": False,
-    } in runtime["checks"]
+    assert runtime["status"] == expected_status
+    if expected_status == "unavailable":
+        assert runtime["reason_code"] == "runtime_truth_invalid"
+    else:
+        assert {
+            "name": "observation_retrieval_projection_identity",
+            "passed": False,
+        } in runtime["checks"]
 
 
 def test_capability_absent_disabled_projection_accepts_empty_optional_digests(
@@ -372,6 +375,8 @@ def test_capability_absent_disabled_projection_accepts_empty_optional_digests(
 ) -> None:
     truth, checks = runtime_truth()
     truth["retrieval_contract_complete"] = "false"
+    truth["retrieval_schema"] = ""
+    truth["retrieval_transport"] = ""
     truth["retrieval_component_digest"] = ""
     truth["retrieval_resource_profile_digest"] = ""
     target = runtime_target()
@@ -394,6 +399,8 @@ def test_capability_absent_disabled_projection_accepts_empty_optional_digests(
 @pytest.mark.parametrize(
     ("field", "value"),
     [
+        ("retrieval_schema", "jitech-embedded-retrieval/v1"),
+        ("retrieval_transport", "in_process"),
         ("retrieval_component_digest", COMPONENT),
         ("retrieval_resource_profile_digest", RESOURCE),
         ("retrieval_enabled", "true"),
@@ -404,6 +411,8 @@ def test_capability_absent_projection_rejects_partial_or_enabled_state(
 ) -> None:
     truth, checks = runtime_truth()
     truth["retrieval_contract_complete"] = "false"
+    truth["retrieval_schema"] = ""
+    truth["retrieval_transport"] = ""
     truth["retrieval_component_digest"] = ""
     truth["retrieval_resource_profile_digest"] = ""
     truth[field] = value
@@ -411,10 +420,10 @@ def test_capability_absent_projection_rejects_partial_or_enabled_state(
         capsys, tmp_path, contract_patches(truth=(truth, checks))
     )
     assert rc == 1
-    assert {
-        "name": "observation_retrieval_projection_identity",
-        "passed": False,
-    } in result["observations"]["runtime"]["checks"]
+    assert result["observations"]["runtime"] == {
+        "status": "unavailable",
+        "reason_code": "runtime_truth_invalid",
+    }
 
 
 def test_runtime_check_failure_is_observed_without_raw_detail(

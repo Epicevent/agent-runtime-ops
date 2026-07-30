@@ -338,3 +338,62 @@ def test_first_install_failure_before_gemini_creation_restores_all_absent() -> N
         assert completed.returncode == 0, completed.stderr
         for path in (current, opsctl, mcp, gemini, manifest):
             assert not path.exists() and not path.is_symlink()
+
+
+@pytest.mark.parametrize("failure_stage", ["wrapper_chmod", "manifest", "chown"])
+def test_real_activation_failure_is_nonzero_and_first_install_restores_absent(
+    failure_stage: str,
+) -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        install_root = root / "install"
+        releases = install_root / "releases"
+        candidate = releases / "candidate"
+        backup = root / "backup"
+        bin_dir = root / "bin"
+        for path in (candidate, backup, bin_dir):
+            path.mkdir(parents=True, exist_ok=True)
+        backup.chmod(0o700)
+        (backup / "state").write_text("first_install\n", encoding="utf-8")
+        (backup / "state").chmod(0o600)
+        current = install_root / "current"
+        opsctl = bin_dir / "opsctl"
+        mcp = bin_dir / "agent-runtime-ops-mcp"
+        gemini = bin_dir / "gemini"
+        manifest = install_root / ".agent-runtime-ops-manifest"
+        if failure_stage == "wrapper_chmod":
+            injection = (
+                'chmod() { if [[ "${2:-}" == "$MCP_BIN_LINK" ]]; then '
+                'return 19; fi; command chmod "$@"; }\n'
+            )
+        elif failure_stage == "manifest":
+            injection = (
+                'ln() { local last="${!#}"; if [[ "$last" == "$MANIFEST" ]]; '
+                'then return 19; fi; command ln "$@"; }\n'
+            )
+        else:
+            injection = "chown() { return 19; }\n"
+        completed = _run_contract_script(
+            root,
+            f"INSTALL_ROOT={str(install_root)!r}\n"
+            f"RELEASES_DIR={str(releases)!r}\n"
+            f"CURRENT_LINK={str(current)!r}\n"
+            f"BIN_LINK={str(opsctl)!r}\n"
+            f"MCP_BIN_LINK={str(mcp)!r}\n"
+            f"GEMINI_BIN_LINK={str(gemini)!r}\n"
+            f"MANIFEST={str(manifest)!r}\n"
+            f"OPS_GROUP={reader.pw_gid!r}\n"
+            f"OPS_USER={reader.pw_name!r}\n"
+            f"GEMINI_HOME={reader.pw_dir!r}\n"
+            + injection
+            + _function("activate_release")
+            + _function("deactivate_first_release")
+            + _function("restore_previous_activation_identity")
+            + "\nactivation_rc=0\n"
+            + f"activate_release {str(candidate)!r} || activation_rc=\"$?\"\n"
+            + '[[ "$activation_rc" -ne 0 ]] || exit 91\n'
+            + f"restore_previous_activation_identity {str(candidate)!r} '' {str(backup)!r}\n",
+        )
+        assert completed.returncode == 0, completed.stderr
+        for path in (current, opsctl, mcp, gemini, manifest):
+            assert not path.exists() and not path.is_symlink()

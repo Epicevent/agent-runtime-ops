@@ -415,6 +415,34 @@ def _validate_runtime_fields(fields: dict[str, str], target: str) -> None:
         value = fields.get(field) or ""
         if value and _DIGEST_RE.fullmatch(value) is None:
             raise ReadonlyObservationError(f"runtime_{field}_invalid")
+    capability_declared = fields.get("retrieval_contract_complete") == "true"
+    retrieval_enabled = fields.get("retrieval_enabled")
+    retrieval_schema = fields.get("retrieval_schema") or ""
+    retrieval_transport = fields.get("retrieval_transport") or ""
+    retrieval_component = fields.get("retrieval_component_digest") or ""
+    retrieval_resource = fields.get("retrieval_resource_profile_digest") or ""
+    if capability_declared:
+        if retrieval_schema != RETRIEVAL_SCHEMA:
+            raise ReadonlyObservationError("runtime_retrieval_schema_mismatch")
+        if retrieval_transport != "in_process":
+            raise ReadonlyObservationError("runtime_retrieval_transport_mismatch")
+        if not (
+            _DIGEST_RE.fullmatch(retrieval_component)
+            and _DIGEST_RE.fullmatch(retrieval_resource)
+        ):
+            raise ReadonlyObservationError(
+                "runtime_retrieval_capability_digest_mismatch"
+            )
+    elif not (
+        retrieval_enabled == "false"
+        and retrieval_schema == ""
+        and retrieval_transport == ""
+        and retrieval_component == ""
+        and retrieval_resource == ""
+    ):
+        raise ReadonlyObservationError(
+            "runtime_retrieval_capability_absence_mismatch"
+        )
     if _REVISION_RE.fullmatch(fields.get("ops_repo_commit") or "") is None:
         raise ReadonlyObservationError("runtime_ops_repo_commit_invalid")
     recipe_name = fields.get("canonical_recipe_name") or ""
@@ -440,10 +468,6 @@ def _validate_runtime_fields(fields: dict[str, str], target: str) -> None:
             raise ReadonlyObservationError("runtime_contract_mismatch")
         if expected_profiles.get(runtime_class) != fields.get("runtime_profile"):
             raise ReadonlyObservationError("runtime_profile_mismatch")
-        if fields.get("retrieval_schema") != RETRIEVAL_SCHEMA:
-            raise ReadonlyObservationError("runtime_retrieval_schema_mismatch")
-        if fields.get("retrieval_transport") != "in_process":
-            raise ReadonlyObservationError("runtime_retrieval_transport_mismatch")
         if fields.get("container_nas_root") != recipe.data.get(
             "container_nas_root"
         ):
@@ -452,9 +476,10 @@ def _validate_runtime_fields(fields: dict[str, str], target: str) -> None:
         raise
     except Exception as exc:
         raise ReadonlyObservationError("runtime_canonical_recipe_invalid") from exc
-    for field in ("retrieval_schema", "retrieval_transport"):
-        if _LABEL_VALUE_RE.fullmatch(fields.get(field) or "") is None:
-            raise ReadonlyObservationError(f"runtime_{field}_invalid")
+    if capability_declared:
+        for field in ("retrieval_schema", "retrieval_transport"):
+            if _LABEL_VALUE_RE.fullmatch(fields.get(field) or "") is None:
+                raise ReadonlyObservationError(f"runtime_{field}_invalid")
     container_nas_root = fields.get("container_nas_root") or ""
     if not container_nas_root.startswith("/") or ".." in container_nas_root.split("/"):
         raise ReadonlyObservationError("runtime_container_nas_root_invalid")

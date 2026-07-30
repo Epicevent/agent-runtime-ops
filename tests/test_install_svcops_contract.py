@@ -31,6 +31,14 @@ def _bash() -> str:
     pytest.skip("bash is required for the installer contract harness")
 
 
+def _shell_path(path: Path) -> str:
+    resolved = path.resolve()
+    if os.name != "nt":
+        return str(resolved)
+    drive, tail = os.path.splitdrive(str(resolved))
+    return f"/{drive[0].lower()}{tail.replace(chr(92), '/')}"
+
+
 def _run_bash(tmp_path: Path, body: str) -> subprocess.CompletedProcess[str]:
     script = tmp_path / "contract.sh"
     script.write_text(
@@ -319,16 +327,43 @@ def test_first_install_restore_removes_candidate_and_keeps_broker_inactive(tmp_p
         + "attest_restored_cli_as_ops() { printf 'cli\\n' >>\"$TRACE\"; }\n"
         + "restart_root_action_broker_for_release() { printf 'broker\\n' >>\"$TRACE\"; }\n"
         + "root_action_broker_inactive_attested() { printf 'inactive:%s\\n' \"$1\" >>\"$TRACE\"; }\n"
+        + "root_action_broker_absent_attested() { printf 'absent:%s\\n' \"$1\" >>\"$TRACE\"; }\n"
         + _function("restore_previous_active_identity")
-        + f"\nrestore_previous_active_identity /candidate {TARGET} '' inactive /backup\n"
+        + f"\nrestore_previous_active_identity /candidate {TARGET} '' absent /backup\n"
     )
     completed = _run_bash(tmp_path, body)
     assert completed.returncode == 0, completed.stderr
     assert trace.read_text(encoding="utf-8").splitlines() == [
         "identity:/candidate::/backup",
-        "inactive:agent-runtime-root-action-broker.service",
+        "absent:agent-runtime-root-action-broker.service",
         "info:activation_rollback=previous_identity_restored",
     ]
+
+
+@pytest.mark.parametrize(("systemctl_rc", "expected"), [(3, "inactive"), (4, "absent")])
+def test_broker_pre_activation_distinguishes_inactive_from_absent(
+    tmp_path: Path, systemctl_rc: int, expected: str
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    systemctl = fake_bin / "systemctl"
+    systemctl.write_text(
+        f"#!/usr/bin/env bash\nexit {systemctl_rc}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    systemctl.chmod(0o755)
+    body = (
+        f"PATH={_shell_path(fake_bin)!r}:$PATH\n"
+        + "ROOT_ACTION_BROKER_SERVICE_FILE=/etc/systemd/system/agent-runtime-root-action-broker.service\n"
+        + "ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=1\n"
+        + "die() { printf 'die:%s\\n' \"$*\"; exit 23; }\n"
+        + _function("capture_root_action_broker_state")
+        + "\ncapture_root_action_broker_state ''\n"
+    )
+    completed = _run_bash(tmp_path, body)
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == f"{expected}\n"
 
 
 def test_restore_failure_never_reports_restored_identity(tmp_path: Path) -> None:
@@ -398,6 +433,52 @@ def test_broker_success_never_enters_restore_and_cleans_backup(tmp_path: Path) -
     ]
 
 
+def test_real_broker_unit_write_failure_reaches_restore_boundary(tmp_path: Path) -> None:
+    release = tmp_path / "release"
+    unit_dir = release / "systemd"
+    unit_dir.mkdir(parents=True)
+    (unit_dir / "agent-runtime-root-action-broker.service").write_text(
+        "ExecStart=@@CURRENT_LINK@@/bin\nEnvironment=AGENT_RUNTIME_OPS_RELEASE=@@RELEASE_DIR@@\n",
+        encoding="utf-8",
+    )
+    trace = tmp_path / "trace"
+    body = (
+        "ROOT=$(cd \"$(dirname \"$0\")\" && pwd -P)\n"
+        + f"TRACE={str(trace)!r}\n"
+        + "ROOT_ACTION_TRUSTED_ACCOUNT=svcops\n"
+        + "INSTALL_ROOT=$ROOT/install\n"
+        + "ROOT_ACTION_STATE_ROOT=$ROOT/state\n"
+        + "ROOT_ACTION_PRIVATE_ROOT=$ROOT/state/private\n"
+        + "ROOT_ACTION_PUBLIC_ROOT=$ROOT/state/public\n"
+        + "ROOT_ACTION_RUNTIME_ROOT=$ROOT/run\n"
+        + "ROOT_ACTION_BROKER_SERVICE_FILE=$ROOT/broker.service\n"
+        + "getent() { return 0; }\n"
+        + "id() { if [[ \"${1:-}\" == '-gn' ]]; then printf 'svcops\\n'; else command id \"$@\"; fi; }\n"
+        + "command() { if [[ \"${1:-}\" == '-v' && \"${2:-}\" == 'systemctl' ]]; then return 1; fi; builtin command \"$@\"; }\n"
+        + "install() { local last=\"${!#}\"; if [[ \"$last\" == \"$ROOT_ACTION_BROKER_SERVICE_FILE\" ]]; then printf 'unit-write-failed\\n' >>\"$TRACE\"; return 19; fi; return 0; }\n"
+        + "info() { printf 'info:%s\\n' \"$*\" >>\"$TRACE\"; }\n"
+        + "die() { printf 'die:%s\\n' \"$*\" >>\"$TRACE\"; exit 23; }\n"
+        + "capture_root_action_broker_unit_backup() { printf 'capture\\n' >>\"$TRACE\"; }\n"
+        + "restore_root_action_broker_unit_backup() { printf 'restore-unit\\n' >>\"$TRACE\"; }\n"
+        + "restore_previous_active_identity() { printf 'restore-identity\\n' >>\"$TRACE\"; }\n"
+        + "cleanup_activation_identity_backup() { printf 'cleanup\\n' >>\"$TRACE\"; }\n"
+        + _function("install_root_action_broker_contract")
+        + _function("install_root_action_broker_or_restore")
+        + "\ninstall_root_action_broker_or_restore \"$ROOT/release\" "
+        + f"{TARGET} /previous active \"$ROOT/backup\"\n"
+    )
+    completed = _run_bash(tmp_path, body)
+    assert completed.returncode == 23, completed.stderr
+    assert trace.read_text(encoding="utf-8").splitlines() == [
+        "capture",
+        "unit-write-failed",
+        "restore-unit",
+        "restore-identity",
+        "cleanup",
+        "die:root-action broker setup failed; previous active identity restored",
+    ]
+
+
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX links and modes")
 def test_restore_previous_activation_identity_uses_exact_wrapper_bytes(
     tmp_path: Path,
@@ -459,11 +540,20 @@ def test_first_install_partial_wrapper_removal_is_failure(tmp_path: Path) -> Non
     current = tmp_path / "current"
     current.symlink_to(release)
     paths = [tmp_path / name for name in ("opsctl", "mcp", "gemini", "manifest")]
-    for path in paths:
-        path.write_text("managed\n", encoding="utf-8")
+    paths[0].write_text(
+        "#!/usr/bin/env bash\n"
+        f'exec "{current}/.venv/bin/opsctl" "$@"\n',
+        encoding="utf-8",
+    )
+    paths[1].write_text(
+        "#!/usr/bin/env bash\n"
+        f'exec "{current}/.venv/bin/agent-runtime-ops-mcp" "$@"\n',
+        encoding="utf-8",
+    )
     paths[2].write_text(
         "agent-runtime-ops managed gemini wrapper\n", encoding="utf-8"
     )
+    paths[3].symlink_to("current/.agent-runtime-ops-manifest")
     body = (
         f"CURRENT_LINK={str(current)!r}\n"
         + f"BIN_LINK={str(paths[0])!r}\n"

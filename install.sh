@@ -317,6 +317,18 @@ root_action_broker_inactive_attested() {
   [[ "$active_check_rc" -eq 3 ]]
 }
 
+root_action_broker_absent_attested() {
+  local service_name="$1"
+  local active_check_rc
+  if /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+    systemctl is-active --quiet "$service_name"; then
+    return 1
+  else
+    active_check_rc="$?"
+  fi
+  [[ "$active_check_rc" -eq 4 ]]
+}
+
 restart_root_action_broker_for_release() {
   local service_name="$1"
   local release_dir="$2"
@@ -343,57 +355,56 @@ install_root_action_broker_contract() {
   local release_dir="$1"
   local unit_source="$release_dir/systemd/agent-runtime-root-action-broker.service"
   local active_check_rc install_root_real current_path service_name unit_tmp
-  [[ -f "$unit_source" && ! -L "$unit_source" ]] \
-    || die "missing root-action broker unit source: $unit_source"
+  [[ -f "$unit_source" && ! -L "$unit_source" ]] || return 1
   # Resolve the trusted reader by its production account name at install time.
   # Numeric IDs are host facts and must never be embedded in the release.
-  getent passwd "$ROOT_ACTION_TRUSTED_ACCOUNT" >/dev/null \
-    || die "missing trusted root-action reader account: $ROOT_ACTION_TRUSTED_ACCOUNT"
-  getent group "$ROOT_ACTION_TRUSTED_ACCOUNT" >/dev/null \
-    || die "missing trusted root-action reader group: $ROOT_ACTION_TRUSTED_ACCOUNT"
+  getent passwd "$ROOT_ACTION_TRUSTED_ACCOUNT" >/dev/null || return 1
+  getent group "$ROOT_ACTION_TRUSTED_ACCOUNT" >/dev/null || return 1
   [[ "$(id -gn "$ROOT_ACTION_TRUSTED_ACCOUNT")" == "$ROOT_ACTION_TRUSTED_ACCOUNT" ]] \
-    || die "trusted root-action reader primary group must match its account name"
-  install_root_real="$(realpath -m "$INSTALL_ROOT")"
+    || return 1
+  install_root_real="$(realpath -m "$INSTALL_ROOT")" || return 1
   current_path="$install_root_real/current"
-  [[ "$current_path" =~ ^/[A-Za-z0-9._/-]+$ ]] \
-    || die "root-action broker current path must be an absolute control-free system path"
-  install -d -o root -g "$ROOT_ACTION_TRUSTED_ACCOUNT" -m 0750 "$ROOT_ACTION_STATE_ROOT"
-  install -d -o root -g root -m 0700 "$ROOT_ACTION_PRIVATE_ROOT"
-  install -d -o root -g "$ROOT_ACTION_TRUSTED_ACCOUNT" -m 0750 "$ROOT_ACTION_PUBLIC_ROOT"
-  install -d -o root -g "$ROOT_ACTION_TRUSTED_ACCOUNT" -m 0750 "$ROOT_ACTION_RUNTIME_ROOT"
-  unit_tmp="$(mktemp)"
+  [[ "$current_path" =~ ^/[A-Za-z0-9._/-]+$ ]] || return 1
+  install -d -o root -g "$ROOT_ACTION_TRUSTED_ACCOUNT" -m 0750 "$ROOT_ACTION_STATE_ROOT" \
+    || return 1
+  install -d -o root -g root -m 0700 "$ROOT_ACTION_PRIVATE_ROOT" || return 1
+  install -d -o root -g "$ROOT_ACTION_TRUSTED_ACCOUNT" -m 0750 "$ROOT_ACTION_PUBLIC_ROOT" \
+    || return 1
+  install -d -o root -g "$ROOT_ACTION_TRUSTED_ACCOUNT" -m 0750 "$ROOT_ACTION_RUNTIME_ROOT" \
+    || return 1
+  unit_tmp="$(mktemp)" || return 1
   sed \
     -e "s|@@CURRENT_LINK@@|$current_path|g" \
     -e "s|@@RELEASE_DIR@@|$release_dir|g" \
-    "$unit_source" >"$unit_tmp"
+    "$unit_source" >"$unit_tmp" || { rm -f -- "$unit_tmp"; return 1; }
   ! grep -Eq '@@(CURRENT_LINK|RELEASE_DIR)@@' "$unit_tmp" \
-    || die "root-action broker unit placeholder was not fully materialized"
-  install -o root -g root -m 0644 "$unit_tmp" "$ROOT_ACTION_BROKER_SERVICE_FILE"
-  rm -f "$unit_tmp"
+    || { rm -f -- "$unit_tmp"; return 1; }
+  install -o root -g root -m 0644 "$unit_tmp" "$ROOT_ACTION_BROKER_SERVICE_FILE" \
+    || { rm -f -- "$unit_tmp"; return 1; }
+  rm -f -- "$unit_tmp" || return 1
   if command -v systemctl >/dev/null 2>&1; then
-    [[ -x /usr/bin/timeout ]] || die "missing command: /usr/bin/timeout"
+    [[ -x /usr/bin/timeout ]] || return 1
     /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
       systemctl daemon-reload >/dev/null \
-      || die "root-action broker daemon-reload timed out or failed"
-    service_name="$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")"
+      || return 1
+    service_name="$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")" || return 1
     if /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
       systemctl is-active --quiet "$service_name"; then
       /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
         systemctl restart "$service_name" >/dev/null \
-        || die "root-action broker restart timed out or failed"
+        || return 1
       wait_for_root_action_broker_release "$service_name" "$release_dir" \
-        || die "root-action broker post-restart attestation failed closed"
-      info "root_action_broker_update=active_restarted_release_verified"
+        || return 1
+      info "root_action_broker_update=active_restarted_release_verified" || return 1
     else
       active_check_rc="$?"
-      [[ "$active_check_rc" -eq 3 ]] \
-        || die "root-action broker active-state probe timed out or failed"
+      [[ "$active_check_rc" -eq 3 ]] || return 1
     fi
   fi
   # An inactive broker remains a separate ratified activation boundary. An
   # already-active broker must move with self-update so old code can be pruned.
-  info "root_action_broker_unit=$ROOT_ACTION_BROKER_SERVICE_FILE"
-  info "root_action_broker_activation=deferred_not_enabled_or_started"
+  info "root_action_broker_unit=$ROOT_ACTION_BROKER_SERVICE_FILE" || return 1
+  info "root_action_broker_activation=deferred_not_enabled_or_started" || return 1
 }
 
 capture_root_action_broker_unit_backup() {
@@ -831,30 +842,30 @@ archive_legacy_state_files() {
 activate_release() {
   local release_dir="$1"
   local release_name
-  release_name="$(basename "$release_dir")"
+  release_name="$(basename "$release_dir")" || return 1
   local next_link="$INSTALL_ROOT/.current.next"
-  [[ -d "$release_dir" ]] || die "missing release dir: $release_dir"
-  ln -sfn "releases/$release_name" "$next_link"
-  mv -Tf "$next_link" "$CURRENT_LINK"
-  rm -f "$BIN_LINK"
-  cat >"$BIN_LINK" <<EOF
+  [[ -d "$release_dir" ]] || return 1
+  ln -sfn "releases/$release_name" "$next_link" || return 1
+  mv -Tf "$next_link" "$CURRENT_LINK" || return 1
+  rm -f "$BIN_LINK" || return 1
+  cat >"$BIN_LINK" <<EOF || return 1
 #!/usr/bin/env bash
 set -euo pipefail
 exec "$CURRENT_LINK/.venv/bin/opsctl" "\$@"
 EOF
-  chmod 0755 "$BIN_LINK"
-  rm -f "$MCP_BIN_LINK"
-  cat >"$MCP_BIN_LINK" <<EOF
+  chmod 0755 "$BIN_LINK" || return 1
+  rm -f "$MCP_BIN_LINK" || return 1
+  cat >"$MCP_BIN_LINK" <<EOF || return 1
 #!/usr/bin/env bash
 set -euo pipefail
 exec "$CURRENT_LINK/.venv/bin/agent-runtime-ops-mcp" "\$@"
 EOF
-  chmod 0755 "$MCP_BIN_LINK"
+  chmod 0755 "$MCP_BIN_LINK" || return 1
   if [[ -e "$GEMINI_BIN_LINK" ]] && ! grep -q 'agent-runtime-ops managed gemini wrapper' "$GEMINI_BIN_LINK" 2>/dev/null; then
-    die "refusing to overwrite unmanaged Gemini wrapper: $GEMINI_BIN_LINK"
+    return 1
   fi
-  rm -f "$GEMINI_BIN_LINK"
-  cat >"$GEMINI_BIN_LINK" <<EOF
+  rm -f "$GEMINI_BIN_LINK" || return 1
+  cat >"$GEMINI_BIN_LINK" <<EOF || return 1
 #!/usr/bin/env bash
 set -euo pipefail
 # agent-runtime-ops managed gemini wrapper
@@ -893,12 +904,12 @@ if [[ "\$(id -un 2>/dev/null || true)" == "\$OPS_USER" ]]; then
 fi
 exec "$CURRENT_LINK/agent-clis/gemini-cli/node_modules/.bin/gemini" "\$@"
 EOF
-  chmod 0755 "$GEMINI_BIN_LINK"
-  ln -sfn "current/.agent-runtime-ops-manifest" "$MANIFEST"
-  chown root:"$OPS_GROUP" "$BIN_LINK" 2>/dev/null || true
-  chown root:"$OPS_GROUP" "$MCP_BIN_LINK" 2>/dev/null || true
-  chown root:"$OPS_GROUP" "$GEMINI_BIN_LINK" 2>/dev/null || true
-  chown -h root:"$OPS_GROUP" "$CURRENT_LINK" "$MANIFEST" 2>/dev/null || true
+  chmod 0755 "$GEMINI_BIN_LINK" || return 1
+  ln -sfn "current/.agent-runtime-ops-manifest" "$MANIFEST" || return 1
+  chown root:"$OPS_GROUP" "$BIN_LINK" || return 1
+  chown root:"$OPS_GROUP" "$MCP_BIN_LINK" || return 1
+  chown root:"$OPS_GROUP" "$GEMINI_BIN_LINK" || return 1
+  chown -h root:"$OPS_GROUP" "$CURRENT_LINK" "$MANIFEST" || return 1
 }
 
 deactivate_first_release() {
@@ -1356,9 +1367,11 @@ capture_root_action_broker_state() {
   else
     active_check_rc="$?"
   fi
-  [[ "$active_check_rc" -eq 3 ]] \
-    || die "root-action broker pre-activation state probe failed"
-  printf 'inactive\n'
+  case "$active_check_rc" in
+    3) printf 'inactive\n' ;;
+    4) printf 'absent\n' ;;
+    *) die "root-action broker pre-activation state probe failed" ;;
+  esac
 }
 
 restore_previous_active_identity() {
@@ -1383,6 +1396,10 @@ restore_previous_active_identity() {
       service_name="$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")"
       root_action_broker_inactive_attested "$service_name" || return 1
       ;;
+    absent)
+      service_name="$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")" || return 1
+      root_action_broker_absent_attested "$service_name" || return 1
+      ;;
     unavailable) ;;
     *) return 1 ;;
   esac
@@ -1395,10 +1412,12 @@ activate_and_attest_cli_or_restore() {
   local previous_release="$3"
   local broker_state="$4"
   local backup_dir="$5"
-  if ! (
-    activate_release "$release_dir"
-    attest_active_cli_as_ops "$release_dir" "$commit"
-  ); then
+  local activation_rc=0
+  activate_release "$release_dir" || activation_rc="$?"
+  if [[ "$activation_rc" -eq 0 ]]; then
+    attest_active_cli_as_ops "$release_dir" "$commit" || activation_rc="$?"
+  fi
+  if [[ "$activation_rc" -ne 0 ]]; then
     restore_previous_active_identity \
       "$release_dir" "$commit" "$previous_release" "$broker_state" "$backup_dir" \
       || die "post-activation svcops CLI attestation failed and previous identity restoration failed"
@@ -1415,7 +1434,7 @@ install_root_action_broker_or_restore() {
   local previous_release="$3"
   local broker_state="$4"
   local backup_dir="$5"
-  local identity_restore_rc=0 unit_restore_rc=0
+  local broker_install_rc=0 identity_restore_rc=0 unit_restore_rc=0
   if ! capture_root_action_broker_unit_backup "$backup_dir"; then
     restore_previous_active_identity \
       "$release_dir" "$commit" "$previous_release" "$broker_state" "$backup_dir" \
@@ -1424,7 +1443,8 @@ install_root_action_broker_or_restore() {
       || die "previous active identity restored but activation backup cleanup failed"
     die "broker unit capture failed; previous active identity restored"
   fi
-  if (install_root_action_broker_contract "$release_dir"); then
+  install_root_action_broker_contract "$release_dir" || broker_install_rc="$?"
+  if [[ "$broker_install_rc" -eq 0 ]]; then
     cleanup_activation_identity_backup "$backup_dir" \
       || die "broker installed but activation backup cleanup failed"
     return 0
