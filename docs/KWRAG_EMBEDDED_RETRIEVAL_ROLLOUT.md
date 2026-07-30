@@ -113,10 +113,11 @@ binds their complete artifact/diagnostic identity, and atomically copies them in
 the root-controlled recovery tree. Originals are retained. Unsafe ownership, modes,
 links, unexpected entries, size excess, or concurrent replacement abort activation;
 an operator rollback repeats the same import if installation did not reach it. The
-earliest legacy schema did not capture `.env`, so that exact variant leaves the current
-environment untouched rather than guessing prior secret state. The later pre-relocation
-schema's private `.env` snapshot, owner, group, mode, and explicit-absence marker are
-all migrated and retain their original rollback semantics.
+earliest legacy schema captured only compose and the agent-runtime manifest. It did not
+capture `.env` or the root-owned runtime state manifest, so that exact three-key variant
+leaves both current files untouched rather than guessing their prior state. The later
+pre-relocation schema's state-manifest marker and private `.env` snapshot, owner, group,
+mode, and explicit-absence marker are all migrated with their original rollback semantics.
 For the first upgrade only, a backup whose manifest and compose bytes prove that it
 predates all retrieval fields may complete rollback when live truth also proves both the
 capability and runtime projection labels are wholly absent; partial, extra, current

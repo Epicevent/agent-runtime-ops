@@ -57,6 +57,11 @@ _ROLLBACK_TRANSACTION_KEYS = {
 }
 _BACKUP_SCHEMA = "agent-runtime-backup/v2"
 _LEGACY_BACKUP_IMPORT_SCHEMA = "agent-runtime-legacy-backup-import/v1"
+_LEGACY_BACKUP_V0_METADATA_KEYS = {
+    "created_at",
+    "had_compose",
+    "had_manifest",
+}
 _LEGACY_BACKUP_METADATA_KEYS = {
     "created_at",
     "had_compose",
@@ -292,16 +297,23 @@ def _strict_legacy_metadata(value: bytes, path: Path) -> dict[str, object]:
         raise ValueError(f"legacy backup metadata must be an object: {path}")
     keys = frozenset(metadata)
     if keys not in {
+        frozenset(_LEGACY_BACKUP_V0_METADATA_KEYS),
         frozenset(_LEGACY_BACKUP_METADATA_KEYS),
         frozenset(_LEGACY_BACKUP_METADATA_KEYS | _LEGACY_BACKUP_ENV_METADATA_KEYS),
     }:
         raise ValueError(f"legacy backup metadata keys are invalid: {path}")
     for marker in _LEGACY_BACKUP_ARTIFACTS.values():
+        if marker == "had_state_manifest" and keys == frozenset(
+            _LEGACY_BACKUP_V0_METADATA_KEYS
+        ):
+            continue
         if not isinstance(metadata.get(marker), bool):
             raise ValueError(f"legacy backup {marker} marker must be boolean: {path}")
     if not isinstance(metadata.get("created_at"), str) or not metadata["created_at"]:
         raise ValueError(f"legacy backup created_at is invalid: {path}")
-    if not isinstance(metadata.get("state_manifest_path"), str):
+    if keys != frozenset(_LEGACY_BACKUP_V0_METADATA_KEYS) and not isinstance(
+        metadata.get("state_manifest_path"), str
+    ):
         raise ValueError(f"legacy backup state_manifest_path is invalid: {path}")
     if "had_env" in metadata:
         had_env = metadata.get("had_env")
@@ -609,7 +621,10 @@ def _validate_backup_integrity(
         present = _metadata_boolean(
             metadata,
             marker,
-            required=not (legacy_import is not None and marker == "had_env"),
+            required=not (
+                legacy_import is not None
+                and marker in {"had_env", "had_state_manifest"}
+            ),
         )
         artifact_path = backup_dir / name
         expected_digest = artifact_digests.get(name)
@@ -828,7 +843,7 @@ def _read_legacy_backup_directory(
         artifact_digests: dict[str, str | None] = {}
         total_bytes = len(metadata_bytes)
         for name, marker in _LEGACY_BACKUP_ARTIFACTS.items():
-            present = bool(metadata[marker])
+            present = bool(metadata[marker]) if marker in metadata else False
             if present != (name in entries):
                 raise ValueError(
                     f"legacy backup artifact marker mismatch: {backup_path / name}"
@@ -1058,7 +1073,6 @@ def _publish_legacy_backup(
             "created_at": source_metadata["created_at"],
             "had_compose": source_metadata["had_compose"],
             "had_manifest": source_metadata["had_manifest"],
-            "had_state_manifest": source_metadata["had_state_manifest"],
             "legacy_source": {
                 "backup_json_sha256": source["backup_json_sha256"],
                 "backup_name": source_name,
@@ -1066,8 +1080,14 @@ def _publish_legacy_backup(
                 "source_identity": source["source_identity"],
             },
             "schema": _BACKUP_SCHEMA,
-            "state_manifest_path": source_metadata["state_manifest_path"],
         }
+        if "had_state_manifest" in source_metadata:
+            metadata.update(
+                {
+                    "had_state_manifest": source_metadata["had_state_manifest"],
+                    "state_manifest_path": source_metadata["state_manifest_path"],
+                }
+            )
         if "had_env" in source_metadata:
             metadata.update(
                 {
@@ -1398,10 +1418,15 @@ def restore_backup(
     state_manifest_file = state_manifest_path(state_root, slot, create_parent=True)
     had_compose = _metadata_boolean(metadata, "had_compose")
     had_manifest = _metadata_boolean(metadata, "had_manifest")
-    had_state_manifest = _metadata_boolean(metadata, "had_state_manifest")
+    legacy_import = _legacy_import_metadata(metadata)
+    had_state_manifest = _metadata_boolean(
+        metadata,
+        "had_state_manifest",
+        required=legacy_import is None,
+    )
     had_env = _validate_env_restore_inputs(runtime_dir, backup_dir, metadata)
 
-    restore_plan = (
+    restore_plan: tuple[tuple[bool | None, Path, Path], ...] = (
         (
             had_compose,
             backup_dir / "docker-compose.agent-runtime.yml",
@@ -1411,6 +1436,8 @@ def restore_backup(
         (had_state_manifest, backup_dir / "manifest.yaml", state_manifest_file),
     )
     for had_file, source, target in restore_plan:
+        if had_file is None:
+            continue
         _validate_managed_target(target)
         if had_file and (source.is_symlink() or not source.is_file()):
             raise ValueError(f"backup restore source must be a regular file: {source}")
@@ -1435,13 +1462,17 @@ def restore_backup(
 
     restore_backup_env(runtime_dir, backup_dir)
     for had_file, source, target in restore_plan:
+        if had_file is None:
+            continue
         if had_file:
             _restore_regular_file(source, target)
         else:
             _remove_regular_file(target)
 
     if not had_compose:
-        active_paths = [compose_path, manifest_path, state_manifest_file]
+        active_paths = [compose_path, manifest_path]
+        if had_state_manifest is False:
+            active_paths.append(state_manifest_file)
         if had_env is False:
             active_paths.append(runtime_dir / ".env")
         if any(path.exists() or path.is_symlink() for path in active_paths):

@@ -72,6 +72,34 @@ def _legacy_backup(
     return backup
 
 
+def _earliest_legacy_backup(
+    runtime_dir: Path,
+    *,
+    name: str = "20260608T151423+0900",
+    had_runtime: bool = True,
+) -> Path:
+    source = _legacy_backup(runtime_dir, name=name, diagnostics=False)
+    metadata_path = source / "backup.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata.pop("had_state_manifest")
+    metadata.pop("state_manifest_path")
+    metadata["had_compose"] = had_runtime
+    metadata["had_manifest"] = had_runtime
+    metadata_path.write_text(
+        json.dumps(metadata, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    metadata_path.chmod(0o644)
+    (source / "manifest.yaml").unlink()
+    if not had_runtime:
+        for artifact_name in (
+            "docker-compose.agent-runtime.yml",
+            ".agent-runtime-manifest",
+        ):
+            (source / artifact_name).unlink()
+    return source
+
+
 @POSIX_ONLY
 def test_valid_legacy_backup_is_durably_adopted_once_without_removing_source(
     tmp_path: Path,
@@ -111,8 +139,115 @@ def test_valid_legacy_backup_is_durably_adopted_once_without_removing_source(
     assert import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root) == []
 
 
+@POSIX_ONLY
+def test_earliest_three_key_backup_with_compose_and_manifest_imports(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    source = _earliest_legacy_backup(runtime_dir)
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+
+    imported = import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root)
+
+    assert len(imported) == 1
+    adopted = imported[0]
+    assert (adopted / "docker-compose.agent-runtime.yml").read_bytes() == (
+        source / "docker-compose.agent-runtime.yml"
+    ).read_bytes()
+    assert (adopted / ".agent-runtime-manifest").read_bytes() == (
+        source / ".agent-runtime-manifest"
+    ).read_bytes()
+    metadata = json.loads((adopted / "backup.json").read_text(encoding="utf-8"))
+    assert metadata["had_compose"] is True
+    assert metadata["had_manifest"] is True
+    assert "had_state_manifest" not in metadata
+    assert metadata["artifact_sha256"]["manifest.yaml"] is None
+
+
+@POSIX_ONLY
+def test_earliest_three_key_backup_preserves_unmeasured_state_and_env(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    source = _earliest_legacy_backup(runtime_dir, had_runtime=False)
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    state_manifest = state_root / "runtime" / "oc20" / "manifest.yaml"
+    state_manifest.parent.mkdir(parents=True)
+    state_manifest.write_text("schema: current-state\n", encoding="utf-8")
+    env_path = runtime_dir / ".env"
+    env_path.write_text("API_SERVER_KEY=current-secret\n", encoding="utf-8")
+
+    imported = import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root)
+
+    assert len(imported) == 1
+    adopted = imported[0]
+    assert source.is_dir()
+    metadata = json.loads((adopted / "backup.json").read_text(encoding="utf-8"))
+    assert "had_state_manifest" not in metadata
+    assert "state_manifest_path" not in metadata
+    assert "had_env" not in metadata
+    assert metadata["artifact_sha256"]["manifest.yaml"] is None
+    assert metadata["artifact_sha256"][".env"] is None
+
+    with patch(
+        "agent_runtime_ops.domain.runtime_backup._empty_baseline_project_residue",
+        return_value=(True, "empty_baseline_project_absent"),
+    ):
+        ok, reason = restore_backup("oc20", runtime_dir, adopted, state_root)
+
+    assert ok is True
+    assert reason == "rollback_empty_baseline_restored"
+    assert state_manifest.read_text(encoding="utf-8") == "schema: current-state\n"
+    assert env_path.read_text(encoding="utf-8") == "API_SERVER_KEY=current-secret\n"
+
+
+@POSIX_ONLY
+def test_earliest_backup_rejects_unmeasured_state_manifest_artifact(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    source = _earliest_legacy_backup(runtime_dir)
+    unexpected = source / "manifest.yaml"
+    unexpected.write_text("schema: must-not-be-guessed\n", encoding="utf-8")
+    unexpected.chmod(0o644)
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+
+    with pytest.raises(ValueError, match="artifact marker mismatch"):
+        import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root)
+
+    assert not (state_root / "runtime-recovery").exists()
+
+
 def stat_mode(path: Path) -> int:
     return path.stat().st_mode & 0o777
+
+
+def test_earliest_metadata_keyset_is_exact_and_rejects_extensions(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backup.json"
+    earliest = {
+        "created_at": "2026-06-08T15:14:23+09:00",
+        "had_compose": True,
+        "had_manifest": True,
+    }
+
+    assert runtime_backup._strict_legacy_metadata(
+        json.dumps(earliest).encode("utf-8"),
+        path,
+    ) == earliest
+
+    with pytest.raises(ValueError, match="metadata keys are invalid"):
+        runtime_backup._strict_legacy_metadata(
+            json.dumps({**earliest, "unexpected": False}).encode("utf-8"),
+            path,
+        )
 
 
 def _add_legacy_env_metadata(source: Path, value: bytes | None) -> None:
