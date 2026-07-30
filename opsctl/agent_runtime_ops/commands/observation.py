@@ -7,6 +7,7 @@ import re
 import sys
 from typing import Any
 
+from ..canonical_recipes import load_canonical_recipe
 from ..domain.common import is_root as _is_root
 from ..domain.common import state_root as _state_root
 from ..domain.image_approval_policy import (
@@ -23,7 +24,7 @@ from ..domain.update_policy import (
     validate_update_target,
 )
 from ..routing import get_runtime_binding
-from ..state import digest_from_image_ref, load_runtime_target
+from ..state import load_runtime_target
 
 
 READONLY_OBSERVATION_SCHEMA = "agent-runtime-svcops-readonly-observation/v1"
@@ -34,6 +35,11 @@ _CHECK_NAME_RE = re.compile(r"[a-z][a-z0-9_]{0,127}")
 _LINUX_ACCOUNT_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
 _TOKEN_RE = re.compile(r"[a-z][a-z0-9_-]{0,127}")
 _LABEL_VALUE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,255}")
+_IMAGE_REF_RE = re.compile(
+    r"[a-z0-9][a-z0-9._:-]{0,127}"
+    r"(?:/[a-z0-9][a-z0-9._-]{0,127})+"
+    r"@(?P<digest>sha256:[0-9a-f]{64})"
+)
 _INSTANCE_ID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 )
@@ -100,6 +106,13 @@ def _safe_text(value: object, field: str, *, allow_empty: bool = True) -> str:
     if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
         raise ReadonlyObservationError(f"{field}_contains_control_character")
     return value
+
+
+def _validated_image_digest(value: str, field: str) -> str:
+    match = _IMAGE_REF_RE.fullmatch(value)
+    if match is None:
+        raise ReadonlyObservationError(f"{field}_not_digest_pinned")
+    return match.group("digest")
 
 
 def _error_payload(reason_code: str) -> dict[str, object]:
@@ -220,10 +233,8 @@ def _rollout_observation(
         product_image = _safe_text(
             spec.get("product_image"), "product_image", allow_empty=False
         )
-        wrapper_digest = digest_from_image_ref(wrapper_image)
-        product_digest = digest_from_image_ref(product_image)
-        if not wrapper_digest or not product_digest:
-            raise ReadonlyObservationError("runtime_manifest_image_not_digest_pinned")
+        wrapper_digest = _validated_image_digest(wrapper_image, "wrapper_image")
+        product_digest = _validated_image_digest(product_image, "product_image")
         component_digest = _safe_text(
             spec.get("retrieval_component_digest") or "",
             "retrieval_component_digest",
@@ -321,7 +332,13 @@ def _validate_runtime_fields(fields: dict[str, str], target: str) -> None:
         value = fields.get(field) or ""
         if not value.isdecimal() or not 1 <= int(value) <= 65535:
             raise ReadonlyObservationError(f"runtime_{field}_invalid")
-    for field in ("runtime_class", "runtime_profile", "truth_source"):
+    if fields.get("truth_status") != "ok":
+        raise ReadonlyObservationError("runtime_truth_status_invalid")
+    if fields.get("truth_source") != "live_image":
+        raise ReadonlyObservationError("runtime_truth_source_invalid")
+    if fields.get("runtime_class") not in {"customer", "dev"}:
+        raise ReadonlyObservationError("runtime_runtime_class_invalid")
+    for field in ("runtime_profile",):
         value = fields.get(field) or ""
         if _TOKEN_RE.fullmatch(value) is None:
             raise ReadonlyObservationError(f"runtime_{field}_invalid")
@@ -341,8 +358,7 @@ def _validate_runtime_fields(fields: dict[str, str], target: str) -> None:
             raise ReadonlyObservationError(f"runtime_{field}_invalid")
     for field in ("wrapper_image", "product_image"):
         value = fields.get(field) or ""
-        if digest_from_image_ref(value) is None:
-            raise ReadonlyObservationError(f"runtime_{field}_not_digest_pinned")
+        _validated_image_digest(value, f"runtime_{field}")
     if _DIGEST_RE.fullmatch(fields.get("canonical_recipe_digest") or "") is None:
         raise ReadonlyObservationError("runtime_canonical_recipe_digest_invalid")
     for field in (
@@ -356,6 +372,33 @@ def _validate_runtime_fields(fields: dict[str, str], target: str) -> None:
             raise ReadonlyObservationError(f"runtime_{field}_invalid")
     if _REVISION_RE.fullmatch(fields.get("ops_repo_commit") or "") is None:
         raise ReadonlyObservationError("runtime_ops_repo_commit_invalid")
+    recipe_name = fields.get("canonical_recipe_name") or ""
+    runtime_contract = fields.get("runtime_contract") or ""
+    if _TOKEN_RE.fullmatch(recipe_name) is None:
+        raise ReadonlyObservationError("runtime_canonical_recipe_name_invalid")
+    if _LABEL_VALUE_RE.fullmatch(runtime_contract) is None:
+        raise ReadonlyObservationError("runtime_contract_invalid")
+    try:
+        recipe = load_canonical_recipe(recipe_name)
+        runtime_class = fields["runtime_class"]
+        expected_contracts = recipe.data.get("runtime_contracts")
+        expected_profiles = recipe.data.get("runtime_profiles")
+        if not isinstance(expected_contracts, dict) or not isinstance(
+            expected_profiles, dict
+        ):
+            raise ReadonlyObservationError("runtime_canonical_recipe_invalid")
+        if recipe.data.get("family") != fields.get("family"):
+            raise ReadonlyObservationError("runtime_canonical_recipe_family_mismatch")
+        if recipe.digest != fields.get("canonical_recipe_digest"):
+            raise ReadonlyObservationError("runtime_canonical_recipe_digest_mismatch")
+        if expected_contracts.get(runtime_class) != runtime_contract:
+            raise ReadonlyObservationError("runtime_contract_mismatch")
+        if expected_profiles.get(runtime_class) != fields.get("runtime_profile"):
+            raise ReadonlyObservationError("runtime_profile_mismatch")
+    except ReadonlyObservationError:
+        raise
+    except Exception as exc:
+        raise ReadonlyObservationError("runtime_canonical_recipe_invalid") from exc
     for field in ("retrieval_schema", "retrieval_transport"):
         if _LABEL_VALUE_RE.fullmatch(fields.get(field) or "") is None:
             raise ReadonlyObservationError(f"runtime_{field}_invalid")

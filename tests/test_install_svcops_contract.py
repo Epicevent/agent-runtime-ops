@@ -91,7 +91,9 @@ def test_svcops_attestations_are_bounded_minimal_and_prune_is_last() -> None:
     runner = _function("run_cli_as_ops")
     candidate = _function("attest_candidate_cli_as_ops")
     active = _function("attest_active_cli_as_ops")
-    finalizer = _function("attest_active_cli_and_prune")
+    finalizer = _function("attest_active_cli_or_restore")
+    restorer = _function("restore_previous_active_identity")
+    broker_restart = _function("restart_root_action_broker_for_release")
     package = _function("install_package")
     assert "/usr/bin/timeout --kill-after=1" in runner
     assert "runuser -u \"$OPS_USER\" -- env -i" in runner
@@ -99,14 +101,29 @@ def test_svcops_attestations_are_bounded_minimal_and_prune_is_last() -> None:
     assert '"$release_dir/.venv/bin/opsctl"' in candidate
     assert '"$release_dir/agent-clis/gemini-cli/node_modules/.bin/gemini"' in candidate
     assert 'run_cli_as_ops "$BIN_LINK" --state-root "$STATE_ROOT" update status' in active
-    assert finalizer.index('attest_active_cli_as_ops "$release_dir" "$commit"') < finalizer.index(
+    assert "restore_previous_active_identity" in finalizer
+    assert '"$release_dir" "$commit" "$previous_release" "$broker_state"' in finalizer
+    assert "previous active identity restored" in finalizer
+    assert 'activate_release "$previous_release"' in restorer
+    assert 'attest_restored_cli_as_ops "$previous_release" "$expected_ref"' in restorer
+    assert 'restart_root_action_broker_for_release "$service_name" "$previous_release"' in restorer
+    assert '/usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS"' in broker_restart
+    assert 'systemctl restart "$service_name"' in broker_restart
+    assert broker_restart.index('systemctl restart "$service_name"') < broker_restart.index(
+        'wait_for_root_action_broker_release "$service_name" "$release_dir"'
+    )
+    assert package.index('previous_active_release="$(capture_previous_active_release "$commit")"') < package.index(
+        'activate_release "$release_dir"'
+    )
+    assert package.index('activate_release "$release_dir"') < package.index(
+        '"$release_dir" "$commit" "$previous_active_release" "$previous_broker_state"'
+    )
+    assert package.index('"$release_dir" "$commit" "$previous_active_release" "$previous_broker_state"') < package.index(
+        'install_root_action_broker_contract "$release_dir"'
+    )
+    assert package.index('install_root_action_broker_contract "$release_dir"') < package.index(
         "prune_old_release_code"
     )
-    assert "previous release preserved" in finalizer
-    assert package.index('activate_release "$release_dir"') < package.index(
-        'attest_active_cli_and_prune "$release_dir" "$commit"'
-    )
-    assert "prune_old_release_code" not in package
     assert '[[ -x /usr/bin/timeout ]] || die "missing executable: /usr/bin/timeout"' in _function(
         "require_commands"
     )
@@ -217,38 +234,104 @@ def test_update_status_validator_rejects_unknown_duplicate_and_mismatch(
     assert completed.returncode != 0
 
 
-def test_post_activation_failure_never_reaches_prune(tmp_path: Path) -> None:
+def test_post_activation_failure_restores_before_returning_failure(tmp_path: Path) -> None:
     trace = tmp_path / "trace"
     body = (
         f"TRACE={str(trace)!r}\n"
         + "die() { printf 'die:%s\\n' \"$*\" >>\"$TRACE\"; exit 23; }\n"
         + "info() { printf 'info:%s\\n' \"$*\" >>\"$TRACE\"; }\n"
         + "attest_active_cli_as_ops() { return 1; }\n"
-        + "prune_old_release_code() { printf 'prune\\n' >>\"$TRACE\"; }\n"
-        + _function("attest_active_cli_and_prune")
-        + f"\nattest_active_cli_and_prune /release {TARGET}\n"
+        + "restore_previous_active_identity() { printf 'restore:%s:%s:%s:%s\\n' \"$1\" \"$2\" \"$3\" \"$4\" >>\"$TRACE\"; }\n"
+        + _function("attest_active_cli_or_restore")
+        + f"\nattest_active_cli_or_restore /release {TARGET} /previous active\n"
     )
     completed = _run_bash(tmp_path, body)
     assert completed.returncode == 23
     assert trace.read_text(encoding="utf-8").splitlines() == [
-        "die:post-activation svcops CLI attestation failed; previous release preserved"
+        f"restore:/release:{TARGET}:/previous:active",
+        "die:post-activation svcops CLI attestation failed; previous active identity restored",
     ]
 
 
-def test_post_activation_success_allows_prune(tmp_path: Path) -> None:
+def test_post_activation_success_does_not_enter_restore(tmp_path: Path) -> None:
     trace = tmp_path / "trace"
     body = (
         f"TRACE={str(trace)!r}\n"
         + "die() { exit 23; }\n"
         + "info() { printf 'info:%s\\n' \"$*\" >>\"$TRACE\"; }\n"
         + "attest_active_cli_as_ops() { return 0; }\n"
-        + "prune_old_release_code() { printf 'prune\\n' >>\"$TRACE\"; }\n"
-        + _function("attest_active_cli_and_prune")
-        + f"\nattest_active_cli_and_prune /release {TARGET}\n"
+        + "restore_previous_active_identity() { printf 'restore\\n' >>\"$TRACE\"; return 1; }\n"
+        + _function("attest_active_cli_or_restore")
+        + f"\nattest_active_cli_or_restore /release {TARGET} /previous active\n"
     )
     completed = _run_bash(tmp_path, body)
     assert completed.returncode == 0, completed.stderr
     assert trace.read_text(encoding="utf-8").splitlines() == [
         "info:ops_cli_post_activation=svcops_verified",
-        "prune",
     ]
+
+
+def test_restore_repoints_wrappers_and_restarts_exact_previous_broker(tmp_path: Path) -> None:
+    trace = tmp_path / "trace"
+    body = (
+        f"TRACE={str(trace)!r}\n"
+        + "ROOT_ACTION_BROKER_SERVICE_FILE=/etc/systemd/system/agent-runtime-root-action-broker.service\n"
+        + "info() { printf 'info:%s\\n' \"$*\" >>\"$TRACE\"; }\n"
+        + "activate_release() { printf 'activate:%s\\n' \"$1\" >>\"$TRACE\"; }\n"
+        + "attest_restored_cli_as_ops() { printf 'cli:%s:%s\\n' \"$1\" \"$2\" >>\"$TRACE\"; }\n"
+        + "deactivate_first_release() { printf 'deactivate:%s\\n' \"$1\" >>\"$TRACE\"; }\n"
+        + "restart_root_action_broker_for_release() { printf 'broker:%s:%s\\n' \"$1\" \"$2\" >>\"$TRACE\"; }\n"
+        + "root_action_broker_inactive_attested() { printf 'inactive:%s\\n' \"$1\" >>\"$TRACE\"; }\n"
+        + _function("restore_previous_active_identity")
+        + f"\nrestore_previous_active_identity /candidate {TARGET} /previous active\n"
+    )
+    completed = _run_bash(tmp_path, body)
+    assert completed.returncode == 0, completed.stderr
+    assert trace.read_text(encoding="utf-8").splitlines() == [
+        "activate:/previous",
+        f"cli:/previous:{TARGET}",
+        "broker:agent-runtime-root-action-broker.service:/previous",
+        "info:activation_rollback=previous_identity_restored",
+    ]
+
+
+def test_first_install_restore_removes_candidate_and_keeps_broker_inactive(tmp_path: Path) -> None:
+    trace = tmp_path / "trace"
+    body = (
+        f"TRACE={str(trace)!r}\n"
+        + "ROOT_ACTION_BROKER_SERVICE_FILE=/etc/systemd/system/agent-runtime-root-action-broker.service\n"
+        + "info() { printf 'info:%s\\n' \"$*\" >>\"$TRACE\"; }\n"
+        + "activate_release() { printf 'activate:%s\\n' \"$1\" >>\"$TRACE\"; }\n"
+        + "attest_restored_cli_as_ops() { printf 'cli\\n' >>\"$TRACE\"; }\n"
+        + "deactivate_first_release() { printf 'deactivate:%s\\n' \"$1\" >>\"$TRACE\"; }\n"
+        + "restart_root_action_broker_for_release() { printf 'broker\\n' >>\"$TRACE\"; }\n"
+        + "root_action_broker_inactive_attested() { printf 'inactive:%s\\n' \"$1\" >>\"$TRACE\"; }\n"
+        + _function("restore_previous_active_identity")
+        + f"\nrestore_previous_active_identity /candidate {TARGET} '' inactive\n"
+    )
+    completed = _run_bash(tmp_path, body)
+    assert completed.returncode == 0, completed.stderr
+    assert trace.read_text(encoding="utf-8").splitlines() == [
+        "deactivate:/candidate",
+        "inactive:agent-runtime-root-action-broker.service",
+        "info:activation_rollback=previous_identity_restored",
+    ]
+
+
+def test_restore_failure_never_reports_restored_identity(tmp_path: Path) -> None:
+    trace = tmp_path / "trace"
+    body = (
+        f"TRACE={str(trace)!r}\n"
+        + "ROOT_ACTION_BROKER_SERVICE_FILE=/etc/systemd/system/agent-runtime-root-action-broker.service\n"
+        + "info() { printf 'info:%s\\n' \"$*\" >>\"$TRACE\"; }\n"
+        + "activate_release() { printf 'activate:%s\\n' \"$1\" >>\"$TRACE\"; }\n"
+        + "attest_restored_cli_as_ops() { return 1; }\n"
+        + "deactivate_first_release() { return 1; }\n"
+        + "restart_root_action_broker_for_release() { printf 'broker\\n' >>\"$TRACE\"; }\n"
+        + "root_action_broker_inactive_attested() { return 0; }\n"
+        + _function("restore_previous_active_identity")
+        + f"\nrestore_previous_active_identity /candidate {TARGET} /previous active\n"
+    )
+    completed = _run_bash(tmp_path, body)
+    assert completed.returncode != 0
+    assert trace.read_text(encoding="utf-8").splitlines() == ["activate:/previous"]

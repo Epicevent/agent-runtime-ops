@@ -6,6 +6,7 @@ from dataclasses import replace
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -148,6 +149,17 @@ def contract_patches(
             return_value=target or runtime_target(),
         ),
         patch(f"{MODULE}.live_runtime_truth", return_value=truth or runtime_truth()),
+        patch(
+            f"{MODULE}.load_canonical_recipe",
+            return_value=SimpleNamespace(
+                digest=RECIPE,
+                data={
+                    "family": "hermes",
+                    "runtime_contracts": {"customer": "hermes-fast/v1"},
+                    "runtime_profiles": {"customer": "hermes-fast"},
+                },
+            ),
+        ),
         patch(
             f"{MODULE}.pending_rollback_identity",
             return_value=pending_transaction,
@@ -311,6 +323,50 @@ def test_control_or_oversized_runtime_field_fails_surface_closed(
     assert "secret" not in raw
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("wrapper_image", "DEMO_SECRET@sha256:not-a-digest"),
+        ("product_image", "ghcr.io/epicevent/product@sha256:not-a-digest"),
+        ("truth_status", "DEMO_SECRET_VALUE"),
+        ("runtime_contract", "DEMO_SECRET_VALUE"),
+        ("canonical_recipe_name", "DEMO_SECRET_VALUE"),
+    ],
+)
+def test_malformed_label_controlled_runtime_fields_fail_closed_without_relay(
+    capsys, tmp_path: Path, field: str, value: str
+) -> None:
+    truth, checks = runtime_truth()
+    truth[field] = value
+    rc, raw, result = run_observation(
+        capsys, tmp_path, contract_patches(truth=(truth, checks))
+    )
+    assert rc == 1
+    assert result["observations"]["runtime"] == {
+        "status": "unavailable",
+        "reason_code": "runtime_truth_invalid",
+    }
+    assert "DEMO_SECRET" not in raw
+    assert "not-a-digest" not in raw
+
+
+def test_runtime_recipe_identity_must_match_root_owned_canonical_contract(
+    capsys, tmp_path: Path
+) -> None:
+    patches = list(contract_patches())
+    patches[-2] = patch(
+        f"{MODULE}.load_canonical_recipe",
+        side_effect=ValueError("unknown recipe"),
+    )
+    rc, raw, result = run_observation(capsys, tmp_path, tuple(patches))
+    assert rc == 1
+    assert result["observations"]["runtime"] == {
+        "status": "unavailable",
+        "reason_code": "runtime_truth_invalid",
+    }
+    assert "unknown recipe" not in raw
+
+
 def test_disabled_or_alias_target_is_rejected_before_live_observation(
     capsys, tmp_path: Path
 ) -> None:
@@ -344,6 +400,27 @@ def test_manifest_target_mismatch_is_degraded_without_leak(
         "reason_code": "runtime_manifest_invalid",
     }
     assert "secret" not in raw
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("wrapper_image", "product_image"),
+)
+def test_malformed_rollout_image_digest_fails_closed_without_relay(
+    capsys, tmp_path: Path, field: str
+) -> None:
+    target = runtime_target()
+    target.image_spec[field] = "DEMO_SECRET@sha256:not-a-digest"
+    rc, raw, value = run_observation(
+        capsys, tmp_path, contract_patches(target=target)
+    )
+    assert rc == 1
+    assert value["observations"]["rollout"] == {
+        "status": "unavailable",
+        "reason_code": "runtime_manifest_invalid",
+    }
+    assert "DEMO_SECRET" not in raw
+    assert "not-a-digest" not in raw
 
 
 def test_routing_or_manifest_change_during_observation_is_explicitly_degraded(

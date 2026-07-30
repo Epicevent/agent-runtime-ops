@@ -164,5 +164,17 @@ runtime/<slot>/manifest.yaml
 nas-policy.yaml
 ```
 
+## Privileged activation continuity
+
+The installer captures the exact previously active release and whether the
+root-action broker was active before changing `current`. It immediately runs the
+candidate CLI as `svcops`. If that attestation fails, it restores the previous
+`current` link and generated wrappers, re-runs the previous CLI attestation, and
+restarts and re-attests the broker at the exact previous release when the broker
+was already active. A previously inactive broker remains inactive. On a failed
+first install, candidate links are removed rather than left as the active
+identity. The previous release is not pruned until the candidate CLI and broker
+contract have both been verified.
+
 Old slot/lane/release files may still exist as migration or compatibility inputs, but new image
 rollout verification should use runtime bindings, runtime manifests, and live image truth.

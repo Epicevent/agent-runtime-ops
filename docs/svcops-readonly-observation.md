@@ -44,6 +44,15 @@ Routing and runtime-manifest identity are read before and after live truth. A
 legitimate rollout that changes either source during the observation is reported
 as `changed_during_observation`, never combined into a synthetic current tuple.
 
+Image references must be digest-pinned with an exact lowercase
+`sha256:<64-hex>` digest. Runtime profile, runtime contract, canonical recipe
+name, and truth status use bounded contract grammars. The observation also loads
+the root-controlled canonical recipe and requires the observed family, recipe
+digest, runtime profile, and runtime contract to match it. Unknown recipes,
+malformed digests, or label-controlled values outside those grammars make the
+runtime observation unavailable; they are not relayed or redacted into an
+otherwise successful receipt.
+
 Broker-managed terminal status remains the existing exact-handle surface:
 
 ```text

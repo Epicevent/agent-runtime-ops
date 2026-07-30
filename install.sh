@@ -305,6 +305,27 @@ root_action_broker_release_attested() {
     || return 1
 }
 
+root_action_broker_inactive_attested() {
+  local service_name="$1"
+  local active_check_rc
+  if /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+    systemctl is-active --quiet "$service_name"; then
+    return 1
+  else
+    active_check_rc="$?"
+  fi
+  [[ "$active_check_rc" -eq 3 ]]
+}
+
+restart_root_action_broker_for_release() {
+  local service_name="$1"
+  local release_dir="$2"
+  /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+    systemctl restart "$service_name" >/dev/null \
+    || return 1
+  wait_for_root_action_broker_release "$service_name" "$release_dir"
+}
+
 wait_for_root_action_broker_release() {
   local service_name="$1"
   local release_dir="$2"
@@ -829,6 +850,17 @@ EOF
   chown -h root:"$OPS_GROUP" "$CURRENT_LINK" "$MANIFEST" 2>/dev/null || true
 }
 
+deactivate_first_release() {
+  local release_dir="$1"
+  [[ "$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)" == "$release_dir" ]] \
+    || return 1
+  [[ -f "$GEMINI_BIN_LINK" ]] \
+    && grep -q 'agent-runtime-ops managed gemini wrapper' "$GEMINI_BIN_LINK" \
+    || return 1
+  rm -f "$BIN_LINK" "$MCP_BIN_LINK" "$GEMINI_BIN_LINK" "$MANIFEST" "$CURRENT_LINK"
+  [[ ! -e "$CURRENT_LINK" && ! -L "$CURRENT_LINK" ]] || return 1
+}
+
 install_ops_home_agents() {
   local release_dir="$1"
   local target="$release_dir/ops-home/AGENTS.md"
@@ -1094,13 +1126,117 @@ attest_active_cli_as_ops() {
   fi
 }
 
-attest_active_cli_and_prune() {
+attest_restored_cli_as_ops() {
+  local release_dir="$1"
+  local expected_ref="$2"
+  local previous_ref output
+  [[ "$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)" == "$release_dir" ]] \
+    || return 1
+  previous_ref="$(manifest_value "$release_dir/.agent-runtime-ops-manifest" source_commit)"
+  require_full_sha "$previous_ref"
+  if [[ -f "$STATE_ROOT/ops-update.yaml" ]]; then
+    output="$(
+      run_cli_as_ops "$BIN_LINK" --state-root "$STATE_ROOT" update status
+    )" || return 1
+    validate_update_status_output "$output" "$expected_ref" no || return 1
+    grep -Fqx "installed_ref=$previous_ref" <<<"$output" || return 1
+  else
+    run_cli_as_ops "$BIN_LINK" profile list >/dev/null || return 1
+  fi
+  run_cli_as_ops "$GEMINI_BIN_LINK" --version >/dev/null || return 1
+  [[ -x "$MCP_BIN_LINK" ]] || return 1
+}
+
+capture_previous_active_release() {
+  local expected_ref="$1"
+  local previous_release releases_real
+  if [[ ! -L "$CURRENT_LINK" ]]; then
+    [[ ! -e "$CURRENT_LINK" ]] || die "current release path exists but is not a symlink"
+    [[ ! -e "$BIN_LINK" && ! -e "$MCP_BIN_LINK" && ! -e "$MANIFEST" ]] \
+      || die "first install requires absent managed current wrappers"
+    if [[ -e "$GEMINI_BIN_LINK" ]]; then
+      grep -q 'agent-runtime-ops managed gemini wrapper' "$GEMINI_BIN_LINK" \
+        || die "refusing first install with unmanaged Gemini wrapper"
+      die "first install requires absent managed current wrappers"
+    fi
+    printf '\n'
+    return 0
+  fi
+  previous_release="$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)"
+  releases_real="$(realpath -m "$RELEASES_DIR")"
+  [[ -n "$previous_release" && "$previous_release" == "$releases_real"/* ]] \
+    || die "current release resolves outside the releases directory"
+  [[ -d "$previous_release" && ! -L "$previous_release" ]] \
+    || die "current release target is not a fixed release directory"
+  attest_restored_cli_as_ops "$previous_release" "$expected_ref" \
+    || die "previous active svcops CLI identity is not restorable"
+  printf '%s\n' "$previous_release"
+}
+
+capture_root_action_broker_state() {
+  local previous_release="$1"
+  local active_check_rc service_name
+  if ! command -v systemctl >/dev/null 2>&1; then
+    printf 'unavailable\n'
+    return 0
+  fi
+  service_name="$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")"
+  if /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+    systemctl is-active --quiet "$service_name"; then
+    [[ -n "$previous_release" ]] \
+      || die "active root-action broker has no previous active release"
+    root_action_broker_release_attested "$service_name" "$previous_release" \
+      || die "previous root-action broker release is not exactly attested"
+    printf 'active\n'
+    return 0
+  else
+    active_check_rc="$?"
+  fi
+  [[ "$active_check_rc" -eq 3 ]] \
+    || die "root-action broker pre-activation state probe failed"
+  printf 'inactive\n'
+}
+
+restore_previous_active_identity() {
+  local failed_release="$1"
+  local expected_ref="$2"
+  local previous_release="$3"
+  local broker_state="$4"
+  local service_name
+  if [[ -n "$previous_release" ]]; then
+    activate_release "$previous_release" || return 1
+    attest_restored_cli_as_ops "$previous_release" "$expected_ref" || return 1
+  else
+    deactivate_first_release "$failed_release" || return 1
+  fi
+  case "$broker_state" in
+    active)
+      service_name="$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")"
+      restart_root_action_broker_for_release "$service_name" "$previous_release" \
+        || return 1
+      ;;
+    inactive)
+      service_name="$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")"
+      root_action_broker_inactive_attested "$service_name" || return 1
+      ;;
+    unavailable) ;;
+    *) return 1 ;;
+  esac
+  info "activation_rollback=previous_identity_restored"
+}
+
+attest_active_cli_or_restore() {
   local release_dir="$1"
   local commit="$2"
-  attest_active_cli_as_ops "$release_dir" "$commit" \
-    || die "post-activation svcops CLI attestation failed; previous release preserved"
+  local previous_release="$3"
+  local broker_state="$4"
+  if ! attest_active_cli_as_ops "$release_dir" "$commit"; then
+    restore_previous_active_identity \
+      "$release_dir" "$commit" "$previous_release" "$broker_state" \
+      || die "post-activation svcops CLI attestation failed and previous identity restoration failed"
+    die "post-activation svcops CLI attestation failed; previous active identity restored"
+  fi
   info "ops_cli_post_activation=svcops_verified"
-  prune_old_release_code
 }
 
 register_codex_mcp() {
@@ -1118,6 +1254,7 @@ register_codex_mcp() {
 
 install_package() {
   local src commit summary release_name tmp_release release_dir
+  local previous_active_release previous_broker_state
   if ! src="$(repo_root)"; then
     bootstrap_from_git
   fi
@@ -1161,7 +1298,11 @@ install_package() {
   # later fails.
   migrate_legacy_runtime_backups "$release_dir"
 
+  previous_active_release="$(capture_previous_active_release "$commit")"
+  previous_broker_state="$(capture_root_action_broker_state "$previous_active_release")"
   activate_release "$release_dir"
+  attest_active_cli_or_restore \
+    "$release_dir" "$commit" "$previous_active_release" "$previous_broker_state"
   install_root_action_broker_contract "$release_dir"
   install_ops_sudoers
   install_boot_restore_unit
@@ -1178,7 +1319,7 @@ install_package() {
   seed_runtime_bindings
   archive_legacy_state_files
   repair_private_state_permissions
-  attest_active_cli_and_prune "$release_dir" "$commit"
+  prune_old_release_code
 
   info "installed_dir=$release_dir"
   info "current=$CURRENT_LINK"

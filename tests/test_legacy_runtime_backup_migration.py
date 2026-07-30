@@ -922,13 +922,20 @@ def test_install_runs_legacy_backup_migration_before_release_activation() -> Non
     )
     activate_offset = text.index('activate_release "$release_dir"', call_offset)
     attestation_offset = text.index(
-        'attest_active_cli_and_prune "$release_dir" "$commit"', activate_offset
+        "attest_active_cli_or_restore", activate_offset
     )
-    finalizer_start = text.index("attest_active_cli_and_prune() {")
-    prune_offset = text.index("prune_old_release_code", finalizer_start)
+    broker_offset = text.index(
+        'install_root_action_broker_contract "$release_dir"', attestation_offset
+    )
+    prune_offset = text.index("prune_old_release_code", broker_offset)
 
-    assert call_offset < activate_offset < attestation_offset
-    assert finalizer_start < prune_offset
+    assert (
+        call_offset
+        < activate_offset
+        < attestation_offset
+        < broker_offset
+        < prune_offset
+    )
     assert (
         '"$release_dir/.venv/bin/python" -m agent_runtime_ops.install_migrations'
         in text

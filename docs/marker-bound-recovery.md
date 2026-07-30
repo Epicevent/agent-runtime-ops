@@ -24,6 +24,20 @@ declared artifact. Absence, replacement, link/owner/mode drift, digest drift, or
 any expected-field mismatch is rejected before runtime restore with `writes=0`.
 There is no latest-backup or legacy-import fallback in this mode.
 
+The implementation marks mutation started at the exact boundary immediately
+before the first state-directory or runtime-file write. Backup validation and
+other execution failures before that boundary remain rejected with `writes=0`;
+failures after the boundary report `writes=1`.
+
+Marker absence during admission is reported as `transaction_state=absent` and
+`terminal_state=incomplete`; it is never inferred to mean that this request
+committed a recovery. `transaction_state=committed` is emitted only when this
+exact invocation observes the marker finish after the restore and all live
+checks pass. If the private action-log append then fails, the command reports a
+failed, incomplete terminal outcome with `writes=1` and committed transaction
+state. It never rewrites that post-mutation failure as an admission rejection or
+as `writes=0`.
+
 After admission, the existing restore, prior-runtime live checks, and optional
 retrieval verifier run. The exact marker is removed only after those checks pass
 and its full identity is revalidated. A failed live check or verifier leaves the

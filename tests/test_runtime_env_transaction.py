@@ -859,6 +859,51 @@ def test_exact_marker_bound_rollback_commits_only_the_expected_transaction(
     }
 
 
+def test_exact_marker_bound_rollback_reports_committed_write_when_action_log_fails(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runtime_dir, state_root, _backup_dir, identity = _prepare_exact_pending_rollback(
+        tmp_path
+    )
+    candidate = agent_compose_path(runtime_dir)
+    candidate.write_text("candidate\n", encoding="utf-8")
+    completed = subprocess.CompletedProcess(["docker"], 0, "", "")
+    with (
+        patch("agent_runtime_ops.commands.apply._validate_exact_recovery_target"),
+        patch("agent_runtime_ops.commands.apply._is_root", return_value=True),
+        patch("agent_runtime_ops.commands.apply._state_root", return_value=state_root),
+        patch(
+            "agent_runtime_ops.commands.apply.slot_runtime_dir",
+            return_value=runtime_dir,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_backup.run_text_cwd",
+            return_value=completed,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_backup.run_text",
+            return_value=completed,
+        ),
+        patch(
+            "agent_runtime_ops.commands.apply._append_action_log",
+            side_effect=OSError("action log unavailable"),
+        ),
+    ):
+        rc = cmd_rollback(exact_rollback_args(identity))
+
+    assert rc == 1
+    assert not candidate.exists()
+    assert pending_rollback_identity(state_root, "oc20") is None
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["result"] == "failed"
+    assert receipt["reason_code"] == "recovery_committed_action_log_failed"
+    assert receipt["runtime_mutation_started"] is True
+    assert receipt["transaction_state"] == "committed"
+    assert receipt["terminal_state"] == "incomplete"
+    assert receipt["writes"] == 1
+
+
 @pytest.mark.parametrize(
     ("field", "replacement"),
     [
@@ -921,6 +966,8 @@ def test_exact_marker_bound_rollback_rejects_marker_disappearance_under_lock(
     latest.assert_not_called()
     receipt = json.loads(capsys.readouterr().out)
     assert receipt["reason_code"] == "pending_transaction_absent"
+    assert receipt["transaction_state"] == "absent"
+    assert receipt["terminal_state"] == "incomplete"
     assert receipt["writes"] == 0
 
 
@@ -933,6 +980,8 @@ def test_exact_marker_is_revalidated_immediately_before_restore_with_zero_writes
     )
     candidate = agent_compose_path(runtime_dir)
     candidate.write_text("candidate\n", encoding="utf-8")
+    state_slot_dir = state_root / "runtime" / "oc20"
+    assert not state_slot_dir.exists()
     from agent_runtime_ops.domain.runtime_backup import MarkerBoundRecoveryError
 
     with (
@@ -953,11 +1002,47 @@ def test_exact_marker_is_revalidated_immediately_before_restore_with_zero_writes
 
     assert rc == 1
     assert candidate.read_text(encoding="utf-8") == "candidate\n"
+    assert not state_slot_dir.exists()
     assert pending_rollback_identity(state_root, "oc20") == identity
     action_log.assert_not_called()
     receipt = json.loads(capsys.readouterr().out)
     assert receipt["reason_code"] == "marker_sha256_mismatch"
     assert receipt["runtime_mutation_started"] is False
+    assert receipt["writes"] == 0
+
+
+def test_exact_recovery_validation_failure_before_first_write_stays_write_free(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runtime_dir, state_root, _backup_dir, identity = _prepare_exact_pending_rollback(
+        tmp_path
+    )
+    with (
+        patch("agent_runtime_ops.commands.apply._validate_exact_recovery_target"),
+        patch("agent_runtime_ops.commands.apply._is_root", return_value=True),
+        patch("agent_runtime_ops.commands.apply._state_root", return_value=state_root),
+        patch(
+            "agent_runtime_ops.commands.apply.slot_runtime_dir",
+            return_value=runtime_dir,
+        ),
+        patch(
+            "agent_runtime_ops.commands.apply.restore_backup",
+            side_effect=ValueError("backup validation failed"),
+        ),
+        patch("agent_runtime_ops.commands.apply._append_action_log") as action_log,
+    ):
+        rc = cmd_rollback(exact_rollback_args(identity))
+
+    assert rc == 1
+    action_log.assert_not_called()
+    assert pending_rollback_identity(state_root, "oc20") == identity
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["result"] == "rejected"
+    assert receipt["reason_code"] == "recovery_execution_failed_before_mutation"
+    assert receipt["runtime_mutation_started"] is False
+    assert receipt["transaction_state"] == "pending"
+    assert receipt["terminal_state"] == "incomplete"
     assert receipt["writes"] == 0
 
 

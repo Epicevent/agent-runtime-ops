@@ -13,7 +13,7 @@ import shutil
 import stat
 import tempfile
 import threading
-from typing import Iterator
+from typing import Callable, Iterator
 
 from ..profiles import load_profile
 from ..yamlio import load_yaml
@@ -1783,12 +1783,13 @@ def restore_backup(
     state_root: Path,
     *,
     expected_transaction: dict[str, str] | None = None,
+    on_mutation_started: Callable[[], None] | None = None,
 ) -> tuple[bool, str]:
     backup_dir = _validate_backup_dir(state_root, slot, backup_dir)
     metadata, _ = _validate_backup_integrity(state_root, slot, backup_dir)
     compose_path = agent_compose_path(runtime_dir)
     manifest_path = agent_manifest_path(runtime_dir)
-    state_manifest_file = state_manifest_path(state_root, slot, create_parent=True)
+    state_manifest_file = state_manifest_path(state_root, slot, create_parent=False)
     had_compose = _metadata_boolean(metadata, "had_compose")
     had_manifest = _metadata_boolean(metadata, "had_manifest")
     had_state_manifest = _metadata_boolean(
@@ -1806,10 +1807,17 @@ def restore_backup(
         (had_manifest, backup_dir / ".agent-runtime-manifest", manifest_path),
         (had_state_manifest, backup_dir / "manifest.yaml", state_manifest_file),
     )
+    if expected_transaction is None:
+        state_manifest_path(state_root, slot, create_parent=True)
     for had_file, source, target in restore_plan:
         if had_file is None:
             continue
-        _validate_managed_target(target)
+        if not (
+            expected_transaction is not None
+            and target == state_manifest_file
+            and not target.parent.exists()
+        ):
+            _validate_managed_target(target)
         if had_file and (source.is_symlink() or not source.is_file()):
             raise ValueError(f"backup restore source must be a regular file: {source}")
 
@@ -1823,6 +1831,13 @@ def restore_backup(
         )
         if exact_backup != backup_dir:
             raise MarkerBoundRecoveryError("backup_identity_changed_before_restore")
+        # The exact marker and backup must still match under both runtime locks
+        # immediately before the first filesystem write.  Parent creation is a
+        # mutation too, so it belongs strictly after this final admission gate.
+        if on_mutation_started is not None:
+            on_mutation_started()
+        state_manifest_path(state_root, slot, create_parent=True)
+        _validate_managed_target(state_manifest_file)
 
     if not had_compose and compose_path.is_file():
         down = run_text_cwd(
