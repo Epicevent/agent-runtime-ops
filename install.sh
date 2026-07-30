@@ -44,6 +44,7 @@ ROOT_ACTION_POST_RESTART_ATTESTATION_ATTEMPTS=40
 ROOT_ACTION_POST_RESTART_ATTESTATION_INTERVAL_SECONDS=0.25
 ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS=30
 ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=1
+OPS_CLI_ATTESTATION_COMMAND_TIMEOUT_SECONDS=10
 USAGE_DB_DEFAULTS_FILE="${AGENT_RUNTIME_USAGE_DB_DEFAULTS_FILE:-/etc/agent-runtime-ops/usage-writer.cnf}"
 USAGE_PRICING_DIR="${AGENT_RUNTIME_USAGE_PRICING_DIR:-$STATE_ROOT/usage-pricing}"
 USAGE_PRICING_FILE="${AGENT_RUNTIME_USAGE_PRICING_FILE:-$USAGE_PRICING_DIR/current.json}"
@@ -133,6 +134,7 @@ require_commands() {
   command -v python3 >/dev/null || die "missing command: python3"
   command -v rsync >/dev/null || die "missing command: rsync"
   command -v runuser >/dev/null || die "missing command: runuser"
+  [[ -x /usr/bin/timeout ]] || die "missing executable: /usr/bin/timeout"
   command -v node >/dev/null || die "missing command: node"
   command -v npm >/dev/null || die "missing command: npm"
 }
@@ -382,6 +384,24 @@ install_gemini_cli() {
   info "gemini_cli=$package_dir"
 }
 
+normalize_generated_runtime_tree_permissions() {
+  local tree="$1"
+  local unexpected
+  [[ -d "$tree" && ! -L "$tree" ]] || return 1
+  unexpected="$(
+    find "$tree" -xdev -mindepth 1 \
+      ! -type d ! -type f ! -type l -print -quit
+  )" || return 1
+  [[ -z "$unexpected" ]] || return 1
+  # The installer may be invoked below a restrictive operator umask.  Keep
+  # generated code private to root + the operating group, while making the
+  # exact svcops command surface independent of that caller state.  find does
+  # not follow the intentional Python/npm symlinks in these trees.
+  find "$tree" -xdev -type d -exec chmod 0750 {} + || return 1
+  find "$tree" -xdev -type f -perm /0111 -exec chmod 0750 {} + || return 1
+  find "$tree" -xdev -type f ! -perm /0111 -exec chmod 0640 {} + || return 1
+}
+
 install_boot_restore_unit() {
   # Boot-time NAS restore: a one-shot @reboot cron loses the power-cut race
   # (2026-07-07: server booted before the NAS answered; five CIFS mounts
@@ -611,6 +631,7 @@ install_ops_sudoers() {
     printf '%s ALL=(root) NOPASSWD: %s usage status *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s usage cost-estimate *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s artifact probe kwrag-product --revision *\n' "$OPS_USER" "$BIN_LINK"
+    printf '%s ALL=(root) NOPASSWD: %s observation status *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s mitigation *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s config validate *\n' "$OPS_USER" "$BIN_LINK"
     printf '%s ALL=(root) NOPASSWD: %s config migrate *\n' "$OPS_USER" "$BIN_LINK"
@@ -964,6 +985,124 @@ run_as_ops() {
   runuser -u "$OPS_USER" -- env HOME="$OPS_HOME" USER="$OPS_USER" LOGNAME="$OPS_USER" CODEX_HOME="$CODEX_HOME" "$@"
 }
 
+run_cli_as_ops() {
+  local cli="$1"
+  shift
+  /usr/bin/timeout --kill-after=1 "$OPS_CLI_ATTESTATION_COMMAND_TIMEOUT_SECONDS" \
+    runuser -u "$OPS_USER" -- env -i \
+      HOME="$OPS_HOME" \
+      USER="$OPS_USER" \
+      LOGNAME="$OPS_USER" \
+      PATH=/usr/local/bin:/usr/bin:/bin \
+      "$cli" "$@"
+}
+
+validate_update_status_output() {
+  local output="$1"
+  local expected_ref="$2"
+  local require_current="$3"
+  local line key value
+  local update_status="" installed_ref="" repo_url="" approved_ref="" matches=""
+  declare -A seen=()
+  while IFS= read -r line; do
+    [[ -n "$line" && "$line" == *=* ]] || return 1
+    key="${line%%=*}"
+    value="${line#*=}"
+    [[ -z "${seen[$key]:-}" ]] || return 1
+    seen[$key]=1
+    case "$key" in
+      update_status) update_status="$value" ;;
+      installed_ref) installed_ref="$value" ;;
+      repo_url) repo_url="$value" ;;
+      approved_ref) approved_ref="$value" ;;
+      approved_matches_installed) matches="$value" ;;
+      *) return 1 ;;
+    esac
+  done <<<"$output"
+  [[ -n "${seen[update_status]:-}" ]] || return 1
+  [[ -n "${seen[repo_url]:-}" ]] || return 1
+  [[ -n "${seen[approved_ref]:-}" ]] || return 1
+  [[ -n "${seen[approved_matches_installed]:-}" ]] || return 1
+  [[ "$repo_url" == "$REPO_URL" ]] || return 1
+  [[ "$approved_ref" == "$expected_ref" ]] || return 1
+  [[ "$installed_ref" =~ ^[0-9a-f]{40}$ || -z "$installed_ref" ]] || return 1
+  if [[ "$require_current" == "yes" ]]; then
+    [[ "$installed_ref" == "$expected_ref" ]] || return 1
+    [[ "$update_status" == "current" && "$matches" == "yes" ]] || return 1
+    return 0
+  fi
+  if [[ "$installed_ref" == "$expected_ref" ]]; then
+    [[ "$update_status" == "current" && "$matches" == "yes" ]] || return 1
+  else
+    [[ "$update_status" == "ready" && "$matches" == "no" ]] || return 1
+  fi
+}
+
+attest_candidate_cli_as_ops() {
+  local release_dir="$1"
+  local commit="$2"
+  local output
+  if [[ -f "$STATE_ROOT/ops-update.yaml" ]]; then
+    output="$(
+      run_cli_as_ops "$release_dir/.venv/bin/opsctl" \
+        --state-root "$STATE_ROOT" update status
+    )" || return 1
+    validate_update_status_output "$output" "$commit" no || return 1
+  else
+    /usr/bin/timeout --kill-after=1 "$OPS_CLI_ATTESTATION_COMMAND_TIMEOUT_SECONDS" \
+      runuser -u "$OPS_USER" -- env -i \
+        HOME="$OPS_HOME" \
+        USER="$OPS_USER" \
+        LOGNAME="$OPS_USER" \
+        PATH=/usr/local/bin:/usr/bin:/bin \
+        AGENT_RUNTIME_OPS_DEV=1 \
+        AGENT_RUNTIME_OPS_ROOT="$release_dir" \
+        "$release_dir/.venv/bin/opsctl" profile list >/dev/null \
+      || return 1
+  fi
+  run_cli_as_ops \
+    "$release_dir/agent-clis/gemini-cli/node_modules/.bin/gemini" \
+    --version >/dev/null || return 1
+}
+
+prepare_release_for_activation() {
+  local release_dir="$1"
+  local commit="$2"
+  if ! normalize_generated_runtime_tree_permissions "$release_dir/.venv" \
+    || ! normalize_generated_runtime_tree_permissions \
+      "$release_dir/agent-clis/gemini-cli/node_modules" \
+    || ! attest_candidate_cli_as_ops "$release_dir" "$commit"; then
+    rm -rf --one-file-system "$release_dir"
+    die "generated runtime permissions or pre-activation svcops attestation failed"
+  fi
+  info "ops_cli_pre_activation=svcops_verified"
+}
+
+attest_active_cli_as_ops() {
+  local release_dir="$1"
+  local commit="$2"
+  local output
+  [[ "$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)" == "$release_dir" ]] \
+    || return 1
+  if [[ -f "$STATE_ROOT/ops-update.yaml" ]]; then
+    output="$(
+      run_cli_as_ops "$BIN_LINK" --state-root "$STATE_ROOT" update status
+    )" || return 1
+    validate_update_status_output "$output" "$commit" yes || return 1
+  else
+    run_cli_as_ops "$BIN_LINK" profile list >/dev/null || return 1
+  fi
+}
+
+attest_active_cli_and_prune() {
+  local release_dir="$1"
+  local commit="$2"
+  attest_active_cli_as_ops "$release_dir" "$commit" \
+    || die "post-activation svcops CLI attestation failed; previous release preserved"
+  info "ops_cli_post_activation=svcops_verified"
+  prune_old_release_code
+}
+
 register_codex_mcp() {
   if ! command -v codex >/dev/null 2>&1; then
     info "codex_mcp=codex_missing"
@@ -1014,6 +1153,7 @@ install_package() {
   fi
   write_manifest "$release_dir" "$src" "$commit" "$summary"
   chown -R root:"$OPS_GROUP" "$release_dir"
+  prepare_release_for_activation "$release_dir" "$commit"
 
   # Import recovery points with the new release before changing current.  A
   # malformed slot-owned legacy tree aborts the update, while successful
@@ -1038,7 +1178,7 @@ install_package() {
   seed_runtime_bindings
   archive_legacy_state_files
   repair_private_state_permissions
-  prune_old_release_code
+  attest_active_cli_and_prune "$release_dir" "$commit"
 
   info "installed_dir=$release_dir"
   info "current=$CURRENT_LINK"

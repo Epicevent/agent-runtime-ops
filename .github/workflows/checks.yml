@@ -48,6 +48,15 @@ jobs:
           sudo "$(command -v python)" -m pytest -q \
             tests/test_legacy_runtime_backup_migration.py::test_legacy_file_owned_by_another_uid_fails_closed
 
+      - name: Run restrictive-umask install ownership contract
+        run: |
+          python -m pytest -q tests/test_install_svcops_contract.py
+          sudo "$(command -v python)" -m pytest -q \
+            tests/test_install_svcops_contract_posix.py
+
+      - name: Run svcops read-only observation contract
+        run: python -m pytest -q tests/test_readonly_observation.py
+
       - name: List runtime profiles
         run: python -m agent_runtime_ops.cli profile list
 

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import redirect_stdout
+import io
+import json
+import re
 import sys
 
 from ..domain.actions import append_action_log as _append_action_log
@@ -13,7 +17,9 @@ from ..domain.runtime_checks import (
     run_live_slot_checks_with_wait as _run_live_slot_checks_with_wait,
 )
 from ..domain.runtime_backup import (
+    MarkerBoundRecoveryError,
     consume_legacy_retrieval_projection_exemption,
+    finish_exact_rollback_transaction,
     finish_rollback_transaction,
     legacy_retrieval_projection_failures_are_expected,
     legacy_retrieval_projection_failures_may_be_expected,
@@ -21,13 +27,17 @@ from ..domain.runtime_backup import (
     latest_backup,
     load_backup_runtime_contract,
     pending_rollback_backup,
+    pending_rollback_identity,
+    require_exact_pending_rollback,
     restore_backup,
     runtime_host_mutation_lock,
     runtime_transaction_lock,
+    validate_expected_rollback_identity,
 )
 from ..domain.runtime_manifest import desired_from_runtime_manifest
 from ..domain.retrieval_contract import run_retrieval_status_probe
 from ..domain.runtime_truth import find_gateway_container_by_binding, live_runtime_truth
+from ..routing import get_runtime_binding
 from ..domain.runtime_paths import (
     slot_runtime_dir,
 )
@@ -63,14 +73,202 @@ def cmd_apply(args: argparse.Namespace) -> int:
     )
 
 
+_MARKER_BOUND_RECOVERY_SCHEMA = "agent-runtime-marker-bound-recovery/v1"
+_EXACT_RECOVERY_TARGET_RE = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
+_MARKER_EXPECTATION_FIELDS = {
+    "backup_metadata_sha256": "expected_backup_metadata_sha256",
+    "backup_name": "expected_backup_name",
+    "marker_sha256": "expected_marker_sha256",
+    "transaction_id": "expected_transaction_id",
+}
+
+
+def _marker_expectations(args: argparse.Namespace) -> dict[str, str] | None:
+    values = {
+        field: getattr(args, attribute, None)
+        for field, attribute in _MARKER_EXPECTATION_FIELDS.items()
+    }
+    present = {field for field, value in values.items() if value is not None}
+    if not present:
+        return None
+    if present != set(values):
+        raise MarkerBoundRecoveryError("exact_expectation_set_incomplete")
+    if _EXACT_RECOVERY_TARGET_RE.fullmatch(str(args.slot)) is None:
+        raise MarkerBoundRecoveryError("exact_target_invalid")
+    expected = {field: str(value) for field, value in values.items()}
+    validate_expected_rollback_identity(expected)
+    return expected
+
+
+def _validate_exact_recovery_target(state_root, target: str) -> None:
+    try:
+        binding = get_runtime_binding(target, state_root)
+    except Exception as exc:
+        raise MarkerBoundRecoveryError("exact_target_not_observable") from exc
+    if not binding.enabled or binding.linux_account != target:
+        raise MarkerBoundRecoveryError("exact_target_not_canonical")
+
+
+def _emit_marker_recovery_receipt(
+    args: argparse.Namespace,
+    expected: dict[str, str],
+    *,
+    result: str,
+    reason_code: str,
+    runtime_mutation_started: bool,
+    transaction_state: str,
+    terminal_state: str,
+) -> None:
+    target = str(args.slot)
+    if _EXACT_RECOVERY_TARGET_RE.fullmatch(target) is None:
+        target = "unavailable"
+    value = {
+        "backup_metadata_sha256": expected["backup_metadata_sha256"],
+        "backup_name": expected["backup_name"],
+        "marker_sha256": expected["marker_sha256"],
+        "reason_code": reason_code,
+        "result": result,
+        "runtime_mutation_started": runtime_mutation_started,
+        "schema": _MARKER_BOUND_RECOVERY_SCHEMA,
+        "target": target,
+        "terminal_state": terminal_state,
+        "transaction_id": expected["transaction_id"],
+        "transaction_state": transaction_state,
+        "writes": 1 if runtime_mutation_started else 0,
+    }
+    print(json.dumps(value, separators=(",", ":"), sort_keys=True))
+
+
+def _exact_recovery_post_state(
+    state_root, slot: str, expected: dict[str, str]
+) -> tuple[str, str]:
+    try:
+        observed = pending_rollback_identity(state_root, slot)
+    except Exception:
+        return "unavailable", "unknown"
+    if observed is None:
+        return "committed", "complete"
+    if observed == expected:
+        return "pending", "incomplete"
+    return "unavailable", "unknown"
+
+
 def cmd_rollback(args: argparse.Namespace) -> int:
+    try:
+        exact_expected = _marker_expectations(args)
+    except MarkerBoundRecoveryError as exc:
+        placeholder = {
+            field: "unavailable" for field in _MARKER_EXPECTATION_FIELDS
+        }
+        _emit_marker_recovery_receipt(
+            args,
+            placeholder,
+            result="rejected",
+            reason_code=exc.reason_code,
+            runtime_mutation_started=False,
+            transaction_state="unavailable",
+            terminal_state="incomplete",
+        )
+        return 2
     if not _is_root():
+        if exact_expected is not None:
+            _emit_marker_recovery_receipt(
+                args,
+                exact_expected,
+                result="rejected",
+                reason_code="root_required",
+                runtime_mutation_started=False,
+                transaction_state="unavailable",
+                terminal_state="incomplete",
+            )
+            return 2
         print(
             "error: run as root/admin: sudo /usr/local/bin/opsctl rollback TARGET",
             file=sys.stderr,
         )
         return 2
     state_root = _state_root(args)
+    if exact_expected is not None:
+        try:
+            _validate_exact_recovery_target(state_root, args.slot)
+            with runtime_host_mutation_lock(state_root):
+                with runtime_transaction_lock(state_root, args.slot):
+                    backup_dir, _ = require_exact_pending_rollback(
+                        state_root,
+                        args.slot,
+                        exact_expected,
+                    )
+                    hidden_output = io.StringIO()
+                    with redirect_stdout(hidden_output):
+                        rc = _cmd_rollback_locked(
+                            args,
+                            state_root,
+                            selected_backup=backup_dir,
+                            exact_expected=exact_expected,
+                        )
+        except MarkerBoundRecoveryError as exc:
+            transaction_state = "unavailable"
+            if not exc.reason_code.startswith("exact_target_"):
+                transaction_state, _ = _exact_recovery_post_state(
+                    state_root,
+                    args.slot,
+                    exact_expected,
+                )
+            _emit_marker_recovery_receipt(
+                args,
+                exact_expected,
+                result="rejected",
+                reason_code=exc.reason_code,
+                runtime_mutation_started=False,
+                transaction_state=transaction_state,
+                terminal_state="incomplete",
+            )
+            return 1
+        except RuntimeError as exc:
+            reason_code = (
+                "lock_unavailable"
+                if str(exc).startswith("another runtime ")
+                else "recovery_admission_failed"
+            )
+            _emit_marker_recovery_receipt(
+                args,
+                exact_expected,
+                result="rejected",
+                reason_code=reason_code,
+                runtime_mutation_started=False,
+                transaction_state="unavailable",
+                terminal_state="incomplete",
+            )
+            return 1
+        except Exception:
+            _emit_marker_recovery_receipt(
+                args,
+                exact_expected,
+                result="rejected",
+                reason_code="recovery_admission_failed",
+                runtime_mutation_started=False,
+                transaction_state="unavailable",
+                terminal_state="incomplete",
+            )
+            return 1
+        transaction_state, terminal_state = _exact_recovery_post_state(
+            state_root,
+            args.slot,
+            exact_expected,
+        )
+        succeeded = rc == 0 and transaction_state == "committed"
+        _emit_marker_recovery_receipt(
+            args,
+            exact_expected,
+            result="complete" if succeeded else "failed",
+            reason_code=(
+                "recovery_committed" if succeeded else "recovery_execution_failed"
+            ),
+            runtime_mutation_started=True,
+            transaction_state=transaction_state,
+            terminal_state=terminal_state if succeeded else "incomplete",
+        )
+        return 0 if succeeded else 1
     try:
         with runtime_host_mutation_lock(state_root):
             with runtime_transaction_lock(state_root, args.slot):
@@ -93,10 +291,18 @@ def cmd_rollback(args: argparse.Namespace) -> int:
         return 1
 
 
-def _cmd_rollback_locked(args: argparse.Namespace, state_root) -> int:
+def _cmd_rollback_locked(
+    args: argparse.Namespace,
+    state_root,
+    *,
+    selected_backup=None,
+    exact_expected: dict[str, str] | None = None,
+) -> int:
     try:
         runtime_dir = slot_runtime_dir(args.slot)
-        backup_dir = pending_rollback_backup(state_root, args.slot)
+        backup_dir = selected_backup
+        if backup_dir is None:
+            backup_dir = pending_rollback_backup(state_root, args.slot)
         if backup_dir is None:
             backup_dir = latest_backup(state_root, args.slot)
         if backup_dir is None:
@@ -109,7 +315,15 @@ def _cmd_rollback_locked(args: argparse.Namespace, state_root) -> int:
             backup_dir = latest_backup(state_root, args.slot)
         if backup_dir is None:
             raise FileNotFoundError("no agent-runtime backup")
-        ok, reason = restore_backup(args.slot, runtime_dir, backup_dir, state_root)
+        ok, reason = restore_backup(
+            args.slot,
+            runtime_dir,
+            backup_dir,
+            state_root,
+            expected_transaction=exact_expected,
+        )
+    except MarkerBoundRecoveryError:
+        raise
     except Exception as exc:
         print(f"target={args.slot}")
         print("rollback_status=fail")
@@ -133,7 +347,15 @@ def _cmd_rollback_locked(args: argparse.Namespace, state_root) -> int:
 
     if reason == "rollback_empty_baseline_restored":
         try:
-            finish_rollback_transaction(args.slot, state_root, backup_dir)
+            if exact_expected is None:
+                finish_rollback_transaction(args.slot, state_root, backup_dir)
+            else:
+                finish_exact_rollback_transaction(
+                    args.slot,
+                    state_root,
+                    backup_dir,
+                    exact_expected,
+                )
         except Exception as exc:
             print("rollback_status=fail")
             print(f"reason=rollback_transaction_finish_failed:{exc}")
@@ -260,7 +482,15 @@ def _cmd_rollback_locked(args: argparse.Namespace, state_root) -> int:
                 args.slot,
                 backup_dir,
             )
-        finish_rollback_transaction(args.slot, state_root, backup_dir)
+        if exact_expected is None:
+            finish_rollback_transaction(args.slot, state_root, backup_dir)
+        else:
+            finish_exact_rollback_transaction(
+                args.slot,
+                state_root,
+                backup_dir,
+                exact_expected,
+            )
     except Exception as exc:
         print("rollback_status=fail")
         print(f"reason=rollback_transaction_finish_failed:{exc}")

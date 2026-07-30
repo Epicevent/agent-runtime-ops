@@ -921,9 +921,14 @@ def test_install_runs_legacy_backup_migration_before_release_activation() -> Non
         call, text.index('chown -R root:"$OPS_GROUP" "$release_dir"')
     )
     activate_offset = text.index('activate_release "$release_dir"', call_offset)
-    prune_offset = text.index("prune_old_release_code", activate_offset)
+    attestation_offset = text.index(
+        'attest_active_cli_and_prune "$release_dir" "$commit"', activate_offset
+    )
+    finalizer_start = text.index("attest_active_cli_and_prune() {")
+    prune_offset = text.index("prune_old_release_code", finalizer_start)
 
-    assert call_offset < activate_offset < prune_offset
+    assert call_offset < activate_offset < attestation_offset
+    assert finalizer_start < prune_offset
     assert (
         '"$release_dir/.venv/bin/python" -m agent_runtime_ops.install_migrations'
         in text
