@@ -286,8 +286,13 @@ def _validate_endpoint_isolation(
     paths: dict[str, str], broker_unit: Path, pending_dir: Path
 ) -> None:
     endpoints = [*(Path(value) for value in paths.values()), broker_unit]
-    if len({str(path) for path in endpoints}) != len(endpoints):
-        _fail("broker and managed activation paths must be pairwise distinct")
+    staging_endpoints = [_temp_path(path) for path in endpoints]
+    visible_paths = [*endpoints, *staging_endpoints]
+    if len({str(path) for path in visible_paths}) != len(visible_paths):
+        _fail(
+            "broker, managed activation paths, and derived staging paths "
+            "must be pairwise distinct"
+        )
     reserved = {
         pending_dir,
         Path(f"{pending_dir}.new"),
@@ -297,7 +302,7 @@ def _validate_endpoint_isolation(
         Path(f"{pending_dir}.recovered.retired"),
         pending_dir.parent / ".activation-candidate.prepare",
     }
-    for endpoint in endpoints:
+    for endpoint in visible_paths:
         _validate_root_controlled_parent_chain(endpoint, f"activation endpoint {endpoint}")
         if any(
             endpoint == root or root in endpoint.parents or endpoint in root.parents

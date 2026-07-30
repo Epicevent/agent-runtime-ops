@@ -485,6 +485,20 @@ def _activation_state_snapshot(tree: dict[str, Any]) -> dict[str, tuple[Any, ...
     }
 
 
+def _symlink_instance(path: Path) -> tuple[Any, ...]:
+    meta = path.lstat()
+    assert stat.S_ISLNK(meta.st_mode)
+    return (
+        meta.st_dev,
+        meta.st_ino,
+        os.readlink(path),
+        meta.st_uid,
+        meta.st_gid,
+        stat.S_IMODE(meta.st_mode),
+        meta.st_nlink,
+    )
+
+
 def test_activation_begin_rejects_negative_gid_without_writes() -> None:
     reader = _reader()
     with _root_temp(reader) as root:
@@ -637,6 +651,7 @@ def test_activation_absolute_current_target_is_rejected_before_journal() -> None
     "overlap",
     (
         "alias",
+        "staging-alias",
         "transaction",
         "manifest-outside",
         "writable-parent",
@@ -651,6 +666,10 @@ def test_activation_endpoint_overlap_is_rejected_without_writes(overlap: str) ->
         tree = _activation_fixture(reader, root)
         if overlap == "alias":
             tree["paths"]["mcp"] = tree["paths"]["opsctl"]
+        elif overlap == "staging-alias":
+            tree["paths"]["mcp"] = Path(
+                f"{tree['paths']['opsctl']}.agent-runtime-activation-next"
+            )
         elif overlap == "transaction":
             tree["paths"]["mcp"] = tree["tx"] / "managed-entry"
         elif overlap == "manifest-outside":
@@ -783,11 +802,12 @@ def test_activation_sigkill_each_publication_boundary_recovers_fresh_process(kil
         assert tree["paths"]["current"].resolve() == tree["previous"]
 
 
-@pytest.mark.parametrize("kill_after", range(1, 7))
+@pytest.mark.parametrize("kill_after", range(1, 6))
 def test_activation_sigkill_during_baseline_restore_is_replay_safe(kill_after: int) -> None:
     reader = _reader()
     with _root_temp(reader) as root:
         tree = _activation_fixture(reader, root, previous=True)
+        manifest_baseline = _path_fingerprint(tree["paths"]["manifest"])
         assert _begin(tree).returncode == 0
         assert _run_tx(tree, "publish").returncode == 0
         assert _run_tx(tree, "publish-broker").returncode == 0
@@ -795,6 +815,10 @@ def test_activation_sigkill_during_baseline_restore_is_replay_safe(kill_after: i
             str(tree["paths"][name])
             for name in ("opsctl", "mcp", "gemini", "manifest", "current")
         ] + [str(tree["broker_unit"])]
+        # The manifest symlink has the same exact identity in both variants, so
+        # recovery replaces the other four managed entries plus the broker unit.
+        assert _path_fingerprint(tree["paths"]["manifest"]) == manifest_baseline
+        published_manifest = _symlink_instance(tree["paths"]["manifest"])
         child = (
             "import importlib.util, os, signal, sys\n"
             f"spec=importlib.util.spec_from_file_location('tx', {str(ACTIVATION_HELPER)!r})\n"
@@ -818,8 +842,10 @@ def test_activation_sigkill_during_baseline_restore_is_replay_safe(kill_after: i
             timeout=10,
         )
         assert killed.returncode == -signal.SIGKILL
+        assert _symlink_instance(tree["paths"]["manifest"]) == published_manifest
         assert _run_tx(tree, "recover").returncode == 0
         assert _run_tx(tree, "finalize", "--expect", "baseline").returncode == 0
+        assert _symlink_instance(tree["paths"]["manifest"]) == published_manifest
         assert tree["paths"]["current"].resolve() == tree["previous"]
         assert tree["broker_unit"].read_text(encoding="utf-8") == "previous-broker-unit\n"
 
@@ -865,13 +891,18 @@ def test_activation_sigkill_between_symlink_create_and_lchown_replays(
         assert _begin(tree).returncode == 0
         if command == "recover":
             assert _run_tx(tree, "publish").returncode == 0
+        symlink_name = "manifest" if command == "publish" else "current"
+        symlink_temp = Path(
+            f"{tree['paths'][symlink_name]}.agent-runtime-activation-next"
+        )
         child = (
             "import importlib.util, os, signal, sys\n"
             f"spec=importlib.util.spec_from_file_location('tx', {str(ACTIVATION_HELPER)!r})\n"
             "mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)\n"
+            f"target={str(symlink_temp)!r}\n"
             "original=mod.os.lchown\n"
             "def lchown(path,uid,gid):\n"
-            " if str(path).endswith('.agent-runtime-activation-next'): os.kill(os.getpid(), signal.SIGKILL)\n"
+            " if str(path)==target: os.kill(os.getpid(), signal.SIGKILL)\n"
             " original(path,uid,gid)\n"
             "mod.os.lchown=lchown\n"
             "sys.argv=sys.argv[1:]\n"
@@ -885,12 +916,9 @@ def test_activation_sigkill_between_symlink_create_and_lchown_replays(
             timeout=10,
         )
         assert killed.returncode == -signal.SIGKILL
-        manifest_temp = Path(
-            f"{tree['paths']['manifest']}.agent-runtime-activation-next"
-        )
-        assert manifest_temp.is_symlink()
-        assert manifest_temp.lstat().st_uid == 0
-        assert manifest_temp.lstat().st_gid == 0
+        assert symlink_temp.is_symlink()
+        assert symlink_temp.lstat().st_uid == 0
+        assert symlink_temp.lstat().st_gid == 0
         assert _run_tx(tree, "recover").returncode == 0
         assert _run_tx(tree, "finalize", "--expect", "baseline").returncode == 0
         assert tree["paths"]["current"].resolve() == tree["previous"]
@@ -1179,6 +1207,46 @@ def test_broker_service_state_is_restored_before_transaction_finalize(
         )
         assert completed.returncode == 0, completed.stderr
         assert trace.read_text(encoding="utf-8").splitlines() == expected
+
+
+def test_active_broker_is_quiesced_before_managed_publication() -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        fake_bin = root / "bin"
+        fake_bin.mkdir(mode=0o750)
+        os.chown(fake_bin, 0, reader.pw_gid)
+        trace = root / "trace"
+        systemctl = fake_bin / "systemctl"
+        systemctl.write_text(
+            "#!/usr/bin/env bash\n"
+            f"printf '%s\\n' \"$*\" >>{str(trace)!r}\n"
+            "[[ \"$1\" == stop ]] && exit 0\n"
+            "[[ \"$1\" == is-active ]] && exit 3\n"
+            "exit 19\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        os.chown(systemctl, 0, reader.pw_gid)
+        systemctl.chmod(0o750)
+        completed = _run_contract_script(
+            root,
+            f"PATH={str(fake_bin)!r}:/usr/bin:/bin\n"
+            f"ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS=1\n"
+            f"ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=1\n"
+            "run_activation_transaction() {\n"
+            "  [[ \"$4\" == broker_state ]] && printf 'active\\n' || printf 'broker.service\\n'\n"
+            "}\n"
+            + _function("root_action_broker_inactive_attested")
+            + _function("root_action_broker_absent_attested")
+            + _function("attest_quiesced_root_action_broker_state")
+            + _function("quiesce_root_action_broker_for_publication")
+            + "\nquiesce_root_action_broker_for_publication /helper\n",
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert trace.read_text(encoding="utf-8").splitlines() == [
+            "stop broker.service",
+            "is-active --quiet broker.service",
+        ]
 
 
 def test_recovery_finalizes_only_after_broker_and_cli_attestation() -> None:

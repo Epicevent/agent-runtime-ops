@@ -195,6 +195,13 @@ The broker service state admitted before release construction is measured again
 under the install lock immediately before the journal is created. A change from
 active, inactive, or absent during that interval aborts before publication; the
 stale state is never written into the transaction as recovery authority.
+An already-active broker is then stopped and attested inactive before `current`
+can move. The candidate broker unit pins both its condition and `ExecStart` to
+the immutable candidate release rather than the mutable `current` link, and its
+running process argv is checked against that pinned release before candidate
+finalization. Recovery restores `current` and the previous unit before it
+restarts an originally active broker, so no broker restart can cross the
+publication window under a false release identity.
 
 A successful activation is finalized only after the candidate CLI works as
 `svcops` and the root-action broker contract has completed. The previous release
@@ -203,8 +210,9 @@ the exact Git commit tree, so dirty tracked files and untracked worktree files
 cannot be attributed to the approved commit or enter the installed release.
 
 Every activation path must be an already-normalized absolute path. `current`
-and the manifest are fixed children of the install root, managed endpoint
-parents are root-owned and nonwritable, and symlinked ancestors are rejected.
+and the manifest are fixed children of the install root, managed endpoints and
+their fixed staging paths are pairwise disjoint, endpoint parents are
+root-owned and nonwritable, and symlinked ancestors are rejected.
 A root-owned sticky directory such as `/tmp` may only be a higher ancestor of a
 protected endpoint directory; it is never accepted as the endpoint's immediate
 parent. The shell validates this layout before bootstrap uses a configured path,

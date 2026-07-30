@@ -188,6 +188,21 @@ for key, value in expected.items():
     if values[key] != value:
         fail(f"{key}: fixed install-root layout required")
 
+managed_endpoints = [
+    opsctl_link,
+    mcp_link,
+    gemini_link,
+    manifest_link,
+    current_link,
+    broker_unit,
+]
+staging_endpoints = [
+    f"{endpoint}.agent-runtime-activation-next"
+    for endpoint in managed_endpoints
+]
+if len(set([*managed_endpoints, *staging_endpoints])) != 12:
+    fail("managed and derived staging endpoints must be pairwise distinct")
+
 
 def validate_parent_chain(endpoint: str, name: str) -> None:
     current = os.path.dirname(endpoint)
@@ -507,10 +522,79 @@ wait_for_root_action_broker_release() {
   return 1
 }
 
+root_action_broker_pinned_release_attested() {
+  local service_name="$1"
+  local release_dir="$2"
+  local main_pid argv0
+  root_action_broker_release_attested "$service_name" "$release_dir" || return 1
+  main_pid="$(
+    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+      systemctl show --property=MainPID --value "$service_name"
+  )" || return 1
+  [[ "$main_pid" =~ ^[1-9][0-9]{0,9}$ ]] || return 1
+  IFS= read -r -d '' argv0 <"/proc/$main_pid/cmdline" || return 1
+  [[ "$argv0" == "$release_dir/.venv/bin/python" ]]
+}
+
+wait_for_root_action_broker_pinned_release() {
+  local service_name="$1"
+  local release_dir="$2"
+  local attempt
+  for ((attempt = 1; attempt <= ROOT_ACTION_POST_RESTART_ATTESTATION_ATTEMPTS; attempt++)); do
+    root_action_broker_pinned_release_attested "$service_name" "$release_dir" \
+      && return 0
+    if [[ "$attempt" -lt "$ROOT_ACTION_POST_RESTART_ATTESTATION_ATTEMPTS" ]]; then
+      /usr/bin/sleep "$ROOT_ACTION_POST_RESTART_ATTESTATION_INTERVAL_SECONDS"
+    fi
+  done
+  return 1
+}
+
+attest_quiesced_root_action_broker_state() {
+  local helper="$1"
+  local broker_state service_name
+  broker_state="$(
+    run_activation_transaction "$helper" show --field broker_state
+  )" || return 1
+  service_name="$(
+    run_activation_transaction "$helper" show --field broker_service_name
+  )" || return 1
+  case "$broker_state" in
+    active|inactive)
+      root_action_broker_inactive_attested "$service_name"
+      ;;
+    absent)
+      root_action_broker_absent_attested "$service_name"
+      ;;
+    unavailable)
+      ! command -v systemctl >/dev/null 2>&1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+quiesce_root_action_broker_for_publication() {
+  local helper="$1"
+  local broker_state service_name
+  broker_state="$(
+    run_activation_transaction "$helper" show --field broker_state
+  )" || return 1
+  service_name="$(
+    run_activation_transaction "$helper" show --field broker_service_name
+  )" || return 1
+  if [[ "$broker_state" == active ]]; then
+    command -v systemctl >/dev/null 2>&1 || return 1
+    [[ -x /usr/bin/timeout ]] || return 1
+    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+      systemctl stop "$service_name" >/dev/null || return 1
+  fi
+  attest_quiesced_root_action_broker_state "$helper"
+}
+
 install_root_action_broker_contract() {
   local release_dir="$1"
   local helper="$2"
-  local broker_state observed_state previous_release service_name
+  local broker_state service_name
   # Resolve the trusted reader by its production account name at install time.
   # Numeric IDs are host facts and must never be embedded in the release.
   getent passwd "$ROOT_ACTION_TRUSTED_ACCOUNT" >/dev/null || return 1
@@ -527,15 +611,11 @@ install_root_action_broker_contract() {
   broker_state="$(
     run_activation_transaction "$helper" show --field broker_state
   )" || return 1
-  previous_release="$(
-    run_activation_transaction "$helper" show --field previous_release
-  )" || return 1
   service_name="$(
     run_activation_transaction "$helper" show --field broker_service_name
   )" || return 1
   [[ "$service_name" == "$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")" ]] || return 1
-  observed_state="$(capture_root_action_broker_state "$previous_release")" || return 1
-  [[ "$observed_state" == "$broker_state" ]] || return 1
+  attest_quiesced_root_action_broker_state "$helper" || return 1
   run_activation_transaction "$helper" publish-broker || return 1
   case "$broker_state" in
     unavailable)
@@ -555,7 +635,7 @@ install_root_action_broker_contract() {
       /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
         systemctl restart "$service_name" >/dev/null \
         || return 1
-      wait_for_root_action_broker_release "$service_name" "$release_dir" \
+      wait_for_root_action_broker_pinned_release "$service_name" "$release_dir" \
         || return 1
       info "root_action_broker_update=active_restarted_release_verified" || return 1
       ;;
@@ -585,7 +665,7 @@ attest_candidate_root_action_broker_state() {
   )" || return 1
   case "$journal_state" in
     active)
-      root_action_broker_release_attested "$service_name" "$release_dir"
+      root_action_broker_pinned_release_attested "$service_name" "$release_dir"
       ;;
     inactive|absent)
       root_action_broker_inactive_attested "$service_name"
@@ -1174,7 +1254,7 @@ activate_release() {
   local previous_release="$3"
   local helper="$4"
   local broker_state="$5"
-  local release_name service_name unit_source install_root_real current_path broker_state_now
+  local release_name service_name unit_source broker_state_now
   release_name="$(basename "$release_dir")" || return 1
   service_name="$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")" || return 1
   unit_source="$release_dir/systemd/agent-runtime-root-action-broker.service"
@@ -1233,11 +1313,9 @@ EOF
       >"$ACTIVATION_CANDIDATE_DIR/manifest-target" || exit 1
     printf '%s\n' "releases/$release_name" \
       >"$ACTIVATION_CANDIDATE_DIR/current-target" || exit 1
-    install_root_real="$(realpath -m "$INSTALL_ROOT")" || exit 1
-    current_path="$install_root_real/current"
-    [[ "$current_path" =~ ^/[A-Za-z0-9._/-]+$ ]] || exit 1
+    [[ "$release_dir" =~ ^/[A-Za-z0-9._/-]+$ ]] || exit 1
     sed \
-      -e "s|@@CURRENT_LINK@@|$current_path|g" \
+      -e "s|@@CURRENT_LINK@@|$release_dir|g" \
       -e "s|@@RELEASE_DIR@@|$release_dir|g" \
       "$unit_source" >"$ACTIVATION_CANDIDATE_DIR/broker-unit" || exit 1
     ! grep -Eq '@@(CURRENT_LINK|RELEASE_DIR)@@' \
@@ -1265,6 +1343,7 @@ EOF
     --broker-service-name "$service_name" \
     --broker-state "$broker_state_now" \
     || return 1
+  quiesce_root_action_broker_for_publication "$helper" || return 1
   cleanup_abandoned_activation_staging "$helper" "$commit" || return 1
   run_activation_transaction "$helper" publish
 }

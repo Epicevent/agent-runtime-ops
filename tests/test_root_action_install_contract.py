@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import os
+import shlex
 import shutil
 import subprocess
 import time
@@ -31,16 +32,16 @@ def test_install_places_fixed_root_action_contract_without_activation_or_new_sud
         '"$ROOT_ACTION_PUBLIC_ROOT"'
     ) in function
     assert 'run_activation_transaction "$helper" publish-broker' in function
-    assert 'current_path="$install_root_real/current"' in activation
-    assert '[[ "$current_path" =~ ^/[A-Za-z0-9._/-]+$ ]]' in activation
-    assert '-e "s|@@CURRENT_LINK@@|$current_path|g"' in activation
+    assert '[[ "$release_dir" =~ ^/[A-Za-z0-9._/-]+$ ]]' in activation
+    assert '-e "s|@@CURRENT_LINK@@|$release_dir|g"' in activation
     assert '-e "s|@@RELEASE_DIR@@|$release_dir|g"' in activation
     assert "systemctl enable" not in function
     assert "systemctl start" not in function
-    assert 'observed_state="$(capture_root_action_broker_state "$previous_release")"' in function
-    assert '[[ "$observed_state" == "$broker_state" ]] || return 1' in function
+    assert 'attest_quiesced_root_action_broker_state "$helper" || return 1' in function
+    assert activation.index('quiesce_root_action_broker_for_publication "$helper"') \
+        < activation.index('run_activation_transaction "$helper" publish')
     assert 'systemctl restart "$service_name"' in install
-    assert 'wait_for_root_action_broker_release "$service_name" "$release_dir"' in install
+    assert 'wait_for_root_action_broker_pinned_release "$service_name" "$release_dir"' in install
     assert "active_restarted_release_verified" in function
     assert "ROOT_ACTION_POST_RESTART_ATTESTATION_ATTEMPTS=40" in install
     assert "ROOT_ACTION_POST_RESTART_ATTESTATION_INTERVAL_SECONDS=0.25" in install
@@ -49,6 +50,7 @@ def test_install_places_fixed_root_action_contract_without_activation_or_new_sud
     assert "/usr/bin/timeout --kill-after=1" in install
     assert 'systemctl show --property=MainPID --value "$service_name"' in install
     assert 'grep -Fzqx "AGENT_RUNTIME_OPS_RELEASE=$release_dir"' in install
+    assert '[[ "$argv0" == "$release_dir/.venv/bin/python" ]]' in install
     sudoers_start = install.index("install_ops_sudoers()")
     sudoers_end = install.index("\n}\n", sudoers_start) + 3
     sudoers = install[sudoers_start:sudoers_end]
@@ -186,21 +188,62 @@ def test_service_is_root_owned_webauthn_broker_and_uses_fixed_paths() -> None:
     assert "sudo" not in unit.lower()
 
 
-def test_custom_install_root_materializes_a_functional_absolute_unit_path() -> None:
+def test_custom_install_root_materializes_a_release_pinned_unit_path() -> None:
     template = Path("systemd/agent-runtime-root-action-broker.service").read_text(
         encoding="utf-8"
     )
-    custom_current = "/srv/jitech-agent-runtime/current"
     custom_release = "/srv/jitech-agent-runtime/releases/tested"
-    materialized = template.replace("@@CURRENT_LINK@@", custom_current).replace(
+    materialized = template.replace("@@CURRENT_LINK@@", custom_release).replace(
         "@@RELEASE_DIR@@", custom_release
     )
-    assert f"ConditionPathIsDirectory={custom_current}" in materialized
+    assert f"ConditionPathIsDirectory={custom_release}" in materialized
     assert (
-        f"ExecStart={custom_current}/.venv/bin/python "
+        f"ExecStart={custom_release}/.venv/bin/python "
         "-m agent_runtime_ops.root_actions.service"
     ) in materialized
     assert "@@CURRENT_LINK@@" not in materialized
     assert "@@RELEASE_DIR@@" not in materialized
     assert f"Environment=AGENT_RUNTIME_OPS_RELEASE={custom_release}" in materialized
     assert "/opt/agent-runtime-ops/current" not in template
+
+
+def test_release_pinned_broker_exec_survives_current_link_flip(tmp_path: Path) -> None:
+    if os.name != "posix":
+        pytest.skip("POSIX executable and symlink semantics are required")
+    previous = tmp_path / "previous"
+    candidate = tmp_path / "candidate"
+    current = tmp_path / "current"
+    for release, label in ((previous, "previous"), (candidate, "candidate")):
+        python = release / ".venv" / "bin" / "python"
+        python.parent.mkdir(parents=True)
+        python.write_text(
+            f"#!/usr/bin/env bash\nprintf '%s\\n' {label!r}\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        python.chmod(0o755)
+    current.symlink_to(previous, target_is_directory=True)
+
+    template = Path("systemd/agent-runtime-root-action-broker.service").read_text(
+        encoding="utf-8"
+    )
+    materialized = template.replace("@@CURRENT_LINK@@", str(candidate)).replace(
+        "@@RELEASE_DIR@@", str(candidate)
+    )
+    exec_line = next(
+        line for line in materialized.splitlines() if line.startswith("ExecStart=")
+    )
+    argv = shlex.split(exec_line.removeprefix("ExecStart="))
+    assert argv[0] == str(candidate / ".venv" / "bin" / "python")
+    for target in (candidate, previous):
+        current.unlink()
+        current.symlink_to(target, target_is_directory=True)
+        completed = subprocess.run(
+            argv,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert completed.stdout == "candidate\n"

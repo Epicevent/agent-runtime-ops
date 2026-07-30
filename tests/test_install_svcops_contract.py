@@ -103,6 +103,7 @@ def test_svcops_attestations_are_bounded_minimal_and_prune_is_last() -> None:
     broker_finalizer = _function("install_root_action_broker_or_restore")
     recovery = _function("recover_and_attest_activation_baseline")
     broker_restart = _function("restart_root_action_broker_for_release")
+    quiesce = _function("quiesce_root_action_broker_for_publication")
     package = _function("install_package")
     assert "/usr/bin/timeout --kill-after=1" in runner
     assert "runuser -u \"$OPS_USER\" -- env -i" in runner
@@ -122,6 +123,8 @@ def test_svcops_attestations_are_bounded_minimal_and_prune_is_last() -> None:
     assert broker_restart.index('systemctl restart "$service_name"') < broker_restart.index(
         'wait_for_root_action_broker_release "$service_name" "$release_dir"'
     )
+    assert 'systemctl stop "$service_name"' in quiesce
+    assert "attest_quiesced_root_action_broker_state" in quiesce
     assert "recover_and_attest_activation_baseline" in broker_finalizer
     assert "finalize --expect candidate" in broker_finalizer
     assert package.index('previous_active_release="$(capture_previous_active_release "$commit")"') < package.index(
@@ -217,6 +220,9 @@ def test_activation_source_contains_no_retired_unjournaled_publisher() -> None:
     assert ".next.$$" not in activation
     assert "fsync-tree" in activation
     assert "--broker-state" in activation
+    assert activation.index("quiesce_root_action_broker_for_publication") < activation.index(
+        'run_activation_transaction "$helper" publish'
+    )
     assert "run_activation_transaction \"$helper\" publish" in activation
     broker = _function("install_root_action_broker_contract")
     assert 'run_activation_transaction "$helper" publish-broker' in broker
@@ -509,13 +515,15 @@ def test_broker_contract_revalidates_recorded_inactive_before_publication(
         + "  fi\n"
         + "  printf 'unexpected-publish\\n' >>\"$TRACE\"\n"
         + "}\n"
-        + "capture_root_action_broker_state() { printf 'capture:active\\n' >>\"$TRACE\"; printf 'active\\n'; }\n"
+        + "attest_quiesced_root_action_broker_state() { printf 'quiesce-attest:active\\n' >>\"$TRACE\"; return 1; }\n"
         + _function("install_root_action_broker_contract")
         + "\ninstall_root_action_broker_contract /candidate /helper\n"
     )
     completed = _run_bash(tmp_path, body)
     assert completed.returncode != 0
-    assert trace.read_text(encoding="utf-8").splitlines() == ["capture:active"]
+    assert trace.read_text(encoding="utf-8").splitlines() == [
+        "quiesce-attest:active"
+    ]
 
 
 def test_post_publish_inactive_broker_drift_recovers_without_candidate_finalize(
