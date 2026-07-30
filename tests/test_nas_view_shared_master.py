@@ -568,6 +568,41 @@ class SharedMasterAssignTest(unittest.TestCase):
         self.assertFalse(complete)
         self.assertFalse(green)
 
+    def test_inventory_is_bracketed_by_two_identical_grant_rounds(self) -> None:
+        before = _valid_grant_item()
+        after = dict(before)
+        after["entry_mode"] = "0700"
+        inventory_seen = False
+
+        def observe(*_args, **_kwargs):
+            return (after if inventory_seen else before, True, True)
+
+        def inventory(*_args, **_kwargs):
+            nonlocal inventory_seen
+            inventory_seen = True
+            return ({
+                "/home/oc3/nas_docs/groupware",
+                "/home/oc3/nas_docs/groupware/mails_seung23",
+            }, None)
+
+        with (
+            patch(
+                "agent_runtime_ops.commands.nas_view.observe_ro_view_grant",
+                side_effect=observe,
+            ),
+            patch(
+                "agent_runtime_ops.commands.nas_view.observe_mount_targets_under",
+                side_effect=inventory,
+            ),
+        ):
+            applicable, evidence, complete, green = _view_grant_evidence(
+                "oc3", "groupware", {"paths": ["mails/seung23"]}, Path("/master")
+            )
+        self.assertEqual(applicable, "yes")
+        self.assertEqual(evidence[0]["entry_mode"], "0700")
+        self.assertFalse(complete)
+        self.assertFalse(green)
+
 
 @unittest.skipUnless(os.name == "posix", "requires POSIX directory fd and mount path semantics")
 class SharedMasterPosixValidationTest(unittest.TestCase):

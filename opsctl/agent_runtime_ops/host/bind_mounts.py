@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import multiprocessing
+import json
 import os
+import select
 import signal
 import stat
 import subprocess
@@ -34,6 +35,17 @@ def _reject_existing_symlink_components(path: Path, label: str) -> None:
 
 def _path_identity(info) -> tuple[int, int, int]:
     return info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)
+
+
+def _grant_identity(info) -> tuple[int, int, int, int, int, int]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        stat.S_IFMT(info.st_mode),
+        int(info.st_uid),
+        int(info.st_gid),
+        stat.S_IMODE(info.st_mode),
+    )
 
 
 def _open_directory_nofollow(path: Path) -> int:
@@ -174,6 +186,9 @@ def _observe_ro_view_grant_core(
     issues: list[str] = item["issues"]
     gaps: list[str] = item["gaps"]
     source_fd = entry_fd = source_after_fd = entry_after_fd = None
+    source_before = entry_before = None
+    baseline_rc = -1
+    baseline_rows: list[dict[str, str]] = []
     complete = True
     deadline = time.monotonic() + max(0.1, timeout)
     try:
@@ -206,6 +221,7 @@ def _observe_ro_view_grant_core(
             gaps.append("probe_unavailable")
             complete = False
             rc, rows = -1, []
+        baseline_rc, baseline_rows = rc, rows
         exact_rows = [row for row in rows if row.get("target") == entry.as_posix()]
         item["mount_exact"] = rc == 0 and len(exact_rows) == 1
         if item["mount_exact"]:
@@ -234,9 +250,9 @@ def _observe_ro_view_grant_core(
             gaps.append("probe_unavailable")
             complete = False
         item["source_identity_match"] = (
-            _path_identity(source_before) == _path_identity(source_after)
-            and _path_identity(entry_before) == _path_identity(entry_after)
-            and _path_identity(source_after) == _path_identity(entry_after)
+            _grant_identity(source_before) == _grant_identity(source_after)
+            and _grant_identity(entry_before) == _grant_identity(entry_after)
+            and _grant_identity(source_after) == _grant_identity(entry_after)
         )
     except FileNotFoundError:
         issues.append("path_missing")
@@ -301,6 +317,43 @@ def _observe_ro_view_grant_core(
             if read is False:
                 issues.append("account_read_denied")
 
+    # Access is pathname-based. Re-open and re-read after both account probes
+    # so uid/gid/mode, inode identity, and exact mount options all belong to the
+    # same final state as the reported allow/deny decisions.
+    if source_before is not None and entry_before is not None:
+        final_source_fd = final_entry_fd = None
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired("grant_final_coherence", timeout)
+            final_source_fd = _open_directory_nofollow(source)
+            final_entry_fd = _open_directory_nofollow(entry)
+            final_source = os.fstat(final_source_fd)
+            final_entry = os.fstat(final_entry_fd)
+            final_rc, final_rows = _findmnt_exact(entry, remaining)
+            if (
+                _grant_identity(source_before) != _grant_identity(final_source)
+                or _grant_identity(entry_before) != _grant_identity(final_entry)
+                or _grant_identity(final_source) != _grant_identity(final_entry)
+                or final_rc != baseline_rc
+                or final_rows != baseline_rows
+            ):
+                item["source_identity_match"] = False
+                issues.append("source_identity_mismatch")
+                gaps.append("probe_unavailable")
+                complete = False
+        except subprocess.TimeoutExpired:
+            gaps.append("probe_timeout")
+            complete = False
+        except (OSError, ValueError):
+            gaps.append("probe_unavailable")
+            complete = False
+        finally:
+            if final_source_fd is not None:
+                os.close(final_source_fd)
+            if final_entry_fd is not None:
+                os.close(final_entry_fd)
+
     item["issues"] = sorted(set(issues))
     item["gaps"] = sorted(set(gaps))
     green = complete and not item["issues"] and not item["gaps"] and all(
@@ -317,16 +370,32 @@ def _observe_ro_view_grant_core(
     return item, complete, green
 
 
-def _grant_probe_child(
-    connection: Any,
+_GRANT_PROBE_PAYLOAD_MAX_BYTES = 32 * 1024
+
+
+def _stop_probe_pid(pid: int) -> None:
+    """Best-effort terminate/reap without registering an interpreter finalizer."""
+    try:
+        if os.getpgid(pid) == pid:
+            os.killpg(pid, signal.SIGKILL)
+        else:
+            os.kill(pid, signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        os.waitpid(pid, os.WNOHANG)
+    except (ChildProcessError, OSError):
+        pass
+
+
+def _grant_probe_child_bytes(
     source: Path,
     entry: Path,
     slot: str,
     allow_account_probe: bool,
     timeout: float,
-) -> None:
+) -> bytes:
     try:
-        os.setsid()
         result = _observe_ro_view_grant_core(
             source,
             entry,
@@ -338,26 +407,20 @@ def _grant_probe_child(
         item = _empty_grant_item(entry)
         item["gaps"] = ["probe_unavailable"]
         result = (item, False, False)
-    try:
-        connection.send(result)
-    except (BrokenPipeError, EOFError, OSError):
-        pass
-    finally:
-        connection.close()
-
-
-def _stop_probe_process(process: Any) -> None:
-    if not process.is_alive():
-        process.join(timeout=0.1)
-        return
-    try:
-        if os.getpgid(process.pid) == process.pid:
-            os.killpg(process.pid, signal.SIGKILL)
-        else:
-            process.kill()
-    except (OSError, ProcessLookupError):
-        process.kill()
-    process.join(timeout=1.0)
+    payload = json.dumps(
+        {"item": result[0], "complete": result[1], "green": result[2]},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(payload) > _GRANT_PROBE_PAYLOAD_MAX_BYTES:
+        item = _empty_grant_item(entry)
+        item["gaps"] = ["probe_unavailable"]
+        payload = json.dumps(
+            {"item": item, "complete": False, "green": False},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    return payload
 
 
 def observe_ro_view_grant(
@@ -373,38 +436,72 @@ def observe_ro_view_grant(
     if os.name != "posix" or timeout <= 0:
         item["gaps"] = ["probe_unavailable"]
         return item, False, False
-    context = multiprocessing.get_context("fork")
-    receiver, sender = context.Pipe(duplex=False)
-    process = context.Process(
-        target=_grant_probe_child,
-        args=(sender, source, entry, slot, allow_account_probe, timeout),
-        daemon=False,
-    )
-    process.start()
-    sender.close()
+    read_fd, write_fd = os.pipe()
     try:
-        if not receiver.poll(timeout):
-            _stop_probe_process(process)
-            item["gaps"] = ["probe_timeout"]
-            return item, False, False
+        pid = os.fork()
+    except OSError:
+        os.close(read_fd)
+        os.close(write_fd)
+        item["gaps"] = ["probe_unavailable"]
+        return item, False, False
+    if pid == 0:
         try:
-            result = receiver.recv()
-        except (EOFError, OSError):
+            os.close(read_fd)
+            os.setsid()
+            payload = _grant_probe_child_bytes(
+                source, entry, slot, allow_account_probe, timeout
+            )
+            offset = 0
+            while offset < len(payload):
+                offset += os.write(write_fd, payload[offset:])
+        except BaseException:
+            pass
+        finally:
+            try:
+                os.close(write_fd)
+            except OSError:
+                pass
+            os._exit(0)
+    os.close(write_fd)
+    os.set_blocking(read_fd, False)
+    deadline = time.monotonic() + timeout
+    chunks: list[bytes] = []
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                item["gaps"] = ["probe_timeout"]
+                return item, False, False
+            ready, _, _ = select.select([read_fd], [], [], remaining)
+            if not ready:
+                item["gaps"] = ["probe_timeout"]
+                return item, False, False
+            chunk = os.read(read_fd, 8192)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if sum(map(len, chunks)) > _GRANT_PROBE_PAYLOAD_MAX_BYTES:
+                item["gaps"] = ["probe_unavailable"]
+                return item, False, False
+        try:
+            response = json.loads(b"".join(chunks).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            item["gaps"] = ["probe_unavailable"]
+            return item, False, False
+        if not isinstance(response, dict) or set(response) != {"item", "complete", "green"}:
             item["gaps"] = ["probe_unavailable"]
             return item, False, False
         if (
-            not isinstance(result, tuple)
-            or len(result) != 3
-            or not isinstance(result[0], dict)
-            or not isinstance(result[1], bool)
-            or not isinstance(result[2], bool)
+            not isinstance(response["item"], dict)
+            or not isinstance(response["complete"], bool)
+            or not isinstance(response["green"], bool)
         ):
             item["gaps"] = ["probe_unavailable"]
             return item, False, False
-        return result
+        return response["item"], response["complete"], response["green"]
     finally:
-        receiver.close()
-        _stop_probe_process(process)
+        os.close(read_fd)
+        _stop_probe_pid(pid)
 
 
 def bind_ro(source: Path, target: Path, *, recursive: bool = False) -> tuple[bool, str]:

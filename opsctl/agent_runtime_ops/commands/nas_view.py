@@ -100,11 +100,9 @@ def _view_grant_evidence(
     if not raw_paths:
         return "yes", [], False, False
     deadline = time.monotonic() + _GRANT_EVIDENCE_TIMEOUT_SECONDS
-    evidence: list[dict] = []
-    complete = True
-    green = True
     seen_paths: set[str] = set()
     seen_aliases: set[str] = set()
+    planned: list[tuple[str, Path, Path]] = []
     expected_entries: set[str] = set()
     for raw_path in raw_paths:
         if not isinstance(raw_path, str):
@@ -118,33 +116,58 @@ def _view_grant_evidence(
             return "yes", [], False, False
         seen_paths.add(rel)
         seen_aliases.add(alias)
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return "yes", evidence, False, False
         entry = slot_entry(slot, corpus) / alias
         expected_entries.add(entry.as_posix())
-        item, item_complete, item_green = observe_ro_view_grant(
-            master / rel,
-            entry,
-            slot,
-            allow_account_probe=_is_root(),
-            timeout=min(3.0, remaining),
-        )
-        item["path"] = rel
-        evidence.append(item)
-        complete = complete and item_complete
-        green = green and item_green
+        planned.append((rel, master / rel, entry))
+
+    def observe_round() -> tuple[list[dict], bool, bool]:
+        evidence: list[dict] = []
+        complete = True
+        green = True
+        for rel, source, entry in planned:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return evidence, False, False
+            item, item_complete, item_green = observe_ro_view_grant(
+                source,
+                entry,
+                slot,
+                allow_account_probe=_is_root(),
+                timeout=min(3.0, remaining),
+            )
+            # Each worker result is an independent JSON projection. Copy it
+            # before adding the recorded intent so mocked or reused mappings
+            # cannot make both coherence rounds alias the same object.
+            item = json.loads(json.dumps(item, sort_keys=True, separators=(",", ":")))
+            item["path"] = rel
+            evidence.append(item)
+            complete = complete and item_complete
+            green = green and item_green
+        return evidence, complete, green
+
+    # The target inventory is bracketed by two complete per-child rounds. This
+    # prevents target-only inventory from combining stale uid/gid/mode/options
+    # and access evidence with a same-target remount or path replacement.
+    first_evidence, first_complete, first_green = observe_round()
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        return "yes", evidence, False, False
+        return "yes", first_evidence, False, False
     targets, inventory_gap = observe_mount_targets_under(
         slot_entry(slot, corpus), min(3.0, remaining)
     )
     expected_targets = {slot_entry(slot, corpus).as_posix(), *expected_entries}
-    if inventory_gap is not None or targets != expected_targets:
-        complete = False
-        green = False
-    return "yes", evidence, complete, green
+    second_evidence, second_complete, second_green = observe_round()
+    coherent = first_evidence == second_evidence
+    complete = (
+        first_complete
+        and second_complete
+        and inventory_gap is None
+        and targets == expected_targets
+        and coherent
+        and len(second_evidence) == len(planned)
+    )
+    green = complete and first_green and second_green
+    return "yes", second_evidence, complete, green
 
 
 def _require_root(command: str) -> bool:

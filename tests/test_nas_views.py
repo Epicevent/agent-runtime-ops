@@ -5,6 +5,7 @@ import contextlib
 import io
 import json
 import os
+import signal
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -741,6 +742,19 @@ class GrantEvidenceProbeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsafe path"):
             validate_relative_path("mails/user\nforged")
 
+    @unittest.skipUnless(os.name == "posix", "requires POSIX process groups")
+    def test_unreapable_probe_cleanup_never_enters_a_wait_loop(self) -> None:
+        from agent_runtime_ops.host import bind_mounts
+
+        with (
+            patch.object(bind_mounts.os, "getpgid", return_value=1234),
+            patch.object(bind_mounts.os, "killpg") as killpg,
+            patch.object(bind_mounts.os, "waitpid", return_value=(0, 0)) as waitpid,
+        ):
+            bind_mounts._stop_probe_pid(1234)
+        killpg.assert_called_once_with(1234, signal.SIGKILL)
+        waitpid.assert_called_once_with(1234, os.WNOHANG)
+
 
 @unittest.skipUnless(os.name == "posix", "requires POSIX no-follow directory descriptors")
 class GrantEvidencePosixTests(unittest.TestCase):
@@ -880,6 +894,70 @@ class GrantEvidencePosixTests(unittest.TestCase):
                     entry, entry, "oc3", allow_account_probe=True, timeout=3.0
                 )
         self.assertTrue(complete)
+        self.assertFalse(green)
+        self.assertIn("source_identity_mismatch", item["issues"])
+
+    def test_mode_change_during_account_access_never_turns_green(self) -> None:
+        from agent_runtime_ops.host import bind_mounts
+
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = Path(tmp) / "entry"
+            entry.mkdir(mode=0o750)
+            row = {
+                "target": entry.as_posix(), "source": entry.as_posix(), "fstype": "none",
+                "options": "ro,nosuid,nodev,bind", "propagation": "private",
+            }
+            calls = 0
+
+            def mutate_on_read(*_args, **_kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    entry.chmod(0o700)
+                return True, None
+
+            with (
+                patch.object(bind_mounts, "_findmnt_exact", return_value=(0, [row])),
+                patch.object(bind_mounts, "_slot_account_identity", return_value=(1003, 1003)),
+                patch.object(bind_mounts, "_probe_slot_access", side_effect=mutate_on_read),
+            ):
+                item, complete, green = bind_mounts._observe_ro_view_grant_core(
+                    entry, entry, "oc3", allow_account_probe=True, timeout=3.0
+                )
+        self.assertFalse(complete)
+        self.assertFalse(green)
+        self.assertIn("source_identity_mismatch", item["issues"])
+
+    def test_path_replacement_during_account_access_never_turns_green(self) -> None:
+        from agent_runtime_ops.host import bind_mounts
+
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = Path(tmp) / "entry"
+            old = Path(tmp) / "entry-old"
+            entry.mkdir(mode=0o750)
+            row = {
+                "target": entry.as_posix(), "source": entry.as_posix(), "fstype": "none",
+                "options": "ro,nosuid,nodev,bind", "propagation": "private",
+            }
+            calls = 0
+
+            def replace_on_read(*_args, **_kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    entry.rename(old)
+                    entry.mkdir(mode=0o750)
+                return True, None
+
+            with (
+                patch.object(bind_mounts, "_findmnt_exact", return_value=(0, [row])),
+                patch.object(bind_mounts, "_slot_account_identity", return_value=(1003, 1003)),
+                patch.object(bind_mounts, "_probe_slot_access", side_effect=replace_on_read),
+            ):
+                item, complete, green = bind_mounts._observe_ro_view_grant_core(
+                    entry, entry, "oc3", allow_account_probe=True, timeout=3.0
+                )
+        self.assertFalse(complete)
         self.assertFalse(green)
         self.assertIn("source_identity_mismatch", item["issues"])
 
