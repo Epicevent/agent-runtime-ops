@@ -1028,7 +1028,9 @@ def publish(args: argparse.Namespace) -> None:
     for name in ENTRY_NAMES:
         path = Path(manifest["paths"][name])
         identity = manifest["entries"][name]["candidate"]
-        _publish_identity(path, identity, _payload(tx_dir, name, "candidate"))
+        candidate_data = _payload(tx_dir, name, "candidate")
+        if not _matches(path, identity, candidate_data):
+            _publish_identity(path, identity, candidate_data)
 
 
 def publish_broker(args: argparse.Namespace) -> None:

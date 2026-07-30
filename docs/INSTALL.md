@@ -198,10 +198,17 @@ stale state is never written into the transaction as recovery authority.
 An already-active broker is then stopped and attested inactive before `current`
 can move. The candidate broker unit pins both its condition and `ExecStart` to
 the immutable candidate release rather than the mutable `current` link, and its
-running process argv is checked against that pinned release before candidate
-finalization. Recovery restores `current` and the previous unit before it
+running process is checked on one stable `MainPID`: the environment release and
+the exact three-element argv (`python`, `-m`, broker module) must agree, and the
+PID is re-read unchanged before candidate finalization. Recovery restores
+`current` and the previous unit before it
 restarts an originally active broker, so no broker restart can cross the
 publication window under a false release identity.
+
+An entry whose live identity already equals the candidate identity is not
+replaced. This preserves the inode of the manifest symlink when its baseline
+and candidate target/owner/mode are exactly the same and avoids inventing an
+extra crash boundary for a no-op publication.
 
 A successful activation is finalized only after the candidate CLI works as
 `svcops` and the root-action broker contract has completed. The previous release

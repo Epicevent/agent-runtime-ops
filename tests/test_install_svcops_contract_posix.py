@@ -770,8 +770,10 @@ def test_activation_first_install_valid_candidate_commits_without_residue() -> N
             assert not os.path.lexists(Path(f"{path}.agent-runtime-activation-next"))
 
 
-@pytest.mark.parametrize("kill_after", range(1, 6))
-def test_activation_sigkill_each_publication_boundary_recovers_fresh_process(kill_after: int) -> None:
+@pytest.mark.parametrize("kill_after", range(1, 5))
+def test_activation_sigkill_each_divergent_publication_boundary_recovers_fresh_process(
+    kill_after: int,
+) -> None:
     reader = _reader()
     with _root_temp(reader) as root:
         tree = _activation_fixture(reader, root, previous=True)
@@ -802,12 +804,27 @@ def test_activation_sigkill_each_publication_boundary_recovers_fresh_process(kil
         assert tree["paths"]["current"].resolve() == tree["previous"]
 
 
+def test_activation_publish_preserves_identity_equal_manifest_inode() -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        tree = _activation_fixture(reader, root, previous=True)
+        before_identity = _path_fingerprint(tree["paths"]["manifest"])
+        before_instance = _symlink_instance(tree["paths"]["manifest"])
+        assert _begin(tree).returncode == 0
+        assert _run_tx(tree, "publish").returncode == 0
+        assert _path_fingerprint(tree["paths"]["manifest"]) == before_identity
+        assert _symlink_instance(tree["paths"]["manifest"]) == before_instance
+        assert _run_tx(tree, "recover").returncode == 0
+        assert _run_tx(tree, "finalize", "--expect", "baseline").returncode == 0
+
+
 @pytest.mark.parametrize("kill_after", range(1, 6))
 def test_activation_sigkill_during_baseline_restore_is_replay_safe(kill_after: int) -> None:
     reader = _reader()
     with _root_temp(reader) as root:
         tree = _activation_fixture(reader, root, previous=True)
         manifest_baseline = _path_fingerprint(tree["paths"]["manifest"])
+        manifest_baseline_instance = _symlink_instance(tree["paths"]["manifest"])
         assert _begin(tree).returncode == 0
         assert _run_tx(tree, "publish").returncode == 0
         assert _run_tx(tree, "publish-broker").returncode == 0
@@ -819,6 +836,7 @@ def test_activation_sigkill_during_baseline_restore_is_replay_safe(kill_after: i
         # recovery replaces the other four managed entries plus the broker unit.
         assert _path_fingerprint(tree["paths"]["manifest"]) == manifest_baseline
         published_manifest = _symlink_instance(tree["paths"]["manifest"])
+        assert published_manifest == manifest_baseline_instance
         child = (
             "import importlib.util, os, signal, sys\n"
             f"spec=importlib.util.spec_from_file_location('tx', {str(ACTIVATION_HELPER)!r})\n"

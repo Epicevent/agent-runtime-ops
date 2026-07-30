@@ -50,7 +50,10 @@ def test_install_places_fixed_root_action_contract_without_activation_or_new_sud
     assert "/usr/bin/timeout --kill-after=1" in install
     assert 'systemctl show --property=MainPID --value "$service_name"' in install
     assert 'grep -Fzqx "AGENT_RUNTIME_OPS_RELEASE=$release_dir"' in install
-    assert '[[ "$argv0" == "$release_dir/.venv/bin/python" ]]' in install
+    assert '[[ "${#process_argv[@]}" -eq 3' in install
+    assert '"${process_argv[1]}" == -m' in install
+    assert '"${process_argv[2]}" == agent_runtime_ops.root_actions.service' in install
+    assert '[[ "$main_pid_after" == "$main_pid" ]]' in install
     sudoers_start = install.index("install_ops_sudoers()")
     sudoers_end = install.index("\n}\n", sudoers_start) + 3
     sudoers = install[sudoers_start:sudoers_end]
@@ -167,6 +170,101 @@ def test_install_attestation_times_out_a_truly_hanging_systemctl(
     elapsed = time.monotonic() - started
     assert completed.returncode != 0
     assert elapsed < 3
+
+
+def _run_broker_process_attestation(
+    tmp_path: Path,
+    *,
+    argv: list[str],
+    first_pid: str = "123",
+    final_pid: str = "123",
+) -> subprocess.CompletedProcess[str]:
+    if os.name != "posix":
+        pytest.skip("POSIX proc and process argv semantics are required")
+    bash = shutil.which("bash")
+    if bash is None or not Path("/usr/bin/timeout").exists():
+        pytest.skip("POSIX bash and timeout are required")
+    release = tmp_path / "release"
+    proc_root = tmp_path / "proc"
+    pid_root = proc_root / first_pid
+    pid_root.mkdir(parents=True)
+    (pid_root / "environ").write_bytes(
+        f"AGENT_RUNTIME_OPS_RELEASE={release}\0OTHER=value\0".encode()
+    )
+    (pid_root / "cmdline").write_bytes(
+        b"\0".join(value.encode() for value in argv) + b"\0"
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    counter = tmp_path / "show-count"
+    systemctl = fake_bin / "systemctl"
+    systemctl.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"$1\" == is-active ]]; then exit 0; fi\n"
+        "[[ \"$1\" == show ]] || exit 19\n"
+        f"count=$(cat {str(counter)!r} 2>/dev/null || printf '0')\n"
+        f"if [[ \"$count\" -eq 0 ]]; then printf '%s\\n' {first_pid!r}; "
+        f"else printf '%s\\n' {final_pid!r}; fi\n"
+        f"printf '%s\\n' \"$((count + 1))\" >{str(counter)!r}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    systemctl.chmod(0o755)
+    harness = tmp_path / "broker-process-attestation.sh"
+    harness.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=1\n"
+        f"ROOT_ACTION_PROC_ROOT={str(proc_root)!r}\n"
+        f"CURRENT_LINK={str(tmp_path / 'current')!r}\n"
+        f"PATH={str(fake_bin)!r}:/usr/bin:/bin\n"
+        + _install_attestation_functions()
+        + f"\nroot_action_broker_process_attested broker.service {str(release)!r} pinned\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    return subprocess.run(
+        [bash, str(harness)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+
+def test_broker_process_attestation_binds_one_pid_and_exact_argv(tmp_path: Path) -> None:
+    release = tmp_path / "release"
+    completed = _run_broker_process_attestation(
+        tmp_path,
+        argv=[
+            str(release / ".venv" / "bin" / "python"),
+            "-m",
+            "agent_runtime_ops.root_actions.service",
+        ],
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize("invalid", ("module_flag", "extra_arg", "pid_swap"))
+def test_broker_process_attestation_rejects_argv_or_pid_drift(
+    tmp_path: Path, invalid: str
+) -> None:
+    release = tmp_path / "release"
+    argv = [
+        str(release / ".venv" / "bin" / "python"),
+        "-m",
+        "agent_runtime_ops.root_actions.service",
+    ]
+    if invalid == "module_flag":
+        argv[1] = "-c"
+    elif invalid == "extra_arg":
+        argv.append("--unexpected")
+    completed = _run_broker_process_attestation(
+        tmp_path,
+        argv=argv,
+        final_pid="124" if invalid == "pid_swap" else "123",
+    )
+    assert completed.returncode != 0
 
 
 def test_service_is_root_owned_webauthn_broker_and_uses_fixed_paths() -> None:

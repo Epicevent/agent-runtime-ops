@@ -47,6 +47,7 @@ ROOT_ACTION_POST_RESTART_ATTESTATION_ATTEMPTS=40
 ROOT_ACTION_POST_RESTART_ATTESTATION_INTERVAL_SECONDS=0.25
 ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS=30
 ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=1
+ROOT_ACTION_PROC_ROOT="/proc"
 OPS_CLI_ATTESTATION_COMMAND_TIMEOUT_SECONDS=10
 ACTIVATION_HELPER_TIMEOUT_SECONDS=120
 USAGE_DB_DEFAULTS_FILE="${AGENT_RUNTIME_USAGE_DB_DEFAULTS_FILE:-/etc/agent-runtime-ops/usage-writer.cnf}"
@@ -460,9 +461,16 @@ install_python_env() {
 }
 
 root_action_broker_release_attested() {
+  root_action_broker_process_attested "$1" "$2" allow-current
+}
+
+root_action_broker_process_attested() {
   local service_name="$1"
   local release_dir="$2"
-  local main_pid
+  local argv_mode="$3"
+  local main_pid main_pid_after current_real
+  local -a process_argv=()
+  [[ "$argv_mode" == pinned || "$argv_mode" == allow-current ]] || return 1
   /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
     systemctl is-active --quiet "$service_name" || return 1
   main_pid="$(
@@ -472,8 +480,28 @@ root_action_broker_release_attested() {
     || return 1
   [[ "$main_pid" =~ ^[1-9][0-9]{0,9}$ ]] || return 1
   /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
-    grep -Fzqx "AGENT_RUNTIME_OPS_RELEASE=$release_dir" "/proc/$main_pid/environ" \
+    grep -Fzqx "AGENT_RUNTIME_OPS_RELEASE=$release_dir" \
+      "$ROOT_ACTION_PROC_ROOT/$main_pid/environ" \
     || return 1
+  mapfile -d '' -t process_argv <"$ROOT_ACTION_PROC_ROOT/$main_pid/cmdline" \
+    || return 1
+  [[ "${#process_argv[@]}" -eq 3 \
+    && "${process_argv[1]}" == -m \
+    && "${process_argv[2]}" == agent_runtime_ops.root_actions.service ]] \
+    || return 1
+  if [[ "$argv_mode" == pinned ]]; then
+    [[ "${process_argv[0]}" == "$release_dir/.venv/bin/python" ]] || return 1
+  elif [[ "${process_argv[0]}" != "$release_dir/.venv/bin/python" ]]; then
+    current_real="$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)"
+    [[ "$current_real" == "$release_dir" \
+      && "${process_argv[0]}" == "$CURRENT_LINK/.venv/bin/python" ]] \
+      || return 1
+  fi
+  main_pid_after="$(
+    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+      systemctl show --property=MainPID --value "$service_name"
+  )" || return 1
+  [[ "$main_pid_after" == "$main_pid" ]]
 }
 
 root_action_broker_inactive_attested() {
@@ -523,17 +551,7 @@ wait_for_root_action_broker_release() {
 }
 
 root_action_broker_pinned_release_attested() {
-  local service_name="$1"
-  local release_dir="$2"
-  local main_pid argv0
-  root_action_broker_release_attested "$service_name" "$release_dir" || return 1
-  main_pid="$(
-    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
-      systemctl show --property=MainPID --value "$service_name"
-  )" || return 1
-  [[ "$main_pid" =~ ^[1-9][0-9]{0,9}$ ]] || return 1
-  IFS= read -r -d '' argv0 <"/proc/$main_pid/cmdline" || return 1
-  [[ "$argv0" == "$release_dir/.venv/bin/python" ]]
+  root_action_broker_process_attested "$1" "$2" pinned
 }
 
 wait_for_root_action_broker_pinned_release() {
