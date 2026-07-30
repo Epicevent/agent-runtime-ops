@@ -722,11 +722,10 @@ class GrantEvidenceProbeTests(unittest.TestCase):
             'TARGET="/home/oc16/nas_docs/groupware/mails_user"\n'
         )
         with patch.object(bind_mounts, "_run_text", return_value=FakeProc(stdout=stdout)) as run:
-            targets, gap = bind_mounts.observe_mount_targets_under(
+            targets = bind_mounts._observe_mount_targets_under_core(
                 Path("/home/oc16/nas_docs/groupware"), 2.0
             )
-        self.assertIsNone(gap)
-        self.assertEqual(targets, {
+        self.assertEqual(set(targets), {
             "/home/oc16/nas_docs/groupware",
             "/home/oc16/nas_docs/groupware/mails_user",
         })
@@ -978,6 +977,31 @@ class GrantEvidencePosixTests(unittest.TestCase):
         self.assertFalse(complete)
         self.assertFalse(green)
         self.assertEqual(item["gaps"], ["probe_timeout"])
+
+    def test_mount_inventory_hard_timeout_kills_hanging_worker(self) -> None:
+        from agent_runtime_ops.host import bind_mounts
+
+        def hang(*_args, **_kwargs):
+            time.sleep(5)
+
+        started = time.monotonic()
+        with patch.object(bind_mounts, "_observe_mount_targets_under_core", side_effect=hang):
+            targets, gap = bind_mounts.observe_mount_targets_under(
+                Path("/home/oc3/nas_docs/groupware"), 0.2
+            )
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 1.5)
+        self.assertIsNone(targets)
+        self.assertEqual(gap, "probe_timeout")
+
+    def test_isolated_probe_rejects_oversize_payload(self) -> None:
+        from agent_runtime_ops.host import bind_mounts
+
+        value, gap = bind_mounts._run_isolated_json_probe(
+            lambda: "x" * (bind_mounts._PROBE_PAYLOAD_MAX_BYTES + 1), 1.0
+        )
+        self.assertIsNone(value)
+        self.assertEqual(gap, "probe_unavailable")
 
 
 if __name__ == "__main__":
