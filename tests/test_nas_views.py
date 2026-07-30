@@ -893,7 +893,7 @@ class GrantEvidencePosixTests(unittest.TestCase):
                 item, complete, green = bind_mounts._observe_ro_view_grant_core(
                     entry, entry, "oc3", allow_account_probe=True, timeout=3.0
                 )
-        self.assertTrue(complete)
+        self.assertFalse(complete)
         self.assertFalse(green)
         self.assertIn("source_identity_mismatch", item["issues"])
 

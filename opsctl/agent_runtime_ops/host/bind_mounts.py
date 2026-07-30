@@ -334,7 +334,6 @@ def _observe_ro_view_grant_core(
             if (
                 _grant_identity(source_before) != _grant_identity(final_source)
                 or _grant_identity(entry_before) != _grant_identity(final_entry)
-                or _grant_identity(final_source) != _grant_identity(final_entry)
                 or final_rc != baseline_rc
                 or final_rows != baseline_rows
             ):
@@ -342,6 +341,10 @@ def _observe_ro_view_grant_core(
                 issues.append("source_identity_mismatch")
                 gaps.append("probe_unavailable")
                 complete = False
+            elif _grant_identity(final_source) != _grant_identity(final_entry):
+                # A stable wrong-source bind is fully observed but unhealthy;
+                # incompleteness is reserved for state that changed mid-probe.
+                item["source_identity_match"] = False
         except subprocess.TimeoutExpired:
             gaps.append("probe_timeout")
             complete = False
