@@ -24,6 +24,10 @@ except ImportError:  # pragma: no cover - exercised by Windows collection
 INSTALL = Path("install.sh").read_text(encoding="utf-8")
 ACTIVATION_HELPER = Path("scripts/activation_transaction.py").resolve()
 ACTIVATION_COMMIT = "b" * 40
+SYSTEMD_TUPLE_SHOW = (
+    "show --property=LoadState --property=ActiveState --property=SubState "
+    "--property=MainPID --property=Job broker.service"
+)
 
 
 def _function(name: str) -> str:
@@ -1213,14 +1217,10 @@ def test_broker_service_state_is_restored_before_transaction_finalize(
             "  stop) printf 'inactive\\n' >\"$LIVE\"; exit 0 ;;\n"
             "  show)\n"
             "    current=$(cat \"$LIVE\")\n"
-            "    case \"$*\" in\n"
-            "      *LoadState*) printf '%s\\n' \"$LOAD_STATE\" ;;\n"
-            "      *ActiveState*) [[ \"$current\" == active ]] && printf 'active\\n' || { [[ \"$current\" == auto_restart ]] && printf 'activating\\n' || printf 'inactive\\n'; } ;;\n"
-            "      *SubState*) [[ \"$current\" == active ]] && printf 'running\\n' || { [[ \"$current\" == auto_restart ]] && printf 'auto-restart\\n' || printf 'dead\\n'; } ;;\n"
-            "      *MainPID*) [[ \"$current\" == active ]] && printf '123\\n' || printf '0\\n' ;;\n"
-            "      *Job*) [[ \"$current\" == queued ]] && printf '77\\n' || printf '\\n' ;;\n"
-            "      *) exit 19 ;;\n"
-            "    esac ;;\n"
+            "    printf 'LoadState=%s\\n' \"$LOAD_STATE\"\n"
+            "    [[ \"$current\" == active ]] && printf 'ActiveState=active\\nSubState=running\\nMainPID=123\\n' || { [[ \"$current\" == auto_restart ]] && printf 'ActiveState=activating\\nSubState=auto-restart\\nMainPID=0\\n' || printf 'ActiveState=inactive\\nSubState=dead\\nMainPID=0\\n'; }\n"
+            "    [[ \"$current\" == queued ]] && printf 'Job=77\\n' || printf 'Job=\\n'\n"
+            "    ;;\n"
             "  *) exit 19 ;;\n"
             "esac\n",
             encoding="utf-8",
@@ -1238,6 +1238,7 @@ def test_broker_service_state_is_restored_before_transaction_finalize(
             f"BROKER_STATE={state!r}\n"
             "run_activation_transaction() { if [[ \"$*\" == *broker_state* ]]; then printf '%s\\n' \"$BROKER_STATE\"; else printf 'broker.service\\n'; fi; }\n"
             "restart_root_action_broker_for_release() { printf 'restart:%s:%s\\n' \"$1\" \"$2\" >>\"$TRACE\"; }\n"
+            + _function("read_root_action_broker_systemd_tuple")
             + _function("root_action_broker_terminal_tuple_attested")
             + _function("root_action_broker_inactive_attested")
             + _function("root_action_broker_absent_attested")
@@ -1247,13 +1248,7 @@ def test_broker_service_state_is_restored_before_transaction_finalize(
             + f"\nrestore_broker_service_from_transaction /helper {previous!r}\n",
         )
         assert completed.returncode == 0, completed.stderr
-        tuple_trace = [
-            "show --property=LoadState --value broker.service",
-            "show --property=ActiveState --value broker.service",
-            "show --property=SubState --value broker.service",
-            "show --property=MainPID --value broker.service",
-            "show --property=Job --value broker.service",
-        ]
+        tuple_trace = [SYSTEMD_TUPLE_SHOW]
         if state == "active":
             expected = ["daemon-reload", "restart:broker.service:/previous"]
         elif state == "inactive":
@@ -1264,7 +1259,7 @@ def test_broker_service_state_is_restored_before_transaction_finalize(
             expected = [
                 "daemon-reload",
                 *tuple_trace,
-                "show --property=LoadState --value broker.service",
+                *tuple_trace,
                 "stop broker.service",
                 *tuple_trace,
                 *tuple_trace,
@@ -1288,14 +1283,11 @@ def test_candidate_inactive_attestation_rejects_restart_or_job_drift(
         systemctl.write_text(
             "#!/usr/bin/env bash\n"
             "printf '%s\\n' \"$*\" >>\"$TRACE\"\n"
-            "case \"$*\" in\n"
-            "  *LoadState*) printf 'loaded\\n' ;;\n"
-            "  *ActiveState*) [[ \"$LIVE_STATE\" == auto_restart ]] && printf 'activating\\n' || printf 'inactive\\n' ;;\n"
-            "  *SubState*) [[ \"$LIVE_STATE\" == auto_restart ]] && printf 'auto-restart\\n' || printf 'dead\\n' ;;\n"
-            "  *MainPID*) printf '0\\n' ;;\n"
-            "  *Job*) [[ \"$LIVE_STATE\" == queued ]] && printf '77\\n' || printf '\\n' ;;\n"
-            "  *) exit 19 ;;\n"
-            "esac\n",
+            "[[ \"$1\" == show ]] || exit 19\n"
+            "printf 'LoadState=loaded\\n'\n"
+            "[[ \"$LIVE_STATE\" == auto_restart ]] && printf 'ActiveState=activating\\nSubState=auto-restart\\n' || printf 'ActiveState=inactive\\nSubState=dead\\n'\n"
+            "printf 'MainPID=0\\n'\n"
+            "[[ \"$LIVE_STATE\" == queued ]] && printf 'Job=77\\n' || printf 'Job=\\n'\n",
             encoding="utf-8",
             newline="\n",
         )
@@ -1310,19 +1302,14 @@ def test_candidate_inactive_attestation_rejects_restart_or_job_drift(
             "ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=1\n"
             f"BROKER_STATE={journal_state!r}\n"
             "run_activation_transaction() { if [[ \"$*\" == *broker_state* ]]; then printf '%s\\n' \"$BROKER_STATE\"; else printf 'broker.service\\n'; fi; }\n"
+            + _function("read_root_action_broker_systemd_tuple")
             + _function("root_action_broker_terminal_tuple_attested")
             + _function("root_action_broker_inactive_attested")
             + _function("attest_candidate_root_action_broker_state")
             + f"\nattest_candidate_root_action_broker_state /candidate /helper {journal_state!r}\n",
         )
         assert completed.returncode == (0 if live_state == "inactive" else 1)
-        assert trace.read_text(encoding="utf-8").splitlines() == [
-            "show --property=LoadState --value broker.service",
-            "show --property=ActiveState --value broker.service",
-            "show --property=SubState --value broker.service",
-            "show --property=MainPID --value broker.service",
-            "show --property=Job --value broker.service",
-        ]
+        assert trace.read_text(encoding="utf-8").splitlines() == [SYSTEMD_TUPLE_SHOW]
 
 
 @pytest.mark.parametrize(
@@ -1348,14 +1335,9 @@ def test_loaded_broker_is_quiesced_before_managed_publication(
             "  stop) printf 'inactive\\n' >\"$STATE\"; exit 0 ;;\n"
             "  show)\n"
             "    current=$(cat \"$STATE\")\n"
-            "    case \"$*\" in\n"
-            "      *LoadState*) printf 'loaded\\n' ;;\n"
-            "      *ActiveState*) [[ \"$current\" == active ]] && printf 'active\\n' || { [[ \"$current\" == auto_restart ]] && printf 'activating\\n' || printf 'inactive\\n'; } ;;\n"
-            "      *SubState*) [[ \"$current\" == active ]] && printf 'running\\n' || { [[ \"$current\" == auto_restart ]] && printf 'auto-restart\\n' || printf 'dead\\n'; } ;;\n"
-            "      *MainPID*) [[ \"$current\" == active ]] && printf '123\\n' || printf '0\\n' ;;\n"
-            "      *Job*) [[ \"$current\" == queued ]] && printf '77\\n' || printf '\\n' ;;\n"
-            "      *) exit 19 ;;\n"
-            "    esac\n"
+            "    printf 'LoadState=loaded\\n'\n"
+            "    [[ \"$current\" == active ]] && printf 'ActiveState=active\\nSubState=running\\nMainPID=123\\n' || { [[ \"$current\" == auto_restart ]] && printf 'ActiveState=activating\\nSubState=auto-restart\\nMainPID=0\\n' || printf 'ActiveState=inactive\\nSubState=dead\\nMainPID=0\\n'; }\n"
+            "    [[ \"$current\" == queued ]] && printf 'Job=77\\n' || printf 'Job=\\n'\n"
             "    exit 0 ;;\n"
             "  *) exit 19 ;;\n"
             "esac\n",
@@ -1375,6 +1357,7 @@ def test_loaded_broker_is_quiesced_before_managed_publication(
             "run_activation_transaction() {\n"
             "  [[ \"$4\" == broker_state ]] && printf 'active\\n' || printf 'broker.service\\n'\n"
             "}\n"
+            + _function("read_root_action_broker_systemd_tuple")
             + _function("root_action_broker_terminal_tuple_attested")
             + _function("root_action_broker_quiesced_attested")
             + _function("quiesce_root_action_broker_for_transaction")
@@ -1382,18 +1365,12 @@ def test_loaded_broker_is_quiesced_before_managed_publication(
             + "\nquiesce_root_action_broker_for_publication /helper\n",
         )
         assert completed.returncode == 0, completed.stderr
-        initial_tuple = [
-            "show --property=LoadState --value broker.service",
-            "show --property=ActiveState --value broker.service",
-            "show --property=SubState --value broker.service",
-            "show --property=MainPID --value broker.service",
-            "show --property=Job --value broker.service",
-        ]
+        initial_tuple = [SYSTEMD_TUPLE_SHOW]
         expected = initial_tuple
         if live_state != "inactive":
             expected = [
                 *initial_tuple,
-                "show --property=LoadState --value broker.service",
+                *initial_tuple,
                 "stop broker.service",
                 *initial_tuple,
             ]
@@ -1411,14 +1388,8 @@ def test_absent_broker_quiesce_accepts_only_exact_not_found_without_stop() -> No
         systemctl.write_text(
             "#!/usr/bin/env bash\n"
             "printf '%s\\n' \"$*\" >>\"$TRACE\"\n"
-            "case \"$*\" in\n"
-            "  *LoadState*) printf 'not-found\\n' ;;\n"
-            "  *ActiveState*) printf 'inactive\\n' ;;\n"
-            "  *SubState*) printf 'dead\\n' ;;\n"
-            "  *MainPID*) printf '0\\n' ;;\n"
-            "  *Job*) printf '\\n' ;;\n"
-            "  *) exit 19 ;;\n"
-            "esac\n",
+            "[[ \"$1\" == show ]] || exit 19\n"
+            "printf 'LoadState=not-found\\nActiveState=inactive\\nSubState=dead\\nMainPID=0\\nJob=\\n'\n",
             encoding="utf-8",
             newline="\n",
         )
@@ -1434,19 +1405,133 @@ def test_absent_broker_quiesce_accepts_only_exact_not_found_without_stop() -> No
             "run_activation_transaction() {\n"
             "  [[ \"$4\" == broker_state ]] && printf 'absent\\n' || printf 'broker.service\\n'\n"
             "}\n"
+            + _function("read_root_action_broker_systemd_tuple")
             + _function("root_action_broker_terminal_tuple_attested")
             + _function("root_action_broker_quiesced_attested")
             + _function("quiesce_root_action_broker_for_transaction")
             + "\nquiesce_root_action_broker_for_transaction /helper\n",
         )
         assert completed.returncode == 0, completed.stderr
-        assert trace.read_text(encoding="utf-8").splitlines() == [
-            "show --property=LoadState --value broker.service",
-            "show --property=ActiveState --value broker.service",
-            "show --property=SubState --value broker.service",
-            "show --property=MainPID --value broker.service",
-            "show --property=Job --value broker.service",
-        ]
+        assert trace.read_text(encoding="utf-8").splitlines() == [SYSTEMD_TUPLE_SHOW]
+
+
+def test_terminal_attestation_uses_one_coherent_systemd_snapshot() -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        fake_bin = root / "bin"
+        fake_bin.mkdir(mode=0o750)
+        os.chown(fake_bin, 0, reader.pw_gid)
+        counter = root / "counter"
+        counter.write_text("0\n", encoding="utf-8")
+        systemctl = fake_bin / "systemctl"
+        systemctl.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            "count=$(cat \"$COUNTER\")\n"
+            "count=$((count + 1))\n"
+            "printf '%s\\n' \"$count\" >\"$COUNTER\"\n"
+            "case \"$*\" in\n"
+            "  'show --property=LoadState --property=ActiveState --property=SubState --property=MainPID --property=Job broker.service')\n"
+            "    printf 'LoadState=loaded\\nActiveState=activating\\nSubState=auto-restart\\nMainPID=0\\nJob=77\\n' ;;\n"
+            "  'show --property=LoadState --value broker.service') printf 'loaded\\n' ;;\n"
+            "  'show --property=ActiveState --value broker.service') printf 'inactive\\n' ;;\n"
+            "  'show --property=SubState --value broker.service') printf 'dead\\n' ;;\n"
+            "  'show --property=MainPID --value broker.service') printf '0\\n' ;;\n"
+            "  'show --property=Job --value broker.service') printf '\\n' ;;\n"
+            "  *) exit 19 ;;\n"
+            "esac\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        os.chown(systemctl, 0, reader.pw_gid)
+        systemctl.chmod(0o750)
+        completed = _run_contract_script(
+            root,
+            f"COUNTER={str(counter)!r}\n"
+            "export COUNTER\n"
+            f"PATH={str(fake_bin)!r}:/usr/bin:/bin\n"
+            "ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=1\n"
+            + _function("read_root_action_broker_systemd_tuple")
+            + _function("root_action_broker_terminal_tuple_attested")
+            + "\nroot_action_broker_terminal_tuple_attested broker.service loaded\n",
+        )
+        assert completed.returncode == 1
+        assert counter.read_text(encoding="utf-8") == "1\n"
+
+
+@pytest.mark.parametrize(
+    ("payload", "systemctl_rc", "expected_output"),
+    (
+        (
+            "Job=\nMainPID=0\nSubState=dead\nActiveState=inactive\nLoadState=loaded\n",
+            0,
+            "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nJobPresent=no\n",
+        ),
+        (
+            "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nJob=77\n",
+            0,
+            "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nJobPresent=yes\n",
+        ),
+        ("LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\n", 0, None),
+        (
+            "LoadState=loaded\nLoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nJob=\n",
+            0,
+            None,
+        ),
+        (
+            "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nJob=\nUnknown=value\n",
+            0,
+            None,
+        ),
+        (
+            "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=12345678901\nJob=\n",
+            0,
+            None,
+        ),
+        (
+            "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nJob=\n",
+            19,
+            None,
+        ),
+    ),
+)
+def test_systemd_tuple_reader_is_strict_and_canonical(
+    payload: str,
+    systemctl_rc: int,
+    expected_output: str | None,
+) -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        fake_bin = root / "bin"
+        fake_bin.mkdir(mode=0o750)
+        os.chown(fake_bin, 0, reader.pw_gid)
+        payload_file = root / "payload"
+        payload_file.write_text(payload, encoding="utf-8")
+        systemctl = fake_bin / "systemctl"
+        systemctl.write_text(
+            "#!/usr/bin/env bash\n"
+            "cat \"$PAYLOAD_FILE\"\n"
+            "exit \"$SYSTEMCTL_RC\"\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        os.chown(systemctl, 0, reader.pw_gid)
+        systemctl.chmod(0o750)
+        completed = _run_contract_script(
+            root,
+            f"PAYLOAD_FILE={str(payload_file)!r}\n"
+            f"SYSTEMCTL_RC={systemctl_rc}\n"
+            "export PAYLOAD_FILE SYSTEMCTL_RC\n"
+            f"PATH={str(fake_bin)!r}:/usr/bin:/bin\n"
+            "ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=1\n"
+            + _function("read_root_action_broker_systemd_tuple")
+            + "\nread_root_action_broker_systemd_tuple broker.service\n",
+        )
+        if expected_output is None:
+            assert completed.returncode == 1
+        else:
+            assert completed.returncode == 0, completed.stderr
+            assert completed.stdout == expected_output
 
 
 @pytest.mark.parametrize("systemctl_present", (False, True))
@@ -1469,6 +1554,7 @@ def test_unavailable_broker_quiesce_requires_systemctl_absent(
             "run_activation_transaction() {\n"
             "  [[ \"$4\" == broker_state ]] && printf 'unavailable\\n' || printf 'broker.service\\n'\n"
             "}\n"
+            + _function("read_root_action_broker_systemd_tuple")
             + _function("root_action_broker_terminal_tuple_attested")
             + _function("root_action_broker_quiesced_attested")
             + _function("quiesce_root_action_broker_for_transaction")
@@ -1530,14 +1616,9 @@ def test_recovery_sigkill_after_filesystem_restore_leaves_broker_quiesced(
             "  stop) printf 'inactive\\n' >\"$STATE\"; exit 0 ;;\n"
             "  show)\n"
             "    current=$(cat \"$STATE\")\n"
-            "    case \"$*\" in\n"
-            "      *LoadState*) printf '%s\\n' \"$LOAD_STATE\" ;;\n"
-            "      *ActiveState*) [[ \"$current\" == active ]] && printf 'active\\n' || { [[ \"$current\" == auto_restart ]] && printf 'activating\\n' || printf 'inactive\\n'; } ;;\n"
-            "      *SubState*) [[ \"$current\" == active ]] && printf 'running\\n' || { [[ \"$current\" == auto_restart ]] && printf 'auto-restart\\n' || printf 'dead\\n'; } ;;\n"
-            "      *MainPID*) [[ \"$current\" == active ]] && printf '123\\n' || printf '0\\n' ;;\n"
-            "      *Job*) [[ \"$current\" == queued ]] && printf '77\\n' || printf '\\n' ;;\n"
-            "      *) exit 19 ;;\n"
-            "    esac\n"
+            "    printf 'LoadState=%s\\n' \"$LOAD_STATE\"\n"
+            "    [[ \"$current\" == active ]] && printf 'ActiveState=active\\nSubState=running\\nMainPID=123\\n' || { [[ \"$current\" == auto_restart ]] && printf 'ActiveState=activating\\nSubState=auto-restart\\nMainPID=0\\n' || printf 'ActiveState=inactive\\nSubState=dead\\nMainPID=0\\n'; }\n"
+            "    [[ \"$current\" == queued ]] && printf 'Job=77\\n' || printf 'Job=\\n'\n"
             "    exit 0 ;;\n"
             "  *) exit 19 ;;\n"
             "esac\n",
@@ -1568,6 +1649,7 @@ def test_recovery_sigkill_after_filesystem_restore_leaves_broker_quiesced(
             "}\n"
             "restore_broker_service_from_transaction() { printf 'unexpected-restore\\n' >>\"$TRACE\"; }\n"
             "attest_restored_cli_as_ops() { printf 'unexpected-cli\\n' >>\"$TRACE\"; }\n"
+            + _function("read_root_action_broker_systemd_tuple")
             + _function("root_action_broker_terminal_tuple_attested")
             + _function("root_action_broker_quiesced_attested")
             + _function("quiesce_root_action_broker_for_transaction")
@@ -1578,18 +1660,12 @@ def test_recovery_sigkill_after_filesystem_restore_leaves_broker_quiesced(
         assert completed.returncode == -signal.SIGKILL
         assert state.read_text(encoding="utf-8") == "inactive\n"
         assert tx_marker.read_text(encoding="utf-8") == "pending\n"
-        initial_tuple = [
-            "systemctl:show --property=LoadState --value broker.service",
-            "systemctl:show --property=ActiveState --value broker.service",
-            "systemctl:show --property=SubState --value broker.service",
-            "systemctl:show --property=MainPID --value broker.service",
-            "systemctl:show --property=Job --value broker.service",
-        ]
+        initial_tuple = [f"systemctl:{SYSTEMD_TUPLE_SHOW}"]
         expected = [*initial_tuple, "filesystem-recover"]
         if live_state != "inactive":
             expected = [
                 *initial_tuple,
-                "systemctl:show --property=LoadState --value broker.service",
+                *initial_tuple,
                 "systemctl:stop broker.service",
                 *initial_tuple,
                 "filesystem-recover",

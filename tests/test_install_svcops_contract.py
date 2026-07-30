@@ -106,6 +106,7 @@ def test_svcops_attestations_are_bounded_minimal_and_prune_is_last() -> None:
     quiesce = _function("quiesce_root_action_broker_for_publication")
     recovery_quiesce = _function("quiesce_root_action_broker_before_recovery")
     transaction_quiesce = _function("quiesce_root_action_broker_for_transaction")
+    tuple_reader = _function("read_root_action_broker_systemd_tuple")
     terminal_attestation = _function("root_action_broker_terminal_tuple_attested")
     inactive_attestation = _function("root_action_broker_inactive_attested")
     absent_attestation = _function("root_action_broker_absent_attested")
@@ -136,15 +137,16 @@ def test_svcops_attestations_are_bounded_minimal_and_prune_is_last() -> None:
     assert 'quiesce_root_action_broker_for_transaction "$1"' in recovery_quiesce
     assert 'systemctl stop "$service_name"' in transaction_quiesce
     assert "root_action_broker_quiesced_attested" in transaction_quiesce
-    assert "systemctl show --property=LoadState --value" in transaction_quiesce
-    assert "systemctl show --property=ActiveState --value" in terminal_attestation
-    assert "systemctl show --property=SubState --value" in terminal_attestation
-    assert "systemctl show --property=MainPID --value" in terminal_attestation
-    assert "systemctl show --property=Job --value" in terminal_attestation
-    assert '"$active_state" == inactive' in terminal_attestation
-    assert '"$sub_state" == dead' in terminal_attestation
-    assert '"$main_pid" == 0' in terminal_attestation
-    assert '-z "$job"' in terminal_attestation
+    assert tuple_reader.count("systemctl show") == 1
+    for property_name in ("LoadState", "ActiveState", "SubState", "MainPID", "Job"):
+        assert f"--property={property_name}" in tuple_reader
+    assert "--value" not in tuple_reader
+    assert terminal_attestation.count("read_root_action_broker_systemd_tuple") == 1
+    assert "systemctl show" not in terminal_attestation
+    assert "ActiveState=inactive" in terminal_attestation
+    assert "SubState=dead" in terminal_attestation
+    assert "MainPID=0" in terminal_attestation
+    assert "JobPresent=no" in terminal_attestation
     assert 'root_action_broker_terminal_tuple_attested "$1" loaded' in inactive_attestation
     assert 'root_action_broker_terminal_tuple_attested "$1" not-found' in absent_attestation
     assert (
@@ -411,14 +413,12 @@ def test_broker_pre_activation_distinguishes_inactive_from_absent(
     systemctl = fake_bin / "systemctl"
     systemctl.write_text(
         "#!/usr/bin/env bash\n"
-        "case \"$*\" in\n"
-        "  *LoadState*) printf '%s\\n' \"$LOAD_STATE\" ;;\n"
-        "  *ActiveState*) printf 'inactive\\n' ;;\n"
-        "  *SubState*) printf 'dead\\n' ;;\n"
-        "  *MainPID*) printf '0\\n' ;;\n"
-        "  *Job*) printf '\\n' ;;\n"
-        "  *) exit 19 ;;\n"
-        "esac\n"
+        "[[ \"$1\" == show ]] || exit 19\n"
+        "printf 'LoadState=%s\\n' \"$LOAD_STATE\"\n"
+        "printf 'ActiveState=inactive\\n'\n"
+        "printf 'SubState=dead\\n'\n"
+        "printf 'MainPID=0\\n'\n"
+        "printf 'Job=\\n'\n"
         "exit 0\n",
         encoding="utf-8",
         newline="\n",
@@ -430,6 +430,7 @@ def test_broker_pre_activation_distinguishes_inactive_from_absent(
         + "ROOT_ACTION_BROKER_SERVICE_FILE=/etc/systemd/system/agent-runtime-root-action-broker.service\n"
         + "ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=5\n"
         + "die() { printf 'die:%s\\n' \"$*\"; exit 23; }\n"
+        + _function("read_root_action_broker_systemd_tuple")
         + _function("capture_root_action_broker_state")
         + "\ncapture_root_action_broker_state ''\n"
     )
@@ -447,14 +448,12 @@ def test_broker_pre_activation_rejects_queued_auto_restart(
     systemctl = fake_bin / "systemctl"
     systemctl.write_text(
         "#!/usr/bin/env bash\n"
-        "case \"$*\" in\n"
-        "  *LoadState*) printf '%s\\n' \"$LOAD_STATE\" ;;\n"
-        "  *ActiveState*) printf 'activating\\n' ;;\n"
-        "  *SubState*) printf 'auto-restart\\n' ;;\n"
-        "  *MainPID*) printf '0\\n' ;;\n"
-        "  *Job*) printf '77\\n' ;;\n"
-        "  *) exit 19 ;;\n"
-        "esac\n"
+        "[[ \"$1\" == show ]] || exit 19\n"
+        "printf 'LoadState=%s\\n' \"$LOAD_STATE\"\n"
+        "printf 'ActiveState=activating\\n'\n"
+        "printf 'SubState=auto-restart\\n'\n"
+        "printf 'MainPID=0\\n'\n"
+        "printf 'Job=77\\n'\n"
         "exit 0\n",
         encoding="utf-8",
         newline="\n",
@@ -466,6 +465,7 @@ def test_broker_pre_activation_rejects_queued_auto_restart(
         + "ROOT_ACTION_BROKER_SERVICE_FILE=/etc/systemd/system/agent-runtime-root-action-broker.service\n"
         + "ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=5\n"
         + "die() { printf 'die:%s\\n' \"$*\"; exit 23; }\n"
+        + _function("read_root_action_broker_systemd_tuple")
         + _function("capture_root_action_broker_state")
         + "\ncapture_root_action_broker_state /previous\n"
     )

@@ -504,43 +504,92 @@ root_action_broker_process_attested() {
   [[ "$main_pid_after" == "$main_pid" ]]
 }
 
+read_root_action_broker_systemd_tuple() {
+  local service_name="$1"
+  local output line load_state active_state sub_state main_pid job
+  local seen_load=0 seen_active=0 seen_sub=0 seen_pid=0 seen_job=0
+  output="$(
+    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+      systemctl show \
+        --property=LoadState \
+        --property=ActiveState \
+        --property=SubState \
+        --property=MainPID \
+        --property=Job \
+        "$service_name"
+  )" || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      LoadState=*)
+        [[ "$seen_load" -eq 0 ]] || return 1
+        load_state="${line#LoadState=}"
+        seen_load=1
+        ;;
+      ActiveState=*)
+        [[ "$seen_active" -eq 0 ]] || return 1
+        active_state="${line#ActiveState=}"
+        seen_active=1
+        ;;
+      SubState=*)
+        [[ "$seen_sub" -eq 0 ]] || return 1
+        sub_state="${line#SubState=}"
+        seen_sub=1
+        ;;
+      MainPID=*)
+        [[ "$seen_pid" -eq 0 ]] || return 1
+        main_pid="${line#MainPID=}"
+        seen_pid=1
+        ;;
+      Job=*)
+        [[ "$seen_job" -eq 0 ]] || return 1
+        job="${line#Job=}"
+        seen_job=1
+        ;;
+      *) return 1 ;;
+    esac
+  done <<<"$output"
+  [[ "$seen_load" -eq 1 \
+    && "$seen_active" -eq 1 \
+    && "$seen_sub" -eq 1 \
+    && "$seen_pid" -eq 1 \
+    && "$seen_job" -eq 1 ]] || return 1
+  [[ "$load_state" =~ ^[a-z][a-z-]*$ \
+    && "$active_state" =~ ^[a-z][a-z-]*$ \
+    && "$sub_state" =~ ^[a-z][a-z0-9-]*$ \
+    && "$main_pid" =~ ^[0-9]{1,10}$ ]] || return 1
+  printf 'LoadState=%s\n' "$load_state"
+  printf 'ActiveState=%s\n' "$active_state"
+  printf 'SubState=%s\n' "$sub_state"
+  printf 'MainPID=%s\n' "$main_pid"
+  if [[ -z "$job" ]]; then
+    printf 'JobPresent=no\n'
+  else
+    printf 'JobPresent=yes\n'
+  fi
+}
+
 root_action_broker_terminal_tuple_attested() {
   local service_name="$1"
   local expected_load_state="$2"
-  local load_state active_state sub_state main_pid job
-  load_state="$(
-    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
-      systemctl show --property=LoadState --value "$service_name"
-  )" || return 1
+  local tuple
+  local -a tuple_fields=()
+  tuple="$(read_root_action_broker_systemd_tuple "$service_name")" || return 1
+  mapfile -t tuple_fields <<<"$tuple"
+  [[ "${#tuple_fields[@]}" -eq 5 ]] || return 1
   case "$expected_load_state" in
     loaded|not-found)
-      [[ "$load_state" == "$expected_load_state" ]] || return 1
+      [[ "${tuple_fields[0]}" == "LoadState=$expected_load_state" ]] || return 1
       ;;
     loaded-or-not-found)
-      [[ "$load_state" == loaded || "$load_state" == not-found ]] || return 1
+      [[ "${tuple_fields[0]}" == LoadState=loaded \
+        || "${tuple_fields[0]}" == LoadState=not-found ]] || return 1
       ;;
     *) return 1 ;;
   esac
-  active_state="$(
-    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
-      systemctl show --property=ActiveState --value "$service_name"
-  )" || return 1
-  sub_state="$(
-    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
-      systemctl show --property=SubState --value "$service_name"
-  )" || return 1
-  main_pid="$(
-    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
-      systemctl show --property=MainPID --value "$service_name"
-  )" || return 1
-  job="$(
-    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
-      systemctl show --property=Job --value "$service_name"
-  )" || return 1
-  [[ "$active_state" == inactive \
-    && "$sub_state" == dead \
-    && "$main_pid" == 0 \
-    && -z "$job" ]]
+  [[ "${tuple_fields[1]}" == ActiveState=inactive \
+    && "${tuple_fields[2]}" == SubState=dead \
+    && "${tuple_fields[3]}" == MainPID=0 \
+    && "${tuple_fields[4]}" == JobPresent=no ]]
 }
 
 root_action_broker_inactive_attested() {
@@ -1231,7 +1280,8 @@ restore_broker_service_from_transaction() {
 
 quiesce_root_action_broker_for_transaction() {
   local helper="$1"
-  local broker_state service_name load_state
+  local broker_state service_name tuple
+  local -a tuple_fields=()
   broker_state="$(
     run_activation_transaction "$helper" show --field broker_state
   )" || return 1
@@ -1255,12 +1305,11 @@ quiesce_root_action_broker_for_transaction() {
   if root_action_broker_quiesced_attested "$service_name"; then
     return 0
   fi
-  load_state="$(
-    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
-      systemctl show --property=LoadState --value "$service_name"
-  )" || return 1
-  case "$load_state" in
-    loaded|not-found) ;;
+  tuple="$(read_root_action_broker_systemd_tuple "$service_name")" || return 1
+  mapfile -t tuple_fields <<<"$tuple"
+  [[ "${#tuple_fields[@]}" -eq 5 ]] || return 1
+  case "${tuple_fields[0]}" in
+    LoadState=loaded|LoadState=not-found) ;;
     *) return 1 ;;
   esac
   /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
@@ -1727,38 +1776,29 @@ capture_previous_active_release() {
 
 capture_root_action_broker_state() {
   local previous_release="$1"
-  local service_name load_state active_state sub_state main_pid job
+  local service_name tuple load_state active_state sub_state main_pid job_present
+  local -a tuple_fields=()
   if ! command -v systemctl >/dev/null 2>&1; then
     printf 'unavailable\n'
     return 0
   fi
   service_name="$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")"
-  load_state="$(
-    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
-      systemctl show --property=LoadState --value "$service_name"
-  )" || die "root-action broker pre-activation load-state probe failed"
+  tuple="$(read_root_action_broker_systemd_tuple "$service_name")" \
+    || die "root-action broker pre-activation systemd tuple probe failed"
+  mapfile -t tuple_fields <<<"$tuple"
+  [[ "${#tuple_fields[@]}" -eq 5 ]] \
+    || die "root-action broker pre-activation systemd tuple is malformed"
+  load_state="${tuple_fields[0]#LoadState=}"
+  active_state="${tuple_fields[1]#ActiveState=}"
+  sub_state="${tuple_fields[2]#SubState=}"
+  main_pid="${tuple_fields[3]#MainPID=}"
+  job_present="${tuple_fields[4]#JobPresent=}"
   case "$load_state" in
     loaded|not-found) ;;
     *) die "root-action broker pre-activation load state is not admissible: $load_state" ;;
   esac
-  active_state="$(
-    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
-      systemctl show --property=ActiveState --value "$service_name"
-  )" || die "root-action broker pre-activation active-state probe failed"
-  sub_state="$(
-    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
-      systemctl show --property=SubState --value "$service_name"
-  )" || die "root-action broker pre-activation sub-state probe failed"
-  main_pid="$(
-    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
-      systemctl show --property=MainPID --value "$service_name"
-  )" || die "root-action broker pre-activation MainPID probe failed"
-  job="$(
-    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
-      systemctl show --property=Job --value "$service_name"
-  )" || die "root-action broker pre-activation Job probe failed"
-  case "$load_state:$active_state:$sub_state:$job" in
-    loaded:active:running:)
+  case "$load_state:$active_state:$sub_state:$job_present" in
+    loaded:active:running:no)
       [[ "$main_pid" =~ ^[1-9][0-9]{0,9}$ ]] \
         || die "active root-action broker has an invalid MainPID"
       [[ -n "$previous_release" ]] \
@@ -1767,12 +1807,12 @@ capture_root_action_broker_state() {
         || die "previous root-action broker release is not exactly attested"
       printf 'active\n'
       ;;
-    loaded:inactive:dead:)
+    loaded:inactive:dead:no)
       [[ "$main_pid" == 0 ]] \
         || die "inactive root-action broker still has a MainPID"
       printf 'inactive\n'
       ;;
-    not-found:inactive:dead:)
+    not-found:inactive:dead:no)
       [[ "$main_pid" == 0 ]] \
         || die "absent root-action broker still has a MainPID"
       printf 'absent\n'
