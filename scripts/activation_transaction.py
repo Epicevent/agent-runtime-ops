@@ -1520,6 +1520,7 @@ def defer_broker_reactivation(args: argparse.Namespace) -> None:
     if _lexists(intent):
         if _read_bounded(intent, 128) != RECOVERED_MARKER_BYTES:
             _fail("broker reactivation intent marker mismatch")
+        _fsync_directory(tx_dir)
         print("broker_reactivation_intent=preserved")
         return
     if not _lexists(recovered):
@@ -1814,9 +1815,11 @@ def acknowledge_recovered(args: argparse.Namespace) -> None:
         print("recovered_completion_acknowledged=yes")
         return
     if manifest["phase"] == "recovered_active_intent":
+        _fsync_directory(acknowledged_dir.parent)
         print("broker_reactivation_intent=ready")
         return
     if manifest["phase"] == "recovered_intent_claimed":
+        _fsync_directory(acknowledged_dir.parent)
         print("broker_reactivation_intent=adoption_claimed")
         return
     if manifest["phase"] == "recovered_intent_revoked":

@@ -1629,9 +1629,7 @@ def test_failed_imported_candidate_recovers_without_losing_active_intent() -> No
         bypass = _run_tx(tree, "finalize", "--expect", "baseline")
         assert bypass.returncode != 0
         assert tree["tx"].is_dir()
-        deferred = _run_tx(
-            tree,
-            "defer-broker-reactivation",
+        deferral_args = (
             "--expected-commit",
             ACTIVATION_COMMIT,
             "--expected-previous-release",
@@ -1639,19 +1637,129 @@ def test_failed_imported_candidate_recovers_without_losing_active_intent() -> No
             "--expected-service-name",
             tree["broker_unit"].name,
         )
-        assert deferred.returncode == 0, deferred.stderr
-        assert _run_tx(tree, "finalize", "--expect", "baseline").returncode == 0
-        assert (
-            _run_tx(
-                tree, "ack-recovered", "--expected-commit", ACTIVATION_COMMIT
-            ).stdout
-            == "recovered_completion_acknowledged=yes\n"
+        defer_child = (
+            "import importlib.util, os, pathlib, signal, sys\n"
+            f"spec=importlib.util.spec_from_file_location('tx', {str(ACTIVATION_HELPER)!r})\n"
+            "mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)\n"
+            "original=mod._fsync_directory\n"
+            f"pending=pathlib.Path({str(tree['tx'])!r})\n"
+            "def kill_before_defer_fsync(path):\n"
+            " if pathlib.Path(path)==pending and (pending/mod.RECOVERED_INTENT_MARKER).exists(): os.kill(os.getpid(), signal.SIGKILL)\n"
+            " return original(path)\n"
+            "mod._fsync_directory=kill_before_defer_fsync\n"
+            "sys.argv=sys.argv[1:]\n"
+            "raise SystemExit(mod.main())\n"
         )
-        ready = _run_tx(
-            tree, "ack-recovered", "--expected-commit", ACTIVATION_COMMIT
+        killed_defer = subprocess.run(
+            _fault_injected_tx_argv(
+                tree,
+                defer_child,
+                "defer-broker-reactivation",
+                *deferral_args,
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert killed_defer.returncode == -signal.SIGKILL
+        assert (tree["tx"] / "recovered-active-intent").is_file()
+
+        defer_replay_seen = root / "defer-replay-fsync"
+        defer_replay_child = (
+            "import importlib.util, pathlib, sys\n"
+            f"spec=importlib.util.spec_from_file_location('tx', {str(ACTIVATION_HELPER)!r})\n"
+            "mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)\n"
+            "original=mod._fsync_directory\n"
+            f"pending=pathlib.Path({str(tree['tx'])!r}); seen=pathlib.Path({str(defer_replay_seen)!r})\n"
+            "def observe_defer_fsync(path):\n"
+            " if pathlib.Path(path)==pending and (pending/mod.RECOVERED_INTENT_MARKER).exists(): seen.write_text('seen')\n"
+            " return original(path)\n"
+            "mod._fsync_directory=observe_defer_fsync\n"
+            "sys.argv=sys.argv[1:]\n"
+            "rc=mod.main()\n"
+            "raise SystemExit(rc if seen.exists() else 95)\n"
+        )
+        deferred = subprocess.run(
+            _fault_injected_tx_argv(
+                tree,
+                defer_replay_child,
+                "defer-broker-reactivation",
+                *deferral_args,
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert deferred.returncode == 0, deferred.stderr
+        assert deferred.stdout == "broker_reactivation_intent=preserved\n"
+        assert defer_replay_seen.read_text(encoding="utf-8") == "seen"
+        assert _run_tx(tree, "finalize", "--expect", "baseline").returncode == 0
+
+        complete = Path(f"{tree['tx']}.recovered.complete")
+        acknowledged = Path(f"{tree['tx']}.recovered.acknowledged")
+        ack_child = (
+            "import importlib.util, os, pathlib, signal, sys\n"
+            f"spec=importlib.util.spec_from_file_location('tx', {str(ACTIVATION_HELPER)!r})\n"
+            "mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)\n"
+            "original=mod._fsync_directory\n"
+            f"acknowledged=pathlib.Path({str(acknowledged)!r})\n"
+            "def kill_before_ack_fsync(path):\n"
+            " if pathlib.Path(path)==acknowledged.parent and acknowledged.is_dir(): os.kill(os.getpid(), signal.SIGKILL)\n"
+            " return original(path)\n"
+            "mod._fsync_directory=kill_before_ack_fsync\n"
+            "sys.argv=sys.argv[1:]\n"
+            "raise SystemExit(mod.main())\n"
+        )
+        killed_ack = subprocess.run(
+            _fault_injected_tx_argv(
+                tree,
+                ack_child,
+                "ack-recovered",
+                "--expected-commit",
+                ACTIVATION_COMMIT,
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert killed_ack.returncode == -signal.SIGKILL
+        assert not os.path.lexists(complete)
+        assert acknowledged.is_dir()
+
+        ack_replay_seen = root / "ack-replay-fsync"
+        ack_replay_child = (
+            "import importlib.util, pathlib, sys\n"
+            f"spec=importlib.util.spec_from_file_location('tx', {str(ACTIVATION_HELPER)!r})\n"
+            "mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)\n"
+            "original=mod._fsync_directory\n"
+            f"acknowledged=pathlib.Path({str(acknowledged)!r}); seen=pathlib.Path({str(ack_replay_seen)!r})\n"
+            "def observe_ack_fsync(path):\n"
+            " if pathlib.Path(path)==acknowledged.parent and acknowledged.is_dir(): seen.write_text('seen')\n"
+            " return original(path)\n"
+            "mod._fsync_directory=observe_ack_fsync\n"
+            "sys.argv=sys.argv[1:]\n"
+            "rc=mod.main()\n"
+            "raise SystemExit(rc if seen.exists() else 94)\n"
+        )
+        ready = subprocess.run(
+            _fault_injected_tx_argv(
+                tree,
+                ack_replay_child,
+                "ack-recovered",
+                "--expected-commit",
+                ACTIVATION_COMMIT,
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         assert ready.returncode == 0, ready.stderr
         assert ready.stdout == "broker_reactivation_intent=ready\n"
+        assert ack_replay_seen.read_text(encoding="utf-8") == "seen"
 
         # A second failed candidate must carry the same authority forward.  The
         # next begin adopts that second-generation carrier into a fresh pending
