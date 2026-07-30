@@ -295,11 +295,11 @@ def _phase_marker_temp(tx_dir: Path, marker_name: str) -> Path:
 
 def _recover_phase_marker_staging(
     tx_dir: Path, marker_name: str, expected: bytes
-) -> None:
+) -> bool:
     marker = tx_dir / marker_name
     temp = _phase_marker_temp(tx_dir, marker_name)
     if not _lexists(temp):
-        return
+        return False
     if _lexists(marker):
         _fail(f"transaction phase marker and staging both exist: {marker_name}")
     meta = os.lstat(temp)
@@ -344,6 +344,7 @@ def _recover_phase_marker_staging(
         os.close(fd)
     os.replace(temp, marker)
     _fsync_directory(tx_dir)
+    return True
 
 
 def _write_phase_marker(tx_dir: Path, marker_name: str, data: bytes) -> bool:
@@ -352,11 +353,11 @@ def _write_phase_marker(tx_dir: Path, marker_name: str, data: bytes) -> bool:
         if _read_bounded(marker, len(data)) != data:
             _fail(f"transaction phase marker mismatch: {marker_name}")
         return False
-    _recover_phase_marker_staging(tx_dir, marker_name, data)
+    recovered = _recover_phase_marker_staging(tx_dir, marker_name, data)
     if _lexists(marker):
         if _read_bounded(marker, len(data)) != data:
             _fail(f"transaction phase marker mismatch: {marker_name}")
-        return False
+        return recovered
     temp = _phase_marker_temp(tx_dir, marker_name)
     _write_file(temp, data)
     _fsync_directory(tx_dir)
@@ -787,7 +788,10 @@ def _validate_meta(
 
 
 def _load_transaction(
-    args: argparse.Namespace, *, recovered_state: str | None = None
+    args: argparse.Namespace,
+    *,
+    recovered_state: str | None = None,
+    recovered_phase_markers: set[str] | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     pending_dir = _safe_absolute(args.transaction_dir, "transaction_dir")
     if pending_dir.name != ".activation-transaction.pending":
@@ -868,7 +872,9 @@ def _load_transaction(
         (START_DISPATCH_MARKER, b"start_dispatch_committed\n"),
         (ACTIVE_ATTESTED_MARKER, b"active_attested\n"),
     ):
-        _recover_phase_marker_staging(tx_dir, marker_name, marker_bytes)
+        if _recover_phase_marker_staging(tx_dir, marker_name, marker_bytes):
+            if recovered_phase_markers is not None:
+                recovered_phase_markers.add(marker_name)
     recovered_marker = tx_dir / "recovered"
     recovered_intent_marker = tx_dir / RECOVERED_INTENT_MARKER
     adoption_claimed_marker = tx_dir / ADOPTION_CLAIMED_MARKER
@@ -1591,10 +1597,19 @@ def _validate_broker_activation_args(
 
 
 def commit_broker_start(args: argparse.Namespace) -> None:
-    tx_dir, manifest = _load_transaction(args)
+    recovered_phase_markers: set[str] = set()
+    tx_dir, manifest = _load_transaction(
+        args, recovered_phase_markers=recovered_phase_markers
+    )
     _retire_adopted_carrier(args, manifest)
     _validate_broker_activation_args(args, tx_dir, manifest)
     phase = _broker_activation_phase(tx_dir, manifest)
+    if (
+        phase == "start_dispatch_committed"
+        and START_DISPATCH_MARKER in recovered_phase_markers
+    ):
+        print("broker_start_dispatch=committed")
+        return
     if phase != "candidate_bound":
         _fail("broker start dispatch cannot advance from the current phase")
     if not _write_phase_marker(
@@ -1721,7 +1736,11 @@ def show(args: argparse.Namespace) -> None:
     elif field == "broker_service_name":
         value = manifest["broker"]["service_name"]
     elif field == "broker_reactivation_origin_sha256":
-        origin = manifest["broker"]["reactivation_origin"]
+        origin = (
+            _reactivation_origin(_tx_dir, manifest)
+            if recovered
+            else manifest["broker"]["reactivation_origin"]
+        )
         if origin is None:
             _fail("transaction has no broker reactivation origin")
         value = origin["source_manifest_sha256"]

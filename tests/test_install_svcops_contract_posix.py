@@ -2067,13 +2067,13 @@ def test_installer_owned_revocation_holds_lock_and_forwards_carrier_bindings() -
             f"    show-recovered:previous_release) printf '%s\\n' {str(previous)!r} ;;\n"
             f"    show-recovered:broker_service_name) printf '%s\\n' {service!r} ;;\n"
             f"    show-recovered:broker_reactivation_origin_sha256) printf '%s\\n' {origin!r} ;;\n"
-            "    revoke-broker-reactivation:)\n"
+            f"    revoke-broker-reactivation:{failed_commit})\n"
             f"      [[ \" $* \" == *\" --expected-commit {failed_commit} \"* ]]\n"
             f"      [[ \" $* \" == *\" --expected-previous-release {str(previous)} \"* ]]\n"
             f"      [[ \" $* \" == *\" --expected-service-name {service} \"* ]]\n"
             f"      [[ \" $* \" == *\" --expected-origin-sha256 {origin} \"* ]]\n"
             "      printf 'broker_reactivation_revocation=recorded\\n' ;;\n"
-            "    ack-recovered:)\n"
+            f"    ack-recovered:{failed_commit})\n"
             f"      [[ \" $* \" == *\" --expected-commit {failed_commit} \"* ]]\n"
             "      printf 'broker_reactivation_intent=revoked\\n' ;;\n"
             "    *) return 88 ;;\n"
@@ -2094,8 +2094,8 @@ def test_installer_owned_revocation_holds_lock_and_forwards_carrier_bindings() -
             "tx:show-recovered:previous_release",
             "tx:show-recovered:broker_service_name",
             "tx:show-recovered:broker_reactivation_origin_sha256",
-            "tx:revoke-broker-reactivation:",
-            "tx:ack-recovered:",
+            f"tx:revoke-broker-reactivation:{failed_commit}",
+            f"tx:ack-recovered:{failed_commit}",
             "info:broker_reactivation_revocation=retired",
             f"info:broker_reactivation_failed_candidate={failed_commit}",
         ]
