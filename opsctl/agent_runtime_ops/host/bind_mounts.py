@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import json
+import os
+import select
+import signal
 import stat
+import subprocess
+import time
 from pathlib import Path
+from typing import Any
 
-from .mounts import _run_text, findmnt_one, findmnt_under
+from .mounts import _run_text, findmnt_one, findmnt_under, parse_findmnt_pairs
 
 
 def _is_safe_view_mount(row: dict[str, str]) -> bool:
@@ -28,6 +35,476 @@ def _reject_existing_symlink_components(path: Path, label: str) -> None:
 
 def _path_identity(info) -> tuple[int, int, int]:
     return info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode)
+
+
+def _grant_identity(info) -> tuple[int, int, int, int, int, int]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        stat.S_IFMT(info.st_mode),
+        int(info.st_uid),
+        int(info.st_gid),
+        stat.S_IMODE(info.st_mode),
+    )
+
+
+def _open_directory_nofollow(path: Path) -> int:
+    """Open every path component without following links; caller closes the fd."""
+    if not path.is_absolute():
+        raise ValueError(f"grant_path_not_absolute:{path}")
+    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
+        raise OSError("nofollow_directory_open_unavailable")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    nofollow = os.O_NOFOLLOW
+    current = os.open(path.anchor, flags | nofollow)
+    try:
+        for part in path.parts[1:]:
+            following = os.open(part, flags | nofollow, dir_fd=current)
+            os.close(current)
+            current = following
+        return current
+    except Exception:
+        os.close(current)
+        raise
+
+
+def _slot_account_identity(slot: str) -> tuple[int, int]:
+    import pwd
+
+    account = pwd.getpwnam(slot)
+    return int(account.pw_uid), int(account.pw_gid)
+
+
+def _probe_slot_access(slot: str, entry: Path, flag: str, timeout: float) -> tuple[bool | None, str | None]:
+    mode = {"-x": "x", "-r": "r"}.get(flag)
+    if mode is None:
+        return None, "probe_unavailable"
+    code = (
+        "import os,sys;"
+        "m={'x':os.X_OK,'r':os.R_OK}[sys.argv[1]];"
+        "print('allow' if os.access(sys.argv[2],m) else 'deny')"
+    )
+    try:
+        proc = _run_text(
+            [
+                "/usr/sbin/runuser", "-u", slot, "--", "/usr/bin/python3", "-I", "-c",
+                code, mode, entry.as_posix(),
+            ],
+            timeout=max(0.1, timeout),
+        )
+    except subprocess.TimeoutExpired:
+        return None, "probe_timeout"
+    except OSError:
+        return None, "probe_unavailable"
+    if proc.returncode != 0:
+        return None, "probe_unavailable"
+    observed = proc.stdout.strip()
+    if observed == "allow":
+        return True, None
+    if observed == "deny":
+        return False, None
+    return None, "probe_unavailable"
+
+
+def _findmnt_exact(entry: Path, timeout: float) -> tuple[int, list[dict[str, str]]]:
+    proc = _run_text(
+        [
+            "/usr/bin/findmnt",
+            "-M",
+            entry.as_posix(),
+            "-P",
+            "-o",
+            "TARGET,SOURCE,FSTYPE,OPTIONS,PROPAGATION",
+        ],
+        timeout=max(0.1, timeout),
+    )
+    return proc.returncode, parse_findmnt_pairs(proc.stdout)
+
+
+def observe_mount_targets_under(entry_root: Path, timeout: float) -> tuple[set[str] | None, str | None]:
+    """Return the exact mounted target inventory under one slot entry root."""
+    try:
+        proc = _run_text(
+            [
+                "/usr/bin/findmnt", "-R", "-M", entry_root.as_posix(), "-P", "-o", "TARGET",
+            ],
+            timeout=max(0.1, timeout),
+        )
+    except subprocess.TimeoutExpired:
+        return None, "probe_timeout"
+    except OSError:
+        return None, "probe_unavailable"
+    if proc.returncode == 1 and not proc.stdout.strip():
+        return set(), None
+    if proc.returncode != 0:
+        return None, "probe_unavailable"
+    rows = parse_findmnt_pairs(proc.stdout)
+    targets = [row.get("target", "") for row in rows]
+    prefix = entry_root.as_posix().rstrip("/") + "/"
+    if (
+        not targets
+        or any(not target or (target != entry_root.as_posix() and not target.startswith(prefix)) for target in targets)
+        or len(targets) != len(set(targets))
+    ):
+        return None, "probe_unavailable"
+    return set(targets), None
+
+
+def _empty_grant_item(entry: Path) -> dict[str, Any]:
+    return {
+        "path": "",
+        "entry_path": entry.as_posix(),
+        "mount_exact": False,
+        "mount_readonly": False,
+        "mount_safe_options": False,
+        "source_identity_match": False,
+        "source_uid": None,
+        "source_gid": None,
+        "source_mode": None,
+        "entry_uid": None,
+        "entry_gid": None,
+        "entry_mode": None,
+        "account_uid": None,
+        "account_gid": None,
+        "account_traverse": None,
+        "account_read": None,
+        "issues": [],
+        "gaps": [],
+    }
+
+
+def _observe_ro_view_grant_core(
+    source: Path,
+    entry: Path,
+    slot: str,
+    *,
+    allow_account_probe: bool,
+    timeout: float,
+) -> tuple[dict[str, Any], bool, bool]:
+    """Probe one grant in an isolated worker without reading directory contents."""
+    item = _empty_grant_item(entry)
+    issues: list[str] = item["issues"]
+    gaps: list[str] = item["gaps"]
+    source_fd = entry_fd = source_after_fd = entry_after_fd = None
+    source_before = entry_before = None
+    baseline_rc = -1
+    baseline_rows: list[dict[str, str]] = []
+    complete = True
+    deadline = time.monotonic() + max(0.1, timeout)
+    try:
+        source_fd = _open_directory_nofollow(source)
+        entry_fd = _open_directory_nofollow(entry)
+        source_before = os.fstat(source_fd)
+        entry_before = os.fstat(entry_fd)
+        item.update({
+            "source_uid": int(source_before.st_uid),
+            "source_gid": int(source_before.st_gid),
+            "source_mode": f"{stat.S_IMODE(source_before.st_mode):04o}",
+            "entry_uid": int(entry_before.st_uid),
+            "entry_gid": int(entry_before.st_gid),
+            "entry_mode": f"{stat.S_IMODE(entry_before.st_mode):04o}",
+        })
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired("grant_metadata", timeout)
+        try:
+            rc, rows = _findmnt_exact(entry, remaining)
+        except subprocess.TimeoutExpired:
+            gaps.append("probe_timeout")
+            complete = False
+            rc, rows = -1, []
+        except OSError:
+            gaps.append("probe_unavailable")
+            complete = False
+            rc, rows = -1, []
+        if rc not in {-1, 0, 1} or (rc == 0 and not rows):
+            gaps.append("probe_unavailable")
+            complete = False
+            rc, rows = -1, []
+        baseline_rc, baseline_rows = rc, rows
+        exact_rows = [row for row in rows if row.get("target") == entry.as_posix()]
+        item["mount_exact"] = rc == 0 and len(exact_rows) == 1
+        if item["mount_exact"]:
+            row = exact_rows[0]
+            options = {part.strip() for part in row.get("options", "").split(",") if part.strip()}
+            item["mount_readonly"] = "ro" in options
+            item["mount_safe_options"] = {"ro", "nosuid", "nodev"}.issubset(options)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired("grant_metadata", timeout)
+        source_after_fd = _open_directory_nofollow(source)
+        entry_after_fd = _open_directory_nofollow(entry)
+        source_after = os.fstat(source_after_fd)
+        entry_after = os.fstat(entry_after_fd)
+        try:
+            rc_after, rows_after = _findmnt_exact(entry, remaining)
+        except subprocess.TimeoutExpired:
+            gaps.append("probe_timeout")
+            complete = False
+            rc_after, rows_after = -1, []
+        except OSError:
+            gaps.append("probe_unavailable")
+            complete = False
+            rc_after, rows_after = -1, []
+        if rc_after != rc or rows_after != rows:
+            gaps.append("probe_unavailable")
+            complete = False
+        item["source_identity_match"] = (
+            _grant_identity(source_before) == _grant_identity(source_after)
+            and _grant_identity(entry_before) == _grant_identity(entry_after)
+            and _grant_identity(source_after) == _grant_identity(entry_after)
+        )
+    except FileNotFoundError:
+        issues.append("path_missing")
+        complete = False
+    except subprocess.TimeoutExpired:
+        gaps.append("probe_timeout")
+        complete = False
+    except (OSError, ValueError):
+        issues.append("metadata_invalid")
+        complete = False
+    finally:
+        if source_fd is not None:
+            os.close(source_fd)
+        if entry_fd is not None:
+            os.close(entry_fd)
+        if source_after_fd is not None:
+            os.close(source_after_fd)
+        if entry_after_fd is not None:
+            os.close(entry_after_fd)
+
+    if complete:
+        if not item["mount_exact"]:
+            issues.append("path_not_mounted")
+        elif not item["mount_readonly"]:
+            issues.append("path_not_readonly")
+        if item["mount_exact"] and not item["mount_safe_options"]:
+            issues.append("mount_safe_options_missing")
+        if not item["source_identity_match"]:
+            issues.append("source_identity_mismatch")
+
+    try:
+        account_uid, account_gid = _slot_account_identity(slot)
+        item["account_uid"] = account_uid
+        item["account_gid"] = account_gid
+    except (ImportError, KeyError, OSError):
+        issues.append("account_not_found")
+        complete = False
+
+    if item["account_uid"] is not None:
+        if not allow_account_probe:
+            gaps.append("account_probe_requires_root")
+            complete = False
+        else:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                traverse, traverse_gap = None, "probe_timeout"
+            else:
+                traverse, traverse_gap = _probe_slot_access(slot, entry, "-x", remaining)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                read, read_gap = None, "probe_timeout"
+            else:
+                read, read_gap = _probe_slot_access(slot, entry, "-r", remaining)
+            item["account_traverse"] = traverse
+            item["account_read"] = read
+            for gap in (traverse_gap, read_gap):
+                if gap is not None:
+                    gaps.append(gap)
+                    complete = False
+            if traverse is False:
+                issues.append("account_traverse_denied")
+            if read is False:
+                issues.append("account_read_denied")
+
+    # Access is pathname-based. Re-open and re-read after both account probes
+    # so uid/gid/mode, inode identity, and exact mount options all belong to the
+    # same final state as the reported allow/deny decisions.
+    if source_before is not None and entry_before is not None:
+        final_source_fd = final_entry_fd = None
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired("grant_final_coherence", timeout)
+            final_source_fd = _open_directory_nofollow(source)
+            final_entry_fd = _open_directory_nofollow(entry)
+            final_source = os.fstat(final_source_fd)
+            final_entry = os.fstat(final_entry_fd)
+            final_rc, final_rows = _findmnt_exact(entry, remaining)
+            if (
+                _grant_identity(source_before) != _grant_identity(final_source)
+                or _grant_identity(entry_before) != _grant_identity(final_entry)
+                or final_rc != baseline_rc
+                or final_rows != baseline_rows
+            ):
+                item["source_identity_match"] = False
+                issues.append("source_identity_mismatch")
+                gaps.append("probe_unavailable")
+                complete = False
+            elif _grant_identity(final_source) != _grant_identity(final_entry):
+                # A stable wrong-source bind is fully observed but unhealthy;
+                # incompleteness is reserved for state that changed mid-probe.
+                item["source_identity_match"] = False
+        except subprocess.TimeoutExpired:
+            gaps.append("probe_timeout")
+            complete = False
+        except (OSError, ValueError):
+            gaps.append("probe_unavailable")
+            complete = False
+        finally:
+            if final_source_fd is not None:
+                os.close(final_source_fd)
+            if final_entry_fd is not None:
+                os.close(final_entry_fd)
+
+    item["issues"] = sorted(set(issues))
+    item["gaps"] = sorted(set(gaps))
+    green = complete and not item["issues"] and not item["gaps"] and all(
+        item[field] is True
+        for field in (
+            "mount_exact",
+            "mount_readonly",
+            "mount_safe_options",
+            "source_identity_match",
+            "account_traverse",
+            "account_read",
+        )
+    )
+    return item, complete, green
+
+
+_GRANT_PROBE_PAYLOAD_MAX_BYTES = 32 * 1024
+
+
+def _stop_probe_pid(pid: int) -> None:
+    """Best-effort terminate/reap without registering an interpreter finalizer."""
+    try:
+        if os.getpgid(pid) == pid:
+            os.killpg(pid, signal.SIGKILL)
+        else:
+            os.kill(pid, signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        os.waitpid(pid, os.WNOHANG)
+    except (ChildProcessError, OSError):
+        pass
+
+
+def _grant_probe_child_bytes(
+    source: Path,
+    entry: Path,
+    slot: str,
+    allow_account_probe: bool,
+    timeout: float,
+) -> bytes:
+    try:
+        result = _observe_ro_view_grant_core(
+            source,
+            entry,
+            slot,
+            allow_account_probe=allow_account_probe,
+            timeout=timeout,
+        )
+    except BaseException:
+        item = _empty_grant_item(entry)
+        item["gaps"] = ["probe_unavailable"]
+        result = (item, False, False)
+    payload = json.dumps(
+        {"item": result[0], "complete": result[1], "green": result[2]},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(payload) > _GRANT_PROBE_PAYLOAD_MAX_BYTES:
+        item = _empty_grant_item(entry)
+        item["gaps"] = ["probe_unavailable"]
+        payload = json.dumps(
+            {"item": item, "complete": False, "green": False},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    return payload
+
+
+def observe_ro_view_grant(
+    source: Path,
+    entry: Path,
+    slot: str,
+    *,
+    allow_account_probe: bool,
+    timeout: float,
+) -> tuple[dict[str, Any], bool, bool]:
+    """Return one content-free grant observation within a hard wall-clock bound."""
+    item = _empty_grant_item(entry)
+    if os.name != "posix" or timeout <= 0:
+        item["gaps"] = ["probe_unavailable"]
+        return item, False, False
+    read_fd, write_fd = os.pipe()
+    try:
+        pid = os.fork()
+    except OSError:
+        os.close(read_fd)
+        os.close(write_fd)
+        item["gaps"] = ["probe_unavailable"]
+        return item, False, False
+    if pid == 0:
+        try:
+            os.close(read_fd)
+            os.setsid()
+            payload = _grant_probe_child_bytes(
+                source, entry, slot, allow_account_probe, timeout
+            )
+            offset = 0
+            while offset < len(payload):
+                offset += os.write(write_fd, payload[offset:])
+        except BaseException:
+            pass
+        finally:
+            try:
+                os.close(write_fd)
+            except OSError:
+                pass
+            os._exit(0)
+    os.close(write_fd)
+    os.set_blocking(read_fd, False)
+    deadline = time.monotonic() + timeout
+    chunks: list[bytes] = []
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                item["gaps"] = ["probe_timeout"]
+                return item, False, False
+            ready, _, _ = select.select([read_fd], [], [], remaining)
+            if not ready:
+                item["gaps"] = ["probe_timeout"]
+                return item, False, False
+            chunk = os.read(read_fd, 8192)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if sum(map(len, chunks)) > _GRANT_PROBE_PAYLOAD_MAX_BYTES:
+                item["gaps"] = ["probe_unavailable"]
+                return item, False, False
+        try:
+            response = json.loads(b"".join(chunks).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            item["gaps"] = ["probe_unavailable"]
+            return item, False, False
+        if not isinstance(response, dict) or set(response) != {"item", "complete", "green"}:
+            item["gaps"] = ["probe_unavailable"]
+            return item, False, False
+        if (
+            not isinstance(response["item"], dict)
+            or not isinstance(response["complete"], bool)
+            or not isinstance(response["green"], bool)
+        ):
+            item["gaps"] = ["probe_unavailable"]
+            return item, False, False
+        return response["item"], response["complete"], response["green"]
+    finally:
+        os.close(read_fd)
+        _stop_probe_pid(pid)
 
 
 def bind_ro(source: Path, target: Path, *, recursive: bool = False) -> tuple[bool, str]:

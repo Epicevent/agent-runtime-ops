@@ -16,6 +16,7 @@ from agent_runtime_ops.commands.nas_view import (
     _restore_views,
     _remove_stale_per_slot_master_registration,
     _validate_shared_master,
+    _view_grant_evidence,
     cmd_nas_view_assign,
     cmd_nas_view_detach,
     cmd_nas_view_preflight,
@@ -33,6 +34,29 @@ from agent_runtime_ops.yamlio import dump_yaml
 
 
 SHARE = "//10.10.10.2/hanpass_groupware"
+
+
+def _valid_grant_item(path: str = "mails/seung23") -> dict:
+    return {
+        "path": path,
+        "entry_path": f"/home/oc3/nas_docs/groupware/{path.replace('/', '_')}",
+        "mount_exact": True,
+        "mount_readonly": True,
+        "mount_safe_options": True,
+        "source_identity_match": True,
+        "source_uid": 0,
+        "source_gid": 1003,
+        "source_mode": "0750",
+        "entry_uid": 0,
+        "entry_gid": 1003,
+        "entry_mode": "0750",
+        "account_uid": 1003,
+        "account_gid": 1003,
+        "account_traverse": True,
+        "account_read": True,
+        "issues": [],
+        "gaps": [],
+    }
 
 
 def _write_state(root: Path) -> None:
@@ -427,6 +451,10 @@ class SharedMasterAssignTest(unittest.TestCase):
             patch("agent_runtime_ops.commands.nas_view._read_fstab", return_value=fstab),
             patch("agent_runtime_ops.commands.nas_view._is_root", return_value=False),
             patch("agent_runtime_ops.commands.nas_view.failed_cifs_mount_units", return_value=([], None)),
+            patch(
+                "agent_runtime_ops.commands.nas_view._view_grant_evidence",
+                return_value=("yes", [_valid_grant_item()], True, True),
+            ),
             contextlib.redirect_stdout(output),
         ):
             rc = cmd_nas_view_status(SimpleNamespace(state_root="/unused"))
@@ -435,9 +463,145 @@ class SharedMasterAssignTest(unittest.TestCase):
         self.assertIn("view_1_master_readonly=no", text)
         self.assertIn("view_1_master_readonly_required=no", text)
         self.assertIn("view_1_entry_mounted_readonly=yes", text)
+        self.assertIn("view_1_grant_evidence_applicable=yes", text)
+        self.assertIn("view_1_grant_evidence_count=1", text)
+        self.assertIn("view_1_grant_evidence_complete=yes", text)
         self.assertIn("view_1_healthy=yes", text)
         self.assertIn("boot_fstab_entries=1/1", text)
         self.assertNotIn("not-output", text)
+
+    def test_status_degrades_when_grant_evidence_is_incomplete(self) -> None:
+        master = Path("/mnt/nas/hanpass_groupware")
+        record = {
+            "user_id": "seung23", "share": SHARE, "paths": ["mails/seung23"],
+            "master_mode": "shared_policy_mount", "master_path": master.as_posix(),
+        }
+        records = {"views": {}, "corpus_views": {"oc3": {"groupware": record}}}
+        output = io.StringIO()
+        with (
+            patch("agent_runtime_ops.commands.nas_view.load_views_state", return_value=records),
+            patch("agent_runtime_ops.commands.nas_view._shared_master_for_record", return_value=master),
+            patch("agent_runtime_ops.commands.nas_view.shared_master_for_share", return_value=master),
+            patch(
+                "agent_runtime_ops.commands.nas_view._findmnt_one",
+                return_value=(0, "", [{"target": master.as_posix(), "options": "rw"}]),
+            ),
+            patch("agent_runtime_ops.commands.nas_view._read_fstab", return_value=""),
+            patch("agent_runtime_ops.commands.nas_view._is_root", return_value=False),
+            patch("agent_runtime_ops.commands.nas_view.failed_cifs_mount_units", return_value=([], None)),
+            patch(
+                "agent_runtime_ops.commands.nas_view._view_grant_evidence",
+                return_value=("yes", [], False, False),
+            ),
+            contextlib.redirect_stdout(output),
+        ):
+            rc = cmd_nas_view_status(SimpleNamespace(state_root="/unused"))
+        text = output.getvalue()
+        self.assertEqual(rc, 1, text)
+        self.assertIn("view_1_grant_evidence_complete=no", text)
+        self.assertIn("view_1_healthy=no", text)
+        self.assertIn('view_observation_gaps_json=["boot_restore_requires_root","grant_evidence_incomplete"]', text)
+
+    def test_grant_evidence_rejects_duplicate_alias_and_non_string_path(self) -> None:
+        record = {"paths": ["mails/user", "mails_user"]}
+        self.assertEqual(
+            _view_grant_evidence("oc3", "groupware", record, Path("/master")),
+            ("yes", [], False, False),
+        )
+        self.assertEqual(
+            _view_grant_evidence("oc3", "groupware", {"paths": [7]}, Path("/master")),
+            ("yes", [], False, False),
+        )
+        self.assertEqual(
+            _view_grant_evidence("oc3", "groupware", {"paths": []}, Path("/master")),
+            ("yes", [], False, False),
+        )
+
+    def test_grant_evidence_uses_exact_source_entry_and_budget(self) -> None:
+        item = _valid_grant_item()
+        with (
+            patch(
+                "agent_runtime_ops.commands.nas_view.observe_ro_view_grant",
+                return_value=(item, True, True),
+            ) as observe,
+            patch(
+                "agent_runtime_ops.commands.nas_view.observe_mount_targets_under",
+                return_value=({
+                    "/home/oc3/nas_docs/groupware",
+                    "/home/oc3/nas_docs/groupware/mails_seung23",
+                }, None),
+            ),
+        ):
+            result = _view_grant_evidence(
+                "oc3", "groupware", {"paths": ["mails/seung23"]}, Path("/master")
+            )
+        self.assertEqual(result, ("yes", [item], True, True))
+        self.assertEqual(observe.call_args.args[:3], (
+            Path("/master/mails/seung23"),
+            Path("/home/oc3/nas_docs/groupware/mails_seung23"),
+            "oc3",
+        ))
+        self.assertGreater(observe.call_args.kwargs["timeout"], 0)
+        self.assertLessEqual(observe.call_args.kwargs["timeout"], 3.0)
+
+    def test_unrecorded_actual_child_mount_makes_evidence_incomplete(self) -> None:
+        item = _valid_grant_item()
+        with (
+            patch(
+                "agent_runtime_ops.commands.nas_view.observe_ro_view_grant",
+                return_value=(item, True, True),
+            ),
+            patch(
+                "agent_runtime_ops.commands.nas_view.observe_mount_targets_under",
+                return_value=({
+                    "/home/oc3/nas_docs/groupware",
+                    "/home/oc3/nas_docs/groupware/mails_seung23",
+                    "/home/oc3/nas_docs/groupware/approval_old_owner",
+                }, None),
+            ),
+        ):
+            applicable, evidence, complete, green = _view_grant_evidence(
+                "oc3", "groupware", {"paths": ["mails/seung23"]}, Path("/master")
+            )
+        self.assertEqual(applicable, "yes")
+        self.assertEqual(evidence, [item])
+        self.assertFalse(complete)
+        self.assertFalse(green)
+
+    def test_inventory_is_bracketed_by_two_identical_grant_rounds(self) -> None:
+        before = _valid_grant_item()
+        after = dict(before)
+        after["entry_mode"] = "0700"
+        inventory_seen = False
+
+        def observe(*_args, **_kwargs):
+            return (after if inventory_seen else before, True, True)
+
+        def inventory(*_args, **_kwargs):
+            nonlocal inventory_seen
+            inventory_seen = True
+            return ({
+                "/home/oc3/nas_docs/groupware",
+                "/home/oc3/nas_docs/groupware/mails_seung23",
+            }, None)
+
+        with (
+            patch(
+                "agent_runtime_ops.commands.nas_view.observe_ro_view_grant",
+                side_effect=observe,
+            ),
+            patch(
+                "agent_runtime_ops.commands.nas_view.observe_mount_targets_under",
+                side_effect=inventory,
+            ),
+        ):
+            applicable, evidence, complete, green = _view_grant_evidence(
+                "oc3", "groupware", {"paths": ["mails/seung23"]}, Path("/master")
+            )
+        self.assertEqual(applicable, "yes")
+        self.assertEqual(evidence[0]["entry_mode"], "0700")
+        self.assertFalse(complete)
+        self.assertFalse(green)
 
 
 @unittest.skipUnless(os.name == "posix", "requires POSIX directory fd and mount path semantics")

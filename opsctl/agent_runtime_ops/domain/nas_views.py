@@ -297,7 +297,12 @@ def validate_relative_path(value: str) -> str:
     if text.startswith("/"):
         raise ValueError(f"path must be corpus-relative, got absolute: {value!r}")
     raw = text.rstrip("/")
-    if not raw or len(raw) > 512 or "\\" in raw:
+    if (
+        not raw
+        or len(raw) > 512
+        or "\\" in raw
+        or any(ord(char) < 0x20 or ord(char) == 0x7F for char in raw)
+    ):
         raise ValueError(f"unsafe path: {value!r}")
     parts = [p for p in raw.split("/")]
     if any(p in {"", ".", ".."} for p in parts):
