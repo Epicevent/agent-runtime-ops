@@ -266,6 +266,17 @@ revocation nor continuation authority; drift is rejected rather than silently
 changing the carried intent. The v2 transaction schema intentionally fails
 closed on a v1 pending/recovered directory; such residue must be resolved under
 its exact source helper instead of being guessed or migrated by the new helper.
+The supported operator surface is `sudo bash install.sh
+revoke-broker-reactivation EXPECTED_COMMIT EXPECTED_PREVIOUS_RELEASE
+EXPECTED_SERVICE EXPECTED_ORIGIN_SHA256` from an exact trusted source checkout.
+The four arguments are the reviewed carrier identity, not caller-selected
+authority. The installer validates their grammar, acquires the same persistent
+lock, reads the root-controlled carrier, requires every observed value to equal
+the reviewed arguments, atomically records revocation, and retires only that
+exact carrier. Missing, stale, or mismatched bindings fail before the revocation
+write. A corrected successor may then install against the measured
+inactive/disabled baseline; revocation deliberately discards the old active
+target rather than transferring authority to an unrelated commit.
 
 Recovery finalization uses a distinct root-owned `recovered.complete` identity.
 The next installer validates its exact commit-bound manifest, payload digests,

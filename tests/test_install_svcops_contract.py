@@ -242,7 +242,9 @@ def test_exact_legacy_baseline_exception_is_passive_and_candidate_gate_remains()
     assert '"\\r" in policy_text' in identity
     assert 'not policy_text.endswith("\\n")' in identity
     assert 'policy_text.count("\\n") != 10' in identity
-    assert "approved_by_scalar" in identity
+    assert "canonical_approved_by_scalar" in identity
+    assert "approved_by_allows_block_plain" in identity
+    assert "implicit_non_string_patterns" in identity
     assert "gemini_wrapper != expected_gemini_wrapper" in identity
     assert '"codex/kwrag-legacy-backup-collision-recovery "' in identity
     assert 'path_is_not_executable_as_ops "$release_dir/.venv/bin/opsctl"' in degraded
@@ -365,6 +367,38 @@ def test_pending_recovery_is_commit_bound_first_gate_after_lock() -> None:
     assert "env -i PATH=/usr/local/bin:/usr/bin:/bin" in helper_runner
     assert "O_NOFOLLOW" in helper_runner
     assert "activation helper bytes do not match the exact source blob" in helper_runner
+
+
+def test_carried_broker_revocation_is_an_installer_lock_owned_exact_action() -> None:
+    revoke = _function("revoke_carried_broker_reactivation")
+    lock = revoke.index("with_install_lock")
+    first_read = revoke.index("show-recovered --field candidate_commit")
+    mutation = revoke.index('revoke-broker-reactivation \\\n')
+    retirement = revoke.index('ack-recovered \\\n')
+    assert lock < first_read < mutation < retirement
+    for field in (
+        "candidate_commit",
+        "previous_release",
+        "broker_service_name",
+        "broker_reactivation_origin_sha256",
+    ):
+        assert f"--field {field}" in revoke
+    for binding in (
+        '--expected-commit "$expected_commit"',
+        '--expected-previous-release "$expected_previous_release"',
+        '--expected-service-name "$expected_service_name"',
+        '--expected-origin-sha256 "$expected_origin_sha256"',
+    ):
+        assert binding in revoke
+    assert '[[ "$carrier_commit" == "$expected_commit"' in revoke
+    assert '"$previous_release" == "$expected_previous_release"' in revoke
+    assert '"$service_name" == "$expected_service_name"' in revoke
+    assert '"$origin_sha256" == "$expected_origin_sha256"' in revoke
+    assert '[[ "$retire_output" == broker_reactivation_intent=revoked ]]' in revoke
+    assert "revoke-broker-reactivation)" in INSTALL
+    assert "revoke_carried_broker_reactivation" in INSTALL.rsplit(
+        'case "${1:-install}" in', 1
+    )[1]
 
 
 def test_bootstrap_installs_python_before_python_backed_parent_validation() -> None:

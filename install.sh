@@ -1398,6 +1398,81 @@ cleanup_abandoned_activation_staging() {
   [[ -z "$output" ]] || return 1
 }
 
+revoke_carried_broker_reactivation() {
+  local expected_commit="$1"
+  local expected_previous_release="$2"
+  local expected_service_name="$3"
+  local expected_origin_sha256="$4"
+  local src commit helper carrier_commit previous_release service_name origin_sha256
+  local revoke_output retire_output
+  require_root
+  validate_activation_path_strings
+  require_full_sha "$expected_commit"
+  [[ "$expected_previous_release" =~ ^/[A-Za-z0-9._/-]+$ ]] \
+    || die "expected previous release is not a fixed absolute path"
+  [[ "$expected_service_name" =~ ^[A-Za-z0-9_.@-]+\.service$ ]] \
+    || die "expected broker service name is invalid"
+  [[ "$expected_origin_sha256" =~ ^[0-9a-f]{64}$ ]] \
+    || die "expected broker reactivation origin digest is invalid"
+  src="$(repo_root)" \
+    || die "broker reactivation revocation requires an exact local source tree"
+  validate_install_root
+  command -v git >/dev/null || die "missing revocation prerequisite: git"
+  command -v python3 >/dev/null || die "missing revocation prerequisite: python3"
+  command -v flock >/dev/null || die "missing revocation prerequisite: flock"
+  require_ops_account
+  helper="$src/scripts/activation_transaction.py"
+  [[ -f "$helper" && ! -L "$helper" ]] \
+    || die "missing fixed activation transaction helper"
+  commit="$(source_commit "$src")"
+  require_full_sha "$commit"
+  ACTIVATION_HELPER_BLOB="$(
+    verify_activation_helper_identity "$src" "$commit" "$helper"
+  )" || die "activation helper does not match the exact source commit"
+  with_install_lock
+  carrier_commit="$(
+    run_activation_transaction "$helper" show-recovered --field candidate_commit
+  )" || die "no exact carried broker reactivation intent is available"
+  previous_release="$(
+    run_activation_transaction "$helper" show-recovered --field previous_release
+  )" || die "carried broker reactivation previous release is unavailable"
+  service_name="$(
+    run_activation_transaction "$helper" show-recovered --field broker_service_name
+  )" || die "carried broker reactivation service is unavailable"
+  origin_sha256="$(
+    run_activation_transaction "$helper" show-recovered \
+      --field broker_reactivation_origin_sha256
+  )" || die "carried broker reactivation origin is unavailable"
+  require_full_sha "$carrier_commit"
+  [[ "$origin_sha256" =~ ^[0-9a-f]{64}$ ]] \
+    || die "carried broker reactivation origin digest is invalid"
+  [[ "$carrier_commit" == "$expected_commit" \
+    && "$previous_release" == "$expected_previous_release" \
+    && "$service_name" == "$expected_service_name" \
+    && "$origin_sha256" == "$expected_origin_sha256" ]] \
+    || die "carried broker reactivation intent does not match reviewed bindings"
+  revoke_output="$(
+    run_activation_transaction "$helper" revoke-broker-reactivation \
+      --expected-commit "$expected_commit" \
+      --expected-previous-release "$expected_previous_release" \
+      --expected-service-name "$expected_service_name" \
+      --expected-origin-sha256 "$expected_origin_sha256"
+  )" || die "carried broker reactivation revocation failed"
+  case "$revoke_output" in
+    broker_reactivation_revocation=recorded|\
+    broker_reactivation_revocation=preserved) ;;
+    *) die "carried broker reactivation revocation returned an invalid result" ;;
+  esac
+  retire_output="$(
+    run_activation_transaction "$helper" ack-recovered \
+      --expected-commit "$expected_commit"
+  )" || die "revoked broker reactivation intent could not be retired"
+  [[ "$retire_output" == broker_reactivation_intent=revoked ]] \
+    || die "revoked broker reactivation intent returned an invalid retirement result"
+  info "broker_reactivation_revocation=retired"
+  info "broker_reactivation_failed_candidate=$expected_commit"
+}
+
 restore_broker_service_from_transaction() {
   local helper="$1"
   local previous_release="$2"
@@ -2677,7 +2752,209 @@ if (
     raise SystemExit(1)
 policy_lines = policy_text.splitlines()
 timestamp_scalar = r"'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}'"
-approved_by_scalar = r"(?:''|[A-Za-z_][A-Za-z0-9_.-]{0,63})"
+
+
+implicit_non_string_patterns = tuple(
+    re.compile(pattern, re.X)
+    for pattern in (
+        r"""^(?:yes|Yes|YES|no|No|NO
+                 |true|True|TRUE|false|False|FALSE
+                 |on|On|ON|off|Off|OFF)$""",
+        r"""^(?:[-+]?(?:[0-9][0-9_]*)\.[0-9_]*(?:[eE][-+][0-9]+)?
+                 |\.[0-9][0-9_]*(?:[eE][-+][0-9]+)?
+                 |[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\.[0-9_]*
+                 |[-+]?\.(?:inf|Inf|INF)
+                 |\.(?:nan|NaN|NAN))$""",
+        r"""^(?:[-+]?0b[0-1_]+
+                 |[-+]?0[0-7_]+
+                 |[-+]?(?:0|[1-9][0-9_]*)
+                 |[-+]?0x[0-9a-fA-F_]+
+                 |[-+]?[1-9][0-9_]*(?::[0-5]?[0-9])+)$""",
+        r"^(?:~|null|Null|NULL)$",
+        r"""^(?:[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]
+                 |[0-9][0-9][0-9][0-9] -[0-9][0-9]? -[0-9][0-9]?
+                  (?:[Tt]|[ \t]+)[0-9][0-9]?
+                  :[0-9][0-9] :[0-9][0-9] (?:\.[0-9]*)?
+                  (?:[ \t]*(?:Z|[-+][0-9][0-9]?(?::[0-9][0-9])?))?)$""",
+        r"^(?:<<|=)$",
+    )
+)
+
+
+def approved_by_allows_block_plain(value: str) -> bool:
+    if not value or value[0] == " " or value[-1] == " ":
+        return False
+    if any(character in "\n\x85\u2028\u2029" for character in value):
+        return False
+    if value.startswith("---") or value.startswith("..."):
+        return False
+    for index, character in enumerate(value):
+        codepoint = ord(character)
+        if not (
+            0x20 <= codepoint <= 0x7E
+            or 0xA0 <= codepoint <= 0xD7FF
+            or 0xE000 <= codepoint <= 0xFFFD
+            or 0x10000 <= codepoint < 0x10FFFF
+        ) or character == "\ufeff":
+            return False
+        preceded_by_whitespace = index == 0 or value[index - 1] in " \t\r\n\x85\u2028\u2029"
+        followed_by_whitespace = index + 1 == len(value) or value[index + 1] in " \t\r\n\x85\u2028\u2029"
+        if index == 0:
+            if character in "#,[]{}&*!|>'\"%@`":
+                return False
+            if character in "?:" and followed_by_whitespace:
+                return False
+            if character == "-" and followed_by_whitespace:
+                return False
+        elif character == ":" and followed_by_whitespace:
+            return False
+        elif character == "#" and preceded_by_whitespace:
+            return False
+    return not any(pattern.fullmatch(value) for pattern in implicit_non_string_patterns)
+
+
+double_quote_escape_values = {
+    "0": "\0",
+    "a": "\x07",
+    "b": "\x08",
+    "t": "\t",
+    "n": "\n",
+    "v": "\x0b",
+    "f": "\x0c",
+    "r": "\r",
+    "e": "\x1b",
+    '"': '"',
+    "\\": "\\",
+    "N": "\x85",
+    "_": "\xa0",
+    "L": "\u2028",
+    "P": "\u2029",
+}
+double_quote_escape_codes = {
+    value: code for code, value in double_quote_escape_values.items()
+}
+
+
+def decode_canonical_double_quoted(token: str) -> str | None:
+    if len(token) < 2 or not token.startswith('"') or not token.endswith('"'):
+        return None
+    value = []
+    index = 1
+    while index < len(token) - 1:
+        character = token[index]
+        if character == '"':
+            return None
+        if character != "\\":
+            value.append(character)
+            index += 1
+            continue
+        index += 1
+        if index >= len(token) - 1:
+            return None
+        escape = token[index]
+        if escape in double_quote_escape_values:
+            value.append(double_quote_escape_values[escape])
+            index += 1
+            continue
+        widths = {"x": 2, "u": 4, "U": 8}
+        width = widths.get(escape)
+        if width is None or index + width >= len(token) - 1:
+            return None
+        digits = token[index + 1:index + 1 + width]
+        if re.fullmatch(f"[0-9A-F]{{{width}}}", digits) is None:
+            return None
+        codepoint = int(digits, 16)
+        if codepoint > 0x10FFFF:
+            return None
+        value.append(chr(codepoint))
+        index += 1 + width
+    return "".join(value)
+
+
+def canonical_double_quoted(value: str) -> str:
+    encoded = []
+    for character in value:
+        codepoint = ord(character)
+        if character in double_quote_escape_codes:
+            encoded.append("\\" + double_quote_escape_codes[character])
+        elif (
+            character not in ('"', "\\", "\x85", "\u2028", "\u2029", "\ufeff")
+            and (
+                0x20 <= codepoint <= 0x7E
+                or 0xA0 <= codepoint <= 0xD7FF
+                or 0xE000 <= codepoint <= 0xFFFD
+                or 0x10000 <= codepoint < 0x10FFFF
+            )
+        ):
+            encoded.append(character)
+        elif codepoint <= 0xFF:
+            encoded.append(f"\\x{codepoint:02X}")
+        elif codepoint <= 0xFFFF:
+            encoded.append(f"\\u{codepoint:04X}")
+        else:
+            encoded.append(f"\\U{codepoint:08X}")
+    return '"' + "".join(encoded) + '"'
+
+
+def approved_by_allows_single_quoted(value: str) -> bool:
+    previous_space = False
+    previous_break = False
+    break_space = False
+    space_break = False
+    special_characters = False
+    for character in value:
+        codepoint = ord(character)
+        if not (character == "\n" or 0x20 <= codepoint <= 0x7E):
+            if not (
+                character == "\x85"
+                or 0xA0 <= codepoint <= 0xD7FF
+                or 0xE000 <= codepoint <= 0xFFFD
+                or 0x10000 <= codepoint < 0x10FFFF
+            ) or character == "\ufeff":
+                special_characters = True
+        if character == " ":
+            break_space = break_space or previous_break
+            previous_space = True
+            previous_break = False
+        elif character in "\n\x85\u2028\u2029":
+            space_break = space_break or previous_space
+            previous_space = False
+            previous_break = True
+        else:
+            previous_space = False
+            previous_break = False
+    return not (break_space or space_break or special_characters)
+
+
+def canonical_approved_by_scalar(token: str) -> bool:
+    if token == "''":
+        value = ""
+    elif token.startswith('"'):
+        value = decode_canonical_double_quoted(token)
+        if value is None:
+            return False
+    elif token.startswith("'") and token.endswith("'"):
+        value = token[1:-1].replace("''", "'")
+        if "'" + value.replace("'", "''") + "'" != token:
+            return False
+    else:
+        value = token
+    single_quoted = approved_by_allows_single_quoted(value)
+    # When single quoting is allowed, PyYAML renders line breaks as a
+    # multiline scalar.  No equivalent one-line token is canonical for this
+    # exact ten-line writer projection.  Special whitespace combinations that
+    # disable single quoting are instead emitted as canonical double quotes.
+    if any(character in "\n\x85\u2028\u2029" for character in value) and single_quoted:
+        return False
+    if approved_by_allows_block_plain(value):
+        expected = value
+    elif single_quoted:
+        expected = "'" + value.replace("'", "''") + "'"
+    else:
+        expected = canonical_double_quoted(value)
+    return token == expected
+
+
 if len(policy_lines) != 10:
     raise SystemExit(1)
 expected_policy_lines = (
@@ -2701,7 +2978,10 @@ if re.fullmatch(f"  updated_at: {timestamp_scalar}", policy_lines[2]) is None:
     raise SystemExit(1)
 if re.fullmatch(f"    approved_at: {timestamp_scalar}", policy_lines[8]) is None:
     raise SystemExit(1)
-if re.fullmatch(f"    approved_by: {approved_by_scalar}", policy_lines[9]) is None:
+approved_by_prefix = "    approved_by: "
+if not policy_lines[9].startswith(approved_by_prefix) or not canonical_approved_by_scalar(
+    policy_lines[9][len(approved_by_prefix):]
+):
     raise SystemExit(1)
 identity_paths = (
     release,
@@ -3222,10 +3502,15 @@ case "${1:-install}" in
   install)
     install_package
     ;;
+  revoke-broker-reactivation)
+    [[ "$#" -eq 5 ]] \
+      || die "usage: sudo bash install.sh revoke-broker-reactivation EXPECTED_COMMIT EXPECTED_PREVIOUS_RELEASE EXPECTED_SERVICE EXPECTED_ORIGIN_SHA256"
+    revoke_carried_broker_reactivation "$2" "$3" "$4" "$5"
+    ;;
   --check|check)
     check_install
     ;;
   *)
-    die "usage: sudo bash install.sh [install|--check]"
+    die "usage: sudo bash install.sh [install|revoke-broker-reactivation EXPECTED_COMMIT EXPECTED_PREVIOUS_RELEASE EXPECTED_SERVICE EXPECTED_ORIGIN_SHA256|--check]"
     ;;
 esac

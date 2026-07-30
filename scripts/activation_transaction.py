@@ -1678,7 +1678,16 @@ def finalize(args: argparse.Namespace) -> None:
 
 
 def show(args: argparse.Namespace) -> None:
-    _tx_dir, manifest = _load_transaction(args)
+    recovered = args.command == "show-recovered"
+    _tx_dir, manifest = _load_transaction(
+        args, recovered_state="acknowledged" if recovered else None
+    )
+    if recovered and manifest["phase"] not in {
+        "recovered_active_intent",
+        "recovered_intent_claimed",
+        "recovered_intent_revoked",
+    }:
+        _fail("recovered transaction has no typed broker reactivation intent")
     field = args.field
     if field not in {
         "candidate_commit",
@@ -1692,6 +1701,7 @@ def show(args: argparse.Namespace) -> None:
         "broker_desired_unit_file_state",
         "broker_activation_phase",
         "broker_service_name",
+        "broker_reactivation_origin_sha256",
     }:
         _fail("unsupported transaction field")
     if field == "broker_state":
@@ -1710,6 +1720,11 @@ def show(args: argparse.Namespace) -> None:
         value = _broker_activation_phase(_tx_dir, manifest)
     elif field == "broker_service_name":
         value = manifest["broker"]["service_name"]
+    elif field == "broker_reactivation_origin_sha256":
+        origin = manifest["broker"]["reactivation_origin"]
+        if origin is None:
+            _fail("transaction has no broker reactivation origin")
+        value = origin["source_manifest_sha256"]
     else:
         value = manifest[field]
     if value is None:
@@ -1978,8 +1993,9 @@ def _parser() -> argparse.ArgumentParser:
     acknowledge_parser.add_argument("--expected-commit", required=True)
     finalize_parser = common("finalize")
     finalize_parser.add_argument("--expect", required=True)
-    show_parser = common("show")
-    show_parser.add_argument("--field", required=True)
+    for command in ("show", "show-recovered"):
+        show_parser = common(command)
+        show_parser.add_argument("--field", required=True)
     cleanup_parser = subparsers.add_parser("cleanup-staging")
     cleanup_parser.add_argument("--install-root", required=True)
     cleanup_parser.add_argument("--transaction-dir", required=True)
@@ -2015,7 +2031,7 @@ def main() -> int:
         acknowledge_recovered(args)
     elif args.command == "finalize":
         finalize(args)
-    elif args.command == "show":
+    elif args.command in {"show", "show-recovered"}:
         show(args)
     elif args.command == "cleanup-staging":
         cleanup_staging(args)

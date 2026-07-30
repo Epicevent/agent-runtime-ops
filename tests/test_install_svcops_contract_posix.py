@@ -655,6 +655,28 @@ def _legacy_unrunnable_fixture(reader: Any, root: Path) -> dict[str, Any]:
     }
 
 
+def _repository_writer_policy(approved_by: str) -> str:
+    from agent_runtime_ops.yamlio import dump_yaml
+
+    return dump_yaml(
+        {
+            "meta": {
+                "schema_version": 1,
+                "updated_at": "2026-07-30T23:00:00+09:00",
+                "scope": "private_server_state",
+            },
+            "updates": {
+                "agent-runtime-ops": {
+                    "repo_url": "https://github.com/Epicevent/agent-runtime-ops.git",
+                    "approved_ref": ACTIVATION_COMMIT,
+                    "approved_at": "2026-07-30T23:00:00+09:00",
+                    "approved_by": approved_by,
+                }
+            },
+        }
+    )
+
+
 def _make_legacy_runnable(
     reader: Any, tree: dict[str, Any], trace: Path
 ) -> None:
@@ -810,7 +832,9 @@ def test_fault_injected_argv_preserves_helper_and_command_positions() -> None:
     ]
 
 
-def _begin(tree: dict[str, Any]) -> subprocess.CompletedProcess[str]:
+def _begin(
+    tree: dict[str, Any], candidate_commit: str = ACTIVATION_COMMIT
+) -> subprocess.CompletedProcess[str]:
     previous = tree["previous"]
     return _run_tx(
         tree,
@@ -819,12 +843,29 @@ def _begin(tree: dict[str, Any]) -> subprocess.CompletedProcess[str]:
         "--releases-dir", str(tree["releases"]),
         "--candidate-dir", str(tree["candidate_dir"]),
         "--candidate-release", str(tree["candidate"]),
-        "--candidate-commit", ACTIVATION_COMMIT,
+        "--candidate-commit", candidate_commit,
         "--previous-release", str(previous) if previous is not None else "",
         "--broker-service-name", tree["broker_unit"].name,
         "--broker-state", tree["broker_state"],
         "--broker-unit-file-state", tree["broker_unit_file_state"],
     )
+
+
+def _retarget_activation_candidate(
+    tree: dict[str, Any], candidate_commit: str
+) -> None:
+    old_candidate = tree["candidate"]
+    suffix = old_candidate.name.split(".", 1)[1]
+    candidate = old_candidate.with_name(f"{candidate_commit}.{suffix}")
+    old_candidate.rename(candidate)
+    tree["candidate"] = candidate
+    current_target = tree["candidate_dir"] / "current-target"
+    current_target.write_text(
+        f"releases/{candidate.name}\n",
+        encoding="utf-8",
+    )
+    os.chown(current_target, 0, 0)
+    current_target.chmod(0o600)
 
 
 def _active_intent_carrier(tree: dict[str, Any]) -> None:
@@ -974,6 +1015,93 @@ def test_exact_legacy_0700_baseline_is_admitted_without_mutation() -> None:
             "restored_exact_but_preexisting_unrunnable\n"
             in completed.stderr
         )
+        assert _legacy_fixture_snapshot(tree) == before
+
+
+@pytest.mark.parametrize(
+    ("approved_by", "expected_scalar"),
+    (
+        ("", "''"),
+        ("root", "root"),
+        ("yes", "'yes'"),
+        ("no", "'no'"),
+        ("a b", "a b"),
+        ("a:b", "a:b"),
+        ("a: b", "'a: b'"),
+        ("운영자", "운영자"),
+        ("root's operator", "root's operator"),
+        ("a\tb", '"a\\tb"'),
+        ("a\x7fb", '"a\\x7Fb"'),
+        ("\ufeffx", '"\\uFEFFx"'),
+        ("\U0010ffff", '"\\U0010FFFF"'),
+        (" \x85", '" \\N"'),
+    ),
+)
+def test_repository_writer_approved_by_scalars_are_admitted_without_writes(
+    approved_by: str,
+    expected_scalar: str,
+) -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        tree = _legacy_unrunnable_fixture(reader, root)
+        policy_text = _repository_writer_policy(approved_by)
+        assert policy_text.splitlines() == [
+            "meta:",
+            "  schema_version: 1",
+            "  updated_at: '2026-07-30T23:00:00+09:00'",
+            "  scope: private_server_state",
+            "updates:",
+            "  agent-runtime-ops:",
+            "    repo_url: https://github.com/Epicevent/agent-runtime-ops.git",
+            f"    approved_ref: {ACTIVATION_COMMIT}",
+            "    approved_at: '2026-07-30T23:00:00+09:00'",
+            f"    approved_by: {expected_scalar}",
+        ]
+        tree["policy"].write_text(policy_text, encoding="utf-8")
+        os.chown(tree["policy"], 0, reader.pw_gid)
+        tree["policy"].chmod(0o640)
+        before = _legacy_fixture_snapshot(tree)
+        completed = _run_contract_script(root, _legacy_capture_body(reader, tree))
+        assert completed.returncode == 0, completed.stderr
+        assert _legacy_fixture_snapshot(tree) == before
+
+
+@pytest.mark.parametrize(
+    "noncanonical_scalar",
+    (
+        "yes",
+        "no",
+        "'root'",
+        '"yes"',
+        '"a b"',
+        '"a\\x7fb"',
+        '"\\n"',
+        '"\\N"',
+        '"\\L"',
+        '"\\P"',
+        "[root]",
+        "'unterminated",
+        "a: b",
+    ),
+)
+def test_noncanonical_or_malformed_approved_by_scalar_is_rejected_without_writes(
+    noncanonical_scalar: str,
+) -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        tree = _legacy_unrunnable_fixture(reader, root)
+        policy_lines = tree["policy"].read_text(encoding="utf-8").splitlines()
+        assert len(policy_lines) == 10
+        policy_lines[-1] = f"    approved_by: {noncanonical_scalar}"
+        tree["policy"].write_text(
+            "\n".join(policy_lines) + "\n",
+            encoding="utf-8",
+        )
+        os.chown(tree["policy"], 0, reader.pw_gid)
+        tree["policy"].chmod(0o640)
+        before = _legacy_fixture_snapshot(tree)
+        completed = _run_contract_script(root, _legacy_capture_body(reader, tree))
+        assert completed.returncode != 0
         assert _legacy_fixture_snapshot(tree) == before
 
 
@@ -1794,6 +1922,19 @@ def test_broker_reactivation_intent_has_exact_typed_revocation() -> None:
         origin_sha256 = hashlib.sha256(
             (acknowledged / "manifest.json").read_bytes()
         ).hexdigest()
+        carrier_commit = _run_tx(
+            tree, "show-recovered", "--field", "candidate_commit"
+        )
+        assert carrier_commit.returncode == 0, carrier_commit.stderr
+        assert carrier_commit.stdout == f"{ACTIVATION_COMMIT}\n"
+        carrier_origin = _run_tx(
+            tree,
+            "show-recovered",
+            "--field",
+            "broker_reactivation_origin_sha256",
+        )
+        assert carrier_origin.returncode == 0, carrier_origin.stderr
+        assert carrier_origin.stdout == f"{origin_sha256}\n"
         revocation = (
             "--expected-commit",
             ACTIVATION_COMMIT,
@@ -1871,9 +2012,16 @@ def test_broker_reactivation_intent_has_exact_typed_revocation() -> None:
         assert cleaned.stdout == "broker_reactivation_intent=revoked\n"
         assert not os.path.lexists(acknowledged)
 
+        successor_commit = "c" * 40
+        _retarget_activation_candidate(tree, successor_commit)
         tree["broker_state"] = "inactive"
         tree["broker_unit_file_state"] = "disabled"
-        assert _begin(tree).returncode == 0
+        successor = _begin(tree, successor_commit)
+        assert successor.returncode == 0, successor.stderr
+        assert (
+            _run_tx(tree, "show", "--field", "candidate_commit").stdout
+            == f"{successor_commit}\n"
+        )
         assert _run_tx(tree, "show", "--field", "broker_desired_state").stdout == "inactive\n"
         assert (
             _run_tx(
@@ -1881,6 +2029,93 @@ def test_broker_reactivation_intent_has_exact_typed_revocation() -> None:
             ).stdout
             == "disabled\n"
         )
+
+
+def test_installer_owned_revocation_holds_lock_and_forwards_carrier_bindings() -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        source = root / "source"
+        helper = source / "scripts" / "activation_transaction.py"
+        helper.parent.mkdir(parents=True)
+        helper.write_text("# trusted fixture helper\n", encoding="utf-8")
+        trace = root / "installer-revocation-trace"
+        failed_commit = "a" * 40
+        source_commit = "b" * 40
+        origin = "c" * 64
+        previous = root / "install" / "releases" / f"{'d' * 40}.fixture"
+        service = "agent-runtime-root-action-broker.service"
+        body = (
+            f"PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/bin'\n"
+            f"TRACE={str(trace)!r}\n"
+            f"SOURCE={str(source)!r}\n"
+            "OPS_USER=svcops\n"
+            "ACTIVATION_HELPER_BLOB=''\n"
+            "die() { printf 'error:%s\\n' \"$*\" >&2; exit 23; }\n"
+            "require_root() { :; }\n"
+            "validate_activation_path_strings() { :; }\n"
+            "repo_root() { printf '%s\\n' \"$SOURCE\"; }\n"
+            "validate_install_root() { :; }\n"
+            "require_ops_account() { :; }\n"
+            f"source_commit() {{ printf '%s\\n' {source_commit!r}; }}\n"
+            "require_full_sha() { [[ \"$1\" =~ ^[0-9a-f]{40}$ ]]; }\n"
+            "verify_activation_helper_identity() { printf '%064d\\n' 0; }\n"
+            "with_install_lock() { printf 'lock\\n' >>\"$TRACE\"; }\n"
+            "run_activation_transaction() {\n"
+            "  printf 'tx:%s:%s\\n' \"$2\" \"${4:-}\" >>\"$TRACE\"\n"
+            "  case \"$2:${4:-}\" in\n"
+            f"    show-recovered:candidate_commit) printf '%s\\n' {failed_commit!r} ;;\n"
+            f"    show-recovered:previous_release) printf '%s\\n' {str(previous)!r} ;;\n"
+            f"    show-recovered:broker_service_name) printf '%s\\n' {service!r} ;;\n"
+            f"    show-recovered:broker_reactivation_origin_sha256) printf '%s\\n' {origin!r} ;;\n"
+            "    revoke-broker-reactivation:)\n"
+            f"      [[ \" $* \" == *\" --expected-commit {failed_commit} \"* ]]\n"
+            f"      [[ \" $* \" == *\" --expected-previous-release {str(previous)} \"* ]]\n"
+            f"      [[ \" $* \" == *\" --expected-service-name {service} \"* ]]\n"
+            f"      [[ \" $* \" == *\" --expected-origin-sha256 {origin} \"* ]]\n"
+            "      printf 'broker_reactivation_revocation=recorded\\n' ;;\n"
+            "    ack-recovered:)\n"
+            f"      [[ \" $* \" == *\" --expected-commit {failed_commit} \"* ]]\n"
+            "      printf 'broker_reactivation_intent=revoked\\n' ;;\n"
+            "    *) return 88 ;;\n"
+            "  esac\n"
+            "}\n"
+            "info() { printf 'info:%s\\n' \"$*\" >>\"$TRACE\"; }\n"
+            + _function("revoke_carried_broker_reactivation")
+            + (
+                "\nrevoke_carried_broker_reactivation "
+                f"{failed_commit!r} {str(previous)!r} {service!r} {origin!r}\n"
+            )
+        )
+        completed = _run_contract_script(root, body)
+        assert completed.returncode == 0, completed.stderr
+        assert trace.read_text(encoding="utf-8").splitlines() == [
+            "lock",
+            "tx:show-recovered:candidate_commit",
+            "tx:show-recovered:previous_release",
+            "tx:show-recovered:broker_service_name",
+            "tx:show-recovered:broker_reactivation_origin_sha256",
+            "tx:revoke-broker-reactivation:",
+            "tx:ack-recovered:",
+            "info:broker_reactivation_revocation=retired",
+            f"info:broker_reactivation_failed_candidate={failed_commit}",
+        ]
+
+        stale_trace = root / "installer-stale-revocation-trace"
+        replaced_commit = "e" * 40
+        stale_body = body.replace(str(trace), str(stale_trace)).replace(
+            f"show-recovered:candidate_commit) printf '%s\\n' {failed_commit!r}",
+            f"show-recovered:candidate_commit) printf '%s\\n' {replaced_commit!r}",
+        )
+        stale = _run_contract_script(root, stale_body)
+        assert stale.returncode != 0
+        stale_lines = stale_trace.read_text(encoding="utf-8").splitlines()
+        assert stale_lines == [
+            "lock",
+            "tx:show-recovered:candidate_commit",
+            "tx:show-recovered:previous_release",
+            "tx:show-recovered:broker_service_name",
+            "tx:show-recovered:broker_reactivation_origin_sha256",
+        ]
 
 
 def test_revocation_cannot_race_after_authority_transfers_to_pending() -> None:
