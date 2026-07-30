@@ -906,10 +906,11 @@ def test_activation_sigkill_between_symlink_create_and_lchown_replays(
     reader = _reader()
     with _root_temp(reader) as root:
         tree = _activation_fixture(reader, root, previous=True)
+        manifest_instance = _symlink_instance(tree["paths"]["manifest"])
         assert _begin(tree).returncode == 0
         if command == "recover":
             assert _run_tx(tree, "publish").returncode == 0
-        symlink_name = "manifest" if command == "publish" else "current"
+        symlink_name = "current"
         symlink_temp = Path(
             f"{tree['paths'][symlink_name]}.agent-runtime-activation-next"
         )
@@ -939,6 +940,7 @@ def test_activation_sigkill_between_symlink_create_and_lchown_replays(
         assert symlink_temp.lstat().st_gid == 0
         assert _run_tx(tree, "recover").returncode == 0
         assert _run_tx(tree, "finalize", "--expect", "baseline").returncode == 0
+        assert _symlink_instance(tree["paths"]["manifest"]) == manifest_instance
         assert tree["paths"]["current"].resolve() == tree["previous"]
 
 
