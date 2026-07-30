@@ -232,22 +232,47 @@ def test_earliest_metadata_keyset_is_exact_and_rejects_extensions(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "backup.json"
-    earliest = {
+    v0 = {
         "created_at": "2026-06-08T15:14:23+09:00",
         "had_compose": True,
         "had_manifest": True,
     }
+    v1 = {
+        **v0,
+        "had_state_manifest": False,
+        "state_manifest_path": "/srv/openclaw-ops/runtime/oc20/manifest.yaml",
+    }
+    v1_env = {
+        **v1,
+        "env_gid": None,
+        "env_mode": None,
+        "env_uid": None,
+        "had_env": False,
+    }
 
-    assert runtime_backup._strict_legacy_metadata(
-        json.dumps(earliest).encode("utf-8"),
-        path,
-    ) == earliest
-
-    with pytest.raises(ValueError, match="metadata keys are invalid"):
-        runtime_backup._strict_legacy_metadata(
-            json.dumps({**earliest, "unexpected": False}).encode("utf-8"),
+    for accepted in (v0, v1, v1_env):
+        assert runtime_backup._strict_legacy_metadata(
+            json.dumps(accepted).encode("utf-8"),
             path,
-        )
+        ) == accepted
+
+    invalid = (
+        {**v0, "unexpected": False},
+        {
+            **v0,
+            "env_gid": None,
+            "env_mode": None,
+            "env_uid": None,
+            "had_env": False,
+        },
+        {**v1_env, "unexpected": False},
+    )
+    for rejected in invalid:
+        with pytest.raises(ValueError, match="metadata keys are invalid"):
+            runtime_backup._strict_legacy_metadata(
+                json.dumps(rejected).encode("utf-8"),
+                path,
+            )
 
 
 def _add_legacy_env_metadata(source: Path, value: bytes | None) -> None:
