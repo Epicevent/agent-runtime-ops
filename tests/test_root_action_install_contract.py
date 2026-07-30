@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import os
+import shlex
 import shutil
 import subprocess
 import time
@@ -16,6 +17,9 @@ def test_install_places_fixed_root_action_contract_without_activation_or_new_sud
     start = install.index("install_root_action_broker_contract()")
     end = install.index("\n}\n", start) + 3
     function = install[start:end]
+    activation_start = install.index("activate_release()")
+    activation_end = install.index("\n}\n", activation_start) + 3
+    activation = install[activation_start:activation_end]
     assert 'ROOT_ACTION_STATE_ROOT="/var/lib/agent-runtime-ops/root-actions"' in install
     assert 'ROOT_ACTION_PRIVATE_ROOT="$ROOT_ACTION_STATE_ROOT/private"' in install
     assert 'ROOT_ACTION_PUBLIC_ROOT="$ROOT_ACTION_STATE_ROOT/public"' in install
@@ -27,16 +31,17 @@ def test_install_places_fixed_root_action_contract_without_activation_or_new_sud
         'install -d -o root -g "$ROOT_ACTION_TRUSTED_ACCOUNT" -m 0750 '
         '"$ROOT_ACTION_PUBLIC_ROOT"'
     ) in function
-    assert 'install -o root -g root -m 0644 "$unit_tmp"' in function
-    assert 'current_path="$install_root_real/current"' in function
-    assert '[[ "$current_path" =~ ^/[A-Za-z0-9._/-]+$ ]]' in function
-    assert '-e "s|@@CURRENT_LINK@@|$current_path|g"' in function
-    assert '-e "s|@@RELEASE_DIR@@|$release_dir|g"' in function
+    assert 'run_activation_transaction "$helper" publish-broker' in function
+    assert '[[ "$release_dir" =~ ^/[A-Za-z0-9._/-]+$ ]]' in activation
+    assert '-e "s|@@CURRENT_LINK@@|$release_dir|g"' in activation
+    assert '-e "s|@@RELEASE_DIR@@|$release_dir|g"' in activation
     assert "systemctl enable" not in function
     assert "systemctl start" not in function
-    assert 'systemctl is-active --quiet "$service_name"' in function
-    assert 'systemctl restart "$service_name"' in function
-    assert 'wait_for_root_action_broker_release "$service_name" "$release_dir"' in function
+    assert 'attest_quiesced_root_action_broker_state "$helper" || return 1' in function
+    assert activation.index('quiesce_root_action_broker_for_publication "$helper"') \
+        < activation.index('run_activation_transaction "$helper" publish')
+    assert 'systemctl restart "$service_name"' in install
+    assert 'wait_for_root_action_broker_pinned_release "$service_name" "$release_dir"' in install
     assert "active_restarted_release_verified" in function
     assert "ROOT_ACTION_POST_RESTART_ATTESTATION_ATTEMPTS=40" in install
     assert "ROOT_ACTION_POST_RESTART_ATTESTATION_INTERVAL_SECONDS=0.25" in install
@@ -45,6 +50,10 @@ def test_install_places_fixed_root_action_contract_without_activation_or_new_sud
     assert "/usr/bin/timeout --kill-after=1" in install
     assert 'systemctl show --property=MainPID --value "$service_name"' in install
     assert 'grep -Fzqx "AGENT_RUNTIME_OPS_RELEASE=$release_dir"' in install
+    assert '[[ "${#process_argv[@]}" -eq 3' in install
+    assert '"${process_argv[1]}" == -m' in install
+    assert '"${process_argv[2]}" == agent_runtime_ops.root_actions.service' in install
+    assert '[[ "$main_pid_after" == "$main_pid" ]]' in install
     sudoers_start = install.index("install_ops_sudoers()")
     sudoers_end = install.index("\n}\n", sudoers_start) + 3
     sudoers = install[sudoers_start:sudoers_end]
@@ -163,6 +172,101 @@ def test_install_attestation_times_out_a_truly_hanging_systemctl(
     assert elapsed < 3
 
 
+def _run_broker_process_attestation(
+    tmp_path: Path,
+    *,
+    argv: list[str],
+    first_pid: str = "123",
+    final_pid: str = "123",
+) -> subprocess.CompletedProcess[str]:
+    if os.name != "posix":
+        pytest.skip("POSIX proc and process argv semantics are required")
+    bash = shutil.which("bash")
+    if bash is None or not Path("/usr/bin/timeout").exists():
+        pytest.skip("POSIX bash and timeout are required")
+    release = tmp_path / "release"
+    proc_root = tmp_path / "proc"
+    pid_root = proc_root / first_pid
+    pid_root.mkdir(parents=True)
+    (pid_root / "environ").write_bytes(
+        f"AGENT_RUNTIME_OPS_RELEASE={release}\0OTHER=value\0".encode()
+    )
+    (pid_root / "cmdline").write_bytes(
+        b"\0".join(value.encode() for value in argv) + b"\0"
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    counter = tmp_path / "show-count"
+    systemctl = fake_bin / "systemctl"
+    systemctl.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"$1\" == is-active ]]; then exit 0; fi\n"
+        "[[ \"$1\" == show ]] || exit 19\n"
+        f"count=$(cat {str(counter)!r} 2>/dev/null || printf '0')\n"
+        f"if [[ \"$count\" -eq 0 ]]; then printf '%s\\n' {first_pid!r}; "
+        f"else printf '%s\\n' {final_pid!r}; fi\n"
+        f"printf '%s\\n' \"$((count + 1))\" >{str(counter)!r}\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    systemctl.chmod(0o755)
+    harness = tmp_path / "broker-process-attestation.sh"
+    harness.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=1\n"
+        f"ROOT_ACTION_PROC_ROOT={str(proc_root)!r}\n"
+        f"CURRENT_LINK={str(tmp_path / 'current')!r}\n"
+        f"PATH={str(fake_bin)!r}:/usr/bin:/bin\n"
+        + _install_attestation_functions()
+        + f"\nroot_action_broker_process_attested broker.service {str(release)!r} pinned\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    return subprocess.run(
+        [bash, str(harness)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+
+def test_broker_process_attestation_binds_one_pid_and_exact_argv(tmp_path: Path) -> None:
+    release = tmp_path / "release"
+    completed = _run_broker_process_attestation(
+        tmp_path,
+        argv=[
+            str(release / ".venv" / "bin" / "python"),
+            "-m",
+            "agent_runtime_ops.root_actions.service",
+        ],
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize("invalid", ("module_flag", "extra_arg", "pid_swap"))
+def test_broker_process_attestation_rejects_argv_or_pid_drift(
+    tmp_path: Path, invalid: str
+) -> None:
+    release = tmp_path / "release"
+    argv = [
+        str(release / ".venv" / "bin" / "python"),
+        "-m",
+        "agent_runtime_ops.root_actions.service",
+    ]
+    if invalid == "module_flag":
+        argv[1] = "-c"
+    elif invalid == "extra_arg":
+        argv.append("--unexpected")
+    completed = _run_broker_process_attestation(
+        tmp_path,
+        argv=argv,
+        final_pid="124" if invalid == "pid_swap" else "123",
+    )
+    assert completed.returncode != 0
+
+
 def test_service_is_root_owned_webauthn_broker_and_uses_fixed_paths() -> None:
     unit = Path("systemd/agent-runtime-root-action-broker.service").read_text(
         encoding="utf-8"
@@ -182,21 +286,62 @@ def test_service_is_root_owned_webauthn_broker_and_uses_fixed_paths() -> None:
     assert "sudo" not in unit.lower()
 
 
-def test_custom_install_root_materializes_a_functional_absolute_unit_path() -> None:
+def test_custom_install_root_materializes_a_release_pinned_unit_path() -> None:
     template = Path("systemd/agent-runtime-root-action-broker.service").read_text(
         encoding="utf-8"
     )
-    custom_current = "/srv/jitech-agent-runtime/current"
     custom_release = "/srv/jitech-agent-runtime/releases/tested"
-    materialized = template.replace("@@CURRENT_LINK@@", custom_current).replace(
+    materialized = template.replace("@@CURRENT_LINK@@", custom_release).replace(
         "@@RELEASE_DIR@@", custom_release
     )
-    assert f"ConditionPathIsDirectory={custom_current}" in materialized
+    assert f"ConditionPathIsDirectory={custom_release}" in materialized
     assert (
-        f"ExecStart={custom_current}/.venv/bin/python "
+        f"ExecStart={custom_release}/.venv/bin/python "
         "-m agent_runtime_ops.root_actions.service"
     ) in materialized
     assert "@@CURRENT_LINK@@" not in materialized
     assert "@@RELEASE_DIR@@" not in materialized
     assert f"Environment=AGENT_RUNTIME_OPS_RELEASE={custom_release}" in materialized
     assert "/opt/agent-runtime-ops/current" not in template
+
+
+def test_release_pinned_broker_exec_survives_current_link_flip(tmp_path: Path) -> None:
+    if os.name != "posix":
+        pytest.skip("POSIX executable and symlink semantics are required")
+    previous = tmp_path / "previous"
+    candidate = tmp_path / "candidate"
+    current = tmp_path / "current"
+    for release, label in ((previous, "previous"), (candidate, "candidate")):
+        python = release / ".venv" / "bin" / "python"
+        python.parent.mkdir(parents=True)
+        python.write_text(
+            f"#!/usr/bin/env bash\nprintf '%s\\n' {label!r}\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        python.chmod(0o755)
+    current.symlink_to(previous, target_is_directory=True)
+
+    template = Path("systemd/agent-runtime-root-action-broker.service").read_text(
+        encoding="utf-8"
+    )
+    materialized = template.replace("@@CURRENT_LINK@@", str(candidate)).replace(
+        "@@RELEASE_DIR@@", str(candidate)
+    )
+    exec_line = next(
+        line for line in materialized.splitlines() if line.startswith("ExecStart=")
+    )
+    argv = shlex.split(exec_line.removeprefix("ExecStart="))
+    assert argv[0] == str(candidate / ".venv" / "bin" / "python")
+    for target in (candidate, previous):
+        current.unlink()
+        current.symlink_to(target, target_is_directory=True)
+        completed = subprocess.run(
+            argv,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert completed.stdout == "candidate\n"

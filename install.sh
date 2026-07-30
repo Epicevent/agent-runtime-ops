@@ -24,6 +24,9 @@ BIN_LINK="${AGENT_RUNTIME_OPS_BIN:-/usr/local/bin/opsctl}"
 MCP_BIN_LINK="${AGENT_RUNTIME_OPS_MCP_BIN:-/usr/local/bin/agent-runtime-ops-mcp}"
 GEMINI_BIN_LINK="${AGENT_RUNTIME_GEMINI_BIN:-/usr/local/bin/gemini}"
 MANIFEST="${AGENT_RUNTIME_OPS_MANIFEST:-$INSTALL_ROOT/.agent-runtime-ops-manifest}"
+ACTIVATION_TRANSACTION_DIR="$INSTALL_ROOT/.activation-transaction.pending"
+ACTIVATION_CANDIDATE_DIR="$INSTALL_ROOT/.activation-candidate.prepare"
+ACTIVATION_HELPER_BLOB=""
 REPO_URL="${AGENT_RUNTIME_OPS_REPO_URL:-https://github.com/Epicevent/agent-runtime-ops.git}"
 REPO_REF="${AGENT_RUNTIME_OPS_REF:-}"
 SUDOERS_FILE="${AGENT_RUNTIME_OPS_SUDOERS_FILE:-/etc/sudoers.d/agent-runtime-ops}"
@@ -44,7 +47,9 @@ ROOT_ACTION_POST_RESTART_ATTESTATION_ATTEMPTS=40
 ROOT_ACTION_POST_RESTART_ATTESTATION_INTERVAL_SECONDS=0.25
 ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS=30
 ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=1
+ROOT_ACTION_PROC_ROOT="/proc"
 OPS_CLI_ATTESTATION_COMMAND_TIMEOUT_SECONDS=10
+ACTIVATION_HELPER_TIMEOUT_SECONDS=120
 USAGE_DB_DEFAULTS_FILE="${AGENT_RUNTIME_USAGE_DB_DEFAULTS_FILE:-/etc/agent-runtime-ops/usage-writer.cnf}"
 USAGE_PRICING_DIR="${AGENT_RUNTIME_USAGE_PRICING_DIR:-$STATE_ROOT/usage-pricing}"
 USAGE_PRICING_FILE="${AGENT_RUNTIME_USAGE_PRICING_FILE:-$USAGE_PRICING_DIR/current.json}"
@@ -81,10 +86,166 @@ require_root() {
   [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "run as root/admin; svcops runs opsctl after install"
 }
 
+require_canonical_absolute_path_string() {
+  local name="$1"
+  local value="$2"
+  [[ "$value" == /* && "$value" != / ]] \
+    || die "$name must be a non-root absolute path"
+  [[ "$value" != *"//"* \
+    && "$value" != *"/./"* && "$value" != *"/." \
+    && "$value" != *"/../"* && "$value" != *"/.." \
+    && "$value" != */ \
+    && "$value" != *$'\n'* && "$value" != *$'\r'* && "$value" != *$'\t'* ]] \
+    || die "$name must be a canonical absolute path"
+}
+
+validate_activation_path_strings() {
+  require_canonical_absolute_path_string INSTALL_ROOT "$INSTALL_ROOT"
+  require_canonical_absolute_path_string RELEASES_DIR "$RELEASES_DIR"
+  require_canonical_absolute_path_string CURRENT_LINK "$CURRENT_LINK"
+  require_canonical_absolute_path_string ACTIVATION_TRANSACTION_DIR "$ACTIVATION_TRANSACTION_DIR"
+  require_canonical_absolute_path_string ACTIVATION_CANDIDATE_DIR "$ACTIVATION_CANDIDATE_DIR"
+  require_canonical_absolute_path_string BIN_LINK "$BIN_LINK"
+  require_canonical_absolute_path_string MCP_BIN_LINK "$MCP_BIN_LINK"
+  require_canonical_absolute_path_string GEMINI_BIN_LINK "$GEMINI_BIN_LINK"
+  require_canonical_absolute_path_string MANIFEST "$MANIFEST"
+  require_canonical_absolute_path_string ROOT_ACTION_BROKER_SERVICE_FILE "$ROOT_ACTION_BROKER_SERVICE_FILE"
+  [[ "$RELEASES_DIR" == "$INSTALL_ROOT/releases" \
+    && "$CURRENT_LINK" == "$INSTALL_ROOT/current" \
+    && "$ACTIVATION_TRANSACTION_DIR" == "$INSTALL_ROOT/.activation-transaction.pending" \
+    && "$ACTIVATION_CANDIDATE_DIR" == "$INSTALL_ROOT/.activation-candidate.prepare" \
+    && "$MANIFEST" == "$INSTALL_ROOT/.agent-runtime-ops-manifest" ]] \
+    || die "activation paths must use the fixed install-root layout"
+}
+
 validate_install_root() {
-  local resolved
-  resolved="$(realpath -m "$INSTALL_ROOT")"
-  [[ -n "$resolved" && "$resolved" != "/" ]] || die "unsafe install root: $INSTALL_ROOT"
+  validate_activation_path_strings
+  [[ -x /usr/bin/python3 ]] \
+    || die "missing recovery prerequisite: /usr/bin/python3"
+  env -i PATH=/usr/bin:/bin /usr/bin/python3 -I - \
+    "$INSTALL_ROOT" "$RELEASES_DIR" "$CURRENT_LINK" \
+    "$ACTIVATION_TRANSACTION_DIR" "$ACTIVATION_CANDIDATE_DIR" \
+    "$BIN_LINK" "$MCP_BIN_LINK" "$GEMINI_BIN_LINK" "$MANIFEST" \
+    "$ROOT_ACTION_BROKER_SERVICE_FILE" <<'PY' \
+    || die "unsafe or noncanonical activation path configuration"
+import os
+import stat
+import sys
+
+(
+    install_root,
+    releases_dir,
+    current_link,
+    transaction_dir,
+    candidate_dir,
+    opsctl_link,
+    mcp_link,
+    gemini_link,
+    manifest_link,
+    broker_unit,
+) = sys.argv[1:]
+
+
+def fail(message: str) -> None:
+    raise SystemExit(message)
+
+
+def canonical(value: str, name: str) -> str:
+    if (
+        not value
+        or not value.startswith("/")
+        or value.startswith("//")
+        or value == "/"
+        or any(ord(char) < 32 or ord(char) == 127 for char in value)
+        or os.path.abspath(value) != value
+    ):
+        fail(f"{name}: canonical absolute path required")
+    return value
+
+
+values = {
+    "install_root": install_root,
+    "releases_dir": releases_dir,
+    "current_link": current_link,
+    "transaction_dir": transaction_dir,
+    "candidate_dir": candidate_dir,
+    "opsctl_link": opsctl_link,
+    "mcp_link": mcp_link,
+    "gemini_link": gemini_link,
+    "manifest_link": manifest_link,
+    "broker_unit": broker_unit,
+}
+for key, value in values.items():
+    canonical(value, key)
+
+expected = {
+    "releases_dir": os.path.join(install_root, "releases"),
+    "current_link": os.path.join(install_root, "current"),
+    "transaction_dir": os.path.join(install_root, ".activation-transaction.pending"),
+    "candidate_dir": os.path.join(install_root, ".activation-candidate.prepare"),
+    "manifest_link": os.path.join(install_root, ".agent-runtime-ops-manifest"),
+}
+for key, value in expected.items():
+    if values[key] != value:
+        fail(f"{key}: fixed install-root layout required")
+
+managed_endpoints = [
+    opsctl_link,
+    mcp_link,
+    gemini_link,
+    manifest_link,
+    current_link,
+    broker_unit,
+]
+staging_endpoints = [
+    f"{endpoint}.agent-runtime-activation-next"
+    for endpoint in managed_endpoints
+]
+if len(set([*managed_endpoints, *staging_endpoints])) != 12:
+    fail("managed and derived staging endpoints must be pairwise distinct")
+
+
+def validate_parent_chain(endpoint: str, name: str) -> None:
+    current = os.path.dirname(endpoint)
+    immediate = True
+    missing_seen = False
+    while True:
+        try:
+            meta = os.lstat(current)
+        except FileNotFoundError:
+            missing_seen = True
+        else:
+            mode = stat.S_IMODE(meta.st_mode)
+            if (
+                not stat.S_ISDIR(meta.st_mode)
+                or stat.S_ISLNK(meta.st_mode)
+                or meta.st_uid != 0
+                or ((immediate or missing_seen) and mode & 0o022)
+                or (
+                    not immediate
+                    and not missing_seen
+                    and mode & 0o022
+                    and not mode & stat.S_ISVTX
+                )
+            ):
+                fail(f"{name}: unsafe activation endpoint parent: {current}")
+        parent = os.path.dirname(current)
+        if parent == current:
+            return
+        current = parent
+        immediate = False
+
+
+for key in (
+    "opsctl_link",
+    "mcp_link",
+    "gemini_link",
+    "manifest_link",
+    "current_link",
+    "broker_unit",
+):
+    validate_parent_chain(values[key], key)
+PY
 }
 
 with_install_lock() {
@@ -134,16 +295,19 @@ require_commands() {
   command -v python3 >/dev/null || die "missing command: python3"
   command -v rsync >/dev/null || die "missing command: rsync"
   command -v runuser >/dev/null || die "missing command: runuser"
+  command -v sync >/dev/null || die "missing command: sync"
   [[ -x /usr/bin/timeout ]] || die "missing executable: /usr/bin/timeout"
   command -v node >/dev/null || die "missing command: node"
   command -v npm >/dev/null || die "missing command: npm"
+  command -v tar >/dev/null || die "missing command: tar"
 }
 
 bootstrap_from_git() {
   require_root
-  validate_install_root
+  validate_activation_path_strings
   require_full_sha "$REPO_REF"
   ensure_base_packages
+  validate_install_root
   require_ops_account
   require_commands
 
@@ -258,22 +422,30 @@ prune_old_release_code() {
   info "release_history=$RELEASE_HISTORY_DIR"
   info "old_release_code_pruned=$pruned"
 }
-
-copy_tree() {
+materialize_exact_source_tree() {
   local src="$1"
-  local dst="$2"
-  install -d -o root -g "$OPS_GROUP" -m 0755 "$dst"
-  rsync -a --delete \
-    --exclude '.git' \
-    --exclude '.venv' \
-    --exclude 'node_modules' \
-    --exclude '__pycache__' \
-    --exclude '*.pyc' \
-    "$src"/ "$dst"/
-  chown root:"$OPS_GROUP" "$dst"
-  find "$dst" -path "$dst/.venv" -prune -o -type d -exec chown root:"$OPS_GROUP" {} + -exec chmod 0755 {} +
-  find "$dst" -path "$dst/.venv" -prune -o -type f -exec chown root:"$OPS_GROUP" {} + -exec chmod 0644 {} +
-  chmod 0755 "$dst/install.sh"
+  local commit="$2"
+  local dst="$3"
+  local tree_before tree_after
+  require_full_sha "$commit"
+  [[ ! -e "$dst" && ! -L "$dst" ]] || return 1
+  tree_before="$(git -C "$src" rev-parse "$commit^{tree}")" || return 1
+  [[ "$tree_before" =~ ^[0-9a-f]{40}$ ]] || return 1
+  install -d -o root -g "$OPS_GROUP" -m 0755 "$dst" || return 1
+  if ! git -C "$src" archive --format=tar "$commit" \
+    | tar -xf - -C "$dst"; then
+    rm -rf --one-file-system "$dst" || true
+    return 1
+  fi
+  tree_after="$(git -C "$src" rev-parse "$commit^{tree}")" || return 1
+  [[ "$tree_after" == "$tree_before" ]] || return 1
+  [[ -f "$dst/install.sh" && -f "$dst/scripts/activation_transaction.py" ]] || return 1
+  chown root:"$OPS_GROUP" "$dst" || return 1
+  find "$dst" -type d -exec chown root:"$OPS_GROUP" {} + -exec chmod 0755 {} + \
+    || return 1
+  find "$dst" -type f -exec chown root:"$OPS_GROUP" {} + -exec chmod 0644 {} + \
+    || return 1
+  chmod 0755 "$dst/install.sh" || return 1
 }
 
 install_python_env() {
@@ -289,9 +461,16 @@ install_python_env() {
 }
 
 root_action_broker_release_attested() {
+  root_action_broker_process_attested "$1" "$2" allow-current
+}
+
+root_action_broker_process_attested() {
   local service_name="$1"
   local release_dir="$2"
-  local main_pid
+  local argv_mode="$3"
+  local main_pid main_pid_after current_real
+  local -a process_argv=()
+  [[ "$argv_mode" == pinned || "$argv_mode" == allow-current ]] || return 1
   /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
     systemctl is-active --quiet "$service_name" || return 1
   main_pid="$(
@@ -301,32 +480,128 @@ root_action_broker_release_attested() {
     || return 1
   [[ "$main_pid" =~ ^[1-9][0-9]{0,9}$ ]] || return 1
   /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
-    grep -Fzqx "AGENT_RUNTIME_OPS_RELEASE=$release_dir" "/proc/$main_pid/environ" \
+    grep -Fzqx "AGENT_RUNTIME_OPS_RELEASE=$release_dir" \
+      "$ROOT_ACTION_PROC_ROOT/$main_pid/environ" \
     || return 1
+  mapfile -d '' -t process_argv <"$ROOT_ACTION_PROC_ROOT/$main_pid/cmdline" \
+    || return 1
+  [[ "${#process_argv[@]}" -eq 3 \
+    && "${process_argv[1]}" == -m \
+    && "${process_argv[2]}" == agent_runtime_ops.root_actions.service ]] \
+    || return 1
+  if [[ "$argv_mode" == pinned ]]; then
+    [[ "${process_argv[0]}" == "$release_dir/.venv/bin/python" ]] || return 1
+  elif [[ "${process_argv[0]}" != "$release_dir/.venv/bin/python" ]]; then
+    current_real="$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)"
+    [[ "$current_real" == "$release_dir" \
+      && "${process_argv[0]}" == "$CURRENT_LINK/.venv/bin/python" ]] \
+      || return 1
+  fi
+  main_pid_after="$(
+    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+      systemctl show --property=MainPID --value "$service_name"
+  )" || return 1
+  [[ "$main_pid_after" == "$main_pid" ]]
+}
+
+read_root_action_broker_systemd_tuple() {
+  local service_name="$1"
+  local output line load_state active_state sub_state main_pid job
+  local seen_load=0 seen_active=0 seen_sub=0 seen_pid=0 seen_job=0
+  output="$(
+    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+      systemctl show \
+        --property=LoadState \
+        --property=ActiveState \
+        --property=SubState \
+        --property=MainPID \
+        --property=Job \
+        "$service_name"
+  )" || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      LoadState=*)
+        [[ "$seen_load" -eq 0 ]] || return 1
+        load_state="${line#LoadState=}"
+        seen_load=1
+        ;;
+      ActiveState=*)
+        [[ "$seen_active" -eq 0 ]] || return 1
+        active_state="${line#ActiveState=}"
+        seen_active=1
+        ;;
+      SubState=*)
+        [[ "$seen_sub" -eq 0 ]] || return 1
+        sub_state="${line#SubState=}"
+        seen_sub=1
+        ;;
+      MainPID=*)
+        [[ "$seen_pid" -eq 0 ]] || return 1
+        main_pid="${line#MainPID=}"
+        seen_pid=1
+        ;;
+      Job=*)
+        [[ "$seen_job" -eq 0 ]] || return 1
+        job="${line#Job=}"
+        seen_job=1
+        ;;
+      *) return 1 ;;
+    esac
+  done <<<"$output"
+  [[ "$seen_load" -eq 1 \
+    && "$seen_active" -eq 1 \
+    && "$seen_sub" -eq 1 \
+    && "$seen_pid" -eq 1 \
+    && "$seen_job" -eq 1 ]] || return 1
+  [[ "$load_state" =~ ^[a-z][a-z-]*$ \
+    && "$active_state" =~ ^[a-z][a-z-]*$ \
+    && "$sub_state" =~ ^[a-z][a-z0-9-]*$ \
+    && "$main_pid" =~ ^[0-9]{1,10}$ ]] || return 1
+  printf 'LoadState=%s\n' "$load_state"
+  printf 'ActiveState=%s\n' "$active_state"
+  printf 'SubState=%s\n' "$sub_state"
+  printf 'MainPID=%s\n' "$main_pid"
+  if [[ -z "$job" ]]; then
+    printf 'JobPresent=no\n'
+  else
+    printf 'JobPresent=yes\n'
+  fi
+}
+
+root_action_broker_terminal_tuple_attested() {
+  local service_name="$1"
+  local expected_load_state="$2"
+  local tuple
+  local -a tuple_fields=()
+  tuple="$(read_root_action_broker_systemd_tuple "$service_name")" || return 1
+  mapfile -t tuple_fields <<<"$tuple"
+  [[ "${#tuple_fields[@]}" -eq 5 ]] || return 1
+  case "$expected_load_state" in
+    loaded|not-found)
+      [[ "${tuple_fields[0]}" == "LoadState=$expected_load_state" ]] || return 1
+      ;;
+    loaded-or-not-found)
+      [[ "${tuple_fields[0]}" == LoadState=loaded \
+        || "${tuple_fields[0]}" == LoadState=not-found ]] || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  [[ "${tuple_fields[1]}" == ActiveState=inactive \
+    && "${tuple_fields[2]}" == SubState=dead \
+    && "${tuple_fields[3]}" == MainPID=0 \
+    && "${tuple_fields[4]}" == JobPresent=no ]]
 }
 
 root_action_broker_inactive_attested() {
-  local service_name="$1"
-  local active_check_rc
-  if /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
-    systemctl is-active --quiet "$service_name"; then
-    return 1
-  else
-    active_check_rc="$?"
-  fi
-  [[ "$active_check_rc" -eq 3 ]]
+  root_action_broker_terminal_tuple_attested "$1" loaded
 }
 
 root_action_broker_absent_attested() {
-  local service_name="$1"
-  local active_check_rc
-  if /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
-    systemctl is-active --quiet "$service_name"; then
-    return 1
-  else
-    active_check_rc="$?"
-  fi
-  [[ "$active_check_rc" -eq 4 ]]
+  root_action_broker_terminal_tuple_attested "$1" not-found
+}
+
+root_action_broker_quiesced_attested() {
+  root_action_broker_terminal_tuple_attested "$1" loaded-or-not-found
 }
 
 restart_root_action_broker_for_release() {
@@ -351,20 +626,58 @@ wait_for_root_action_broker_release() {
   return 1
 }
 
+root_action_broker_pinned_release_attested() {
+  root_action_broker_process_attested "$1" "$2" pinned
+}
+
+wait_for_root_action_broker_pinned_release() {
+  local service_name="$1"
+  local release_dir="$2"
+  local attempt
+  for ((attempt = 1; attempt <= ROOT_ACTION_POST_RESTART_ATTESTATION_ATTEMPTS; attempt++)); do
+    root_action_broker_pinned_release_attested "$service_name" "$release_dir" \
+      && return 0
+    if [[ "$attempt" -lt "$ROOT_ACTION_POST_RESTART_ATTESTATION_ATTEMPTS" ]]; then
+      /usr/bin/sleep "$ROOT_ACTION_POST_RESTART_ATTESTATION_INTERVAL_SECONDS"
+    fi
+  done
+  return 1
+}
+
+attest_quiesced_root_action_broker_state() {
+  local helper="$1"
+  local broker_state service_name
+  broker_state="$(
+    run_activation_transaction "$helper" show --field broker_state
+  )" || return 1
+  service_name="$(
+    run_activation_transaction "$helper" show --field broker_service_name
+  )" || return 1
+  case "$broker_state" in
+    active|inactive|absent)
+      root_action_broker_quiesced_attested "$service_name"
+      ;;
+    unavailable)
+      ! command -v systemctl >/dev/null 2>&1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+quiesce_root_action_broker_for_publication() {
+  quiesce_root_action_broker_for_transaction "$1"
+}
+
 install_root_action_broker_contract() {
   local release_dir="$1"
-  local unit_source="$release_dir/systemd/agent-runtime-root-action-broker.service"
-  local active_check_rc install_root_real current_path service_name unit_tmp
-  [[ -f "$unit_source" && ! -L "$unit_source" ]] || return 1
+  local helper="$2"
+  local broker_state service_name
   # Resolve the trusted reader by its production account name at install time.
   # Numeric IDs are host facts and must never be embedded in the release.
   getent passwd "$ROOT_ACTION_TRUSTED_ACCOUNT" >/dev/null || return 1
   getent group "$ROOT_ACTION_TRUSTED_ACCOUNT" >/dev/null || return 1
   [[ "$(id -gn "$ROOT_ACTION_TRUSTED_ACCOUNT")" == "$ROOT_ACTION_TRUSTED_ACCOUNT" ]] \
     || return 1
-  install_root_real="$(realpath -m "$INSTALL_ROOT")" || return 1
-  current_path="$install_root_real/current"
-  [[ "$current_path" =~ ^/[A-Za-z0-9._/-]+$ ]] || return 1
   install -d -o root -g "$ROOT_ACTION_TRUSTED_ACCOUNT" -m 0750 "$ROOT_ACTION_STATE_ROOT" \
     || return 1
   install -d -o root -g root -m 0700 "$ROOT_ACTION_PRIVATE_ROOT" || return 1
@@ -372,92 +685,74 @@ install_root_action_broker_contract() {
     || return 1
   install -d -o root -g "$ROOT_ACTION_TRUSTED_ACCOUNT" -m 0750 "$ROOT_ACTION_RUNTIME_ROOT" \
     || return 1
-  unit_tmp="$(mktemp)" || return 1
-  sed \
-    -e "s|@@CURRENT_LINK@@|$current_path|g" \
-    -e "s|@@RELEASE_DIR@@|$release_dir|g" \
-    "$unit_source" >"$unit_tmp" || { rm -f -- "$unit_tmp"; return 1; }
-  ! grep -Eq '@@(CURRENT_LINK|RELEASE_DIR)@@' "$unit_tmp" \
-    || { rm -f -- "$unit_tmp"; return 1; }
-  install -o root -g root -m 0644 "$unit_tmp" "$ROOT_ACTION_BROKER_SERVICE_FILE" \
-    || { rm -f -- "$unit_tmp"; return 1; }
-  rm -f -- "$unit_tmp" || return 1
-  if command -v systemctl >/dev/null 2>&1; then
-    [[ -x /usr/bin/timeout ]] || return 1
-    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
-      systemctl daemon-reload >/dev/null \
-      || return 1
-    service_name="$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")" || return 1
-    if /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
-      systemctl is-active --quiet "$service_name"; then
+  broker_state="$(
+    run_activation_transaction "$helper" show --field broker_state
+  )" || return 1
+  service_name="$(
+    run_activation_transaction "$helper" show --field broker_service_name
+  )" || return 1
+  [[ "$service_name" == "$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")" ]] || return 1
+  attest_quiesced_root_action_broker_state "$helper" || return 1
+  run_activation_transaction "$helper" publish-broker || return 1
+  case "$broker_state" in
+    unavailable)
+      ! command -v systemctl >/dev/null 2>&1 || return 1
+      ;;
+    active|inactive|absent)
+      command -v systemctl >/dev/null 2>&1 || return 1
+      [[ -x /usr/bin/timeout ]] || return 1
+      /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+        systemctl daemon-reload >/dev/null \
+        || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  case "$broker_state" in
+    active)
       /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
         systemctl restart "$service_name" >/dev/null \
         || return 1
-      wait_for_root_action_broker_release "$service_name" "$release_dir" \
+      wait_for_root_action_broker_pinned_release "$service_name" "$release_dir" \
         || return 1
       info "root_action_broker_update=active_restarted_release_verified" || return 1
-    else
-      active_check_rc="$?"
-      [[ "$active_check_rc" -eq 3 ]] || return 1
-    fi
-  fi
+      ;;
+    inactive|absent)
+      root_action_broker_inactive_attested "$service_name" || return 1
+      ;;
+    unavailable) ;;
+    *) return 1 ;;
+  esac
   # An inactive broker remains a separate ratified activation boundary. An
   # already-active broker must move with self-update so old code can be pruned.
   info "root_action_broker_unit=$ROOT_ACTION_BROKER_SERVICE_FILE" || return 1
   info "root_action_broker_activation=deferred_not_enabled_or_started" || return 1
 }
 
-capture_root_action_broker_unit_backup() {
-  local backup_dir="$1"
-  local backup="$backup_dir/broker-unit"
-  local state="$backup_dir/broker-unit-state"
-  if [[ ! -e "$ROOT_ACTION_BROKER_SERVICE_FILE" && ! -L "$ROOT_ACTION_BROKER_SERVICE_FILE" ]]; then
-    printf 'absent\n' >"$state" || return 1
-    chmod 0600 "$state" || return 1
-    return 0
-  fi
-  [[ -f "$ROOT_ACTION_BROKER_SERVICE_FILE" && ! -L "$ROOT_ACTION_BROKER_SERVICE_FILE" ]] \
-    || return 1
-  [[ "$(stat -c '%a:%h:%u:%g' "$ROOT_ACTION_BROKER_SERVICE_FILE" 2>/dev/null || true)" == "644:1:0:0" ]] \
-    || return 1
-  install -m 0600 "$ROOT_ACTION_BROKER_SERVICE_FILE" "$backup" || return 1
-  cmp -s "$ROOT_ACTION_BROKER_SERVICE_FILE" "$backup" || return 1
-  printf 'present\n' >"$state" || return 1
-  chmod 0600 "$state" || return 1
-}
-
-restore_root_action_broker_unit_backup() {
-  local backup_dir="$1"
-  local backup="$backup_dir/broker-unit"
-  local state_file="$backup_dir/broker-unit-state"
-  local state
-  [[ -f "$state_file" && ! -L "$state_file" ]] || return 1
-  state="$(<"$state_file")"
-  case "$state" in
-    present)
-      [[ -f "$backup" && ! -L "$backup" ]] || return 1
-      [[ "$(stat -c '%a:%h:%u' "$backup" 2>/dev/null || true)" == "600:1:$(id -u)" ]] \
-        || return 1
-      [[ ! -L "$ROOT_ACTION_BROKER_SERVICE_FILE" ]] || return 1
-      rm -f -- "$ROOT_ACTION_BROKER_SERVICE_FILE" || return 1
-      install -m 0644 "$backup" "$ROOT_ACTION_BROKER_SERVICE_FILE" || return 1
-      chown root:root "$ROOT_ACTION_BROKER_SERVICE_FILE" || return 1
-      cmp -s "$backup" "$ROOT_ACTION_BROKER_SERVICE_FILE" || return 1
+attest_candidate_root_action_broker_state() {
+  local release_dir="$1"
+  local helper="$2"
+  local expected_state="$3"
+  local journal_state service_name
+  journal_state="$(
+    run_activation_transaction "$helper" show --field broker_state
+  )" || return 1
+  [[ "$journal_state" == "$expected_state" ]] || return 1
+  service_name="$(
+    run_activation_transaction "$helper" show --field broker_service_name
+  )" || return 1
+  case "$journal_state" in
+    active)
+      root_action_broker_pinned_release_attested "$service_name" "$release_dir"
       ;;
-    absent)
-      rm -f -- "$ROOT_ACTION_BROKER_SERVICE_FILE" || return 1
-      [[ ! -e "$ROOT_ACTION_BROKER_SERVICE_FILE" && ! -L "$ROOT_ACTION_BROKER_SERVICE_FILE" ]] \
-        || return 1
+    inactive|absent)
+      root_action_broker_inactive_attested "$service_name"
+      ;;
+    unavailable)
+      ! command -v systemctl >/dev/null 2>&1
       ;;
     *) return 1 ;;
   esac
-  if command -v systemctl >/dev/null 2>&1; then
-    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
-      systemctl daemon-reload >/dev/null \
-      || return 1
-  fi
 }
-
 install_gemini_cli() {
   local release_dir="$1"
   local package_dir="$release_dir/agent-clis/gemini-cli"
@@ -839,56 +1134,260 @@ archive_legacy_state_files() {
   fi
 }
 
-cleanup_activation_staging() {
-  local failed=0 path
-  for path in "$@"; do
-    [[ -n "$path" ]] || continue
-    rm -f -- "$path" || failed=1
-    [[ ! -e "$path" && ! -L "$path" ]] || failed=1
-  done
-  [[ "$failed" -eq 0 ]]
+run_trusted_activation_helper() {
+  local helper="$1"
+  shift
+  [[ -f "$helper" && ! -L "$helper" ]] || return 1
+  [[ "$ACTIVATION_HELPER_BLOB" =~ ^[0-9a-f]{40}$ ]] || return 1
+  /usr/bin/timeout --kill-after=2 "$ACTIVATION_HELPER_TIMEOUT_SECONDS" \
+    env -i PATH=/usr/local/bin:/usr/bin:/bin \
+      /usr/bin/python3 -I - "$helper" "$ACTIVATION_HELPER_BLOB" "$@" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+
+source = sys.argv[1]
+expected = sys.argv[2]
+flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+fd = os.open(source, flags)
+try:
+    before = os.fstat(fd)
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise SystemExit("activation helper is not a regular single-link file")
+    chunks = []
+    total = 0
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > 1024 * 1024:
+            raise SystemExit("activation helper exceeds size bound")
+        chunks.append(chunk)
+    after = os.fstat(fd)
+    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+        after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns
+    ):
+        raise SystemExit("activation helper changed while reading")
+finally:
+    os.close(fd)
+data = b"".join(chunks)
+actual = hashlib.sha1(f"blob {len(data)}\0".encode("ascii") + data).hexdigest()
+if actual != expected:
+    raise SystemExit("activation helper bytes do not match the exact source blob")
+sys.argv = [source, *sys.argv[3:]]
+namespace = {"__name__": "__main__", "__file__": source}
+exec(compile(data, source, "exec"), namespace, namespace)
+PY
+}
+
+run_activation_transaction() {
+  local helper="$1"
+  local command="$2"
+  local ops_gid
+  shift 2
+  ops_gid="$(id -g "$OPS_USER")" || return 1
+  [[ "$ops_gid" =~ ^[0-9]+$ ]] || return 1
+  run_trusted_activation_helper "$helper" "$command" \
+    --transaction-dir "$ACTIVATION_TRANSACTION_DIR" \
+    --ops-gid "$ops_gid" \
+    --opsctl-link "$BIN_LINK" \
+    --mcp-link "$MCP_BIN_LINK" \
+    --gemini-link "$GEMINI_BIN_LINK" \
+    --manifest-link "$MANIFEST" \
+    --current-link "$CURRENT_LINK" \
+    --broker-unit "$ROOT_ACTION_BROKER_SERVICE_FILE" \
+    "$@"
+}
+
+verify_activation_helper_identity() {
+  local src="$1"
+  local commit="$2"
+  local helper="$3"
+  local actual_blob expected_blob
+  [[ -f "$helper" && ! -L "$helper" ]] || return 1
+  expected_blob="$(
+    git -C "$src" rev-parse "$commit:scripts/activation_transaction.py"
+  )" || return 1
+  actual_blob="$(git hash-object "$helper")" || return 1
+  [[ "$actual_blob" == "$expected_blob" ]] || return 1
+  printf '%s\n' "$expected_blob"
+}
+
+cleanup_abandoned_activation_staging() {
+  local helper="$1"
+  local expected_commit="$2"
+  local completion_output output
+  completion_output="$(
+    run_activation_transaction "$helper" ack-recovered \
+      --expected-commit "$expected_commit"
+  )" || return 1
+  case "$completion_output" in
+    recovered_completion=absent) ;;
+    recovered_completion_acknowledged=yes) return 2 ;;
+    recovered_completion_cleaned=yes) return 2 ;;
+    *) return 1 ;;
+  esac
+  output="$(
+    run_trusted_activation_helper "$helper" cleanup-staging \
+      --install-root "$INSTALL_ROOT" \
+      --transaction-dir "$ACTIVATION_TRANSACTION_DIR" \
+      --candidate-dir "$ACTIVATION_CANDIDATE_DIR" \
+      --path "$ACTIVATION_CANDIDATE_DIR" \
+      --path "${ACTIVATION_TRANSACTION_DIR}.new" \
+      --path "${ACTIVATION_TRANSACTION_DIR}.complete"
+  )" || return 1
+  [[ -z "$output" ]] || return 1
+}
+
+restore_broker_service_from_transaction() {
+  local helper="$1"
+  local previous_release="$2"
+  local broker_state service_name
+  broker_state="$(
+    run_activation_transaction "$helper" show --field broker_state
+  )" || return 1
+  service_name="$(
+    run_activation_transaction "$helper" show --field broker_service_name
+  )" || return 1
+  if [[ "$broker_state" == unavailable ]]; then
+    ! command -v systemctl >/dev/null 2>&1 || return 1
+    return 0
+  fi
+  command -v systemctl >/dev/null 2>&1 || return 1
+  [[ -x /usr/bin/timeout ]] || return 1
+  /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+    systemctl daemon-reload >/dev/null || return 1
+  case "$broker_state" in
+    active)
+      [[ -n "$previous_release" ]] || return 1
+      restart_root_action_broker_for_release "$service_name" "$previous_release" \
+        || return 1
+      ;;
+    inactive)
+      /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+        systemctl stop "$service_name" >/dev/null || return 1
+      root_action_broker_inactive_attested "$service_name" || return 1
+      ;;
+    absent)
+      quiesce_root_action_broker_for_transaction "$helper" || return 1
+      root_action_broker_absent_attested "$service_name" || return 1
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+quiesce_root_action_broker_for_transaction() {
+  local helper="$1"
+  local broker_state service_name tuple
+  local -a tuple_fields=()
+  broker_state="$(
+    run_activation_transaction "$helper" show --field broker_state
+  )" || return 1
+  service_name="$(
+    run_activation_transaction "$helper" show --field broker_service_name
+  )" || return 1
+  case "$broker_state" in
+    unavailable)
+      ! command -v systemctl >/dev/null 2>&1
+      return
+      ;;
+    active|inactive|absent) ;;
+    *) return 1 ;;
+  esac
+  command -v systemctl >/dev/null 2>&1 || return 1
+  [[ -x /usr/bin/timeout ]] || return 1
+  # LoadState is orthogonal to process/job state.  In particular a unit whose
+  # configuration was removed can remain active or queued for restart.  Only
+  # the complete inactive tuple is already safe; every other loaded/not-found
+  # tuple is stopped before any transaction-owned filesystem mutation.
+  if root_action_broker_quiesced_attested "$service_name"; then
+    return 0
+  fi
+  tuple="$(read_root_action_broker_systemd_tuple "$service_name")" || return 1
+  mapfile -t tuple_fields <<<"$tuple"
+  [[ "${#tuple_fields[@]}" -eq 5 ]] || return 1
+  case "${tuple_fields[0]}" in
+    LoadState=loaded|LoadState=not-found) ;;
+    *) return 1 ;;
+  esac
+  /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+    systemctl stop "$service_name" >/dev/null || return 1
+  root_action_broker_quiesced_attested "$service_name"
+}
+
+quiesce_root_action_broker_before_recovery() {
+  quiesce_root_action_broker_for_transaction "$1"
+}
+
+recover_and_attest_activation_baseline() {
+  local helper="$1"
+  local expected_commit="$2"
+  local previous_release="$3"
+  quiesce_root_action_broker_before_recovery "$helper" || return 1
+  run_activation_transaction "$helper" recover || return 1
+  restore_broker_service_from_transaction "$helper" "$previous_release" || return 1
+  if [[ -n "$previous_release" ]]; then
+    attest_restored_cli_as_ops "$previous_release" "$expected_commit" || return 1
+  fi
+  run_activation_transaction "$helper" finalize --expect baseline || return 1
+}
+
+recover_pending_activation_transaction() {
+  local helper="$1"
+  local expected_commit="$2"
+  local candidate_commit previous_release cleanup_rc=0
+  if [[ ! -e "$ACTIVATION_TRANSACTION_DIR" && ! -L "$ACTIVATION_TRANSACTION_DIR" ]]; then
+    return 1
+  fi
+  candidate_commit="$(
+    run_activation_transaction "$helper" show --field candidate_commit
+  )" || die "pending activation transaction is invalid"
+  [[ "$candidate_commit" == "$expected_commit" ]] \
+    || die "pending activation belongs to a different exact source commit"
+  previous_release="$(
+    run_activation_transaction "$helper" show --field previous_release
+  )" || die "pending activation transaction is invalid"
+  recover_and_attest_activation_baseline \
+    "$helper" "$candidate_commit" "$previous_release" \
+    || die "pending activation baseline or broker restoration failed; transaction preserved"
+  cleanup_abandoned_activation_staging "$helper" "$candidate_commit" \
+    || cleanup_rc="$?"
+  [[ "$cleanup_rc" -eq 2 ]] \
+    || die "activation baseline recovered but durable completion acknowledgement failed"
+  info "activation_recovery=previous_identity_restored"
+  return 0
 }
 
 activate_release() {
   local release_dir="$1"
-  local release_name bin_tmp="" mcp_tmp="" gemini_tmp=""
+  local commit="$2"
+  local previous_release="$3"
+  local helper="$4"
+  local broker_state="$5"
+  local release_name service_name unit_source broker_state_now
   release_name="$(basename "$release_dir")" || return 1
-  local next_link="$INSTALL_ROOT/.current.next.$$"
-  local manifest_tmp="$INSTALL_ROOT/.manifest.next.$$"
-  [[ -d "$release_dir" ]] || return 1
-  for path in "$next_link" "$manifest_tmp"; do
-    [[ ! -e "$path" && ! -L "$path" ]] || return 1
-  done
-  bin_tmp="$(mktemp "${BIN_LINK}.next.XXXXXX")" || return 1
-  mcp_tmp="$(mktemp "${MCP_BIN_LINK}.next.XXXXXX")" \
-    || { cleanup_activation_staging "$bin_tmp"; return 1; }
-  gemini_tmp="$(mktemp "${GEMINI_BIN_LINK}.next.XXXXXX")" \
-    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp"; return 1; }
-  cat >"$bin_tmp" <<EOF \
-    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp"; return 1; }
+  service_name="$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")" || return 1
+  unit_source="$release_dir/systemd/agent-runtime-root-action-broker.service"
+  [[ -d "$release_dir" && ! -L "$release_dir" ]] || return 1
+  [[ -f "$unit_source" && ! -L "$unit_source" ]] || return 1
+  [[ ! -e "$ACTIVATION_CANDIDATE_DIR" && ! -L "$ACTIVATION_CANDIDATE_DIR" ]] \
+    || return 1
+  install -d -o root -g root -m 0700 "$ACTIVATION_CANDIDATE_DIR" || return 1
+  if ! (
+    umask 077
+    cat >"$ACTIVATION_CANDIDATE_DIR/opsctl" <<EOF || exit 1
 #!/usr/bin/env bash
 set -euo pipefail
 exec "$CURRENT_LINK/.venv/bin/opsctl" "\$@"
 EOF
-  chmod 0755 "$bin_tmp" \
-    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp"; return 1; }
-  cat >"$mcp_tmp" <<EOF \
-    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp"; return 1; }
+    cat >"$ACTIVATION_CANDIDATE_DIR/mcp" <<EOF || exit 1
 #!/usr/bin/env bash
 set -euo pipefail
 exec "$CURRENT_LINK/.venv/bin/agent-runtime-ops-mcp" "\$@"
 EOF
-  chmod 0755 "$mcp_tmp" \
-    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp"; return 1; }
-  if [[ -e "$GEMINI_BIN_LINK" || -L "$GEMINI_BIN_LINK" ]]; then
-    if [[ ! -f "$GEMINI_BIN_LINK" || -L "$GEMINI_BIN_LINK" ]] \
-      || ! grep -q 'agent-runtime-ops managed gemini wrapper' "$GEMINI_BIN_LINK" 2>/dev/null; then
-      cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp" || true
-      return 1
-    fi
-  fi
-  cat >"$gemini_tmp" <<EOF \
-    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp"; return 1; }
+    cat >"$ACTIVATION_CANDIDATE_DIR/gemini" <<EOF || exit 1
 #!/usr/bin/env bash
 set -euo pipefail
 # agent-runtime-ops managed gemini wrapper
@@ -905,20 +1404,15 @@ if [[ "\$(id -un 2>/dev/null || true)" == "\$OPS_USER" ]]; then
   skip_agent_runtime_mcp_default=0
   for arg in "\$@"; do
     case "\$arg" in
-      --)
-        break
-        ;;
+      --) break ;;
       mcp|extensions|extension|skills|skill|hooks|hook|gemma)
-        skip_agent_runtime_mcp_default=1
-        ;;
+        skip_agent_runtime_mcp_default=1 ;;
     esac
   done
   has_allowed_mcp=0
   for arg in "\$@"; do
     case "\$arg" in
-      --allowed-mcp-server-names|--allowed-mcp-server-names=*)
-        has_allowed_mcp=1
-        ;;
+      --allowed-mcp-server-names|--allowed-mcp-server-names=*) has_allowed_mcp=1 ;;
     esac
   done
   if [[ "\$skip_agent_runtime_mcp_default" -eq 0 && "\$has_allowed_mcp" -eq 0 ]]; then
@@ -927,157 +1421,44 @@ if [[ "\$(id -un 2>/dev/null || true)" == "\$OPS_USER" ]]; then
 fi
 exec "$CURRENT_LINK/agent-clis/gemini-cli/node_modules/.bin/gemini" "\$@"
 EOF
-  chmod 0755 "$gemini_tmp" \
-    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp"; return 1; }
-  chown root:"$OPS_GROUP" "$bin_tmp" "$mcp_tmp" "$gemini_tmp" \
-    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp"; return 1; }
-  ln -s "current/.agent-runtime-ops-manifest" "$manifest_tmp" \
-    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp" "$manifest_tmp"; return 1; }
-  ln -s "releases/$release_name" "$next_link" \
-    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp" "$manifest_tmp" "$next_link"; return 1; }
-  mv -Tf "$bin_tmp" "$BIN_LINK" \
-    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp" "$manifest_tmp" "$next_link"; return 1; }
-  mv -Tf "$mcp_tmp" "$MCP_BIN_LINK" \
-    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp" "$manifest_tmp" "$next_link"; return 1; }
-  mv -Tf "$gemini_tmp" "$GEMINI_BIN_LINK" \
-    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp" "$manifest_tmp" "$next_link"; return 1; }
-  mv -Tf "$manifest_tmp" "$MANIFEST" \
-    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp" "$manifest_tmp" "$next_link"; return 1; }
-  mv -Tf "$next_link" "$CURRENT_LINK" \
-    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp" "$manifest_tmp" "$next_link"; return 1; }
-  chown -h root:"$OPS_GROUP" "$CURRENT_LINK" "$MANIFEST" \
-    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp" "$manifest_tmp" "$next_link"; return 1; }
-  cleanup_activation_staging \
-    "$bin_tmp" "$mcp_tmp" "$gemini_tmp" "$manifest_tmp" "$next_link"
+    printf '%s\n' 'current/.agent-runtime-ops-manifest' \
+      >"$ACTIVATION_CANDIDATE_DIR/manifest-target" || exit 1
+    printf '%s\n' "releases/$release_name" \
+      >"$ACTIVATION_CANDIDATE_DIR/current-target" || exit 1
+    [[ "$release_dir" =~ ^/[A-Za-z0-9._/-]+$ ]] || exit 1
+    sed \
+      -e "s|@@CURRENT_LINK@@|$release_dir|g" \
+      -e "s|@@RELEASE_DIR@@|$release_dir|g" \
+      "$unit_source" >"$ACTIVATION_CANDIDATE_DIR/broker-unit" || exit 1
+    ! grep -Eq '@@(CURRENT_LINK|RELEASE_DIR)@@' \
+      "$ACTIVATION_CANDIDATE_DIR/broker-unit" || exit 1
+    chmod 0600 "$ACTIVATION_CANDIDATE_DIR"/* || exit 1
+    chown root:root "$ACTIVATION_CANDIDATE_DIR"/* || exit 1
+  ); then
+    return 1
+  fi
+  run_trusted_activation_helper "$helper" fsync-tree \
+    --releases-dir "$RELEASES_DIR" --path "$release_dir" || return 1
+  broker_state_now="$(capture_root_action_broker_state "$previous_release")" \
+    || return 1
+  if [[ "$broker_state_now" != "$broker_state" ]]; then
+    cleanup_abandoned_activation_staging "$helper" "$commit" || true
+    return 1
+  fi
+  run_activation_transaction "$helper" begin \
+    --install-root "$INSTALL_ROOT" \
+    --releases-dir "$RELEASES_DIR" \
+    --candidate-dir "$ACTIVATION_CANDIDATE_DIR" \
+    --candidate-release "$release_dir" \
+    --candidate-commit "$commit" \
+    --previous-release "$previous_release" \
+    --broker-service-name "$service_name" \
+    --broker-state "$broker_state_now" \
+    || return 1
+  quiesce_root_action_broker_for_publication "$helper" || return 1
+  cleanup_abandoned_activation_staging "$helper" "$commit" || return 1
+  run_activation_transaction "$helper" publish
 }
-
-deactivate_first_release() {
-  local release_dir="$1"
-  local current_release path
-  if [[ -e "$CURRENT_LINK" || -L "$CURRENT_LINK" ]]; then
-    [[ -L "$CURRENT_LINK" ]] || return 1
-    current_release="$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)"
-    [[ "$current_release" == "$release_dir" ]] || return 1
-  fi
-  if [[ -e "$BIN_LINK" || -L "$BIN_LINK" ]]; then
-    [[ -f "$BIN_LINK" && ! -L "$BIN_LINK" ]] || return 1
-    grep -Fqx "exec \"$CURRENT_LINK/.venv/bin/opsctl\" \"\$@\"" "$BIN_LINK" \
-      || return 1
-  fi
-  if [[ -e "$MCP_BIN_LINK" || -L "$MCP_BIN_LINK" ]]; then
-    [[ -f "$MCP_BIN_LINK" && ! -L "$MCP_BIN_LINK" ]] || return 1
-    grep -Fqx "exec \"$CURRENT_LINK/.venv/bin/agent-runtime-ops-mcp\" \"\$@\"" "$MCP_BIN_LINK" \
-      || return 1
-  fi
-  if [[ -e "$GEMINI_BIN_LINK" || -L "$GEMINI_BIN_LINK" ]]; then
-    [[ -f "$GEMINI_BIN_LINK" && ! -L "$GEMINI_BIN_LINK" ]] || return 1
-    grep -Fq 'agent-runtime-ops managed gemini wrapper' "$GEMINI_BIN_LINK" \
-      || return 1
-  fi
-  if [[ -e "$MANIFEST" || -L "$MANIFEST" ]]; then
-    [[ -L "$MANIFEST" ]] || return 1
-    [[ "$(readlink "$MANIFEST")" == "current/.agent-runtime-ops-manifest" ]] \
-      || return 1
-  fi
-  for path in "$BIN_LINK" "$MCP_BIN_LINK" "$GEMINI_BIN_LINK" "$MANIFEST" "$CURRENT_LINK"; do
-    rm -f -- "$path" || return 1
-    [[ ! -e "$path" && ! -L "$path" ]] || return 1
-  done
-}
-
-capture_previous_activation_identity() {
-  local previous_release="$1"
-  local backup_dir="$2"
-  local gid name source target
-  [[ -d "$backup_dir" && ! -L "$backup_dir" ]] || return 1
-  [[ "$(stat -c '%a:%h:%u' "$backup_dir" 2>/dev/null || true)" == "700:1:$(id -u)" ]] \
-    || return 1
-  if [[ -z "$previous_release" ]]; then
-    printf 'first_install\n' >"$backup_dir/state" || return 1
-    chmod 0600 "$backup_dir/state" || return 1
-    return 0
-  fi
-  gid="$(id -g "$OPS_USER")" || return 1
-  for name in opsctl mcp gemini; do
-    case "$name" in
-      opsctl) source="$BIN_LINK" ;;
-      mcp) source="$MCP_BIN_LINK" ;;
-      gemini) source="$GEMINI_BIN_LINK" ;;
-      *) return 1 ;;
-    esac
-    [[ -f "$source" && ! -L "$source" ]] || return 1
-    [[ "$(stat -c '%a:%h:%u:%g' "$source" 2>/dev/null || true)" == "755:1:0:$gid" ]] \
-      || return 1
-    target="$backup_dir/$name"
-    install -m 0600 "$source" "$target" || return 1
-    cmp -s "$source" "$target" || return 1
-  done
-  [[ -L "$MANIFEST" ]] || return 1
-  [[ "$(readlink "$MANIFEST")" == "current/.agent-runtime-ops-manifest" ]] \
-    || return 1
-  printf 'previous\n' >"$backup_dir/state" || return 1
-  printf 'current/.agent-runtime-ops-manifest\n' >"$backup_dir/manifest-target" \
-    || return 1
-  chmod 0600 "$backup_dir/state" "$backup_dir/manifest-target" || return 1
-}
-
-restore_previous_activation_identity() {
-  local failed_release="$1"
-  local previous_release="$2"
-  local backup_dir="$3"
-  local backup destination name next_link release_name state target
-  [[ -f "$backup_dir/state" && ! -L "$backup_dir/state" ]] || return 1
-  state="$(<"$backup_dir/state")"
-  if [[ "$state" == "first_install" ]]; then
-    [[ -z "$previous_release" ]] || return 1
-    deactivate_first_release "$failed_release" || return 1
-    return 0
-  fi
-  [[ "$state" == "previous" && -n "$previous_release" ]] || return 1
-  [[ -d "$previous_release" && ! -L "$previous_release" ]] || return 1
-  release_name="$(basename "$previous_release")"
-  [[ "$previous_release" == "$(realpath -m "$RELEASES_DIR")/$release_name" ]] \
-    || return 1
-  next_link="$INSTALL_ROOT/.current.restore.$$"
-  ln -s "releases/$release_name" "$next_link" || return 1
-  mv -Tf "$next_link" "$CURRENT_LINK" || return 1
-  for name in opsctl mcp gemini; do
-    backup="$backup_dir/$name"
-    case "$name" in
-      opsctl) destination="$BIN_LINK" ;;
-      mcp) destination="$MCP_BIN_LINK" ;;
-      gemini) destination="$GEMINI_BIN_LINK" ;;
-      *) return 1 ;;
-    esac
-    [[ -f "$backup" && ! -L "$backup" ]] || return 1
-    [[ "$(stat -c '%a:%h:%u' "$backup" 2>/dev/null || true)" == "600:1:$(id -u)" ]] \
-      || return 1
-    rm -f -- "$destination" || return 1
-    install -m 0755 "$backup" "$destination" || return 1
-    chown root:"$OPS_GROUP" "$destination" || return 1
-    cmp -s "$backup" "$destination" || return 1
-  done
-  [[ -f "$backup_dir/manifest-target" && ! -L "$backup_dir/manifest-target" ]] \
-    || return 1
-  target="$(<"$backup_dir/manifest-target")"
-  [[ "$target" == "current/.agent-runtime-ops-manifest" ]] || return 1
-  rm -f -- "$MANIFEST" || return 1
-  ln -s "$target" "$MANIFEST" || return 1
-  chown -h root:"$OPS_GROUP" "$CURRENT_LINK" "$MANIFEST" || return 1
-  [[ "$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)" == "$previous_release" ]] \
-    || return 1
-}
-
-cleanup_activation_identity_backup() {
-  local backup_dir="$1"
-  local path
-  [[ -d "$backup_dir" && ! -L "$backup_dir" ]] || return 1
-  for path in state manifest-target opsctl mcp gemini broker-unit broker-unit-state; do
-    rm -f -- "$backup_dir/$path" || return 1
-  done
-  rmdir "$backup_dir"
-}
-
 install_ops_home_agents() {
   local release_dir="$1"
   local target="$release_dir/ops-home/AGENTS.md"
@@ -1368,10 +1749,13 @@ capture_previous_active_release() {
   local expected_ref="$1"
   local previous_release releases_real
   if [[ ! -L "$CURRENT_LINK" ]]; then
-    [[ ! -e "$CURRENT_LINK" ]] || die "current release path exists but is not a symlink"
-    [[ ! -e "$BIN_LINK" && ! -e "$MCP_BIN_LINK" && ! -e "$MANIFEST" ]] \
+    [[ ! -e "$CURRENT_LINK" && ! -L "$CURRENT_LINK" ]] \
+      || die "current release path exists but is not a managed symlink"
+    [[ ! -e "$BIN_LINK" && ! -L "$BIN_LINK" \
+      && ! -e "$MCP_BIN_LINK" && ! -L "$MCP_BIN_LINK" \
+      && ! -e "$MANIFEST" && ! -L "$MANIFEST" ]] \
       || die "first install requires absent managed current wrappers"
-    if [[ -e "$GEMINI_BIN_LINK" ]]; then
+    if [[ -e "$GEMINI_BIN_LINK" || -L "$GEMINI_BIN_LINK" ]]; then
       grep -q 'agent-runtime-ops managed gemini wrapper' "$GEMINI_BIN_LINK" \
         || die "refusing first install with unmanaged Gemini wrapper"
       die "first install requires absent managed current wrappers"
@@ -1392,79 +1776,70 @@ capture_previous_active_release() {
 
 capture_root_action_broker_state() {
   local previous_release="$1"
-  local active_check_rc service_name
+  local service_name tuple load_state active_state sub_state main_pid job_present
+  local -a tuple_fields=()
   if ! command -v systemctl >/dev/null 2>&1; then
     printf 'unavailable\n'
     return 0
   fi
   service_name="$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")"
-  if /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
-    systemctl is-active --quiet "$service_name"; then
-    [[ -n "$previous_release" ]] \
-      || die "active root-action broker has no previous active release"
-    root_action_broker_release_attested "$service_name" "$previous_release" \
-      || die "previous root-action broker release is not exactly attested"
-    printf 'active\n'
-    return 0
-  else
-    active_check_rc="$?"
-  fi
-  case "$active_check_rc" in
-    3) printf 'inactive\n' ;;
-    4) printf 'absent\n' ;;
-    *) die "root-action broker pre-activation state probe failed" ;;
+  tuple="$(read_root_action_broker_systemd_tuple "$service_name")" \
+    || die "root-action broker pre-activation systemd tuple probe failed"
+  mapfile -t tuple_fields <<<"$tuple"
+  [[ "${#tuple_fields[@]}" -eq 5 ]] \
+    || die "root-action broker pre-activation systemd tuple is malformed"
+  load_state="${tuple_fields[0]#LoadState=}"
+  active_state="${tuple_fields[1]#ActiveState=}"
+  sub_state="${tuple_fields[2]#SubState=}"
+  main_pid="${tuple_fields[3]#MainPID=}"
+  job_present="${tuple_fields[4]#JobPresent=}"
+  case "$load_state" in
+    loaded|not-found) ;;
+    *) die "root-action broker pre-activation load state is not admissible: $load_state" ;;
+  esac
+  case "$load_state:$active_state:$sub_state:$job_present" in
+    loaded:active:running:no)
+      [[ "$main_pid" =~ ^[1-9][0-9]{0,9}$ ]] \
+        || die "active root-action broker has an invalid MainPID"
+      [[ -n "$previous_release" ]] \
+        || die "active root-action broker has no previous active release"
+      root_action_broker_release_attested "$service_name" "$previous_release" \
+        || die "previous root-action broker release is not exactly attested"
+      printf 'active\n'
+      ;;
+    loaded:inactive:dead:no)
+      [[ "$main_pid" == 0 ]] \
+        || die "inactive root-action broker still has a MainPID"
+      printf 'inactive\n'
+      ;;
+    not-found:inactive:dead:no)
+      [[ "$main_pid" == 0 ]] \
+        || die "absent root-action broker still has a MainPID"
+      printf 'absent\n'
+      ;;
+    *)
+      die "root-action broker pre-activation state is transient or unsafe: $load_state/$active_state/$sub_state"
+      ;;
   esac
 }
-
-restore_previous_active_identity() {
-  local failed_release="$1"
-  local expected_ref="$2"
-  local previous_release="$3"
-  local broker_state="$4"
-  local backup_dir="$5"
-  local service_name
-  restore_previous_activation_identity \
-    "$failed_release" "$previous_release" "$backup_dir" || return 1
-  if [[ -n "$previous_release" ]]; then
-    attest_restored_cli_as_ops "$previous_release" "$expected_ref" || return 1
-  fi
-  case "$broker_state" in
-    active)
-      service_name="$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")"
-      restart_root_action_broker_for_release "$service_name" "$previous_release" \
-        || return 1
-      ;;
-    inactive)
-      service_name="$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")"
-      root_action_broker_inactive_attested "$service_name" || return 1
-      ;;
-    absent)
-      service_name="$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")" || return 1
-      root_action_broker_absent_attested "$service_name" || return 1
-      ;;
-    unavailable) ;;
-    *) return 1 ;;
-  esac
-  info "activation_rollback=previous_identity_restored"
-}
-
 activate_and_attest_cli_or_restore() {
   local release_dir="$1"
   local commit="$2"
   local previous_release="$3"
   local broker_state="$4"
-  local backup_dir="$5"
+  local helper="$5"
   local activation_rc=0
-  activate_release "$release_dir" || activation_rc="$?"
+  activate_release "$release_dir" "$commit" "$previous_release" "$helper" "$broker_state" \
+    || activation_rc="$?"
   if [[ "$activation_rc" -eq 0 ]]; then
     attest_active_cli_as_ops "$release_dir" "$commit" || activation_rc="$?"
   fi
   if [[ "$activation_rc" -ne 0 ]]; then
-    restore_previous_active_identity \
-      "$release_dir" "$commit" "$previous_release" "$broker_state" "$backup_dir" \
-      || die "post-activation svcops CLI attestation failed and previous identity restoration failed"
-    cleanup_activation_identity_backup "$backup_dir" \
-      || die "previous active identity restored but activation backup cleanup failed"
+    if [[ -e "$ACTIVATION_TRANSACTION_DIR" || -L "$ACTIVATION_TRANSACTION_DIR" ]]; then
+      recover_and_attest_activation_baseline \
+        "$helper" "$commit" "$previous_release" \
+        || die "activation failed and durable previous identity restoration failed"
+    fi
     die "post-activation svcops CLI attestation failed; previous active identity restored"
   fi
   info "ops_cli_post_activation=svcops_verified"
@@ -1475,31 +1850,30 @@ install_root_action_broker_or_restore() {
   local commit="$2"
   local previous_release="$3"
   local broker_state="$4"
-  local backup_dir="$5"
-  local broker_install_rc=0 identity_restore_rc=0 unit_restore_rc=0
-  if ! capture_root_action_broker_unit_backup "$backup_dir"; then
-    restore_previous_active_identity \
-      "$release_dir" "$commit" "$previous_release" "$broker_state" "$backup_dir" \
-      || die "broker unit capture failed and previous identity restoration failed"
-    cleanup_activation_identity_backup "$backup_dir" \
-      || die "previous active identity restored but activation backup cleanup failed"
-    die "broker unit capture failed; previous active identity restored"
+  local helper="$5"
+  local broker_install_rc=0 journal_state
+  journal_state="$(
+    run_activation_transaction "$helper" show --field broker_state
+  )" || broker_install_rc="$?"
+  if [[ "$broker_install_rc" -eq 0 && "$journal_state" != "$broker_state" ]]; then
+    broker_install_rc=1
   fi
-  install_root_action_broker_contract "$release_dir" || broker_install_rc="$?"
   if [[ "$broker_install_rc" -eq 0 ]]; then
-    cleanup_activation_identity_backup "$backup_dir" \
-      || die "broker installed but activation backup cleanup failed"
+    install_root_action_broker_contract "$release_dir" "$helper" \
+      || broker_install_rc="$?"
+  fi
+  if [[ "$broker_install_rc" -eq 0 ]]; then
+    attest_candidate_root_action_broker_state \
+      "$release_dir" "$helper" "$broker_state" \
+      || broker_install_rc="$?"
+  fi
+  if [[ "$broker_install_rc" -eq 0 ]]; then
+    run_activation_transaction "$helper" finalize --expect candidate \
+      || die "broker installed but activation transaction finalization failed"
     return 0
   fi
-  restore_root_action_broker_unit_backup "$backup_dir" || unit_restore_rc="$?"
-  restore_previous_active_identity \
-    "$release_dir" "$commit" "$previous_release" "$broker_state" "$backup_dir" \
-    || identity_restore_rc="$?"
-  if [[ "$unit_restore_rc" -ne 0 || "$identity_restore_rc" -ne 0 ]]; then
-    die "root-action broker setup failed and previous active identity restoration failed"
-  fi
-  cleanup_activation_identity_backup "$backup_dir" \
-    || die "previous active identity restored but activation backup cleanup failed"
+  recover_and_attest_activation_baseline "$helper" "$commit" "$previous_release" \
+    || die "root-action broker setup failed and durable previous identity restoration failed"
   die "root-action broker setup failed; previous active identity restored"
 }
 
@@ -1518,31 +1892,67 @@ register_codex_mcp() {
 
 install_package() {
   local src commit summary release_name tmp_release release_dir
-  local activation_backup_dir previous_active_release previous_broker_state
+  local activation_helper previous_active_release previous_broker_state
+  local activation_cleanup_rc=0
+  require_root
+  validate_activation_path_strings
   if ! src="$(repo_root)"; then
+    local recovery_path
+    for recovery_path in \
+      "$ACTIVATION_TRANSACTION_DIR" \
+      "${ACTIVATION_TRANSACTION_DIR}.new" \
+      "${ACTIVATION_TRANSACTION_DIR}.complete" \
+      "${ACTIVATION_TRANSACTION_DIR}.recovered.complete" \
+      "${ACTIVATION_TRANSACTION_DIR}.recovered.acknowledged" \
+      "${ACTIVATION_TRANSACTION_DIR}.recovered.retired" \
+      "$ACTIVATION_CANDIDATE_DIR"; do
+      [[ ! -e "$recovery_path" && ! -L "$recovery_path" ]] \
+        || die "activation recovery residue requires the exact trusted source installer; bootstrap refused"
+    done
     bootstrap_from_git
   fi
 
-  require_root
   validate_install_root
-  ensure_base_packages
-  with_install_lock
+  command -v git >/dev/null || die "missing recovery prerequisite: git"
+  command -v python3 >/dev/null || die "missing recovery prerequisite: python3"
+  command -v flock >/dev/null || die "missing recovery prerequisite: flock"
+  [[ -x /usr/bin/timeout ]] || die "missing recovery prerequisite: /usr/bin/timeout"
   require_ops_account
-  require_commands
-
+  activation_helper="$src/scripts/activation_transaction.py"
+  [[ -f "$activation_helper" && ! -L "$activation_helper" ]] \
+    || die "missing fixed activation transaction helper"
   commit="$(source_commit "$src")"
-  summary="$(source_summary "$src")"
   require_full_sha "$commit"
   if [[ -n "$REPO_REF" && "$REPO_REF" != "$commit" ]]; then
     die "source commit does not match AGENT_RUNTIME_OPS_REF: $commit != $REPO_REF"
   fi
+  ACTIVATION_HELPER_BLOB="$(
+    verify_activation_helper_identity "$src" "$commit" "$activation_helper"
+  )" || die "activation helper does not match the exact source commit"
+  with_install_lock
+  if recover_pending_activation_transaction "$activation_helper" "$commit"; then
+    die "pending activation recovered to the previous identity; rerun install to begin a new activation"
+  fi
+  cleanup_abandoned_activation_staging "$activation_helper" "$commit" \
+    || activation_cleanup_rc="$?"
+  case "$activation_cleanup_rc" in
+    0) ;;
+    2) die "completed activation recovery retired; rerun install to begin a new activation" ;;
+    *) die "unsafe or unremovable activation staging residue" ;;
+  esac
+  previous_active_release="$(capture_previous_active_release "$commit")"
+  previous_broker_state="$(capture_root_action_broker_state "$previous_active_release")"
+  ensure_base_packages
+  require_commands
+  summary="$(source_summary "$src")"
 
   install -d -o root -g "$OPS_GROUP" -m 0755 "$INSTALL_ROOT" "$RELEASES_DIR"
   release_name="$commit.$(date +%Y%m%d%H%M%S).$$"
   release_dir="$RELEASES_DIR/$release_name"
   tmp_release="$RELEASES_DIR/.tmp.$release_name"
   rm -rf "$tmp_release"
-  copy_tree "$src" "$tmp_release"
+  materialize_exact_source_tree "$src" "$commit" "$tmp_release" \
+    || die "failed to materialize the exact approved source tree"
   mv "$tmp_release" "$release_dir"
   if ! install_python_env "$release_dir"; then
     rm -rf "$release_dir"
@@ -1562,21 +1972,12 @@ install_package() {
   # later fails.
   migrate_legacy_runtime_backups "$release_dir"
 
-  previous_active_release="$(capture_previous_active_release "$commit")"
-  previous_broker_state="$(capture_root_action_broker_state "$previous_active_release")"
-  activation_backup_dir="$(mktemp -d)" \
-    || die "failed to create activation identity backup directory"
-  if ! capture_previous_activation_identity \
-    "$previous_active_release" "$activation_backup_dir"; then
-    cleanup_activation_identity_backup "$activation_backup_dir" || true
-    die "failed to capture exact previous activation identity"
-  fi
   activate_and_attest_cli_or_restore \
     "$release_dir" "$commit" "$previous_active_release" \
-    "$previous_broker_state" "$activation_backup_dir"
+    "$previous_broker_state" "$activation_helper"
   install_root_action_broker_or_restore \
     "$release_dir" "$commit" "$previous_active_release" \
-    "$previous_broker_state" "$activation_backup_dir"
+    "$previous_broker_state" "$activation_helper"
   install_ops_sudoers
   install_boot_restore_unit
   install_usage_collect_timer

@@ -166,15 +166,65 @@ nas-policy.yaml
 
 ## Privileged activation continuity
 
-The installer captures the exact previously active release and whether the
-root-action broker was active before changing `current`. It immediately runs the
-candidate CLI as `svcops`. If that attestation fails, it restores the previous
-`current` link and generated wrappers, re-runs the previous CLI attestation, and
-restarts and re-attests the broker at the exact previous release when the broker
-was already active. A previously inactive broker remains inactive. On a failed
-first install, candidate links are removed rather than left as the active
-identity. The previous release is not pruned until the candidate CLI and broker
-contract have both been verified.
+The installer does not claim that the five managed entry points (`opsctl`, MCP,
+Gemini, manifest, and `current`) plus the root-action broker are group-atomic.
+Instead it uses one durable, restartable activation transaction. Before the
+first visible replacement, the transaction records the exact previous and
+candidate identities, the exact prior broker unit bytes, and whether the broker
+was active, inactive, absent, or unavailable. Unsafe pre-state (including a
+dangling managed symlink, hard link, special node, wrong owner, or unexpected
+type) is rejected before the journal or a managed entry is written.
+
+If the installer is interrupted after any publication or broker transition,
+the pending transaction remains under the install root. The next invocation
+must use the exact same commit-bound helper. Under the install lock it restores
+the complete previous identity, restores and attests the prior broker state,
+re-attests the previous CLI as `svcops`, durably retires the transaction, and
+then stops. It never continues into a new activation in that invocation; the
+operator reruns the installer only after recovery has completed. A failed first
+install converges to the exact all-absent baseline.
+
+Recovery finalization uses a distinct root-owned `recovered.complete` identity.
+The next installer validates its exact commit-bound manifest, payload digests,
+live baseline, and zero staging residue before acknowledging it. A killed
+acknowledgement remains restartable under an `acknowledged` or `retired`
+identity. Every invocation that observes one of these recovery identities stops
+before package installation or a new activation.
+
+The broker service state admitted before release construction is measured again
+under the install lock immediately before the journal is created. A change from
+active, inactive, or absent during that interval aborts before publication; the
+stale state is never written into the transaction as recovery authority.
+An already-active broker is then stopped and attested inactive before `current`
+can move. The candidate broker unit pins both its condition and `ExecStart` to
+the immutable candidate release rather than the mutable `current` link, and its
+running process is checked on one stable `MainPID`: the environment release and
+the exact three-element argv (`python`, `-m`, broker module) must agree, and the
+PID is re-read unchanged before candidate finalization. Recovery restores
+`current` and the previous unit before it
+restarts an originally active broker, so no broker restart can cross the
+publication window under a false release identity.
+
+An entry whose live identity already equals the candidate identity is not
+replaced. This preserves the inode of the manifest symlink when its baseline
+and candidate target/owner/mode are exactly the same and avoids inventing an
+extra crash boundary for a no-op publication.
+
+A successful activation is finalized only after the candidate CLI works as
+`svcops` and the root-action broker contract has completed. The previous release
+is not pruned before those attestations. Release contents are materialized from
+the exact Git commit tree, so dirty tracked files and untracked worktree files
+cannot be attributed to the approved commit or enter the installed release.
+
+Every activation path must be an already-normalized absolute path. `current`
+and the manifest are fixed children of the install root, managed endpoints and
+their fixed staging paths are pairwise disjoint, endpoint parents are
+root-owned and nonwritable, and symlinked ancestors are rejected.
+A root-owned sticky directory such as `/tmp` may only be a higher ancestor of a
+protected endpoint directory; it is never accepted as the endpoint's immediate
+parent. The shell validates this layout before bootstrap uses a configured path,
+and the commit-bound transaction helper independently revalidates it on begin
+and recovery.
 
 Old slot/lane/release files may still exist as migration or compatibility inputs, but new image
 rollout verification should use runtime bindings, runtime manifests, and live image truth.
