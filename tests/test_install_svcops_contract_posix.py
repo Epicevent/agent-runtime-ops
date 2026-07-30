@@ -2629,7 +2629,7 @@ def test_exact_legacy_active_recovery_requires_terminal_inactive_before_finalize
             "    show:broker_state) printf 'active\\n' ;;\n"
             "    show:broker_service_name) printf 'broker.service\\n' ;;\n"
             "    recover:) printf 'tx:recover\\n' >>\"$TRACE\" ;;\n"
-            "    finalize:) printf 'tx:finalize\\n' >>\"$TRACE\"; rm -f \"$TX_MARKER\" ;;\n"
+            "    finalize:*) printf 'tx:finalize\\n' >>\"$TRACE\"; rm -f \"$TX_MARKER\" ;;\n"
             "    *) return 88 ;;\n"
             "  esac\n"
             "}\n"
