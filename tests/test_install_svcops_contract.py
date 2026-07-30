@@ -105,6 +105,7 @@ def test_svcops_attestations_are_bounded_minimal_and_prune_is_last() -> None:
     broker_restart = _function("restart_root_action_broker_for_release")
     quiesce = _function("quiesce_root_action_broker_for_publication")
     recovery_quiesce = _function("quiesce_root_action_broker_before_recovery")
+    transaction_quiesce = _function("quiesce_root_action_broker_for_transaction")
     quiesced_attestation = _function("root_action_broker_quiesced_attested")
     package = _function("install_package")
     assert "/usr/bin/timeout --kill-after=1" in runner
@@ -128,12 +129,19 @@ def test_svcops_attestations_are_bounded_minimal_and_prune_is_last() -> None:
     assert broker_restart.index('systemctl restart "$service_name"') < broker_restart.index(
         'wait_for_root_action_broker_release "$service_name" "$release_dir"'
     )
-    assert 'systemctl stop "$service_name"' in quiesce
-    assert "attest_quiesced_root_action_broker_state" in quiesce
-    assert 'systemctl stop "$service_name"' in recovery_quiesce
-    assert "root_action_broker_quiesced_attested" in recovery_quiesce
+    assert 'quiesce_root_action_broker_for_transaction "$1"' in quiesce
+    assert 'quiesce_root_action_broker_for_transaction "$1"' in recovery_quiesce
+    assert 'systemctl stop "$service_name"' in transaction_quiesce
+    assert "root_action_broker_quiesced_attested" in transaction_quiesce
+    assert "systemctl show --property=LoadState --value" in transaction_quiesce
+    assert "systemctl show --property=ActiveState --value" in quiesced_attestation
+    assert "systemctl show --property=SubState --value" in quiesced_attestation
     assert "systemctl show --property=MainPID --value" in quiesced_attestation
-    assert '[[ "$main_pid" == 0 ]]' in quiesced_attestation
+    assert "systemctl show --property=Job --value" in quiesced_attestation
+    assert '"$active_state" == inactive' in quiesced_attestation
+    assert '"$sub_state" == dead' in quiesced_attestation
+    assert '"$main_pid" == 0' in quiesced_attestation
+    assert '-z "$job"' in quiesced_attestation
     assert "recover_and_attest_activation_baseline" in broker_finalizer
     assert "finalize --expect candidate" in broker_finalizer
     assert package.index('previous_active_release="$(capture_previous_active_release "$commit")"') < package.index(
@@ -385,23 +393,33 @@ def test_post_activation_success_does_not_enter_restore(tmp_path: Path) -> None:
     ]
 
 
-@pytest.mark.parametrize(("systemctl_rc", "expected"), [(3, "inactive"), (4, "absent")])
+@pytest.mark.parametrize(("load_state", "expected"), [("loaded", "inactive"), ("not-found", "absent")])
 def test_broker_pre_activation_distinguishes_inactive_from_absent(
-    tmp_path: Path, systemctl_rc: int, expected: str
+    tmp_path: Path, load_state: str, expected: str
 ) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     systemctl = fake_bin / "systemctl"
     systemctl.write_text(
-        f"#!/usr/bin/env bash\nexit {systemctl_rc}\n",
+        "#!/usr/bin/env bash\n"
+        "case \"$*\" in\n"
+        "  *LoadState*) printf '%s\\n' \"$LOAD_STATE\" ;;\n"
+        "  *ActiveState*) printf 'inactive\\n' ;;\n"
+        "  *SubState*) printf 'dead\\n' ;;\n"
+        "  *MainPID*) printf '0\\n' ;;\n"
+        "  *Job*) printf '\\n' ;;\n"
+        "  *) exit 19 ;;\n"
+        "esac\n"
+        "exit 0\n",
         encoding="utf-8",
         newline="\n",
     )
     systemctl.chmod(0o755)
     body = (
         f"PATH={_shell_path(fake_bin)!r}:$PATH\n"
+        + f"LOAD_STATE={load_state!r}\nexport LOAD_STATE\n"
         + "ROOT_ACTION_BROKER_SERVICE_FILE=/etc/systemd/system/agent-runtime-root-action-broker.service\n"
-        + "ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=1\n"
+        + "ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=5\n"
         + "die() { printf 'die:%s\\n' \"$*\"; exit 23; }\n"
         + _function("capture_root_action_broker_state")
         + "\ncapture_root_action_broker_state ''\n"
@@ -409,6 +427,45 @@ def test_broker_pre_activation_distinguishes_inactive_from_absent(
     completed = _run_bash(tmp_path, body)
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout == f"{expected}\n"
+
+
+@pytest.mark.parametrize("load_state", ("loaded", "not-found"))
+def test_broker_pre_activation_rejects_queued_auto_restart(
+    tmp_path: Path, load_state: str
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    systemctl = fake_bin / "systemctl"
+    systemctl.write_text(
+        "#!/usr/bin/env bash\n"
+        "case \"$*\" in\n"
+        "  *LoadState*) printf '%s\\n' \"$LOAD_STATE\" ;;\n"
+        "  *ActiveState*) printf 'activating\\n' ;;\n"
+        "  *SubState*) printf 'auto-restart\\n' ;;\n"
+        "  *MainPID*) printf '0\\n' ;;\n"
+        "  *Job*) printf '77\\n' ;;\n"
+        "  *) exit 19 ;;\n"
+        "esac\n"
+        "exit 0\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    systemctl.chmod(0o755)
+    body = (
+        f"PATH={_shell_path(fake_bin)!r}:$PATH\n"
+        + f"LOAD_STATE={load_state!r}\nexport LOAD_STATE\n"
+        + "ROOT_ACTION_BROKER_SERVICE_FILE=/etc/systemd/system/agent-runtime-root-action-broker.service\n"
+        + "ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=5\n"
+        + "die() { printf 'die:%s\\n' \"$*\"; exit 23; }\n"
+        + _function("capture_root_action_broker_state")
+        + "\ncapture_root_action_broker_state /previous\n"
+    )
+    completed = _run_bash(tmp_path, body)
+    assert completed.returncode == 23
+    assert (
+        f"state is transient or unsafe: {load_state}/activating/auto-restart"
+        in completed.stdout
+    )
 
 
 def test_broker_partial_failure_restores_unit_then_exact_active_identity(

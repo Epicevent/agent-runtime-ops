@@ -530,22 +530,34 @@ root_action_broker_absent_attested() {
 
 root_action_broker_quiesced_attested() {
   local service_name="$1"
-  local active_check_rc main_pid
-  if /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
-    systemctl is-active --quiet "$service_name"; then
-    return 1
-  else
-    active_check_rc="$?"
-  fi
-  case "$active_check_rc" in
-    3)
+  local load_state active_state sub_state main_pid job
+  load_state="$(
+    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+      systemctl show --property=LoadState --value "$service_name"
+  )" || return 1
+  case "$load_state" in
+    loaded|not-found)
+      active_state="$(
+        /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+          systemctl show --property=ActiveState --value "$service_name"
+      )" || return 1
+      sub_state="$(
+        /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+          systemctl show --property=SubState --value "$service_name"
+      )" || return 1
       main_pid="$(
         /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
           systemctl show --property=MainPID --value "$service_name"
       )" || return 1
-      [[ "$main_pid" == 0 ]]
+      job="$(
+        /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+          systemctl show --property=Job --value "$service_name"
+      )" || return 1
+      [[ "$active_state" == inactive \
+        && "$sub_state" == dead \
+        && "$main_pid" == 0 \
+        && -z "$job" ]]
       ;;
-    4) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -600,11 +612,8 @@ attest_quiesced_root_action_broker_state() {
     run_activation_transaction "$helper" show --field broker_service_name
   )" || return 1
   case "$broker_state" in
-    active|inactive)
-      root_action_broker_inactive_attested "$service_name"
-      ;;
-    absent)
-      root_action_broker_absent_attested "$service_name"
+    active|inactive|absent)
+      root_action_broker_quiesced_attested "$service_name"
       ;;
     unavailable)
       ! command -v systemctl >/dev/null 2>&1
@@ -614,21 +623,7 @@ attest_quiesced_root_action_broker_state() {
 }
 
 quiesce_root_action_broker_for_publication() {
-  local helper="$1"
-  local broker_state service_name
-  broker_state="$(
-    run_activation_transaction "$helper" show --field broker_state
-  )" || return 1
-  service_name="$(
-    run_activation_transaction "$helper" show --field broker_service_name
-  )" || return 1
-  if [[ "$broker_state" == active ]]; then
-    command -v systemctl >/dev/null 2>&1 || return 1
-    [[ -x /usr/bin/timeout ]] || return 1
-    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
-      systemctl stop "$service_name" >/dev/null || return 1
-  fi
-  attest_quiesced_root_action_broker_state "$helper"
+  quiesce_root_action_broker_for_transaction "$1"
 }
 
 install_root_action_broker_contract() {
@@ -1250,9 +1245,9 @@ restore_broker_service_from_transaction() {
   esac
 }
 
-quiesce_root_action_broker_before_recovery() {
+quiesce_root_action_broker_for_transaction() {
   local helper="$1"
-  local broker_state service_name active_rc
+  local broker_state service_name load_state
   broker_state="$(
     run_activation_transaction "$helper" show --field broker_state
   )" || return 1
@@ -1269,15 +1264,28 @@ quiesce_root_action_broker_before_recovery() {
   esac
   command -v systemctl >/dev/null 2>&1 || return 1
   [[ -x /usr/bin/timeout ]] || return 1
-  if /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
-    systemctl is-active --quiet "$service_name"; then
-    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
-      systemctl stop "$service_name" >/dev/null || return 1
-  else
-    active_rc="$?"
-    [[ "$active_rc" -eq 3 || "$active_rc" -eq 4 ]] || return 1
+  # LoadState is orthogonal to process/job state.  In particular a unit whose
+  # configuration was removed can remain active or queued for restart.  Only
+  # the complete inactive tuple is already safe; every other loaded/not-found
+  # tuple is stopped before any transaction-owned filesystem mutation.
+  if root_action_broker_quiesced_attested "$service_name"; then
+    return 0
   fi
+  load_state="$(
+    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+      systemctl show --property=LoadState --value "$service_name"
+  )" || return 1
+  case "$load_state" in
+    loaded|not-found) ;;
+    *) return 1 ;;
+  esac
+  /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+    systemctl stop "$service_name" >/dev/null || return 1
   root_action_broker_quiesced_attested "$service_name"
+}
+
+quiesce_root_action_broker_before_recovery() {
+  quiesce_root_action_broker_for_transaction "$1"
 }
 
 recover_and_attest_activation_baseline() {
@@ -1735,27 +1743,59 @@ capture_previous_active_release() {
 
 capture_root_action_broker_state() {
   local previous_release="$1"
-  local active_check_rc service_name
+  local service_name load_state active_state sub_state main_pid job
   if ! command -v systemctl >/dev/null 2>&1; then
     printf 'unavailable\n'
     return 0
   fi
   service_name="$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")"
-  if /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
-    systemctl is-active --quiet "$service_name"; then
-    [[ -n "$previous_release" ]] \
-      || die "active root-action broker has no previous active release"
-    root_action_broker_release_attested "$service_name" "$previous_release" \
-      || die "previous root-action broker release is not exactly attested"
-    printf 'active\n'
-    return 0
-  else
-    active_check_rc="$?"
-  fi
-  case "$active_check_rc" in
-    3) printf 'inactive\n' ;;
-    4) printf 'absent\n' ;;
-    *) die "root-action broker pre-activation state probe failed" ;;
+  load_state="$(
+    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+      systemctl show --property=LoadState --value "$service_name"
+  )" || die "root-action broker pre-activation load-state probe failed"
+  case "$load_state" in
+    loaded|not-found) ;;
+    *) die "root-action broker pre-activation load state is not admissible: $load_state" ;;
+  esac
+  active_state="$(
+    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+      systemctl show --property=ActiveState --value "$service_name"
+  )" || die "root-action broker pre-activation active-state probe failed"
+  sub_state="$(
+    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+      systemctl show --property=SubState --value "$service_name"
+  )" || die "root-action broker pre-activation sub-state probe failed"
+  main_pid="$(
+    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+      systemctl show --property=MainPID --value "$service_name"
+  )" || die "root-action broker pre-activation MainPID probe failed"
+  job="$(
+    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+      systemctl show --property=Job --value "$service_name"
+  )" || die "root-action broker pre-activation Job probe failed"
+  case "$load_state:$active_state:$sub_state:$job" in
+    loaded:active:running:)
+      [[ "$main_pid" =~ ^[1-9][0-9]{0,9}$ ]] \
+        || die "active root-action broker has an invalid MainPID"
+      [[ -n "$previous_release" ]] \
+        || die "active root-action broker has no previous active release"
+      root_action_broker_release_attested "$service_name" "$previous_release" \
+        || die "previous root-action broker release is not exactly attested"
+      printf 'active\n'
+      ;;
+    loaded:inactive:dead:)
+      [[ "$main_pid" == 0 ]] \
+        || die "inactive root-action broker still has a MainPID"
+      printf 'inactive\n'
+      ;;
+    not-found:inactive:dead:)
+      [[ "$main_pid" == 0 ]] \
+        || die "absent root-action broker still has a MainPID"
+      printf 'absent\n'
+      ;;
+    *)
+      die "root-action broker pre-activation state is transient or unsafe: $load_state/$active_state/$sub_state"
+      ;;
   esac
 }
 activate_and_attest_cli_or_restore() {
