@@ -50,6 +50,12 @@ def _grant_identity(info) -> tuple[int, int, int, int, int, int]:
 
 
 _PROBE_PAYLOAD_MAX_BYTES = 32 * 1024
+_MOUNT_INVENTORY_MAX_TARGETS = 65  # entry root plus 64 admitted grant paths
+_MOUNT_INVENTORY_MAX_TARGET_CHARS = 640  # 512-char alias plus canonical root
+_MOUNT_INVENTORY_PAYLOAD_MAX_BYTES = (
+    4096
+    + _MOUNT_INVENTORY_MAX_TARGETS * _MOUNT_INVENTORY_MAX_TARGET_CHARS * 4
+)
 
 
 def _stop_probe_pid(pid: int) -> None:
@@ -68,7 +74,10 @@ def _stop_probe_pid(pid: int) -> None:
 
 
 def _run_isolated_json_probe(
-    probe: Callable[[], Any], timeout: float
+    probe: Callable[[], Any],
+    timeout: float,
+    *,
+    max_payload_bytes: int = _PROBE_PAYLOAD_MAX_BYTES,
 ) -> tuple[Any | None, str | None]:
     """Run a content-free probe under a hard parent deadline.
 
@@ -95,9 +104,9 @@ def _run_isolated_json_probe(
             except BaseException:
                 envelope = {"ok": False}
             payload = json.dumps(
-                envelope, sort_keys=True, separators=(",", ":")
+                envelope, ensure_ascii=False, sort_keys=True, separators=(",", ":")
             ).encode("utf-8")
-            if len(payload) > _PROBE_PAYLOAD_MAX_BYTES:
+            if len(payload) > max_payload_bytes:
                 payload = b'{"ok":false}'
             offset = 0
             while offset < len(payload):
@@ -137,7 +146,7 @@ def _run_isolated_json_probe(
                 break
             chunks.append(chunk)
             total += len(chunk)
-            if total > _PROBE_PAYLOAD_MAX_BYTES:
+            if total > max_payload_bytes:
                 return None, gap
         try:
             envelope = json.loads(b"".join(chunks).decode("utf-8"))
@@ -254,13 +263,21 @@ def _observe_mount_targets_under_core(entry_root: Path, timeout: float) -> list[
 def observe_mount_targets_under(entry_root: Path, timeout: float) -> tuple[set[str] | None, str | None]:
     """Return exact mounted targets under a hard wall-clock supervisor."""
     value, gap = _run_isolated_json_probe(
-        lambda: _observe_mount_targets_under_core(entry_root, timeout), timeout
+        lambda: _observe_mount_targets_under_core(entry_root, timeout),
+        timeout,
+        max_payload_bytes=_MOUNT_INVENTORY_PAYLOAD_MAX_BYTES,
     )
     if gap is not None:
         return None, gap
     if (
         not isinstance(value, list)
         or any(not isinstance(target, str) for target in value)
+        or len(value) > _MOUNT_INVENTORY_MAX_TARGETS
+        or any(
+            len(target) > _MOUNT_INVENTORY_MAX_TARGET_CHARS
+            or any(ord(char) < 32 or ord(char) == 127 for char in target)
+            for target in value
+        )
         or len(value) != len(set(value))
     ):
         return None, "probe_unavailable"

@@ -1003,6 +1003,33 @@ class GrantEvidencePosixTests(unittest.TestCase):
         self.assertIsNone(value)
         self.assertEqual(gap, "probe_unavailable")
 
+    def test_mount_inventory_accepts_max_non_ascii_grant_boundary(self) -> None:
+        from agent_runtime_ops.host import bind_mounts
+
+        root = "/home/oc3/nas_docs/groupware"
+        targets = [root] + [
+            f"{root}/{index:02d}_" + ("가" * 500)
+            for index in range(64)
+        ]
+        with patch.object(
+            bind_mounts, "_observe_mount_targets_under_core", return_value=targets
+        ):
+            observed, gap = bind_mounts.observe_mount_targets_under(Path(root), 1.0)
+        self.assertIsNone(gap)
+        self.assertEqual(observed, set(targets))
+
+    def test_mount_inventory_rejects_more_than_admitted_target_count(self) -> None:
+        from agent_runtime_ops.host import bind_mounts
+
+        root = "/home/oc3/nas_docs/groupware"
+        targets = [root] + [f"{root}/grant_{index:02d}" for index in range(65)]
+        with patch.object(
+            bind_mounts, "_observe_mount_targets_under_core", return_value=targets
+        ):
+            observed, gap = bind_mounts.observe_mount_targets_under(Path(root), 1.0)
+        self.assertIsNone(observed)
+        self.assertEqual(gap, "probe_unavailable")
+
 
 if __name__ == "__main__":
     unittest.main()
