@@ -106,6 +106,9 @@ def test_svcops_attestations_are_bounded_minimal_and_prune_is_last() -> None:
     quiesce = _function("quiesce_root_action_broker_for_publication")
     recovery_quiesce = _function("quiesce_root_action_broker_before_recovery")
     transaction_quiesce = _function("quiesce_root_action_broker_for_transaction")
+    terminal_attestation = _function("root_action_broker_terminal_tuple_attested")
+    inactive_attestation = _function("root_action_broker_inactive_attested")
+    absent_attestation = _function("root_action_broker_absent_attested")
     quiesced_attestation = _function("root_action_broker_quiesced_attested")
     package = _function("install_package")
     assert "/usr/bin/timeout --kill-after=1" in runner
@@ -134,14 +137,20 @@ def test_svcops_attestations_are_bounded_minimal_and_prune_is_last() -> None:
     assert 'systemctl stop "$service_name"' in transaction_quiesce
     assert "root_action_broker_quiesced_attested" in transaction_quiesce
     assert "systemctl show --property=LoadState --value" in transaction_quiesce
-    assert "systemctl show --property=ActiveState --value" in quiesced_attestation
-    assert "systemctl show --property=SubState --value" in quiesced_attestation
-    assert "systemctl show --property=MainPID --value" in quiesced_attestation
-    assert "systemctl show --property=Job --value" in quiesced_attestation
-    assert '"$active_state" == inactive' in quiesced_attestation
-    assert '"$sub_state" == dead' in quiesced_attestation
-    assert '"$main_pid" == 0' in quiesced_attestation
-    assert '-z "$job"' in quiesced_attestation
+    assert "systemctl show --property=ActiveState --value" in terminal_attestation
+    assert "systemctl show --property=SubState --value" in terminal_attestation
+    assert "systemctl show --property=MainPID --value" in terminal_attestation
+    assert "systemctl show --property=Job --value" in terminal_attestation
+    assert '"$active_state" == inactive' in terminal_attestation
+    assert '"$sub_state" == dead' in terminal_attestation
+    assert '"$main_pid" == 0' in terminal_attestation
+    assert '-z "$job"' in terminal_attestation
+    assert 'root_action_broker_terminal_tuple_attested "$1" loaded' in inactive_attestation
+    assert 'root_action_broker_terminal_tuple_attested "$1" not-found' in absent_attestation
+    assert (
+        'root_action_broker_terminal_tuple_attested "$1" loaded-or-not-found'
+        in quiesced_attestation
+    )
     assert "recover_and_attest_activation_baseline" in broker_finalizer
     assert "finalize --expect candidate" in broker_finalizer
     assert package.index('previous_active_release="$(capture_previous_active_release "$commit")"') < package.index(

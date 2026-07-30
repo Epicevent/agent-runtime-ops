@@ -504,62 +504,55 @@ root_action_broker_process_attested() {
   [[ "$main_pid_after" == "$main_pid" ]]
 }
 
-root_action_broker_inactive_attested() {
+root_action_broker_terminal_tuple_attested() {
   local service_name="$1"
-  local active_check_rc
-  if /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
-    systemctl is-active --quiet "$service_name"; then
-    return 1
-  else
-    active_check_rc="$?"
-  fi
-  [[ "$active_check_rc" -eq 3 ]]
-}
-
-root_action_broker_absent_attested() {
-  local service_name="$1"
-  local active_check_rc
-  if /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
-    systemctl is-active --quiet "$service_name"; then
-    return 1
-  else
-    active_check_rc="$?"
-  fi
-  [[ "$active_check_rc" -eq 4 ]]
-}
-
-root_action_broker_quiesced_attested() {
-  local service_name="$1"
+  local expected_load_state="$2"
   local load_state active_state sub_state main_pid job
   load_state="$(
     /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
       systemctl show --property=LoadState --value "$service_name"
   )" || return 1
-  case "$load_state" in
+  case "$expected_load_state" in
     loaded|not-found)
-      active_state="$(
-        /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
-          systemctl show --property=ActiveState --value "$service_name"
-      )" || return 1
-      sub_state="$(
-        /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
-          systemctl show --property=SubState --value "$service_name"
-      )" || return 1
-      main_pid="$(
-        /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
-          systemctl show --property=MainPID --value "$service_name"
-      )" || return 1
-      job="$(
-        /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
-          systemctl show --property=Job --value "$service_name"
-      )" || return 1
-      [[ "$active_state" == inactive \
-        && "$sub_state" == dead \
-        && "$main_pid" == 0 \
-        && -z "$job" ]]
+      [[ "$load_state" == "$expected_load_state" ]] || return 1
+      ;;
+    loaded-or-not-found)
+      [[ "$load_state" == loaded || "$load_state" == not-found ]] || return 1
       ;;
     *) return 1 ;;
   esac
+  active_state="$(
+    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+      systemctl show --property=ActiveState --value "$service_name"
+  )" || return 1
+  sub_state="$(
+    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+      systemctl show --property=SubState --value "$service_name"
+  )" || return 1
+  main_pid="$(
+    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+      systemctl show --property=MainPID --value "$service_name"
+  )" || return 1
+  job="$(
+    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
+      systemctl show --property=Job --value "$service_name"
+  )" || return 1
+  [[ "$active_state" == inactive \
+    && "$sub_state" == dead \
+    && "$main_pid" == 0 \
+    && -z "$job" ]]
+}
+
+root_action_broker_inactive_attested() {
+  root_action_broker_terminal_tuple_attested "$1" loaded
+}
+
+root_action_broker_absent_attested() {
+  root_action_broker_terminal_tuple_attested "$1" not-found
+}
+
+root_action_broker_quiesced_attested() {
+  root_action_broker_terminal_tuple_attested "$1" loaded-or-not-found
 }
 
 restart_root_action_broker_for_release() {
@@ -1202,7 +1195,7 @@ cleanup_abandoned_activation_staging() {
 restore_broker_service_from_transaction() {
   local helper="$1"
   local previous_release="$2"
-  local broker_state service_name active_rc
+  local broker_state service_name
   broker_state="$(
     run_activation_transaction "$helper" show --field broker_state
   )" || return 1
@@ -1229,16 +1222,7 @@ restore_broker_service_from_transaction() {
       root_action_broker_inactive_attested "$service_name" || return 1
       ;;
     absent)
-      if /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
-        systemctl is-active --quiet "$service_name"; then
-        /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
-          systemctl stop "$service_name" >/dev/null || return 1
-        /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
-          systemctl daemon-reload >/dev/null || return 1
-      else
-        active_rc="$?"
-        [[ "$active_rc" -eq 3 || "$active_rc" -eq 4 ]] || return 1
-      fi
+      quiesce_root_action_broker_for_transaction "$helper" || return 1
       root_action_broker_absent_attested "$service_name" || return 1
       ;;
     *) return 1 ;;
