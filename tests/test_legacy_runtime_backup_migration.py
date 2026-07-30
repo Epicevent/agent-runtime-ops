@@ -162,12 +162,17 @@ def test_earliest_three_key_backup_with_compose_and_manifest_imports(
     metadata = json.loads((adopted / "backup.json").read_text(encoding="utf-8"))
     assert metadata["had_compose"] is True
     assert metadata["had_manifest"] is True
-    assert "had_state_manifest" not in metadata
+    assert metadata["schema"] == "agent-runtime-backup/v2"
+    assert metadata["had_state_manifest"] is False
+    assert metadata["state_manifest_path"] == str(
+        state_root / "runtime" / "oc20" / "manifest.yaml"
+    )
     assert metadata["artifact_sha256"]["manifest.yaml"] is None
+    assert "had_env" not in metadata
 
 
 @POSIX_ONLY
-def test_earliest_three_key_backup_preserves_unmeasured_state_and_env(
+def test_earliest_three_key_backup_removes_impossible_state_and_preserves_env(
     tmp_path: Path,
 ) -> None:
     runtime_dir = tmp_path / "runtime"
@@ -187,8 +192,9 @@ def test_earliest_three_key_backup_preserves_unmeasured_state_and_env(
     adopted = imported[0]
     assert source.is_dir()
     metadata = json.loads((adopted / "backup.json").read_text(encoding="utf-8"))
-    assert "had_state_manifest" not in metadata
-    assert "state_manifest_path" not in metadata
+    assert metadata["schema"] == "agent-runtime-backup/v2"
+    assert metadata["had_state_manifest"] is False
+    assert metadata["state_manifest_path"] == str(state_manifest)
     assert "had_env" not in metadata
     assert metadata["artifact_sha256"]["manifest.yaml"] is None
     assert metadata["artifact_sha256"][".env"] is None
@@ -201,7 +207,7 @@ def test_earliest_three_key_backup_preserves_unmeasured_state_and_env(
 
     assert ok is True
     assert reason == "rollback_empty_baseline_restored"
-    assert state_manifest.read_text(encoding="utf-8") == "schema: current-state\n"
+    assert not state_manifest.exists()
     assert env_path.read_text(encoding="utf-8") == "API_SERVER_KEY=current-secret\n"
 
 

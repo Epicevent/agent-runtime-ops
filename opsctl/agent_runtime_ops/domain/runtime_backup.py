@@ -623,7 +623,7 @@ def _validate_backup_integrity(
             marker,
             required=not (
                 legacy_import is not None
-                and marker in {"had_env", "had_state_manifest"}
+                and marker == "had_env"
             ),
         )
         artifact_path = backup_dir / name
@@ -1081,7 +1081,14 @@ def _publish_legacy_backup(
             },
             "schema": _BACKUP_SCHEMA,
         }
-        if "had_state_manifest" in source_metadata:
+        if set(source_metadata) == _LEGACY_BACKUP_V0_METADATA_KEYS:
+            metadata.update(
+                {
+                    "had_state_manifest": False,
+                    "state_manifest_path": str(state_manifest_path(state_root, slot)),
+                }
+            )
+        else:
             metadata.update(
                 {
                     "had_state_manifest": source_metadata["had_state_manifest"],
@@ -1418,11 +1425,9 @@ def restore_backup(
     state_manifest_file = state_manifest_path(state_root, slot, create_parent=True)
     had_compose = _metadata_boolean(metadata, "had_compose")
     had_manifest = _metadata_boolean(metadata, "had_manifest")
-    legacy_import = _legacy_import_metadata(metadata)
     had_state_manifest = _metadata_boolean(
         metadata,
         "had_state_manifest",
-        required=legacy_import is None,
     )
     had_env = _validate_env_restore_inputs(runtime_dir, backup_dir, metadata)
 
