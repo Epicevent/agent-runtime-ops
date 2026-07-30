@@ -695,10 +695,20 @@ def test_nested_suffix_residue_with_wrong_source_identity_is_not_adopted(
     imported = import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root)
     malformed = imported[0].with_name(f"{timestamp}.2.2")
     imported[0].rename(malformed)
+    rename_calls: list[tuple[Path, Path]] = []
+    original_rename = Path.rename
 
-    with pytest.raises(ValueError, match="source identity mismatch"):
+    def reject_any_recovery_rename(path: Path, target: Path) -> Path:
+        rename_calls.append((path, target))
+        return original_rename(path, target)
+
+    with (
+        patch.object(Path, "rename", reject_any_recovery_rename),
+        pytest.raises(ValueError, match="source identity mismatch"),
+    ):
         import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root)
 
+    assert rename_calls == []
     assert malformed.is_dir()
     assert not (malformed.parent / timestamp).exists()
 
@@ -826,19 +836,21 @@ def test_interrupted_recovery_rollback_failure_remains_visible(
 ) -> None:
     runtime_dir = tmp_path / "runtime"
     runtime_dir.mkdir()
-    _legacy_backup(runtime_dir, diagnostics=False)
+    _legacy_backup(
+        runtime_dir,
+        name="20260713T234730+0900.2",
+        diagnostics=False,
+    )
     state_root = tmp_path / "state"
     state_root.mkdir()
-    backup_root = state_root / "runtime-recovery" / "oc20" / "backups"
-    backup_root.mkdir(parents=True, mode=0o700)
-    (state_root / "runtime-recovery").chmod(0o700)
-    (state_root / "runtime-recovery" / "oc20").chmod(0o700)
-    backup_root.chmod(0o700)
+    imported = import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root)
+    backup_root = imported[0].parent
     malformed = backup_root / "20260713T234730+0900.2.2"
-    malformed.mkdir(mode=0o700)
-    metadata = malformed / "backup.json"
-    metadata.write_text("{}\n", encoding="utf-8")
-    metadata.chmod(0o600)
+    imported[0].rename(malformed)
+    (malformed / "docker-compose.agent-runtime.yml").write_text(
+        "services:\n  corrupted: {}\n",
+        encoding="utf-8",
+    )
     canonical = backup_root / "20260713T234730+0900"
     original_rename = Path.rename
 
@@ -858,7 +870,7 @@ def test_interrupted_recovery_rollback_failure_remains_visible(
 
     assert canonical.is_dir()
     assert not malformed.exists()
-    with pytest.raises(ValueError, match="metadata schema is invalid"):
+    with pytest.raises(ValueError, match="artifact digest mismatch"):
         import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root)
 
 

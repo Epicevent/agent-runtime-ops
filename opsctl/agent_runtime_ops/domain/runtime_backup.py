@@ -625,17 +625,34 @@ def _validate_backup_dir(state_root: Path, slot: str, backup_dir: Path) -> Path:
     return backup_dir
 
 
+def _load_validated_backup_metadata(backup_dir: Path) -> tuple[dict, str]:
+    metadata_path = backup_dir / "backup.json"
+    if metadata_path.is_symlink() or not metadata_path.is_file():
+        raise ValueError(
+            f"rollback backup metadata must be a regular file: {metadata_path}"
+        )
+    metadata_stat = metadata_path.stat()
+    if metadata_stat.st_nlink != 1:
+        raise ValueError(
+            f"rollback backup metadata must have one link: {metadata_path}"
+        )
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is not None and metadata_stat.st_uid != geteuid():
+        raise ValueError(f"rollback backup metadata owner mismatch: {metadata_path}")
+    metadata_digest = _sha256_file(metadata_path)
+    metadata = load_yaml(metadata_path)
+    if not isinstance(metadata, dict) or metadata.get("schema") != _BACKUP_SCHEMA:
+        raise ValueError("rollback backup metadata schema is invalid")
+    return metadata, metadata_digest
+
+
 def _validate_backup_integrity(
     state_root: Path,
     slot: str,
     backup_dir: Path,
 ) -> tuple[dict, str]:
     backup_dir = _validate_backup_dir(state_root, slot, backup_dir)
-    metadata_path = backup_dir / "backup.json"
-    metadata_digest = _sha256_file(metadata_path)
-    metadata = load_yaml(metadata_path)
-    if not isinstance(metadata, dict) or metadata.get("schema") != _BACKUP_SCHEMA:
-        raise ValueError("rollback backup metadata schema is invalid")
+    metadata, metadata_digest = _load_validated_backup_metadata(backup_dir)
     legacy_import = _legacy_import_metadata(metadata)
     artifact_digests = metadata.get("artifact_sha256")
     if not isinstance(artifact_digests, dict) or set(artifact_digests) != set(
@@ -1080,6 +1097,19 @@ def _recover_interrupted_legacy_publications(
 
     ignored_entries = frozenset(item for item, _match in interrupted)
     for item, match in interrupted:
+        expected_source_name = (
+            f"{match.group('timestamp')}.{match.group('source_suffix')}"
+        )
+        candidate_metadata, _ = _load_validated_backup_metadata(item)
+        candidate_legacy = _legacy_import_metadata(candidate_metadata)
+        if (
+            candidate_legacy is None
+            or candidate_legacy["backup_name"] != expected_source_name
+        ):
+            raise ValueError(
+                "interrupted legacy publication source identity mismatch: "
+                f"{item}"
+            )
         canonical_base = backup_root / match.group("timestamp")
         target = _next_backup_path(
             backup_root,
@@ -1091,9 +1121,6 @@ def _recover_interrupted_legacy_publications(
         try:
             metadata, _ = _validate_backup_integrity(state_root, slot, target)
             legacy = _legacy_import_metadata(metadata)
-            expected_source_name = (
-                f"{match.group('timestamp')}.{match.group('source_suffix')}"
-            )
             if legacy is None or legacy["backup_name"] != expected_source_name:
                 raise ValueError(
                     "interrupted legacy publication source identity mismatch: "
