@@ -9,6 +9,7 @@ import signal
 import stat
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,121 @@ def _grant_identity(info) -> tuple[int, int, int, int, int, int]:
         int(info.st_gid),
         stat.S_IMODE(info.st_mode),
     )
+
+
+_PROBE_PAYLOAD_MAX_BYTES = 32 * 1024
+_MOUNT_INVENTORY_MAX_TARGETS = 65  # entry root plus 64 admitted grant paths
+_MOUNT_INVENTORY_MAX_TARGET_CHARS = 640  # 512-char alias plus canonical root
+_MOUNT_INVENTORY_PAYLOAD_MAX_BYTES = (
+    4096
+    + _MOUNT_INVENTORY_MAX_TARGETS * _MOUNT_INVENTORY_MAX_TARGET_CHARS * 4
+)
+
+
+def _stop_probe_pid(pid: int) -> None:
+    """Best-effort terminate/reap without registering an interpreter finalizer."""
+    try:
+        if os.getpgid(pid) == pid:
+            os.killpg(pid, signal.SIGKILL)
+        else:
+            os.kill(pid, signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        os.waitpid(pid, os.WNOHANG)
+    except (ChildProcessError, OSError):
+        pass
+
+
+def _run_isolated_json_probe(
+    probe: Callable[[], Any],
+    timeout: float,
+    *,
+    max_payload_bytes: int = _PROBE_PAYLOAD_MAX_BYTES,
+) -> tuple[Any | None, str | None]:
+    """Run a content-free probe under a hard parent deadline.
+
+    A raw fork is intentionally used instead of multiprocessing: if a child is
+    stuck in uninterruptible I/O after SIGKILL, no Python finalizer can join it
+    and defeat the caller's wall-clock bound.
+    """
+    if os.name != "posix" or timeout <= 0:
+        return None, "probe_unavailable"
+    read_fd, write_fd = os.pipe()
+    try:
+        pid = os.fork()
+    except OSError:
+        os.close(read_fd)
+        os.close(write_fd)
+        return None, "probe_unavailable"
+    if pid == 0:
+        try:
+            os.close(read_fd)
+            os.setsid()
+            try:
+                value = probe()
+                envelope = {"ok": True, "value": value}
+            except BaseException:
+                envelope = {"ok": False}
+            payload = json.dumps(
+                envelope, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+            if len(payload) > max_payload_bytes:
+                payload = b'{"ok":false}'
+            offset = 0
+            while offset < len(payload):
+                offset += os.write(write_fd, payload[offset:])
+        except BaseException:
+            pass
+        finally:
+            try:
+                os.close(write_fd)
+            except OSError:
+                pass
+            os._exit(0)
+    os.close(write_fd)
+    os.set_blocking(read_fd, False)
+    deadline = time.monotonic() + timeout
+    chunks: list[bytes] = []
+    total = 0
+    gap = "probe_unavailable"
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                gap = "probe_timeout"
+                return None, gap
+            try:
+                ready, _, _ = select.select([read_fd], [], [], remaining)
+            except OSError:
+                return None, gap
+            if not ready:
+                gap = "probe_timeout"
+                return None, gap
+            try:
+                chunk = os.read(read_fd, 8192)
+            except OSError:
+                return None, gap
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > max_payload_bytes:
+                return None, gap
+        try:
+            envelope = json.loads(b"".join(chunks).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None, gap
+        if not isinstance(envelope, dict):
+            return None, gap
+        if set(envelope) == {"ok"} and envelope.get("ok") is False:
+            return None, gap
+        if set(envelope) != {"ok", "value"} or envelope.get("ok") is not True:
+            return None, gap
+        return envelope["value"], None
+    finally:
+        os.close(read_fd)
+        _stop_probe_pid(pid)
 
 
 def _open_directory_nofollow(path: Path) -> int:
@@ -121,23 +237,17 @@ def _findmnt_exact(entry: Path, timeout: float) -> tuple[int, list[dict[str, str
     return proc.returncode, parse_findmnt_pairs(proc.stdout)
 
 
-def observe_mount_targets_under(entry_root: Path, timeout: float) -> tuple[set[str] | None, str | None]:
-    """Return the exact mounted target inventory under one slot entry root."""
-    try:
-        proc = _run_text(
-            [
-                "/usr/bin/findmnt", "-R", "-M", entry_root.as_posix(), "-P", "-o", "TARGET",
-            ],
-            timeout=max(0.1, timeout),
-        )
-    except subprocess.TimeoutExpired:
-        return None, "probe_timeout"
-    except OSError:
-        return None, "probe_unavailable"
+def _observe_mount_targets_under_core(entry_root: Path, timeout: float) -> list[str]:
+    proc = _run_text(
+        [
+            "/usr/bin/findmnt", "-R", "-M", entry_root.as_posix(), "-P", "-o", "TARGET",
+        ],
+        timeout=max(0.1, timeout),
+    )
     if proc.returncode == 1 and not proc.stdout.strip():
-        return set(), None
+        return []
     if proc.returncode != 0:
-        return None, "probe_unavailable"
+        raise OSError("mount_inventory_failed")
     rows = parse_findmnt_pairs(proc.stdout)
     targets = [row.get("target", "") for row in rows]
     prefix = entry_root.as_posix().rstrip("/") + "/"
@@ -146,8 +256,32 @@ def observe_mount_targets_under(entry_root: Path, timeout: float) -> tuple[set[s
         or any(not target or (target != entry_root.as_posix() and not target.startswith(prefix)) for target in targets)
         or len(targets) != len(set(targets))
     ):
+        raise ValueError("mount_inventory_invalid")
+    return sorted(targets)
+
+
+def observe_mount_targets_under(entry_root: Path, timeout: float) -> tuple[set[str] | None, str | None]:
+    """Return exact mounted targets under a hard wall-clock supervisor."""
+    value, gap = _run_isolated_json_probe(
+        lambda: _observe_mount_targets_under_core(entry_root, timeout),
+        timeout,
+        max_payload_bytes=_MOUNT_INVENTORY_PAYLOAD_MAX_BYTES,
+    )
+    if gap is not None:
+        return None, gap
+    if (
+        not isinstance(value, list)
+        or any(not isinstance(target, str) for target in value)
+        or len(value) > _MOUNT_INVENTORY_MAX_TARGETS
+        or any(
+            len(target) > _MOUNT_INVENTORY_MAX_TARGET_CHARS
+            or any(ord(char) < 32 or ord(char) == 127 for char in target)
+            for target in value
+        )
+        or len(value) != len(set(value))
+    ):
         return None, "probe_unavailable"
-    return set(targets), None
+    return set(value), None
 
 
 def _empty_grant_item(entry: Path) -> dict[str, Any]:
@@ -373,59 +507,6 @@ def _observe_ro_view_grant_core(
     return item, complete, green
 
 
-_GRANT_PROBE_PAYLOAD_MAX_BYTES = 32 * 1024
-
-
-def _stop_probe_pid(pid: int) -> None:
-    """Best-effort terminate/reap without registering an interpreter finalizer."""
-    try:
-        if os.getpgid(pid) == pid:
-            os.killpg(pid, signal.SIGKILL)
-        else:
-            os.kill(pid, signal.SIGKILL)
-    except (OSError, ProcessLookupError):
-        pass
-    try:
-        os.waitpid(pid, os.WNOHANG)
-    except (ChildProcessError, OSError):
-        pass
-
-
-def _grant_probe_child_bytes(
-    source: Path,
-    entry: Path,
-    slot: str,
-    allow_account_probe: bool,
-    timeout: float,
-) -> bytes:
-    try:
-        result = _observe_ro_view_grant_core(
-            source,
-            entry,
-            slot,
-            allow_account_probe=allow_account_probe,
-            timeout=timeout,
-        )
-    except BaseException:
-        item = _empty_grant_item(entry)
-        item["gaps"] = ["probe_unavailable"]
-        result = (item, False, False)
-    payload = json.dumps(
-        {"item": result[0], "complete": result[1], "green": result[2]},
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    if len(payload) > _GRANT_PROBE_PAYLOAD_MAX_BYTES:
-        item = _empty_grant_item(entry)
-        item["gaps"] = ["probe_unavailable"]
-        payload = json.dumps(
-            {"item": item, "complete": False, "green": False},
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    return payload
-
-
 def observe_ro_view_grant(
     source: Path,
     entry: Path,
@@ -439,72 +520,34 @@ def observe_ro_view_grant(
     if os.name != "posix" or timeout <= 0:
         item["gaps"] = ["probe_unavailable"]
         return item, False, False
-    read_fd, write_fd = os.pipe()
-    try:
-        pid = os.fork()
-    except OSError:
-        os.close(read_fd)
-        os.close(write_fd)
+
+    def probe() -> dict[str, Any]:
+        result = _observe_ro_view_grant_core(
+            source,
+            entry,
+            slot,
+            allow_account_probe=allow_account_probe,
+            timeout=timeout,
+        )
+        return {"item": result[0], "complete": result[1], "green": result[2]}
+
+    value, gap = _run_isolated_json_probe(
+        probe, timeout
+    )
+    if gap is not None:
+        item["gaps"] = [gap]
+        return item, False, False
+    if not isinstance(value, dict) or set(value) != {"item", "complete", "green"}:
         item["gaps"] = ["probe_unavailable"]
         return item, False, False
-    if pid == 0:
-        try:
-            os.close(read_fd)
-            os.setsid()
-            payload = _grant_probe_child_bytes(
-                source, entry, slot, allow_account_probe, timeout
-            )
-            offset = 0
-            while offset < len(payload):
-                offset += os.write(write_fd, payload[offset:])
-        except BaseException:
-            pass
-        finally:
-            try:
-                os.close(write_fd)
-            except OSError:
-                pass
-            os._exit(0)
-    os.close(write_fd)
-    os.set_blocking(read_fd, False)
-    deadline = time.monotonic() + timeout
-    chunks: list[bytes] = []
-    try:
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                item["gaps"] = ["probe_timeout"]
-                return item, False, False
-            ready, _, _ = select.select([read_fd], [], [], remaining)
-            if not ready:
-                item["gaps"] = ["probe_timeout"]
-                return item, False, False
-            chunk = os.read(read_fd, 8192)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            if sum(map(len, chunks)) > _GRANT_PROBE_PAYLOAD_MAX_BYTES:
-                item["gaps"] = ["probe_unavailable"]
-                return item, False, False
-        try:
-            response = json.loads(b"".join(chunks).decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            item["gaps"] = ["probe_unavailable"]
-            return item, False, False
-        if not isinstance(response, dict) or set(response) != {"item", "complete", "green"}:
-            item["gaps"] = ["probe_unavailable"]
-            return item, False, False
-        if (
-            not isinstance(response["item"], dict)
-            or not isinstance(response["complete"], bool)
-            or not isinstance(response["green"], bool)
-        ):
-            item["gaps"] = ["probe_unavailable"]
-            return item, False, False
-        return response["item"], response["complete"], response["green"]
-    finally:
-        os.close(read_fd)
-        _stop_probe_pid(pid)
+    if (
+        not isinstance(value["item"], dict)
+        or not isinstance(value["complete"], bool)
+        or not isinstance(value["green"], bool)
+    ):
+        item["gaps"] = ["probe_unavailable"]
+        return item, False, False
+    return value["item"], value["complete"], value["green"]
 
 
 def bind_ro(source: Path, target: Path, *, recursive: bool = False) -> tuple[bool, str]:
