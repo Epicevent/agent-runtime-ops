@@ -167,11 +167,19 @@ def contract_patches(
     )
 
 
-def run_observation(capsys, tmp_path: Path, patches) -> tuple[int, str, dict]:
+def run_observation(
+    capsys,
+    tmp_path: Path,
+    patches,
+    *,
+    requested_target: str = "dev-hermes-img",
+) -> tuple[int, str, dict]:
+    request = args(tmp_path)
+    request.target = requested_target
     with ExitStack() as stack:
         for item in patches:
             stack.enter_context(item)
-        rc = cmd_observation_status(args(tmp_path))
+        rc = cmd_observation_status(request)
     raw = capsys.readouterr().out
     return rc, raw, json.loads(raw)
 
@@ -234,6 +242,87 @@ def test_runtime_observation_does_not_claim_canary_completion_without_terminal_i
     assert "credential" not in runtime["fields"]
     assert "container-secret-detail" not in raw
     assert "another-raw-detail" not in raw
+
+
+def test_dev_owned_image_target_does_not_require_prior_image_approval(
+    capsys, tmp_path: Path
+) -> None:
+    rc, _raw, value = run_observation(
+        capsys,
+        tmp_path,
+        contract_patches(approval={}),
+    )
+    assert rc == 0
+    assert value["result"] == "observed"
+    assert value["observations"]["images"] == {
+        "status": "not_required",
+        "family": "hermes",
+        "approval_required": False,
+        "binding_status": "not_required_dev_target",
+        "product": {"status": "not_approved"},
+        "wrapper": {"status": "not_approved"},
+    }
+
+
+def test_production_target_requires_approvals_matching_exact_rollout_digests(
+    capsys, tmp_path: Path
+) -> None:
+    binding = replace(
+        runtime_binding(),
+        linux_account="oc20",
+        public_host="oc20.ji-tech.co.kr",
+    )
+    target = replace(runtime_target(), target="oc20", route=binding)
+    truth, checks = runtime_truth()
+    truth["linux_account"] = "oc20"
+
+    rc, _raw, value = run_observation(
+        capsys,
+        tmp_path,
+        contract_patches(
+            binding=binding,
+            target=target,
+            truth=(truth, checks),
+        ),
+        requested_target="oc20",
+    )
+    assert rc == 0
+    assert value["observations"]["images"]["approval_required"] is True
+    assert value["observations"]["images"]["binding_status"] == "exact"
+
+    stale = approvals()
+    stale_wrapper = "ghcr.io/epicevent/agent-runtime-hermes@sha256:" + "a" * 64
+    stale["hermes:wrapper"]["approved_ref"] = stale_wrapper
+    stale["hermes:wrapper"]["approved_digest"] = "sha256:" + "a" * 64
+    rc, _raw, value = run_observation(
+        capsys,
+        tmp_path,
+        contract_patches(
+            binding=binding,
+            target=target,
+            truth=(truth, checks),
+            approval=stale,
+        ),
+        requested_target="oc20",
+    )
+    assert rc == 1
+    assert value["result"] == "degraded"
+    assert value["observations"]["images"]["binding_status"] == "digest_mismatch"
+
+    rc, _raw, value = run_observation(
+        capsys,
+        tmp_path,
+        contract_patches(
+            binding=binding,
+            target=target,
+            truth=(truth, checks),
+            approval={},
+        ),
+        requested_target="oc20",
+    )
+    assert rc == 1
+    assert value["result"] == "degraded"
+    assert value["observations"]["images"]["binding_status"] == "approval_missing"
 
 
 @pytest.mark.parametrize(
@@ -472,7 +561,11 @@ def test_malformed_approval_does_not_leak_raw_value(capsys, tmp_path: Path) -> N
     rc, raw, value = run_observation(
         capsys, tmp_path, contract_patches(approval=bad)
     )
-    assert rc == 1
+    assert rc == 0
+    assert value["result"] == "observed"
+    assert value["observations"]["images"]["binding_status"] == (
+        "not_required_dev_target"
+    )
     assert value["observations"]["images"]["wrapper"] == {
         "status": "unavailable",
         "reason_code": "approval_record_invalid",

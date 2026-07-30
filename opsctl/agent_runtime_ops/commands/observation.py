@@ -8,6 +8,7 @@ import sys
 from typing import Any
 
 from ..canonical_recipes import load_canonical_recipe
+from ..domain.common import is_dev_slot
 from ..domain.common import is_root as _is_root
 from ..domain.common import state_root as _state_root
 from ..domain.image_approval_policy import (
@@ -190,21 +191,47 @@ def _image_identity(
     }
 
 
-def _images_observation(state_root: Any, family: str) -> dict[str, object]:
+def _images_observation(
+    state_root: Any,
+    family: str,
+    target: str,
+    rollout: dict[str, object],
+) -> dict[str, object]:
     try:
         approvals = load_image_approvals(state_root)
     except Exception:
         return {"status": "unavailable", "reason_code": "approval_policy_invalid"}
     product = _image_identity(approvals, family, "product")
     wrapper = _image_identity(approvals, family, "wrapper")
+    approval_required = not is_dev_slot(target)
+    if not approval_required:
+        status = "not_required"
+        binding_status = "not_required_dev_target"
+    elif rollout.get("status") != "observed":
+        status = "degraded"
+        binding_status = "rollout_unavailable"
+    elif (
+        product.get("status") == "approved"
+        and wrapper.get("status") == "approved"
+        and product.get("digest") == rollout.get("product_digest")
+        and wrapper.get("digest") == rollout.get("wrapper_digest")
+    ):
+        status = "observed"
+        binding_status = "exact"
+    elif (
+        product.get("status") == "approved"
+        and wrapper.get("status") == "approved"
+    ):
+        status = "degraded"
+        binding_status = "digest_mismatch"
+    else:
+        status = "degraded"
+        binding_status = "approval_missing"
     return {
-        "status": (
-            "observed"
-            if product.get("status") == "approved"
-            and wrapper.get("status") == "approved"
-            else "degraded"
-        ),
+        "status": status,
         "family": family,
+        "approval_required": approval_required,
+        "binding_status": binding_status,
         "product": product,
         "wrapper": wrapper,
     }
@@ -514,10 +541,13 @@ def build_readonly_observation(args: argparse.Namespace) -> dict[str, object]:
             raise
         raise ReadonlyObservationError("target_not_observable") from exc
     initial_binding = _binding_identity(binding, target)
+    initial_rollout = _rollout_observation(state_root, target, family)
     observations = {
         "update": _update_observation(state_root),
-        "images": _images_observation(state_root, family),
-        "rollout": _rollout_observation(state_root, target, family),
+        "images": _images_observation(
+            state_root, family, target, initial_rollout
+        ),
+        "rollout": initial_rollout,
         "runtime": _runtime_observation(state_root, target),
         "transaction": _transaction_observation(state_root, target),
     }
@@ -551,7 +581,8 @@ def build_readonly_observation(args: argparse.Namespace) -> dict[str, object]:
     source_planes_current = all(
         (
             observations["update"].get("status") == "current",
-            observations["images"].get("status") == "observed",
+            observations["images"].get("status")
+            in {"observed", "not_required"},
             observations["rollout"].get("status") == "observed",
         )
     )

@@ -53,6 +53,12 @@ malformed digests, or label-controlled values outside those grammars make the
 runtime observation unavailable; they are not relayed or redacted into an
 otherwise successful receipt.
 
+Image approval is target-aware. A `dev-*` image-validation account reports
+approval as not required because that boundary exists to validate a digest
+before root approval. Every non-`dev-*` production target requires both product
+and wrapper approvals to match the rollout manifest's exact digests; an older
+family approval is reported as a digest mismatch and degrades the snapshot.
+
 Broker-managed terminal status remains the existing exact-handle surface:
 
 ```text
