@@ -1069,6 +1069,7 @@ def test_exact_legacy_0700_baseline_reaches_real_candidate_svcops_attestation() 
         "missing-inner-mcp",
         "replaced-inner-mcp",
         "appended-inner-mcp",
+        "noncanonical-inner-opsctl-mode",
         "unsafe-inner-mcp-mode",
         "missing-gemini-link",
         "wrong-gemini-link-target",
@@ -1141,6 +1142,8 @@ def test_legacy_baseline_exception_rejects_unsafe_identity_without_writes(
         elif invalid == "appended-inner-mcp":
             with tree["inner_mcp"].open("a", encoding="utf-8") as stream:
                 stream.write("open('/tmp/unexpected-side-effect', 'w').close()\n")
+        elif invalid == "noncanonical-inner-opsctl-mode":
+            tree["inner_opsctl"].chmod(0o700)
         elif invalid == "unsafe-inner-mcp-mode":
             tree["inner_mcp"].chmod(0o775)
         elif invalid == "missing-gemini-link":

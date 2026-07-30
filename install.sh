@@ -2272,19 +2272,6 @@ if (
 ):
     raise SystemExit(1)
 venv_opsctl = os.path.join(venv, "bin", "opsctl")
-venv_opsctl_meta = lstat(venv_opsctl)
-if (
-    not stat.S_ISREG(venv_opsctl_meta.st_mode)
-    or stat.S_ISLNK(venv_opsctl_meta.st_mode)
-    or venv_opsctl_meta.st_uid != 0
-    or venv_opsctl_meta.st_gid != ops_gid
-    or venv_opsctl_meta.st_nlink != 1
-    or (stat.S_IMODE(venv_opsctl_meta.st_mode) & 0o100) == 0
-    or (stat.S_IMODE(venv_opsctl_meta.st_mode) & 0o077) != 0
-):
-    raise SystemExit(1)
-
-
 def require_console_entrypoint(path: str, import_target: str) -> str:
     payload = read_regular(path, 0o755, 64 * 1024)
     shebang, separator, body = payload.partition("\n")

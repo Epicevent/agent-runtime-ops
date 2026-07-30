@@ -194,9 +194,9 @@ def test_legacy_unrunnable_baseline_exception_is_narrow_and_candidate_gate_remai
     assert "os.O_NOFOLLOW" in discriminator
     assert "st_mtime_ns" in discriminator and "st_ctime_ns" in discriminator
     assert 'stat.S_IMODE(venv_meta.st_mode) != 0o700' in identity
-    assert "venv_opsctl_meta.st_uid != 0" in identity
-    assert "venv_opsctl_meta.st_gid != ops_gid" in identity
-    assert "venv_opsctl_meta.st_nlink != 1" in identity
+    assert "venv_opsctl_meta" not in identity
+    assert "venv_opsctl_text = require_console_entrypoint(" in identity
+    assert "venv_mcp_text = require_console_entrypoint(" in identity
     assert "os.O_NOFOLLOW" in identity
     assert "st_mtime_ns" in identity and "st_ctime_ns" in identity
     assert 'line == "updates:"' in identity
