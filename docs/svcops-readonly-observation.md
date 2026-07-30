@@ -31,12 +31,13 @@ is part of every output.
 The top-level states are deliberately independent:
 
 - `runtime_state=healthy|degraded|unavailable`
-- `transaction_state=committed|pending|unavailable`
+- `transaction_state=no_pending_transaction|pending|unavailable`
 - `terminal_state=unknown` for this target-only command
 
 Healthy runtime state is not canary completion. A pending rollback marker makes
-the result `incomplete`. An absent marker means there is no pending rollback
-transaction, but terminal action identity remains unknown. Therefore this
+the result `incomplete`. An absent marker proves only
+`no_pending_transaction`; it does not prove that any recovery committed, and
+terminal action identity remains unknown. Therefore this
 target-only surface uses `result=observed|incomplete|degraded` and always sets
 `canary_completion_claimed=false`; it never emits `result=complete`.
 

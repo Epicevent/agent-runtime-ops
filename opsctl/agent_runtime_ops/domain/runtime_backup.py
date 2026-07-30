@@ -568,6 +568,51 @@ def runtime_host_mutation_lock(state_root: Path) -> Iterator[Path]:
         os.close(descriptor)
 
 
+@contextmanager
+def existing_runtime_host_mutation_lock(state_root: Path) -> Iterator[Path]:
+    """Acquire the root-managed host lock without creating any filesystem state."""
+
+    _validate_controlled_directory(state_root)
+    recovery_root = state_root / "runtime-recovery"
+    _validate_controlled_directory(recovery_root, exact_mode=0o700)
+    lock_path = _runtime_host_mutation_lock_path(state_root)
+    if lock_path.is_symlink():
+        raise ValueError(f"runtime host mutation lock must not be a symlink: {lock_path}")
+    flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(lock_path, flags)
+    windows_lock: threading.Lock | None = None
+    windows_lock_held = False
+    posix_lock_held = False
+    try:
+        _validate_runtime_lock_descriptor(descriptor, lock_path)
+        if lock_path.parent != recovery_root:
+            raise ValueError(f"runtime host mutation lock parent mismatch: {lock_path}")
+        if os.name == "nt":
+            key = str(lock_path.resolve(strict=False)).casefold()
+            with _WINDOWS_LOCKS_GUARD:
+                windows_lock = _WINDOWS_LOCKS.setdefault(key, threading.Lock())
+            if not windows_lock.acquire(blocking=False):
+                raise RuntimeError("another runtime host mutation is active")
+            windows_lock_held = True
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise RuntimeError("another runtime host mutation is active") from exc
+            posix_lock_held = True
+        yield lock_path
+    finally:
+        if windows_lock_held and windows_lock is not None:
+            windows_lock.release()
+        if posix_lock_held:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
 def _validate_runtime_lock_descriptor(descriptor: int, path: Path) -> None:
     descriptor_stat = os.fstat(descriptor)
     if not stat.S_ISREG(descriptor_stat.st_mode):
@@ -598,6 +643,61 @@ def runtime_transaction_lock(state_root: Path, slot: str) -> Iterator[Path]:
     flags |= getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(lock_path, flags, 0o600)
+    windows_lock: threading.Lock | None = None
+    windows_lock_held = False
+    posix_lock_held = False
+    try:
+        _validate_runtime_lock_descriptor(descriptor, lock_path)
+        if lock_path.parent != recovery_dir:
+            raise ValueError(f"runtime transaction lock parent mismatch: {lock_path}")
+        if os.name == "nt":
+            key = str(lock_path.resolve(strict=False)).casefold()
+            with _WINDOWS_LOCKS_GUARD:
+                windows_lock = _WINDOWS_LOCKS.setdefault(key, threading.Lock())
+            if not windows_lock.acquire(blocking=False):
+                raise RuntimeError(f"another runtime transaction is active: {slot}")
+            windows_lock_held = True
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise RuntimeError(
+                    f"another runtime transaction is active: {slot}"
+                ) from exc
+            posix_lock_held = True
+        yield lock_path
+    finally:
+        if windows_lock_held and windows_lock is not None:
+            windows_lock.release()
+        if posix_lock_held:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+@contextmanager
+def existing_runtime_transaction_lock(
+    state_root: Path, slot: str
+) -> Iterator[Path]:
+    """Acquire a root-managed slot lock without creating directories or lock files."""
+
+    _validate_controlled_directory(state_root)
+    recovery_root = state_root / "runtime-recovery"
+    _validate_controlled_directory(recovery_root, exact_mode=0o700)
+    recovery_dir = runtime_recovery_dir(state_root, slot)
+    _validate_controlled_directory(recovery_dir, exact_mode=0o700)
+    if recovery_dir.parent != recovery_root:
+        raise ValueError(
+            f"root-controlled path parent mismatch: {recovery_dir}"
+        )
+    lock_path = _runtime_transaction_lock_path(state_root, slot)
+    if lock_path.is_symlink():
+        raise ValueError(f"runtime transaction lock must not be a symlink: {lock_path}")
+    flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(lock_path, flags)
     windows_lock: threading.Lock | None = None
     windows_lock_held = False
     posix_lock_held = False

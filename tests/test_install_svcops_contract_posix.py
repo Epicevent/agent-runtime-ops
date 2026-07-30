@@ -93,6 +93,26 @@ def _run_normalizer(tree: Path, *, path: str | None = None) -> subprocess.Comple
     )
 
 
+def _run_contract_script(
+    root: Path, body: str
+) -> subprocess.CompletedProcess[str]:
+    script = root / "contract.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n" + body,
+        encoding="utf-8",
+        newline="\n",
+    )
+    script.chmod(0o700)
+    return subprocess.run(
+        ["/usr/bin/bash", str(script)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": "/usr/local/bin:/usr/bin:/bin"},
+        timeout=10,
+    )
+
+
 def test_restrictive_umask_tree_becomes_group_executable_and_world_denied() -> None:
     reader = _reader()
     with _root_temp(reader) as root:
@@ -180,3 +200,94 @@ def test_normalizer_rejects_special_nodes_and_chmod_failure() -> None:
             tree, path=f"{fake_bin}:/usr/local/bin:/usr/bin:/bin"
         )
         assert failed.returncode != 0
+
+
+def test_exact_previous_wrapper_bytes_are_restored_for_svcops() -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        install_root = root / "install"
+        releases = install_root / "releases"
+        previous = releases / "previous"
+        candidate = releases / "candidate"
+        backup = root / "backup"
+        bin_dir = root / "bin"
+        for path in (previous, candidate, backup, bin_dir):
+            path.mkdir(parents=True, exist_ok=True)
+        backup.chmod(0o700)
+        current = install_root / "current"
+        current.symlink_to("releases/candidate")
+        wrappers = {
+            "opsctl": bin_dir / "opsctl",
+            "mcp": bin_dir / "agent-runtime-ops-mcp",
+            "gemini": bin_dir / "gemini",
+        }
+        for name, path in wrappers.items():
+            path.write_text(f"candidate-{name}\n", encoding="utf-8")
+            path.chmod(0o755)
+            os.chown(path, 0, reader.pw_gid)
+            prior = backup / name
+            prior.write_text(
+                "#!/bin/sh\nprintf 'previous-opsctl\\n'\n"
+                if name == "opsctl"
+                else f"previous-{name}\n",
+                encoding="utf-8",
+            )
+            prior.chmod(0o600)
+        (backup / "state").write_text("previous\n", encoding="utf-8")
+        (backup / "manifest-target").write_text(
+            "current/.agent-runtime-ops-manifest\n", encoding="utf-8"
+        )
+        (backup / "state").chmod(0o600)
+        (backup / "manifest-target").chmod(0o600)
+        manifest = install_root / ".agent-runtime-ops-manifest"
+        manifest.symlink_to("current/.agent-runtime-ops-manifest")
+        completed = _run_contract_script(
+            root,
+            f"INSTALL_ROOT={str(install_root)!r}\n"
+            f"RELEASES_DIR={str(releases)!r}\n"
+            f"CURRENT_LINK={str(current)!r}\n"
+            f"BIN_LINK={str(wrappers['opsctl'])!r}\n"
+            f"MCP_BIN_LINK={str(wrappers['mcp'])!r}\n"
+            f"GEMINI_BIN_LINK={str(wrappers['gemini'])!r}\n"
+            f"MANIFEST={str(manifest)!r}\n"
+            f"OPS_GROUP=$(id -gn {reader.pw_name!r})\n"
+            + _function("restore_previous_activation_identity")
+            + f"\nrestore_previous_activation_identity {str(candidate)!r} {str(previous)!r} {str(backup)!r}\n",
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert current.resolve() == previous.resolve()
+        assert wrappers["opsctl"].read_bytes() == (backup / "opsctl").read_bytes()
+        assert wrappers["mcp"].read_bytes() == (backup / "mcp").read_bytes()
+        assert wrappers["gemini"].read_bytes() == (backup / "gemini").read_bytes()
+        allowed = _as_reader(reader, [str(wrappers["opsctl"])])
+        assert allowed.returncode == 0, allowed.stderr
+        assert allowed.stdout == "previous-opsctl\n"
+
+
+def test_broker_unit_partial_replacement_restores_exact_previous_bytes() -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        backup = root / "backup"
+        backup.mkdir(mode=0o700)
+        unit = root / "agent-runtime-root-action-broker.service"
+        unit.write_text("previous-unit\n", encoding="utf-8")
+        unit.chmod(0o644)
+        os.chown(unit, 0, 0)
+        completed = _run_contract_script(
+            root,
+            f"ROOT_ACTION_BROKER_SERVICE_FILE={str(unit)!r}\n"
+            "ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS=1\n"
+            "command() { if [[ \"${1:-}\" == '-v' && \"${2:-}\" == 'systemctl' ]]; then return 1; fi; builtin command \"$@\"; }\n"
+            + _function("capture_root_action_broker_unit_backup")
+            + _function("restore_root_action_broker_unit_backup")
+            + f"\ncapture_root_action_broker_unit_backup {str(backup)!r}\n"
+            + f"printf 'candidate-partial-unit\\n' >{str(unit)!r}\n"
+            + f"chmod 0644 {str(unit)!r}\n"
+            + f"restore_root_action_broker_unit_backup {str(backup)!r}\n",
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert unit.read_text(encoding="utf-8") == "previous-unit\n"
+        meta = unit.lstat()
+        assert meta.st_uid == 0
+        assert meta.st_gid == 0
+        assert stat.S_IMODE(meta.st_mode) == 0o644

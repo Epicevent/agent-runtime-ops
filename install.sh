@@ -396,6 +396,57 @@ install_root_action_broker_contract() {
   info "root_action_broker_activation=deferred_not_enabled_or_started"
 }
 
+capture_root_action_broker_unit_backup() {
+  local backup_dir="$1"
+  local backup="$backup_dir/broker-unit"
+  local state="$backup_dir/broker-unit-state"
+  if [[ ! -e "$ROOT_ACTION_BROKER_SERVICE_FILE" && ! -L "$ROOT_ACTION_BROKER_SERVICE_FILE" ]]; then
+    printf 'absent\n' >"$state" || return 1
+    chmod 0600 "$state" || return 1
+    return 0
+  fi
+  [[ -f "$ROOT_ACTION_BROKER_SERVICE_FILE" && ! -L "$ROOT_ACTION_BROKER_SERVICE_FILE" ]] \
+    || return 1
+  [[ "$(stat -c '%a:%h:%u:%g' "$ROOT_ACTION_BROKER_SERVICE_FILE" 2>/dev/null || true)" == "644:1:0:0" ]] \
+    || return 1
+  install -m 0600 "$ROOT_ACTION_BROKER_SERVICE_FILE" "$backup" || return 1
+  cmp -s "$ROOT_ACTION_BROKER_SERVICE_FILE" "$backup" || return 1
+  printf 'present\n' >"$state" || return 1
+  chmod 0600 "$state" || return 1
+}
+
+restore_root_action_broker_unit_backup() {
+  local backup_dir="$1"
+  local backup="$backup_dir/broker-unit"
+  local state_file="$backup_dir/broker-unit-state"
+  local state
+  [[ -f "$state_file" && ! -L "$state_file" ]] || return 1
+  state="$(<"$state_file")"
+  case "$state" in
+    present)
+      [[ -f "$backup" && ! -L "$backup" ]] || return 1
+      [[ "$(stat -c '%a:%h:%u' "$backup" 2>/dev/null || true)" == "600:1:$(id -u)" ]] \
+        || return 1
+      [[ ! -L "$ROOT_ACTION_BROKER_SERVICE_FILE" ]] || return 1
+      rm -f -- "$ROOT_ACTION_BROKER_SERVICE_FILE" || return 1
+      install -m 0644 "$backup" "$ROOT_ACTION_BROKER_SERVICE_FILE" || return 1
+      chown root:root "$ROOT_ACTION_BROKER_SERVICE_FILE" || return 1
+      cmp -s "$backup" "$ROOT_ACTION_BROKER_SERVICE_FILE" || return 1
+      ;;
+    absent)
+      rm -f -- "$ROOT_ACTION_BROKER_SERVICE_FILE" || return 1
+      [[ ! -e "$ROOT_ACTION_BROKER_SERVICE_FILE" && ! -L "$ROOT_ACTION_BROKER_SERVICE_FILE" ]] \
+        || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  if command -v systemctl >/dev/null 2>&1; then
+    /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+      systemctl daemon-reload >/dev/null \
+      || return 1
+  fi
+}
+
 install_gemini_cli() {
   local release_dir="$1"
   local package_dir="$release_dir/agent-clis/gemini-cli"
@@ -852,13 +903,109 @@ EOF
 
 deactivate_first_release() {
   local release_dir="$1"
+  local path
   [[ "$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)" == "$release_dir" ]] \
     || return 1
   [[ -f "$GEMINI_BIN_LINK" ]] \
     && grep -q 'agent-runtime-ops managed gemini wrapper' "$GEMINI_BIN_LINK" \
     || return 1
-  rm -f "$BIN_LINK" "$MCP_BIN_LINK" "$GEMINI_BIN_LINK" "$MANIFEST" "$CURRENT_LINK"
-  [[ ! -e "$CURRENT_LINK" && ! -L "$CURRENT_LINK" ]] || return 1
+  for path in "$BIN_LINK" "$MCP_BIN_LINK" "$GEMINI_BIN_LINK" "$MANIFEST" "$CURRENT_LINK"; do
+    rm -f -- "$path" || return 1
+    [[ ! -e "$path" && ! -L "$path" ]] || return 1
+  done
+}
+
+capture_previous_activation_identity() {
+  local previous_release="$1"
+  local backup_dir="$2"
+  local gid name source target
+  [[ -d "$backup_dir" && ! -L "$backup_dir" ]] || return 1
+  [[ "$(stat -c '%a:%h:%u' "$backup_dir" 2>/dev/null || true)" == "700:1:$(id -u)" ]] \
+    || return 1
+  if [[ -z "$previous_release" ]]; then
+    printf 'first_install\n' >"$backup_dir/state" || return 1
+    chmod 0600 "$backup_dir/state" || return 1
+    return 0
+  fi
+  gid="$(id -g "$OPS_USER")" || return 1
+  for name in opsctl mcp gemini; do
+    case "$name" in
+      opsctl) source="$BIN_LINK" ;;
+      mcp) source="$MCP_BIN_LINK" ;;
+      gemini) source="$GEMINI_BIN_LINK" ;;
+      *) return 1 ;;
+    esac
+    [[ -f "$source" && ! -L "$source" ]] || return 1
+    [[ "$(stat -c '%a:%h:%u:%g' "$source" 2>/dev/null || true)" == "755:1:0:$gid" ]] \
+      || return 1
+    target="$backup_dir/$name"
+    install -m 0600 "$source" "$target" || return 1
+    cmp -s "$source" "$target" || return 1
+  done
+  [[ -L "$MANIFEST" ]] || return 1
+  [[ "$(readlink "$MANIFEST")" == "current/.agent-runtime-ops-manifest" ]] \
+    || return 1
+  printf 'previous\n' >"$backup_dir/state" || return 1
+  printf 'current/.agent-runtime-ops-manifest\n' >"$backup_dir/manifest-target" \
+    || return 1
+  chmod 0600 "$backup_dir/state" "$backup_dir/manifest-target" || return 1
+}
+
+restore_previous_activation_identity() {
+  local failed_release="$1"
+  local previous_release="$2"
+  local backup_dir="$3"
+  local backup destination name next_link release_name state target
+  [[ -f "$backup_dir/state" && ! -L "$backup_dir/state" ]] || return 1
+  state="$(<"$backup_dir/state")"
+  if [[ "$state" == "first_install" ]]; then
+    [[ -z "$previous_release" ]] || return 1
+    deactivate_first_release "$failed_release" || return 1
+    return 0
+  fi
+  [[ "$state" == "previous" && -n "$previous_release" ]] || return 1
+  [[ -d "$previous_release" && ! -L "$previous_release" ]] || return 1
+  release_name="$(basename "$previous_release")"
+  [[ "$previous_release" == "$(realpath -m "$RELEASES_DIR")/$release_name" ]] \
+    || return 1
+  next_link="$INSTALL_ROOT/.current.restore.$$"
+  ln -s "releases/$release_name" "$next_link" || return 1
+  mv -Tf "$next_link" "$CURRENT_LINK" || return 1
+  for name in opsctl mcp gemini; do
+    backup="$backup_dir/$name"
+    case "$name" in
+      opsctl) destination="$BIN_LINK" ;;
+      mcp) destination="$MCP_BIN_LINK" ;;
+      gemini) destination="$GEMINI_BIN_LINK" ;;
+      *) return 1 ;;
+    esac
+    [[ -f "$backup" && ! -L "$backup" ]] || return 1
+    [[ "$(stat -c '%a:%h:%u' "$backup" 2>/dev/null || true)" == "600:1:$(id -u)" ]] \
+      || return 1
+    rm -f -- "$destination" || return 1
+    install -m 0755 "$backup" "$destination" || return 1
+    chown root:"$OPS_GROUP" "$destination" || return 1
+    cmp -s "$backup" "$destination" || return 1
+  done
+  [[ -f "$backup_dir/manifest-target" && ! -L "$backup_dir/manifest-target" ]] \
+    || return 1
+  target="$(<"$backup_dir/manifest-target")"
+  [[ "$target" == "current/.agent-runtime-ops-manifest" ]] || return 1
+  rm -f -- "$MANIFEST" || return 1
+  ln -s "$target" "$MANIFEST" || return 1
+  chown -h root:"$OPS_GROUP" "$CURRENT_LINK" "$MANIFEST" || return 1
+  [[ "$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)" == "$previous_release" ]] \
+    || return 1
+}
+
+cleanup_activation_identity_backup() {
+  local backup_dir="$1"
+  local path
+  [[ -d "$backup_dir" && ! -L "$backup_dir" ]] || return 1
+  for path in state manifest-target opsctl mcp gemini broker-unit broker-unit-state; do
+    rm -f -- "$backup_dir/$path" || return 1
+  done
+  rmdir "$backup_dir"
 }
 
 install_ops_home_agents() {
@@ -1202,12 +1349,12 @@ restore_previous_active_identity() {
   local expected_ref="$2"
   local previous_release="$3"
   local broker_state="$4"
+  local backup_dir="$5"
   local service_name
+  restore_previous_activation_identity \
+    "$failed_release" "$previous_release" "$backup_dir" || return 1
   if [[ -n "$previous_release" ]]; then
-    activate_release "$previous_release" || return 1
     attest_restored_cli_as_ops "$previous_release" "$expected_ref" || return 1
-  else
-    deactivate_first_release "$failed_release" || return 1
   fi
   case "$broker_state" in
     active)
@@ -1225,18 +1372,56 @@ restore_previous_active_identity() {
   info "activation_rollback=previous_identity_restored"
 }
 
-attest_active_cli_or_restore() {
+activate_and_attest_cli_or_restore() {
   local release_dir="$1"
   local commit="$2"
   local previous_release="$3"
   local broker_state="$4"
-  if ! attest_active_cli_as_ops "$release_dir" "$commit"; then
+  local backup_dir="$5"
+  if ! (
+    activate_release "$release_dir"
+    attest_active_cli_as_ops "$release_dir" "$commit"
+  ); then
     restore_previous_active_identity \
-      "$release_dir" "$commit" "$previous_release" "$broker_state" \
+      "$release_dir" "$commit" "$previous_release" "$broker_state" "$backup_dir" \
       || die "post-activation svcops CLI attestation failed and previous identity restoration failed"
+    cleanup_activation_identity_backup "$backup_dir" \
+      || die "previous active identity restored but activation backup cleanup failed"
     die "post-activation svcops CLI attestation failed; previous active identity restored"
   fi
   info "ops_cli_post_activation=svcops_verified"
+}
+
+install_root_action_broker_or_restore() {
+  local release_dir="$1"
+  local commit="$2"
+  local previous_release="$3"
+  local broker_state="$4"
+  local backup_dir="$5"
+  local identity_restore_rc=0 unit_restore_rc=0
+  if ! capture_root_action_broker_unit_backup "$backup_dir"; then
+    restore_previous_active_identity \
+      "$release_dir" "$commit" "$previous_release" "$broker_state" "$backup_dir" \
+      || die "broker unit capture failed and previous identity restoration failed"
+    cleanup_activation_identity_backup "$backup_dir" \
+      || die "previous active identity restored but activation backup cleanup failed"
+    die "broker unit capture failed; previous active identity restored"
+  fi
+  if (install_root_action_broker_contract "$release_dir"); then
+    cleanup_activation_identity_backup "$backup_dir" \
+      || die "broker installed but activation backup cleanup failed"
+    return 0
+  fi
+  restore_root_action_broker_unit_backup "$backup_dir" || unit_restore_rc="$?"
+  restore_previous_active_identity \
+    "$release_dir" "$commit" "$previous_release" "$broker_state" "$backup_dir" \
+    || identity_restore_rc="$?"
+  if [[ "$unit_restore_rc" -ne 0 || "$identity_restore_rc" -ne 0 ]]; then
+    die "root-action broker setup failed and previous active identity restoration failed"
+  fi
+  cleanup_activation_identity_backup "$backup_dir" \
+    || die "previous active identity restored but activation backup cleanup failed"
+  die "root-action broker setup failed; previous active identity restored"
 }
 
 register_codex_mcp() {
@@ -1254,7 +1439,7 @@ register_codex_mcp() {
 
 install_package() {
   local src commit summary release_name tmp_release release_dir
-  local previous_active_release previous_broker_state
+  local activation_backup_dir previous_active_release previous_broker_state
   if ! src="$(repo_root)"; then
     bootstrap_from_git
   fi
@@ -1300,10 +1485,19 @@ install_package() {
 
   previous_active_release="$(capture_previous_active_release "$commit")"
   previous_broker_state="$(capture_root_action_broker_state "$previous_active_release")"
-  activate_release "$release_dir"
-  attest_active_cli_or_restore \
-    "$release_dir" "$commit" "$previous_active_release" "$previous_broker_state"
-  install_root_action_broker_contract "$release_dir"
+  activation_backup_dir="$(mktemp -d)" \
+    || die "failed to create activation identity backup directory"
+  if ! capture_previous_activation_identity \
+    "$previous_active_release" "$activation_backup_dir"; then
+    cleanup_activation_identity_backup "$activation_backup_dir" || true
+    die "failed to capture exact previous activation identity"
+  fi
+  activate_and_attest_cli_or_restore \
+    "$release_dir" "$commit" "$previous_active_release" \
+    "$previous_broker_state" "$activation_backup_dir"
+  install_root_action_broker_or_restore \
+    "$release_dir" "$commit" "$previous_active_release" \
+    "$previous_broker_state" "$activation_backup_dir"
   install_ops_sudoers
   install_boot_restore_unit
   install_usage_collect_timer

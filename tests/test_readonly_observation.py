@@ -155,6 +155,7 @@ def contract_patches(
                 digest=RECIPE,
                 data={
                     "family": "hermes",
+                    "container_nas_root": "/workspace/nas_docs",
                     "runtime_contracts": {"customer": "hermes-fast/v1"},
                     "runtime_profiles": {"customer": "hermes-fast"},
                 },
@@ -223,7 +224,7 @@ def test_runtime_observation_does_not_claim_canary_completion_without_terminal_i
     assert value["schema"] == READONLY_OBSERVATION_SCHEMA
     assert value["result"] == "observed"
     assert value["runtime_state"] == "healthy"
-    assert value["transaction_state"] == "committed"
+    assert value["transaction_state"] == "no_pending_transaction"
     assert value["terminal_state"] == "unknown"
     assert value["canary_completion_claimed"] is False
     assert value["claim_scope"] == "runtime_observation_only"
@@ -262,6 +263,21 @@ def test_dev_owned_image_target_does_not_require_prior_image_approval(
         "product": {"status": "not_approved"},
         "wrapper": {"status": "not_approved"},
     }
+
+
+def test_dev_owned_image_target_does_not_read_malformed_approval_policy(
+    capsys, tmp_path: Path
+) -> None:
+    patches = list(contract_patches())
+    patches[5] = patch(
+        f"{MODULE}.load_image_approvals",
+        side_effect=ValueError("malformed approval policy"),
+    )
+    rc, raw, value = run_observation(capsys, tmp_path, tuple(patches))
+    assert rc == 0
+    assert value["result"] == "observed"
+    assert value["observations"]["images"]["status"] == "not_required"
+    assert "malformed approval policy" not in raw
 
 
 def test_production_target_requires_approvals_matching_exact_rollout_digests(
@@ -420,6 +436,9 @@ def test_control_or_oversized_runtime_field_fails_surface_closed(
         ("truth_status", "DEMO_SECRET_VALUE"),
         ("runtime_contract", "DEMO_SECRET_VALUE"),
         ("canonical_recipe_name", "DEMO_SECRET_VALUE"),
+        ("retrieval_schema", "attacker-controlled/v9"),
+        ("retrieval_transport", "attacker_controlled"),
+        ("container_nas_root", "/attacker/controlled/path"),
     ],
 )
 def test_malformed_label_controlled_runtime_fields_fail_closed_without_relay(
@@ -567,8 +586,7 @@ def test_malformed_approval_does_not_leak_raw_value(capsys, tmp_path: Path) -> N
         "not_required_dev_target"
     )
     assert value["observations"]["images"]["wrapper"] == {
-        "status": "unavailable",
-        "reason_code": "approval_record_invalid",
+        "status": "not_approved",
     }
     assert "SECRET" not in raw
 

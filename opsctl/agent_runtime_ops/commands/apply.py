@@ -20,6 +20,8 @@ from ..domain.runtime_checks import (
 from ..domain.runtime_backup import (
     MarkerBoundRecoveryError,
     consume_legacy_retrieval_projection_exemption,
+    existing_runtime_host_mutation_lock,
+    existing_runtime_transaction_lock,
     finish_exact_rollback_transaction,
     finish_rollback_transaction,
     legacy_retrieval_projection_failures_are_expected,
@@ -199,6 +201,7 @@ def cmd_rollback(args: argparse.Namespace) -> int:
     if exact_expected is not None:
         execution_entered = False
         mutation_started = False
+        locked_post_state = ("unavailable", "unknown")
 
         def observe_mutation_start() -> None:
             nonlocal mutation_started
@@ -206,26 +209,48 @@ def cmd_rollback(args: argparse.Namespace) -> int:
 
         try:
             _validate_exact_recovery_target(state_root, args.slot)
-            with runtime_host_mutation_lock(state_root):
-                with runtime_transaction_lock(state_root, args.slot):
+            # Admission is read-only before the existing persistent lock plane is
+            # opened.  The exact identity is revalidated again under both locks.
+            require_exact_pending_rollback(state_root, args.slot, exact_expected)
+            with existing_runtime_host_mutation_lock(state_root):
+                with existing_runtime_transaction_lock(state_root, args.slot):
                     backup_dir, _ = require_exact_pending_rollback(
                         state_root,
                         args.slot,
                         exact_expected,
                     )
                     hidden_output = io.StringIO()
-                    with redirect_stdout(hidden_output):
-                        execution_entered = True
-                        rc = _cmd_rollback_locked(
-                            args,
+                    try:
+                        with redirect_stdout(hidden_output):
+                            execution_entered = True
+                            rc = _cmd_rollback_locked(
+                                args,
+                                state_root,
+                                selected_backup=backup_dir,
+                                exact_expected=exact_expected,
+                                on_mutation_started=observe_mutation_start,
+                            )
+                    except BaseException:
+                        locked_post_state = _exact_recovery_post_state(
                             state_root,
-                            selected_backup=backup_dir,
-                            exact_expected=exact_expected,
-                            on_mutation_started=observe_mutation_start,
+                            args.slot,
+                            exact_expected,
                         )
+                        raise
+                    locked_post_state = _exact_recovery_post_state(
+                        state_root,
+                        args.slot,
+                        exact_expected,
+                        marker_finish_observed=(
+                            rc
+                            in {0, _EXACT_RECOVERY_POST_COMMIT_LOG_FAILURE_RC}
+                        ),
+                    )
         except MarkerBoundRecoveryError as exc:
-            transaction_state = "unavailable"
-            if not exc.reason_code.startswith("exact_target_"):
+            transaction_state, terminal_state = locked_post_state
+            if not execution_entered and not exc.reason_code.startswith(
+                "exact_target_"
+            ):
                 transaction_state, _ = _exact_recovery_post_state(
                     state_root,
                     args.slot,
@@ -234,20 +259,18 @@ def cmd_rollback(args: argparse.Namespace) -> int:
             _emit_marker_recovery_receipt(
                 args,
                 exact_expected,
-                result="rejected",
+                result="failed" if mutation_started else "rejected",
                 reason_code=exc.reason_code,
-                runtime_mutation_started=False,
+                runtime_mutation_started=mutation_started,
                 transaction_state=transaction_state,
-                terminal_state="incomplete",
+                terminal_state=(
+                    terminal_state if execution_entered else "incomplete"
+                ),
             )
             return 1
         except RuntimeError as exc:
             if execution_entered:
-                transaction_state, terminal_state = _exact_recovery_post_state(
-                    state_root,
-                    args.slot,
-                    exact_expected,
-                )
+                transaction_state, terminal_state = locked_post_state
                 _emit_marker_recovery_receipt(
                     args,
                     exact_expected,
@@ -279,11 +302,7 @@ def cmd_rollback(args: argparse.Namespace) -> int:
             return 1
         except Exception:
             if execution_entered:
-                transaction_state, terminal_state = _exact_recovery_post_state(
-                    state_root,
-                    args.slot,
-                    exact_expected,
-                )
+                transaction_state, terminal_state = locked_post_state
                 _emit_marker_recovery_receipt(
                     args,
                     exact_expected,
@@ -308,14 +327,7 @@ def cmd_rollback(args: argparse.Namespace) -> int:
                 terminal_state="incomplete",
             )
             return 1
-        transaction_state, terminal_state = _exact_recovery_post_state(
-            state_root,
-            args.slot,
-            exact_expected,
-            marker_finish_observed=(
-                rc in {0, _EXACT_RECOVERY_POST_COMMIT_LOG_FAILURE_RC}
-            ),
-        )
+        transaction_state, terminal_state = locked_post_state
         succeeded = (
             rc == 0 and mutation_started and transaction_state == "committed"
         )

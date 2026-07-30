@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
 from pathlib import Path
 import shutil
 import stat
@@ -723,6 +724,11 @@ def _prepare_exact_pending_rollback(
     if with_env:
         (runtime_dir / ".env").write_text("VALUE=prior\n", encoding="utf-8")
     backup_dir = backup_agent_runtime_state("oc20", runtime_dir, state_root)
+    # Normal runtime mutation establishes the persistent root-managed lock plane.
+    # Exact recovery is intentionally forbidden from creating it.
+    with runtime_host_mutation_lock(state_root):
+        with runtime_transaction_lock(state_root, "oc20"):
+            pass
     from agent_runtime_ops.domain.runtime_backup import _begin_rollback_transaction
 
     _begin_rollback_transaction("oc20", state_root, backup_dir)
@@ -797,7 +803,9 @@ def test_exact_marker_bound_rollback_rejects_alias_before_lock_or_restore(
             "agent_runtime_ops.commands.apply.get_runtime_binding",
             return_value=binding,
         ),
-        patch("agent_runtime_ops.commands.apply.runtime_host_mutation_lock") as lock,
+        patch(
+            "agent_runtime_ops.commands.apply.existing_runtime_host_mutation_lock"
+        ) as lock,
         patch("agent_runtime_ops.commands.apply.restore_backup") as restore,
     ):
         rc = cmd_rollback(request)
@@ -859,6 +867,34 @@ def test_exact_marker_bound_rollback_commits_only_the_expected_transaction(
     }
 
 
+def test_exact_marker_bound_missing_marker_on_pristine_state_writes_nothing(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    expected = {
+        "backup_metadata_sha256": "sha256:" + "a" * 64,
+        "backup_name": "20260730T010203+0900",
+        "marker_sha256": "sha256:" + "b" * 64,
+        "transaction_id": "c" * 64,
+    }
+    before = sorted(path.relative_to(state_root) for path in state_root.rglob("*"))
+    with (
+        patch("agent_runtime_ops.commands.apply._validate_exact_recovery_target"),
+        patch("agent_runtime_ops.commands.apply._is_root", return_value=True),
+        patch("agent_runtime_ops.commands.apply._state_root", return_value=state_root),
+    ):
+        rc = cmd_rollback(exact_rollback_args(expected))
+    after = sorted(path.relative_to(state_root) for path in state_root.rglob("*"))
+    assert rc == 1
+    assert after == before == []
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["reason_code"] == "pending_transaction_absent"
+    assert receipt["runtime_mutation_started"] is False
+    assert receipt["writes"] == 0
+
+
 def test_exact_marker_bound_rollback_reports_committed_write_when_action_log_fails(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -902,6 +938,80 @@ def test_exact_marker_bound_rollback_reports_committed_write_when_action_log_fai
     assert receipt["transaction_state"] == "committed"
     assert receipt["terminal_state"] == "incomplete"
     assert receipt["writes"] == 1
+
+
+def test_exact_recovery_completion_state_is_captured_under_both_locks(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _runtime_dir, state_root, backup_dir, identity = _prepare_exact_pending_rollback(
+        tmp_path
+    )
+    lock_state = {"host": False, "slot": False}
+    replacement_race = {"new_transaction_after_unlock": False}
+
+    @contextmanager
+    def host_lock(_state_root):
+        lock_state["host"] = True
+        try:
+            yield
+        finally:
+            lock_state["host"] = False
+            replacement_race["new_transaction_after_unlock"] = True
+
+    @contextmanager
+    def slot_lock(_state_root, _slot):
+        assert lock_state["host"] is True
+        lock_state["slot"] = True
+        try:
+            yield
+        finally:
+            lock_state["slot"] = False
+
+    def execute(*_args, on_mutation_started=None, **_kwargs):
+        assert on_mutation_started is not None
+        on_mutation_started()
+        return 0
+
+    def post_state(*_args, **_kwargs):
+        assert lock_state == {"host": True, "slot": True}
+        assert replacement_race["new_transaction_after_unlock"] is False
+        return "committed", "complete"
+
+    with (
+        patch("agent_runtime_ops.commands.apply._validate_exact_recovery_target"),
+        patch("agent_runtime_ops.commands.apply._is_root", return_value=True),
+        patch("agent_runtime_ops.commands.apply._state_root", return_value=state_root),
+        patch(
+            "agent_runtime_ops.commands.apply.existing_runtime_host_mutation_lock",
+            side_effect=host_lock,
+        ),
+        patch(
+            "agent_runtime_ops.commands.apply.existing_runtime_transaction_lock",
+            side_effect=slot_lock,
+        ),
+        patch(
+            "agent_runtime_ops.commands.apply.require_exact_pending_rollback",
+            return_value=(backup_dir, {}),
+        ),
+        patch(
+            "agent_runtime_ops.commands.apply._cmd_rollback_locked",
+            side_effect=execute,
+        ),
+        patch(
+            "agent_runtime_ops.commands.apply._exact_recovery_post_state",
+            side_effect=post_state,
+        ) as observed,
+    ):
+        rc = cmd_rollback(exact_rollback_args(identity))
+
+    assert rc == 0
+    observed.assert_called_once()
+    assert lock_state == {"host": False, "slot": False}
+    assert replacement_race["new_transaction_after_unlock"] is True
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["result"] == "complete"
+    assert receipt["transaction_state"] == "committed"
 
 
 @pytest.mark.parametrize(
@@ -1215,6 +1325,9 @@ def test_exact_marker_bound_rollback_retries_after_failed_live_verification(
     state_root.mkdir()
     agent_compose_path(runtime_dir).write_text("services: {}\n", encoding="utf-8")
     backup_dir = backup_agent_runtime_state("oc20", runtime_dir, state_root)
+    with runtime_host_mutation_lock(state_root):
+        with runtime_transaction_lock(state_root, "oc20"):
+            pass
     from agent_runtime_ops.domain.runtime_backup import _begin_rollback_transaction
 
     _begin_rollback_transaction("oc20", state_root, backup_dir)

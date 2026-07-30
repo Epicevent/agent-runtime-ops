@@ -16,9 +16,13 @@ sudo /usr/local/bin/opsctl rollback TARGET \
 
 `TARGET` must be an enabled runtime binding's exact canonical Linux account. All
 four expectations are required together and use strict canonical grammars.
-The command acquires the existing host mutation lock and target transaction lock
-before reading the marker. Under those locks it opens the root-controlled marker
-without following links, binds its stable bytes to `marker_sha256`, validates
+The command first validates the exact marker and backup through a read-only
+admission path. A missing or invalid marker therefore cannot create the recovery
+directory or persistent lock files while reporting `writes=0`. Only an admitted
+request opens the already-existing root-managed host mutation lock and target
+transaction lock; it never creates this lock plane. Under those locks it reopens
+the root-controlled marker without following links, binds its stable bytes to
+`marker_sha256`, validates
 the transaction id and backup name, and re-hashes the backup metadata and every
 declared artifact. Absence, replacement, link/owner/mode drift, digest drift, or
 any expected-field mismatch is rejected before runtime restore with `writes=0`.

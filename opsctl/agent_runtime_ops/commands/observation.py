@@ -16,7 +16,7 @@ from ..domain.image_approval_policy import (
     policy_key,
     validate_image_approval_target,
 )
-from ..domain.retrieval_contract import SHA256_RE
+from ..domain.retrieval_contract import RETRIEVAL_SCHEMA, SHA256_RE
 from ..domain.runtime_backup import pending_rollback_identity
 from ..domain.runtime_truth import live_runtime_truth
 from ..domain.update_policy import (
@@ -197,17 +197,23 @@ def _images_observation(
     target: str,
     rollout: dict[str, object],
 ) -> dict[str, object]:
+    if is_dev_slot(target):
+        return {
+            "status": "not_required",
+            "family": family,
+            "approval_required": False,
+            "binding_status": "not_required_dev_target",
+            "product": {"status": "not_approved"},
+            "wrapper": {"status": "not_approved"},
+        }
     try:
         approvals = load_image_approvals(state_root)
     except Exception:
         return {"status": "unavailable", "reason_code": "approval_policy_invalid"}
     product = _image_identity(approvals, family, "product")
     wrapper = _image_identity(approvals, family, "wrapper")
-    approval_required = not is_dev_slot(target)
-    if not approval_required:
-        status = "not_required"
-        binding_status = "not_required_dev_target"
-    elif rollout.get("status") != "observed":
+    approval_required = True
+    if rollout.get("status") != "observed":
         status = "degraded"
         binding_status = "rollout_unavailable"
     elif (
@@ -422,6 +428,14 @@ def _validate_runtime_fields(fields: dict[str, str], target: str) -> None:
             raise ReadonlyObservationError("runtime_contract_mismatch")
         if expected_profiles.get(runtime_class) != fields.get("runtime_profile"):
             raise ReadonlyObservationError("runtime_profile_mismatch")
+        if fields.get("retrieval_schema") != RETRIEVAL_SCHEMA:
+            raise ReadonlyObservationError("runtime_retrieval_schema_mismatch")
+        if fields.get("retrieval_transport") != "in_process":
+            raise ReadonlyObservationError("runtime_retrieval_transport_mismatch")
+        if fields.get("container_nas_root") != recipe.data.get(
+            "container_nas_root"
+        ):
+            raise ReadonlyObservationError("runtime_container_nas_root_mismatch")
     except ReadonlyObservationError:
         raise
     except Exception as exc:
@@ -473,7 +487,7 @@ def _transaction_observation(state_root: Any, target: str) -> dict[str, object]:
     if identity is None:
         return {
             "status": "observed",
-            "state": "committed",
+            "state": "no_pending_transaction",
             "pending_marker": False,
         }
     return {
