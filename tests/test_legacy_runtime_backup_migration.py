@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -35,7 +36,7 @@ def _legacy_backup(
     diagnostics: bool = True,
 ) -> Path:
     root = runtime_dir / ".agent-runtime-backups"
-    root.mkdir(mode=0o755)
+    root.mkdir(mode=0o755, exist_ok=True)
     root.chmod(0o755)
     backup = root / name
     backup.mkdir(mode=0o755)
@@ -564,6 +565,217 @@ def test_changed_legacy_source_after_import_fails_closed(
 
     with pytest.raises(ValueError, match="changed after import"):
         import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root)
+
+
+@POSIX_ONLY
+def test_partial_prior_imports_are_idempotent_and_sources_remain(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    first_source = _legacy_backup(
+        runtime_dir,
+        name="20260713T234729+0900",
+        diagnostics=False,
+    )
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+
+    first_import = import_legacy_agent_runtime_backups(
+        "oc20", runtime_dir, state_root
+    )
+    assert len(first_import) == 1
+    first_metadata = (first_import[0] / "backup.json").read_bytes()
+
+    second_source = _legacy_backup(
+        runtime_dir,
+        name="20260713T234730+0900",
+        diagnostics=False,
+    )
+    second_import = import_legacy_agent_runtime_backups(
+        "oc20", runtime_dir, state_root
+    )
+
+    assert len(second_import) == 1
+    assert first_import[0].is_dir()
+    assert (first_import[0] / "backup.json").read_bytes() == first_metadata
+    assert first_source.is_dir()
+    assert second_source.is_dir()
+    assert import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root) == []
+
+
+@POSIX_ONLY
+def test_source_collision_chain_publishes_only_canonical_names(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    timestamp = "20260713T234730+0900"
+    sources = [
+        _legacy_backup(
+            runtime_dir,
+            name=f"{timestamp}{suffix}",
+            diagnostics=False,
+        )
+        for suffix in ("", ".2", ".3")
+    ]
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+
+    imported = import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root)
+
+    assert [item.name for item in imported] == [
+        timestamp,
+        f"{timestamp}.2",
+        f"{timestamp}.3",
+    ]
+    assert all(".2.2" not in item.name for item in imported)
+    assert all(source.is_dir() for source in sources)
+    assert import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root) == []
+
+
+@POSIX_ONLY
+def test_nested_suffix_residue_is_renamed_canonically_without_reimport(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    timestamp = "20260713T234730+0900"
+    source = _legacy_backup(
+        runtime_dir,
+        name=f"{timestamp}.2",
+        diagnostics=False,
+    )
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    imported = import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root)
+    assert len(imported) == 1
+    malformed = imported[0].with_name(f"{timestamp}.2.2")
+    imported[0].rename(malformed)
+    before_digest = hashlib.sha256(
+        (malformed / "backup.json").read_bytes()
+    ).hexdigest()
+
+    repeated = import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root)
+
+    recovered = malformed.parent / timestamp
+    assert repeated == []
+    assert recovered.is_dir()
+    assert not malformed.exists()
+    assert hashlib.sha256((recovered / "backup.json").read_bytes()).hexdigest() == (
+        before_digest
+    )
+    assert source.is_dir()
+    assert import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root) == []
+
+
+@POSIX_ONLY
+def test_nested_suffix_residue_with_wrong_source_identity_is_not_adopted(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    timestamp = "20260713T234730+0900"
+    _legacy_backup(
+        runtime_dir,
+        name=f"{timestamp}.3",
+        diagnostics=False,
+    )
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    imported = import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root)
+    malformed = imported[0].with_name(f"{timestamp}.2.2")
+    imported[0].rename(malformed)
+
+    with pytest.raises(ValueError, match="source identity mismatch"):
+        import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root)
+
+    assert malformed.is_dir()
+    assert not (malformed.parent / timestamp).exists()
+
+
+@POSIX_ONLY
+def test_invalid_nested_suffix_residue_rolls_back_to_original_name(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    _legacy_backup(runtime_dir, diagnostics=False)
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    backup_root = state_root / "runtime-recovery" / "oc20" / "backups"
+    backup_root.mkdir(parents=True, mode=0o700)
+    (state_root / "runtime-recovery").chmod(0o700)
+    (state_root / "runtime-recovery" / "oc20").chmod(0o700)
+    backup_root.chmod(0o700)
+    malformed = backup_root / "20260713T234730+0900.2.2"
+    malformed.mkdir(mode=0o700)
+    metadata = malformed / "backup.json"
+    metadata.write_text("{}\n", encoding="utf-8")
+    metadata.chmod(0o600)
+
+    with pytest.raises(ValueError, match="metadata schema is invalid"):
+        import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root)
+
+    assert malformed.is_dir()
+    assert not (backup_root / "20260713T234730+0900").exists()
+
+
+@POSIX_ONLY
+def test_unknown_managed_backup_entry_fails_closed_without_source_removal(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    source = _legacy_backup(runtime_dir, diagnostics=False)
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    imported = import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root)
+    backup_root = imported[0].parent
+    unknown = backup_root / ".unexpected-managed-entry"
+    unknown.mkdir(mode=0o700)
+    unknown.chmod(0o700)
+
+    with pytest.raises(ValueError, match="unexpected managed backup entry"):
+        import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root)
+
+    assert unknown.is_dir()
+    assert source.is_dir()
+
+
+@POSIX_ONLY
+def test_post_rename_validation_failure_removes_only_the_import_copy(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    source = _legacy_backup(runtime_dir, diagnostics=False)
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    observed: list[Path] = []
+
+    def reject_published(
+        _state_root: Path,
+        _slot: str,
+        backup_dir: Path,
+    ) -> tuple[dict, str]:
+        observed.append(backup_dir)
+        raise ValueError("forced post-rename validation failure")
+
+    with (
+        patch(
+            "agent_runtime_ops.domain.runtime_backup._validate_backup_integrity",
+            side_effect=reject_published,
+        ),
+        pytest.raises(ValueError, match="forced post-rename validation failure"),
+    ):
+        import_legacy_agent_runtime_backups("oc20", runtime_dir, state_root)
+
+    backup_root = state_root / "runtime-recovery" / "oc20" / "backups"
+    assert len(observed) == 1
+    assert not observed[0].exists()
+    assert list(backup_root.iterdir()) == []
+    assert source.is_dir()
 
 
 def test_install_migration_uses_binding_account_and_reports_import_count(

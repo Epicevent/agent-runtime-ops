@@ -120,7 +120,13 @@ any later stale state manifest during rollback. It predates `.env` backup withou
 that `.env` itself was absent, so only `.env` remains unmeasured and is left untouched.
 The later pre-relocation schema's state-manifest marker and private `.env` snapshot, owner,
 group, mode, and explicit-absence marker are all migrated with their original rollback
-semantics.
+semantics. Collision allocation always derives a canonical `timestamp[.N]` name from the
+timestamp base, including when the legacy source name already has a suffix. The installer
+also recognizes only the exact nested-suffix residue produced by the superseded publisher,
+atomically renames it to the next canonical name, validates the complete root-controlled
+backup, and preserves the original legacy source. Validation failure restores the residue
+to its prior name. Any other non-canonical entry in the managed backup root aborts the
+upgrade instead of being silently skipped.
 For the first upgrade only, a backup whose manifest and compose bytes prove that it
 predates all retrieval fields may complete rollback when live truth also proves both the
 capability and runtime projection labels are wholly absent; partial, extra, current
