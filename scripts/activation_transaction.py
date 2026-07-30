@@ -1383,6 +1383,7 @@ def _claim_reactivation_carrier(
     tx_dir: Path, manifest: dict[str, Any]
 ) -> None:
     if manifest["phase"] == "recovered_intent_claimed":
+        _fsync_directory(tx_dir)
         return
     if manifest["phase"] != "recovered_active_intent":
         _fail("recovered broker intent cannot be claimed from the current phase")
@@ -1547,6 +1548,7 @@ def revoke_broker_reactivation(args: argparse.Namespace) -> None:
         _fail("broker reactivation revocation authority mismatch")
     revoked = tx_dir / REVOKED_INTENT_MARKER
     if _lexists(revoked):
+        _fsync_directory(tx_dir)
         print("broker_reactivation_revocation=preserved")
         return
     if manifest["phase"] == "recovered_intent_claimed":

@@ -246,6 +246,10 @@ Adoption first atomically renames the carrier's intent marker to a claimed
 identity. Revocation and adoption therefore cannot both report success; a kill
 before the new pending journal is published leaves a replayable claimed carrier,
 not an unowned or silently revoked intent.
+The transaction helper is an installer-internal surface: supported begin,
+cleanup, recovery, publication, acknowledgement, and revocation calls all run
+under the installer's existing exclusive install lock. Concurrent direct helper
+invocation outside that lock is not an admitted operation contract.
 The rebuilt candidate unit remains disabled through publication. The helper
 then durably commits an at-most-one start-dispatch marker before the installer
 enables or starts the service. Only the immutable candidate release may be

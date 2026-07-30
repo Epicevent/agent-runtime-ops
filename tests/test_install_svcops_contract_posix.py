@@ -1704,12 +1704,58 @@ def test_broker_reactivation_intent_has_exact_typed_revocation() -> None:
         )
         assert wrong.returncode != 0
         assert acknowledged.is_dir()
-        revoked = _run_tx(tree, "revoke-broker-reactivation", *revocation)
-        assert revoked.returncode == 0, revoked.stderr
-        assert revoked.stdout == "broker_reactivation_revocation=recorded\n"
-        repeated = _run_tx(tree, "revoke-broker-reactivation", *revocation)
+        kill_child = (
+            "import importlib.util, os, pathlib, signal, sys\n"
+            f"spec=importlib.util.spec_from_file_location('tx', {str(ACTIVATION_HELPER)!r})\n"
+            "mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)\n"
+            "original=mod._fsync_directory\n"
+            f"carrier=pathlib.Path({str(acknowledged)!r})\n"
+            "def kill_before_revocation_fsync(path):\n"
+            " if pathlib.Path(path)==carrier and (carrier/mod.REVOKED_INTENT_MARKER).exists(): os.kill(os.getpid(), signal.SIGKILL)\n"
+            " return original(path)\n"
+            "mod._fsync_directory=kill_before_revocation_fsync\n"
+            "sys.argv=sys.argv[1:]\n"
+            "raise SystemExit(mod.main())\n"
+        )
+        killed = subprocess.run(
+            _fault_injected_tx_argv(
+                tree, kill_child, "revoke-broker-reactivation", *revocation
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert killed.returncode == -signal.SIGKILL
+        assert (acknowledged / "broker-reactivation-revoked").is_file()
+
+        replay_seen = root / "revocation-replay-fsync"
+        replay_child = (
+            "import importlib.util, pathlib, sys\n"
+            f"spec=importlib.util.spec_from_file_location('tx', {str(ACTIVATION_HELPER)!r})\n"
+            "mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)\n"
+            "original=mod._fsync_directory\n"
+            f"carrier=pathlib.Path({str(acknowledged)!r}); seen=pathlib.Path({str(replay_seen)!r})\n"
+            "def observe_revocation_fsync(path):\n"
+            " if pathlib.Path(path)==carrier and (carrier/mod.REVOKED_INTENT_MARKER).exists(): seen.write_text('seen')\n"
+            " return original(path)\n"
+            "mod._fsync_directory=observe_revocation_fsync\n"
+            "sys.argv=sys.argv[1:]\n"
+            "rc=mod.main()\n"
+            "raise SystemExit(rc if seen.exists() else 96)\n"
+        )
+        repeated = subprocess.run(
+            _fault_injected_tx_argv(
+                tree, replay_child, "revoke-broker-reactivation", *revocation
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
         assert repeated.returncode == 0, repeated.stderr
         assert repeated.stdout == "broker_reactivation_revocation=preserved\n"
+        assert replay_seen.read_text(encoding="utf-8") == "seen"
         cleaned = _run_tx(
             tree, "ack-recovered", "--expected-commit", ACTIVATION_COMMIT
         )
@@ -1817,42 +1863,46 @@ def test_claimed_reactivation_intent_is_replayable_and_excludes_revocation() -> 
         ).hexdigest()
         tree["broker_state"] = "inactive"
         tree["broker_unit_file_state"] = "disabled"
+        previous = tree["previous"]
+        begin_args = (
+            "--install-root",
+            str(tree["install_root"]),
+            "--releases-dir",
+            str(tree["releases"]),
+            "--candidate-dir",
+            str(tree["candidate_dir"]),
+            "--candidate-release",
+            str(tree["candidate"]),
+            "--candidate-commit",
+            ACTIVATION_COMMIT,
+            "--previous-release",
+            str(previous),
+            "--broker-service-name",
+            tree["broker_unit"].name,
+            "--broker-state",
+            "inactive",
+            "--broker-unit-file-state",
+            "disabled",
+        )
         child = (
-            "import importlib.util, os, signal, sys\n"
+            "import importlib.util, os, pathlib, signal, sys\n"
             f"spec=importlib.util.spec_from_file_location('tx', {str(ACTIVATION_HELPER)!r})\n"
             "mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)\n"
-            "original=mod._claim_reactivation_carrier\n"
-            "def kill_after_claim(*args,**kwargs):\n"
-            " original(*args,**kwargs)\n"
-            " os.kill(os.getpid(), signal.SIGKILL)\n"
-            "mod._claim_reactivation_carrier=kill_after_claim\n"
+            "original=mod._fsync_directory\n"
+            f"carrier=pathlib.Path({str(acknowledged)!r})\n"
+            "def kill_before_claim_fsync(path):\n"
+            " if pathlib.Path(path)==carrier and (carrier/mod.ADOPTION_CLAIMED_MARKER).exists(): os.kill(os.getpid(), signal.SIGKILL)\n"
+            " return original(path)\n"
+            "mod._fsync_directory=kill_before_claim_fsync\n"
             "sys.argv=sys.argv[1:]\n"
             "raise SystemExit(mod.main())\n"
         )
-        previous = tree["previous"]
         killed = subprocess.run(
             _fault_injected_tx_argv(
                 tree,
                 child,
                 "begin",
-                "--install-root",
-                str(tree["install_root"]),
-                "--releases-dir",
-                str(tree["releases"]),
-                "--candidate-dir",
-                str(tree["candidate_dir"]),
-                "--candidate-release",
-                str(tree["candidate"]),
-                "--candidate-commit",
-                ACTIVATION_COMMIT,
-                "--previous-release",
-                str(previous),
-                "--broker-service-name",
-                tree["broker_unit"].name,
-                "--broker-state",
-                "inactive",
-                "--broker-unit-file-state",
-                "disabled",
+                *begin_args,
             ),
             check=False,
             capture_output=True,
@@ -1884,8 +1934,30 @@ def test_claimed_reactivation_intent_is_replayable_and_excludes_revocation() -> 
         assert claimed.returncode == 0, claimed.stderr
         assert claimed.stdout == "broker_reactivation_intent=adoption_claimed\n"
 
-        resumed = _begin(tree)
+        replay_seen = root / "claim-replay-fsync"
+        replay_child = (
+            "import importlib.util, pathlib, sys\n"
+            f"spec=importlib.util.spec_from_file_location('tx', {str(ACTIVATION_HELPER)!r})\n"
+            "mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)\n"
+            "original=mod._fsync_directory\n"
+            f"carrier=pathlib.Path({str(acknowledged)!r}); seen=pathlib.Path({str(replay_seen)!r})\n"
+            "def observe_claim_fsync(path):\n"
+            " if pathlib.Path(path)==carrier and (carrier/mod.ADOPTION_CLAIMED_MARKER).exists(): seen.write_text('seen')\n"
+            " return original(path)\n"
+            "mod._fsync_directory=observe_claim_fsync\n"
+            "sys.argv=sys.argv[1:]\n"
+            "rc=mod.main()\n"
+            "raise SystemExit(rc if seen.exists() else 97)\n"
+        )
+        resumed = subprocess.run(
+            _fault_injected_tx_argv(tree, replay_child, "begin", *begin_args),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
         assert resumed.returncode == 0, resumed.stderr
+        assert replay_seen.read_text(encoding="utf-8") == "seen"
         assert tree["tx"].is_dir()
         assert not os.path.lexists(acknowledged)
         assert (
