@@ -101,7 +101,7 @@ def test_svcops_attestations_are_bounded_minimal_and_prune_is_last() -> None:
     active = _function("attest_active_cli_as_ops")
     finalizer = _function("activate_and_attest_cli_or_restore")
     broker_finalizer = _function("install_root_action_broker_or_restore")
-    restorer = _function("restore_previous_active_identity")
+    recovery = _function("recover_and_attest_activation_baseline")
     broker_restart = _function("restart_root_action_broker_for_release")
     package = _function("install_package")
     assert "/usr/bin/timeout --kill-after=1" in runner
@@ -110,29 +110,22 @@ def test_svcops_attestations_are_bounded_minimal_and_prune_is_last() -> None:
     assert '"$release_dir/.venv/bin/opsctl"' in candidate
     assert '"$release_dir/agent-clis/gemini-cli/node_modules/.bin/gemini"' in candidate
     assert 'run_cli_as_ops "$BIN_LINK" --state-root "$STATE_ROOT" update status' in active
-    assert "restore_previous_active_identity" in finalizer
-    assert '"$release_dir" "$commit" "$previous_release" "$broker_state" "$backup_dir"' in finalizer
+    assert "recover_and_attest_activation_baseline" in finalizer
+    assert '"$helper" "$commit" "$previous_release"' in finalizer
     assert "previous active identity restored" in finalizer
-    assert "restore_previous_activation_identity" in restorer
-    assert 'activate_release "$previous_release"' not in restorer
-    assert 'attest_restored_cli_as_ops "$previous_release" "$expected_ref"' in restorer
-    assert 'restart_root_action_broker_for_release "$service_name" "$previous_release"' in restorer
+    assert 'run_activation_transaction "$helper" recover' in recovery
+    assert 'restore_broker_service_from_transaction "$helper" "$previous_release"' in recovery
+    assert 'attest_restored_cli_as_ops "$previous_release" "$expected_commit"' in recovery
+    assert 'run_activation_transaction "$helper" finalize --expect baseline' in recovery
     assert '/usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS"' in broker_restart
     assert 'systemctl restart "$service_name"' in broker_restart
     assert broker_restart.index('systemctl restart "$service_name"') < broker_restart.index(
         'wait_for_root_action_broker_release "$service_name" "$release_dir"'
     )
-    assert "capture_root_action_broker_unit_backup" in broker_finalizer
-    assert "restore_root_action_broker_unit_backup" in broker_finalizer
-    unit_restore = broker_finalizer.index("restore_root_action_broker_unit_backup")
-    assert unit_restore < broker_finalizer.index(
-        "restore_previous_active_identity", unit_restore
-    )
+    assert "recover_and_attest_activation_baseline" in broker_finalizer
+    assert "finalize --expect candidate" in broker_finalizer
     assert package.index('previous_active_release="$(capture_previous_active_release "$commit")"') < package.index(
-        "capture_previous_activation_identity"
-    )
-    assert package.index("capture_previous_activation_identity") < package.index(
-        "activate_and_attest_cli_or_restore"
+        "materialize_exact_source_tree"
     )
     assert package.index("activate_and_attest_cli_or_restore") < package.index(
         "install_root_action_broker_or_restore"
@@ -143,6 +136,90 @@ def test_svcops_attestations_are_bounded_minimal_and_prune_is_last() -> None:
     assert '[[ -x /usr/bin/timeout ]] || die "missing executable: /usr/bin/timeout"' in _function(
         "require_commands"
     )
+
+
+def test_pending_recovery_is_commit_bound_first_gate_after_lock() -> None:
+    package = _function("install_package")
+    helper_runner = _function("run_trusted_activation_helper")
+    cleanup = _function("cleanup_abandoned_activation_staging")
+    assert package.index('commit="$(source_commit "$src")"') < package.index("with_install_lock")
+    assert package.index("verify_activation_helper_identity") < package.index("with_install_lock")
+    assert package.index("with_install_lock") < package.index(
+        'recover_pending_activation_transaction "$activation_helper" "$commit"'
+    )
+    recovery = package.index('recover_pending_activation_transaction "$activation_helper" "$commit"')
+    assert recovery < package.index("cleanup_abandoned_activation_staging")
+    assert recovery < package.index("capture_previous_active_release")
+    assert recovery < package.index("ensure_base_packages")
+    assert package.index("capture_previous_active_release") < package.index(
+        "materialize_exact_source_tree"
+    )
+    for suffix in (
+        '"$ACTIVATION_TRANSACTION_DIR"',
+        '"${ACTIVATION_TRANSACTION_DIR}.new"',
+        '"${ACTIVATION_TRANSACTION_DIR}.complete"',
+        '"${ACTIVATION_TRANSACTION_DIR}.recovered.complete"',
+        '"${ACTIVATION_TRANSACTION_DIR}.recovered.acknowledged"',
+        '"${ACTIVATION_TRANSACTION_DIR}.recovered.retired"',
+        '"$ACTIVATION_CANDIDATE_DIR"',
+    ):
+        assert suffix in package
+    assert "ack-recovered" in cleanup
+    assert '--expected-commit "$expected_commit"' in cleanup
+    assert "recovered_completion_acknowledged=yes) return 2" in cleanup
+    assert "recovered_completion_cleaned=yes) return 2" in cleanup
+    assert package.index("activation_cleanup_rc") < package.index("capture_previous_active_release")
+    assert "completed activation recovery retired; rerun install" in package
+    assert "/usr/bin/python3 -I -" in helper_runner
+    assert "env -i PATH=/usr/local/bin:/usr/bin:/bin" in helper_runner
+    assert "O_NOFOLLOW" in helper_runner
+    assert "activation helper bytes do not match the exact source blob" in helper_runner
+
+
+def test_bootstrap_installs_python_before_python_backed_parent_validation() -> None:
+    bootstrap = _function("bootstrap_from_git")
+    package = _function("install_package")
+    lexical = _function("validate_activation_path_strings")
+    assert "python3" not in lexical
+    assert bootstrap.index("validate_activation_path_strings") < bootstrap.index(
+        "ensure_base_packages"
+    )
+    assert bootstrap.index("ensure_base_packages") < bootstrap.index(
+        "validate_install_root"
+    )
+    assert bootstrap.index("validate_install_root") < bootstrap.index('tmp="$(mktemp -d)"')
+    assert package.index("validate_activation_path_strings") < package.index(
+        'if ! src="$(repo_root)"'
+    )
+    assert package.index("validate_install_root") > package.index("bootstrap_from_git")
+
+
+def test_recovered_completion_acknowledgement_is_a_terminal_cleanup_gate(
+    tmp_path: Path,
+) -> None:
+    trace = tmp_path / "trace"
+    body = (
+        f"TRACE={str(trace)!r}\n"
+        + "run_activation_transaction() { printf 'recovered_completion_acknowledged=yes\\n'; }\n"
+        + "run_trusted_activation_helper() { printf 'generic-cleanup\\n' >>\"$TRACE\"; }\n"
+        + _function("cleanup_abandoned_activation_staging")
+        + f"\ncleanup_abandoned_activation_staging /helper {TARGET}\n"
+    )
+    completed = _run_bash(tmp_path, body)
+    assert completed.returncode == 2
+    assert not trace.exists()
+
+
+def test_activation_source_contains_no_retired_unjournaled_publisher() -> None:
+    assert "_retired_activate_release" not in INSTALL
+    activation = _function("activate_release")
+    assert "mktemp" not in activation
+    assert ".next.$$" not in activation
+    assert "fsync-tree" in activation
+    assert "--broker-state" in activation
+    assert "run_activation_transaction \"$helper\" publish" in activation
+    broker = _function("install_root_action_broker_contract")
+    assert 'run_activation_transaction "$helper" publish-broker' in broker
 
 
 def test_pre_activation_failure_removes_only_candidate_and_stops(tmp_path: Path) -> None:
@@ -254,21 +331,21 @@ def test_post_activation_failure_restores_before_returning_failure(tmp_path: Pat
     trace = tmp_path / "trace"
     body = (
         f"TRACE={str(trace)!r}\n"
+        + "ACTIVATION_TRANSACTION_DIR=$(cd \"$(dirname \"$0\")\" && pwd -P)/pending\n"
+        + "touch \"$ACTIVATION_TRANSACTION_DIR\"\n"
         + "die() { printf 'die:%s\\n' \"$*\" >>\"$TRACE\"; exit 23; }\n"
         + "info() { printf 'info:%s\\n' \"$*\" >>\"$TRACE\"; }\n"
         + "activate_release() { printf 'activate\\n' >>\"$TRACE\"; }\n"
         + "attest_active_cli_as_ops() { return 1; }\n"
-        + "restore_previous_active_identity() { printf 'restore:%s:%s:%s:%s:%s\\n' \"$1\" \"$2\" \"$3\" \"$4\" \"$5\" >>\"$TRACE\"; }\n"
-        + "cleanup_activation_identity_backup() { printf 'cleanup:%s\\n' \"$1\" >>\"$TRACE\"; }\n"
+        + "recover_and_attest_activation_baseline() { printf 'recover:%s:%s:%s\\n' \"$1\" \"$2\" \"$3\" >>\"$TRACE\"; }\n"
         + _function("activate_and_attest_cli_or_restore")
-        + f"\nactivate_and_attest_cli_or_restore /release {TARGET} /previous active /backup\n"
+        + f"\nactivate_and_attest_cli_or_restore /release {TARGET} /previous active /helper\n"
     )
     completed = _run_bash(tmp_path, body)
     assert completed.returncode == 23
     assert trace.read_text(encoding="utf-8").splitlines() == [
         "activate",
-        f"restore:/release:{TARGET}:/previous:active:/backup",
-        "cleanup:/backup",
+        f"recover:/helper:{TARGET}:/previous",
         "die:post-activation svcops CLI attestation failed; previous active identity restored",
     ]
 
@@ -281,62 +358,15 @@ def test_post_activation_success_does_not_enter_restore(tmp_path: Path) -> None:
         + "info() { printf 'info:%s\\n' \"$*\" >>\"$TRACE\"; }\n"
         + "activate_release() { printf 'activate\\n' >>\"$TRACE\"; }\n"
         + "attest_active_cli_as_ops() { return 0; }\n"
-        + "restore_previous_active_identity() { printf 'restore\\n' >>\"$TRACE\"; return 1; }\n"
-        + "cleanup_activation_identity_backup() { printf 'cleanup\\n' >>\"$TRACE\"; }\n"
+        + "recover_and_attest_activation_baseline() { printf 'recover\\n' >>\"$TRACE\"; return 1; }\n"
         + _function("activate_and_attest_cli_or_restore")
-        + f"\nactivate_and_attest_cli_or_restore /release {TARGET} /previous active /backup\n"
+        + f"\nactivate_and_attest_cli_or_restore /release {TARGET} /previous active /helper\n"
     )
     completed = _run_bash(tmp_path, body)
     assert completed.returncode == 0, completed.stderr
     assert trace.read_text(encoding="utf-8").splitlines() == [
         "activate",
         "info:ops_cli_post_activation=svcops_verified",
-    ]
-
-
-def test_restore_repoints_wrappers_and_restarts_exact_previous_broker(tmp_path: Path) -> None:
-    trace = tmp_path / "trace"
-    body = (
-        f"TRACE={str(trace)!r}\n"
-        + "ROOT_ACTION_BROKER_SERVICE_FILE=/etc/systemd/system/agent-runtime-root-action-broker.service\n"
-        + "info() { printf 'info:%s\\n' \"$*\" >>\"$TRACE\"; }\n"
-        + "restore_previous_activation_identity() { printf 'identity:%s:%s:%s\\n' \"$1\" \"$2\" \"$3\" >>\"$TRACE\"; }\n"
-        + "attest_restored_cli_as_ops() { printf 'cli:%s:%s\\n' \"$1\" \"$2\" >>\"$TRACE\"; }\n"
-        + "restart_root_action_broker_for_release() { printf 'broker:%s:%s\\n' \"$1\" \"$2\" >>\"$TRACE\"; }\n"
-        + "root_action_broker_inactive_attested() { printf 'inactive:%s\\n' \"$1\" >>\"$TRACE\"; }\n"
-        + _function("restore_previous_active_identity")
-        + f"\nrestore_previous_active_identity /candidate {TARGET} /previous active /backup\n"
-    )
-    completed = _run_bash(tmp_path, body)
-    assert completed.returncode == 0, completed.stderr
-    assert trace.read_text(encoding="utf-8").splitlines() == [
-        "identity:/candidate:/previous:/backup",
-        f"cli:/previous:{TARGET}",
-        "broker:agent-runtime-root-action-broker.service:/previous",
-        "info:activation_rollback=previous_identity_restored",
-    ]
-
-
-def test_first_install_restore_removes_candidate_and_keeps_broker_inactive(tmp_path: Path) -> None:
-    trace = tmp_path / "trace"
-    body = (
-        f"TRACE={str(trace)!r}\n"
-        + "ROOT_ACTION_BROKER_SERVICE_FILE=/etc/systemd/system/agent-runtime-root-action-broker.service\n"
-        + "info() { printf 'info:%s\\n' \"$*\" >>\"$TRACE\"; }\n"
-        + "restore_previous_activation_identity() { printf 'identity:%s:%s:%s\\n' \"$1\" \"$2\" \"$3\" >>\"$TRACE\"; }\n"
-        + "attest_restored_cli_as_ops() { printf 'cli\\n' >>\"$TRACE\"; }\n"
-        + "restart_root_action_broker_for_release() { printf 'broker\\n' >>\"$TRACE\"; }\n"
-        + "root_action_broker_inactive_attested() { printf 'inactive:%s\\n' \"$1\" >>\"$TRACE\"; }\n"
-        + "root_action_broker_absent_attested() { printf 'absent:%s\\n' \"$1\" >>\"$TRACE\"; }\n"
-        + _function("restore_previous_active_identity")
-        + f"\nrestore_previous_active_identity /candidate {TARGET} '' absent /backup\n"
-    )
-    completed = _run_bash(tmp_path, body)
-    assert completed.returncode == 0, completed.stderr
-    assert trace.read_text(encoding="utf-8").splitlines() == [
-        "identity:/candidate::/backup",
-        "absent:agent-runtime-root-action-broker.service",
-        "info:activation_rollback=previous_identity_restored",
     ]
 
 
@@ -366,24 +396,6 @@ def test_broker_pre_activation_distinguishes_inactive_from_absent(
     assert completed.stdout == f"{expected}\n"
 
 
-def test_restore_failure_never_reports_restored_identity(tmp_path: Path) -> None:
-    trace = tmp_path / "trace"
-    body = (
-        f"TRACE={str(trace)!r}\n"
-        + "ROOT_ACTION_BROKER_SERVICE_FILE=/etc/systemd/system/agent-runtime-root-action-broker.service\n"
-        + "info() { printf 'info:%s\\n' \"$*\" >>\"$TRACE\"; }\n"
-        + "restore_previous_activation_identity() { printf 'identity\\n' >>\"$TRACE\"; return 1; }\n"
-        + "attest_restored_cli_as_ops() { return 1; }\n"
-        + "restart_root_action_broker_for_release() { printf 'broker\\n' >>\"$TRACE\"; }\n"
-        + "root_action_broker_inactive_attested() { return 0; }\n"
-        + _function("restore_previous_active_identity")
-        + f"\nrestore_previous_active_identity /candidate {TARGET} /previous active /backup\n"
-    )
-    completed = _run_bash(tmp_path, body)
-    assert completed.returncode != 0
-    assert trace.read_text(encoding="utf-8").splitlines() == ["identity"]
-
-
 def test_broker_partial_failure_restores_unit_then_exact_active_identity(
     tmp_path: Path,
 ) -> None:
@@ -391,22 +403,18 @@ def test_broker_partial_failure_restores_unit_then_exact_active_identity(
     body = (
         f"TRACE={str(trace)!r}\n"
         + "die() { printf 'die:%s\\n' \"$*\" >>\"$TRACE\"; exit 23; }\n"
-        + "capture_root_action_broker_unit_backup() { printf 'capture-unit:%s\\n' \"$1\" >>\"$TRACE\"; }\n"
-        + "install_root_action_broker_contract() { printf 'broker-partial:%s\\n' \"$1\" >>\"$TRACE\"; return 1; }\n"
-        + "restore_root_action_broker_unit_backup() { printf 'restore-unit:%s\\n' \"$1\" >>\"$TRACE\"; }\n"
-        + "restore_previous_active_identity() { printf 'restore-identity:%s:%s:%s:%s:%s\\n' \"$1\" \"$2\" \"$3\" \"$4\" \"$5\" >>\"$TRACE\"; }\n"
-        + "cleanup_activation_identity_backup() { printf 'cleanup:%s\\n' \"$1\" >>\"$TRACE\"; }\n"
+        + "run_activation_transaction() { [[ \"$2\" == show ]] && { printf 'active\\n'; return; }; return 1; }\n"
+        + "install_root_action_broker_contract() { printf 'broker-partial:%s:%s\\n' \"$1\" \"$2\" >>\"$TRACE\"; return 1; }\n"
+        + "attest_candidate_root_action_broker_state() { printf 'unexpected-attest\\n' >>\"$TRACE\"; return 1; }\n"
+        + "recover_and_attest_activation_baseline() { printf 'recover:%s:%s:%s\\n' \"$1\" \"$2\" \"$3\" >>\"$TRACE\"; }\n"
         + _function("install_root_action_broker_or_restore")
-        + f"\ninstall_root_action_broker_or_restore /candidate {TARGET} /previous active /backup\n"
+        + f"\ninstall_root_action_broker_or_restore /candidate {TARGET} /previous active /helper\n"
     )
     completed = _run_bash(tmp_path, body)
     assert completed.returncode == 23
     assert trace.read_text(encoding="utf-8").splitlines() == [
-        "capture-unit:/backup",
-        "broker-partial:/candidate",
-        "restore-unit:/backup",
-        f"restore-identity:/candidate:{TARGET}:/previous:active:/backup",
-        "cleanup:/backup",
+        "broker-partial:/candidate:/helper",
+        f"recover:/helper:{TARGET}:/previous",
         "die:root-action broker setup failed; previous active identity restored",
     ]
 
@@ -416,156 +424,148 @@ def test_broker_success_never_enters_restore_and_cleans_backup(tmp_path: Path) -
     body = (
         f"TRACE={str(trace)!r}\n"
         + "die() { exit 23; }\n"
-        + "capture_root_action_broker_unit_backup() { printf 'capture-unit\\n' >>\"$TRACE\"; }\n"
-        + "install_root_action_broker_contract() { printf 'broker-ok\\n' >>\"$TRACE\"; }\n"
-        + "restore_root_action_broker_unit_backup() { printf 'restore-unit\\n' >>\"$TRACE\"; return 1; }\n"
-        + "restore_previous_active_identity() { printf 'restore-identity\\n' >>\"$TRACE\"; return 1; }\n"
-        + "cleanup_activation_identity_backup() { printf 'cleanup\\n' >>\"$TRACE\"; }\n"
+        + "install_root_action_broker_contract() { printf 'broker-ok:%s:%s\\n' \"$1\" \"$2\" >>\"$TRACE\"; }\n"
+        + "attest_candidate_root_action_broker_state() { printf 'attest:%s:%s:%s\\n' \"$1\" \"$2\" \"$3\" >>\"$TRACE\"; }\n"
+        + "run_activation_transaction() { if [[ \"$2\" == show ]]; then printf 'active\\n'; else printf 'tx:%s:%s:%s:%s\\n' \"$1\" \"$2\" \"$3\" \"$4\" >>\"$TRACE\"; fi; }\n"
+        + "recover_and_attest_activation_baseline() { printf 'recover\\n' >>\"$TRACE\"; return 1; }\n"
         + _function("install_root_action_broker_or_restore")
-        + f"\ninstall_root_action_broker_or_restore /candidate {TARGET} /previous active /backup\n"
+        + f"\ninstall_root_action_broker_or_restore /candidate {TARGET} /previous active /helper\n"
     )
     completed = _run_bash(tmp_path, body)
     assert completed.returncode == 0, completed.stderr
     assert trace.read_text(encoding="utf-8").splitlines() == [
-        "capture-unit",
-        "broker-ok",
-        "cleanup",
+        "broker-ok:/candidate:/helper",
+        "attest:/candidate:/helper:active",
+        "tx:/helper:finalize:--expect:candidate",
     ]
 
-
-def test_real_broker_unit_write_failure_reaches_restore_boundary(tmp_path: Path) -> None:
-    release = tmp_path / "release"
-    unit_dir = release / "systemd"
-    unit_dir.mkdir(parents=True)
-    (unit_dir / "agent-runtime-root-action-broker.service").write_text(
-        "ExecStart=@@CURRENT_LINK@@/bin\nEnvironment=AGENT_RUNTIME_OPS_RELEASE=@@RELEASE_DIR@@\n",
-        encoding="utf-8",
-    )
+def test_real_broker_publish_failure_reaches_durable_recovery_boundary(tmp_path: Path) -> None:
     trace = tmp_path / "trace"
     body = (
-        "ROOT=$(cd \"$(dirname \"$0\")\" && pwd -P)\n"
-        + f"TRACE={str(trace)!r}\n"
-        + "ROOT_ACTION_TRUSTED_ACCOUNT=svcops\n"
-        + "INSTALL_ROOT=$ROOT/install\n"
-        + "ROOT_ACTION_STATE_ROOT=$ROOT/state\n"
-        + "ROOT_ACTION_PRIVATE_ROOT=$ROOT/state/private\n"
-        + "ROOT_ACTION_PUBLIC_ROOT=$ROOT/state/public\n"
-        + "ROOT_ACTION_RUNTIME_ROOT=$ROOT/run\n"
-        + "ROOT_ACTION_BROKER_SERVICE_FILE=$ROOT/broker.service\n"
-        + "getent() { return 0; }\n"
-        + "id() { if [[ \"${1:-}\" == '-gn' ]]; then printf 'svcops\\n'; else command id \"$@\"; fi; }\n"
-        + "command() { if [[ \"${1:-}\" == '-v' && \"${2:-}\" == 'systemctl' ]]; then return 1; fi; builtin command \"$@\"; }\n"
-        + "install() { local last=\"${!#}\"; if [[ \"$last\" == \"$ROOT_ACTION_BROKER_SERVICE_FILE\" ]]; then printf 'unit-write-failed\\n' >>\"$TRACE\"; return 19; fi; return 0; }\n"
-        + "info() { printf 'info:%s\\n' \"$*\" >>\"$TRACE\"; }\n"
+        f"TRACE={str(trace)!r}\n"
         + "die() { printf 'die:%s\\n' \"$*\" >>\"$TRACE\"; exit 23; }\n"
-        + "capture_root_action_broker_unit_backup() { printf 'capture\\n' >>\"$TRACE\"; }\n"
-        + "restore_root_action_broker_unit_backup() { printf 'restore-unit\\n' >>\"$TRACE\"; }\n"
-        + "restore_previous_active_identity() { printf 'restore-identity\\n' >>\"$TRACE\"; }\n"
-        + "cleanup_activation_identity_backup() { printf 'cleanup\\n' >>\"$TRACE\"; }\n"
-        + _function("install_root_action_broker_contract")
+        + "run_activation_transaction() { [[ \"$2\" == show ]] && { printf 'active\\n'; return; }; return 1; }\n"
+        + "install_root_action_broker_contract() { printf 'publish-broker:%s:%s\\n' \"$1\" \"$2\" >>\"$TRACE\"; return 19; }\n"
+        + "attest_candidate_root_action_broker_state() { printf 'unexpected-attest\\n' >>\"$TRACE\"; return 1; }\n"
+        + "recover_and_attest_activation_baseline() { printf 'recover:%s:%s:%s\\n' \"$1\" \"$2\" \"$3\" >>\"$TRACE\"; }\n"
         + _function("install_root_action_broker_or_restore")
-        + "\ninstall_root_action_broker_or_restore \"$ROOT/release\" "
-        + f"{TARGET} /previous active \"$ROOT/backup\"\n"
+        + f"\ninstall_root_action_broker_or_restore /candidate {TARGET} /previous active /helper\n"
     )
     completed = _run_bash(tmp_path, body)
     assert completed.returncode == 23, completed.stderr
     assert trace.read_text(encoding="utf-8").splitlines() == [
-        "capture",
-        "unit-write-failed",
-        "restore-unit",
-        "restore-identity",
-        "cleanup",
+        "publish-broker:/candidate:/helper",
+        f"recover:/helper:{TARGET}:/previous",
         "die:root-action broker setup failed; previous active identity restored",
     ]
 
 
-@pytest.mark.skipif(os.name != "posix", reason="requires POSIX links and modes")
-def test_restore_previous_activation_identity_uses_exact_wrapper_bytes(
+def test_recorded_inactive_broker_drift_to_active_recovers_without_finalize(
     tmp_path: Path,
 ) -> None:
-    install_root = tmp_path / "install"
-    releases = install_root / "releases"
-    previous = releases / "previous"
-    candidate = releases / "candidate"
-    backup = tmp_path / "backup"
-    bin_dir = tmp_path / "bin"
-    for path in (previous, candidate, backup, bin_dir):
-        path.mkdir(parents=True, exist_ok=True)
-    current = install_root / "current"
-    current.symlink_to("releases/candidate")
-    paths = {
-        "opsctl": bin_dir / "opsctl",
-        "mcp": bin_dir / "agent-runtime-ops-mcp",
-        "gemini": bin_dir / "gemini",
-    }
-    for name, path in paths.items():
-        path.write_text(f"candidate-{name}\n", encoding="utf-8")
-        path.chmod(0o755)
-        (backup / name).write_text(f"previous-{name}\n", encoding="utf-8")
-        (backup / name).chmod(0o600)
-    (backup / "state").write_text("previous\n", encoding="utf-8")
-    (backup / "manifest-target").write_text(
-        "current/.agent-runtime-ops-manifest\n", encoding="utf-8"
-    )
-    (backup / "state").chmod(0o600)
-    (backup / "manifest-target").chmod(0o600)
-    backup.chmod(0o700)
-    manifest = install_root / ".agent-runtime-ops-manifest"
-    manifest.symlink_to("current/.agent-runtime-ops-manifest")
+    trace = tmp_path / "trace"
     body = (
-        f"INSTALL_ROOT={str(install_root)!r}\n"
-        + f"RELEASES_DIR={str(releases)!r}\n"
-        + f"CURRENT_LINK={str(current)!r}\n"
-        + f"BIN_LINK={str(paths['opsctl'])!r}\n"
-        + f"MCP_BIN_LINK={str(paths['mcp'])!r}\n"
-        + f"GEMINI_BIN_LINK={str(paths['gemini'])!r}\n"
-        + f"MANIFEST={str(manifest)!r}\n"
-        + "OPS_GROUP=$(id -gn)\n"
-        + "chown() { :; }\n"
-        + _function("restore_previous_activation_identity")
-        + f"\nrestore_previous_activation_identity {str(candidate)!r} {str(previous)!r} {str(backup)!r}\n"
+        f"TRACE={str(trace)!r}\n"
+        + "die() { printf 'die:%s\\n' \"$*\" >>\"$TRACE\"; exit 23; }\n"
+        + "run_activation_transaction() { if [[ \"$2\" == show ]]; then printf 'inactive\\n'; else printf 'unexpected-finalize\\n' >>\"$TRACE\"; fi; }\n"
+        + "install_root_action_broker_contract() { printf 'drift:inactive-to-active\\n' >>\"$TRACE\"; return 1; }\n"
+        + "attest_candidate_root_action_broker_state() { printf 'unexpected-attest\\n' >>\"$TRACE\"; return 1; }\n"
+        + "recover_and_attest_activation_baseline() { printf 'recover:%s:%s:%s\\n' \"$1\" \"$2\" \"$3\" >>\"$TRACE\"; }\n"
+        + _function("install_root_action_broker_or_restore")
+        + f"\ninstall_root_action_broker_or_restore /candidate {TARGET} /previous inactive /helper\n"
     )
     completed = _run_bash(tmp_path, body)
-    assert completed.returncode == 0, completed.stderr
-    assert current.resolve() == previous.resolve()
-    for name, path in paths.items():
-        assert path.read_text(encoding="utf-8") == f"previous-{name}\n"
-    assert manifest.readlink() == Path("current/.agent-runtime-ops-manifest")
+    assert completed.returncode == 23, completed.stderr
+    assert trace.read_text(encoding="utf-8").splitlines() == [
+        "drift:inactive-to-active",
+        f"recover:/helper:{TARGET}:/previous",
+        "die:root-action broker setup failed; previous active identity restored",
+    ]
 
 
-@pytest.mark.skipif(os.name != "posix", reason="requires POSIX links")
-def test_first_install_partial_wrapper_removal_is_failure(tmp_path: Path) -> None:
-    release = tmp_path / "candidate"
-    release.mkdir()
-    current = tmp_path / "current"
-    current.symlink_to(release)
-    paths = [tmp_path / name for name in ("opsctl", "mcp", "gemini", "manifest")]
-    paths[0].write_text(
-        "#!/usr/bin/env bash\n"
-        f'exec "{current}/.venv/bin/opsctl" "$@"\n',
-        encoding="utf-8",
-    )
-    paths[1].write_text(
-        "#!/usr/bin/env bash\n"
-        f'exec "{current}/.venv/bin/agent-runtime-ops-mcp" "$@"\n',
-        encoding="utf-8",
-    )
-    paths[2].write_text(
-        "agent-runtime-ops managed gemini wrapper\n", encoding="utf-8"
-    )
-    paths[3].symlink_to("current/.agent-runtime-ops-manifest")
+def test_broker_contract_revalidates_recorded_inactive_before_publication(
+    tmp_path: Path,
+) -> None:
+    trace = tmp_path / "trace"
     body = (
-        f"CURRENT_LINK={str(current)!r}\n"
-        + f"BIN_LINK={str(paths[0])!r}\n"
-        + f"MCP_BIN_LINK={str(paths[1])!r}\n"
-        + f"GEMINI_BIN_LINK={str(paths[2])!r}\n"
-        + f"MANIFEST={str(paths[3])!r}\n"
-        + "rm() { if [[ \"${3:-}\" == \"$MCP_BIN_LINK\" ]]; then return 1; fi; command rm \"$@\"; }\n"
-        + _function("deactivate_first_release")
-        + f"\ndeactivate_first_release {str(release)!r}\n"
+        f"TRACE={str(trace)!r}\n"
+        + "ROOT_ACTION_TRUSTED_ACCOUNT=svcops\n"
+        + "ROOT_ACTION_STATE_ROOT=/state\n"
+        + "ROOT_ACTION_PRIVATE_ROOT=/state/private\n"
+        + "ROOT_ACTION_PUBLIC_ROOT=/state/public\n"
+        + "ROOT_ACTION_RUNTIME_ROOT=/run/root-action\n"
+        + "ROOT_ACTION_BROKER_SERVICE_FILE=/etc/systemd/system/agent-runtime-root-action-broker.service\n"
+        + "getent() { return 0; }\n"
+        + "id() { [[ \"$1\" == -gn ]] && printf 'svcops\\n'; }\n"
+        + "install() { return 0; }\n"
+        + "run_activation_transaction() {\n"
+        + "  if [[ \"$2\" == show && \"$3\" == --field ]]; then\n"
+        + "    case \"$4\" in\n"
+        + "      broker_state) printf 'inactive\\n' ;;\n"
+        + "      previous_release) printf '/previous\\n' ;;\n"
+        + "      broker_service_name) printf 'agent-runtime-root-action-broker.service\\n' ;;\n"
+        + "    esac\n"
+        + "    return 0\n"
+        + "  fi\n"
+        + "  printf 'unexpected-publish\\n' >>\"$TRACE\"\n"
+        + "}\n"
+        + "capture_root_action_broker_state() { printf 'capture:active\\n' >>\"$TRACE\"; printf 'active\\n'; }\n"
+        + _function("install_root_action_broker_contract")
+        + "\ninstall_root_action_broker_contract /candidate /helper\n"
     )
     completed = _run_bash(tmp_path, body)
     assert completed.returncode != 0
-    assert not paths[0].exists()
-    assert paths[1].exists()
-    assert current.is_symlink()
+    assert trace.read_text(encoding="utf-8").splitlines() == ["capture:active"]
+
+
+def test_post_publish_inactive_broker_drift_recovers_without_candidate_finalize(
+    tmp_path: Path,
+) -> None:
+    trace = tmp_path / "trace"
+    body = (
+        f"TRACE={str(trace)!r}\n"
+        + "die() { printf 'die:%s\\n' \"$*\" >>\"$TRACE\"; exit 23; }\n"
+        + "run_activation_transaction() {\n"
+        + "  if [[ \"$2\" == show ]]; then\n"
+        + "    [[ \"$4\" == broker_state ]] && printf 'inactive\\n' || printf 'agent-runtime-root-action-broker.service\\n'\n"
+        + "  else printf 'unexpected-finalize\\n' >>\"$TRACE\"; fi\n"
+        + "}\n"
+        + "install_root_action_broker_contract() { printf 'broker-published\\n' >>\"$TRACE\"; }\n"
+        + "root_action_broker_release_attested() { printf 'unexpected-release-attest\\n' >>\"$TRACE\"; return 1; }\n"
+        + "root_action_broker_inactive_attested() { printf 'observed-live-active\\n' >>\"$TRACE\"; return 1; }\n"
+        + "recover_and_attest_activation_baseline() { printf 'recover:%s:%s:%s\\n' \"$1\" \"$2\" \"$3\" >>\"$TRACE\"; }\n"
+        + _function("attest_candidate_root_action_broker_state")
+        + _function("install_root_action_broker_or_restore")
+        + f"\ninstall_root_action_broker_or_restore /candidate {TARGET} /previous inactive /helper\n"
+    )
+    completed = _run_bash(tmp_path, body)
+    assert completed.returncode == 23, completed.stderr
+    assert trace.read_text(encoding="utf-8").splitlines() == [
+        "broker-published",
+        "observed-live-active",
+        f"recover:/helper:{TARGET}:/previous",
+        "die:root-action broker setup failed; previous active identity restored",
+    ]
+
+
+@pytest.mark.parametrize("journal_state,caller_state", (("inactive", "active"), ("active", "inactive")))
+def test_caller_broker_state_cannot_override_durable_journal(
+    tmp_path: Path, journal_state: str, caller_state: str
+) -> None:
+    trace = tmp_path / "trace"
+    body = (
+        f"TRACE={str(trace)!r}\n"
+        + "die() { printf 'die:%s\\n' \"$*\" >>\"$TRACE\"; exit 23; }\n"
+        + f"run_activation_transaction() {{ [[ \"$2\" == show ]] && printf '{journal_state}\\n' || printf 'unexpected-finalize\\n' >>\"$TRACE\"; }}\n"
+        + "install_root_action_broker_contract() { printf 'unexpected-install\\n' >>\"$TRACE\"; }\n"
+        + "attest_candidate_root_action_broker_state() { printf 'unexpected-attest\\n' >>\"$TRACE\"; }\n"
+        + "recover_and_attest_activation_baseline() { printf 'recover:%s:%s:%s\\n' \"$1\" \"$2\" \"$3\" >>\"$TRACE\"; }\n"
+        + _function("install_root_action_broker_or_restore")
+        + f"\ninstall_root_action_broker_or_restore /candidate {TARGET} /previous {caller_state} /helper\n"
+    )
+    completed = _run_bash(tmp_path, body)
+    assert completed.returncode == 23, completed.stderr
+    assert trace.read_text(encoding="utf-8").splitlines() == [
+        f"recover:/helper:{TARGET}:/previous",
+        "die:root-action broker setup failed; previous active identity restored",
+    ]

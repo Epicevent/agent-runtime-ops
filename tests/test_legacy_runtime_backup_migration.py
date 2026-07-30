@@ -920,20 +920,18 @@ def test_install_runs_legacy_backup_migration_before_release_activation() -> Non
     call_offset = text.index(
         call, text.index('chown -R root:"$OPS_GROUP" "$release_dir"')
     )
-    capture_offset = text.index(
-        "capture_previous_activation_identity", call_offset
+    admission_offset = text.index(
+        'previous_active_release="$(capture_previous_active_release "$commit")"'
     )
-    attestation_offset = text.index(
-        "activate_and_attest_cli_or_restore", capture_offset
-    )
+    attestation_offset = text.index("activate_and_attest_cli_or_restore", call_offset)
     broker_offset = text.index(
         "install_root_action_broker_or_restore", attestation_offset
     )
     prune_offset = text.index("prune_old_release_code", broker_offset)
 
     assert (
-        call_offset
-        < capture_offset
+        admission_offset
+        < call_offset
         < attestation_offset
         < broker_offset
         < prune_offset

@@ -16,6 +16,9 @@ def test_install_places_fixed_root_action_contract_without_activation_or_new_sud
     start = install.index("install_root_action_broker_contract()")
     end = install.index("\n}\n", start) + 3
     function = install[start:end]
+    activation_start = install.index("activate_release()")
+    activation_end = install.index("\n}\n", activation_start) + 3
+    activation = install[activation_start:activation_end]
     assert 'ROOT_ACTION_STATE_ROOT="/var/lib/agent-runtime-ops/root-actions"' in install
     assert 'ROOT_ACTION_PRIVATE_ROOT="$ROOT_ACTION_STATE_ROOT/private"' in install
     assert 'ROOT_ACTION_PUBLIC_ROOT="$ROOT_ACTION_STATE_ROOT/public"' in install
@@ -27,16 +30,17 @@ def test_install_places_fixed_root_action_contract_without_activation_or_new_sud
         'install -d -o root -g "$ROOT_ACTION_TRUSTED_ACCOUNT" -m 0750 '
         '"$ROOT_ACTION_PUBLIC_ROOT"'
     ) in function
-    assert 'install -o root -g root -m 0644 "$unit_tmp"' in function
-    assert 'current_path="$install_root_real/current"' in function
-    assert '[[ "$current_path" =~ ^/[A-Za-z0-9._/-]+$ ]]' in function
-    assert '-e "s|@@CURRENT_LINK@@|$current_path|g"' in function
-    assert '-e "s|@@RELEASE_DIR@@|$release_dir|g"' in function
+    assert 'run_activation_transaction "$helper" publish-broker' in function
+    assert 'current_path="$install_root_real/current"' in activation
+    assert '[[ "$current_path" =~ ^/[A-Za-z0-9._/-]+$ ]]' in activation
+    assert '-e "s|@@CURRENT_LINK@@|$current_path|g"' in activation
+    assert '-e "s|@@RELEASE_DIR@@|$release_dir|g"' in activation
     assert "systemctl enable" not in function
     assert "systemctl start" not in function
-    assert 'systemctl is-active --quiet "$service_name"' in function
-    assert 'systemctl restart "$service_name"' in function
-    assert 'wait_for_root_action_broker_release "$service_name" "$release_dir"' in function
+    assert 'observed_state="$(capture_root_action_broker_state "$previous_release")"' in function
+    assert '[[ "$observed_state" == "$broker_state" ]] || return 1' in function
+    assert 'systemctl restart "$service_name"' in install
+    assert 'wait_for_root_action_broker_release "$service_name" "$release_dir"' in install
     assert "active_restarted_release_verified" in function
     assert "ROOT_ACTION_POST_RESTART_ATTESTATION_ATTEMPTS=40" in install
     assert "ROOT_ACTION_POST_RESTART_ATTESTATION_INTERVAL_SECONDS=0.25" in install
