@@ -178,6 +178,7 @@ def test_svcops_attestations_are_bounded_minimal_and_prune_is_last() -> None:
 
 
 def test_legacy_unrunnable_baseline_exception_is_narrow_and_candidate_gate_remains() -> None:
+    discriminator = _function("legacy_restrictive_umask_baseline_is_shaped")
     identity = _function_block(
         "exact_preexisting_unrunnable_cli_baseline_identity",
         "attest_exact_preexisting_unrunnable_cli_baseline",
@@ -190,6 +191,8 @@ def test_legacy_unrunnable_baseline_exception_is_narrow_and_candidate_gate_remai
     package = _function("install_package")
 
     assert "LEGACY_RESTRICTIVE_UMASK_BASELINE_REF" in identity
+    assert "os.O_NOFOLLOW" in discriminator
+    assert "st_mtime_ns" in discriminator and "st_ctime_ns" in discriminator
     assert 'stat.S_IMODE(venv_meta.st_mode) != 0o700' in identity
     assert "venv_opsctl_meta.st_uid != 0" in identity
     assert "venv_opsctl_meta.st_gid != ops_gid" in identity
@@ -199,13 +202,30 @@ def test_legacy_unrunnable_baseline_exception_is_narrow_and_candidate_gate_remai
     assert 'line == "updates:"' in identity
     assert 'line == "  agent-runtime-ops:"' in identity
     assert "gemini_wrapper != expected_gemini_wrapper" in identity
-    assert 'run_cli_as_ops "$release_dir/.venv/bin/opsctl"' in degraded
-    assert '[[ "$cli_rc" -eq 126 ]]' in degraded
+    assert 'path_is_not_executable_as_ops "$release_dir/.venv/bin/opsctl"' in degraded
+    assert 'run_cli_as_ops "$release_dir/.venv/bin/opsctl"' not in degraded
+    assert "c615067ad8d61a09f116bd9f9e22d949d45b9603af8de184fd90718ebf27765e" in INSTALL
+    assert 'source_files != expected_source_files' in identity
+    assert 'source_dirs != expected_source_dirs' in identity
+    assert 'source_bytes != expected_source_bytes' in identity
+    assert 'venv_mcp = os.path.join(venv, "bin", "agent-runtime-ops-mcp")' in identity
+    assert 'require_symlink(gemini_link, "../@google/gemini-cli/bundle/gemini.js")' in identity
+    assert 'source_projection = validate_source_projection()' in identity
+    assert "payload = read_regular(path, 0o755" in identity
+    assert "body not in (distlib_template, legacy_template)" in identity
+    assert 'gemini_package_data.get("bin") != {"gemini": "bundle/gemini.js"}' in identity
+    assert "gemini_bundle_bytes = read_regular_bytes(gemini_bundle, 0o700" in identity
     assert degraded.count("exact_preexisting_unrunnable_cli_baseline_identity") == 2
     assert 'RESTORED_CLI_RESULT="svcops_verified"' in combined
     assert (
         'RESTORED_CLI_RESULT="restored_exact_but_preexisting_unrunnable"'
         in combined
+    )
+    assert combined.index("legacy_restrictive_umask_baseline_is_shaped") < combined.index(
+        "attest_restored_cli_as_ops"
+    )
+    assert combined.index("attest_exact_preexisting_unrunnable_cli_baseline") < combined.index(
+        "attest_restored_cli_as_ops"
     )
     assert "attest_restored_cli_or_exact_preexisting_unrunnable" in capture
     assert "attest_restored_cli_or_exact_preexisting_unrunnable" in recovery
@@ -217,6 +237,36 @@ def test_legacy_unrunnable_baseline_exception_is_narrow_and_candidate_gate_remai
     assert package.index('prepare_release_for_activation "$release_dir" "$commit"') < package.index(
         "activate_and_attest_cli_or_restore"
     )
+
+
+def test_legacy_shaped_altered_opsctl_is_rejected_before_live_wrapper_execution(
+    tmp_path: Path,
+) -> None:
+    sentinel = tmp_path / "altered-wrapper-executed"
+    wrapper = tmp_path / "opsctl"
+    wrapper.write_text(
+        "#!/usr/bin/env bash\n"
+        f"printf 'executed\\n' > {_shell_path(sentinel)!r}\n"
+        "exit 0\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    wrapper.chmod(0o755)
+    body = (
+        f"BIN_LINK={_shell_path(wrapper)!r}\n"
+        + "RESTORED_CLI_RESULT=''\n"
+        + "legacy_restrictive_umask_baseline_is_shaped() { return 0; }\n"
+        + "attest_exact_preexisting_unrunnable_cli_baseline() { return 1; }\n"
+        + "attest_restored_cli_as_ops() { \"$BIN_LINK\" profile list >/dev/null; }\n"
+        + _function("attest_restored_cli_or_exact_preexisting_unrunnable")
+        + f"\nif attest_restored_cli_or_exact_preexisting_unrunnable /legacy {TARGET}; then\n"
+        + "  exit 91\n"
+        + "fi\n"
+        + "[[ -z \"$RESTORED_CLI_RESULT\" ]]\n"
+    )
+    completed = _run_bash(tmp_path, body)
+    assert completed.returncode == 0, completed.stderr
+    assert not sentinel.exists()
 
 
 def test_pending_recovery_is_commit_bound_first_gate_after_lock() -> None:

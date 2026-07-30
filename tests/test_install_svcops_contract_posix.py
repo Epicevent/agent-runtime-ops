@@ -76,8 +76,12 @@ def _reader() -> Any:
         pytest.skip("root POSIX ownership semantics are required")
     name = os.environ.get("SUDO_USER", "")
     if not name or name == "root":
+        if os.environ.get("CI") == "true" and os.name == "posix" and os.geteuid() == 0:
+            pytest.fail("Linux CI must provide a distinct SUDO_USER for ownership tests")
         pytest.skip("a distinct SUDO_USER reader is required")
-    return pwd.getpwnam(name)
+    reader = pwd.getpwnam(name)
+    assert reader.pw_uid != 0
+    return reader
 
 
 @contextmanager
@@ -360,6 +364,57 @@ def _legacy_gemini_wrapper(current: Path, ops_user: str, gemini_home: str) -> st
     )
 
 
+def _fixture_source_projection(release: Path) -> tuple[str, int, int, int]:
+    rows: list[str] = []
+    source_files = 0
+    source_dirs = 0
+    source_bytes = 0
+    generated_roots = {
+        ".venv",
+        "agent-clis/gemini-cli/node_modules",
+        "build",
+        "opsctl/agent_runtime_ops.egg-info",
+    }
+
+    def visit(directory: Path, relative: str) -> None:
+        nonlocal source_files, source_dirs, source_bytes
+        for entry in sorted(os.scandir(directory), key=lambda value: value.name):
+            child_relative = entry.name if not relative else f"{relative}/{entry.name}"
+            if not relative and entry.name == ".agent-runtime-ops-manifest":
+                continue
+            if child_relative in generated_roots or entry.name == "__pycache__":
+                continue
+            path = Path(entry.path)
+            meta = os.lstat(path)
+            if stat.S_ISDIR(meta.st_mode) and not stat.S_ISLNK(meta.st_mode):
+                assert stat.S_IMODE(meta.st_mode) == 0o755
+                rows.append("\0".join(("D", child_relative, "0755")))
+                source_dirs += 1
+                visit(path, child_relative)
+                continue
+            assert stat.S_ISREG(meta.st_mode) and not stat.S_ISLNK(meta.st_mode)
+            expected_mode = 0o755 if child_relative == "install.sh" else 0o644
+            assert stat.S_IMODE(meta.st_mode) == expected_mode
+            payload = path.read_bytes()
+            rows.append(
+                "\0".join(
+                    (
+                        "F",
+                        child_relative,
+                        f"{expected_mode:04o}",
+                        hashlib.sha256(payload).hexdigest(),
+                    )
+                )
+            )
+            source_files += 1
+            source_bytes += len(payload)
+
+    visit(release, "")
+    rows.sort()
+    digest = hashlib.sha256("\0".join(rows).encode("utf-8")).hexdigest()
+    return digest, source_files, source_dirs, source_bytes
+
+
 def _legacy_unrunnable_fixture(reader: Any, root: Path) -> dict[str, Any]:
     install_root = root / "legacy-install"
     releases = install_root / "releases"
@@ -379,6 +434,28 @@ def _legacy_unrunnable_fixture(reader: Any, root: Path) -> dict[str, Any]:
     release.mkdir()
     os.chown(release, 0, reader.pw_gid)
     release.chmod(0o755)
+    source_payloads = {
+        "install.sh": b"#!/usr/bin/env bash\nset -euo pipefail\n",
+        "README.md": b"synthetic legacy source projection fixture\n",
+        "opsctl/agent_runtime_ops/cli.py": b"def main():\n    return 0\n",
+        "agent-clis/gemini-cli/package.json": (
+            b'{"dependencies":{"@google/gemini-cli":"0.45.2"}}\n'
+        ),
+        "agent-clis/gemini-cli/package-lock.json": (
+            b'{"lockfileVersion":3,"packages":{"node_modules/@google/'
+            b'gemini-cli":{"integrity":"sha512-fixture","version":"0.45.2"}}}\n'
+        ),
+    }
+    for relative, payload in source_payloads.items():
+        target = release / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+    for path in [release, *release.rglob("*")]:
+        if path.is_dir():
+            path.chmod(0o755)
+        else:
+            path.chmod(0o755 if path == release / "install.sh" else 0o644)
+    _chown_tree(release, reader.pw_gid)
     current = install_root / "current"
     manifest_link = install_root / ".agent-runtime-ops-manifest"
     os.symlink(f"releases/{release.name}", current)
@@ -415,10 +492,63 @@ def _legacy_unrunnable_fixture(reader: Any, root: Path) -> dict[str, Any]:
     venv_bin = venv / "bin"
     venv_bin.mkdir(parents=True)
     inner_opsctl = venv_bin / "opsctl"
-    inner_opsctl.write_text("#!/bin/sh\nprintf 'should-not-run\\n'\n", encoding="utf-8")
-    for path in (venv, venv_bin, inner_opsctl):
+    inner_mcp = venv_bin / "agent-runtime-ops-mcp"
+    entrypoint = (
+        f"#!{venv}/bin/python3\n"
+        "# -*- coding: utf-8 -*-\n"
+        "import re\n"
+        "import sys\n"
+        "if __name__ == '__main__':\n"
+        "    from {module} import main\n"
+        "    sys.argv[0] = re.sub(r'(-script\\.pyw|\\.exe)?$', '', sys.argv[0])\n"
+        "    sys.exit(main())\n"
+    )
+    inner_opsctl.write_text(
+        entrypoint.format(module="agent_runtime_ops.cli"), encoding="utf-8"
+    )
+    inner_mcp.write_text(
+        entrypoint.format(module="agent_runtime_ops.mcp_server"), encoding="utf-8"
+    )
+    node_modules = release / "agent-clis" / "gemini-cli" / "node_modules"
+    gemini_package_dir = node_modules / "@google" / "gemini-cli"
+    gemini_bundle = gemini_package_dir / "bundle" / "gemini.js"
+    gemini_bundle.parent.mkdir(parents=True)
+    gemini_bundle.write_text(
+        "#!/usr/bin/env node\nconsole.log('fixture gemini');\n", encoding="utf-8"
+    )
+    gemini_package = gemini_package_dir / "package.json"
+    gemini_package.write_text(
+        json.dumps(
+            {
+                "name": "@google/gemini-cli",
+                "version": "0.45.2",
+                "bin": {"gemini": "bundle/gemini.js"},
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    gemini_bin_dir = node_modules / ".bin"
+    gemini_bin_dir.mkdir(parents=True)
+    inner_gemini = gemini_bin_dir / "gemini"
+    inner_gemini.symlink_to("../@google/gemini-cli/bundle/gemini.js")
+    for path in (venv, venv_bin):
         os.chown(path, 0, reader.pw_gid)
         path.chmod(0o700)
+    for path in (inner_opsctl, inner_mcp):
+        os.chown(path, 0, reader.pw_gid)
+        path.chmod(0o755)
+    _chown_tree(node_modules, reader.pw_gid)
+    for path in [node_modules, *node_modules.rglob("*")]:
+        if path.is_symlink():
+            os.lchown(path, 0, reader.pw_gid)
+        elif path.is_dir():
+            path.chmod(0o700)
+        elif path == gemini_bundle:
+            path.chmod(0o700)
+        else:
+            path.chmod(0o600)
 
     ops_group = "fixture-ops"
     release_manifest = release / ".agent-runtime-ops-manifest"
@@ -426,7 +556,8 @@ def _legacy_unrunnable_fixture(reader: Any, root: Path) -> dict[str, Any]:
         "\n".join(
             (
                 f"source_commit={LEGACY_RESTRICTIVE_UMASK_REF}",
-                "source_summary=legacy restrictive umask fixture",
+                "source_summary=Merge pull request #71 from Epicevent/"
+                "codex/kwrag-legacy-backup-collision-recovery",
                 "installed_at=2026-07-30T09:58:51+09:00",
                 f"installed_dir={release}",
                 f"install_root={install_root}",
@@ -456,6 +587,9 @@ def _legacy_unrunnable_fixture(reader: Any, root: Path) -> dict[str, Any]:
     )
     os.chown(policy, 0, reader.pw_gid)
     policy.chmod(0o640)
+    source_projection, source_files, source_dirs, source_bytes = (
+        _fixture_source_projection(release)
+    )
     return {
         "install_root": install_root,
         "releases": releases,
@@ -469,7 +603,16 @@ def _legacy_unrunnable_fixture(reader: Any, root: Path) -> dict[str, Any]:
         "venv": venv,
         "venv_bin": venv_bin,
         "inner_opsctl": inner_opsctl,
+        "inner_mcp": inner_mcp,
+        "inner_gemini": inner_gemini,
+        "gemini_package": gemini_package,
+        "gemini_bundle": gemini_bundle,
+        "node_modules": node_modules,
         "ops_group": ops_group,
+        "source_projection": source_projection,
+        "source_files": source_files,
+        "source_dirs": source_dirs,
+        "source_bytes": source_bytes,
     }
 
 
@@ -618,11 +761,16 @@ def _path_fingerprint(path: Path) -> tuple[Any, ...]:
         return ("absent",)
     meta = os.lstat(path)
     common = (
+        meta.st_dev,
+        meta.st_ino,
         stat.S_IFMT(meta.st_mode),
         stat.S_IMODE(meta.st_mode),
         meta.st_uid,
         meta.st_gid,
         meta.st_nlink,
+        meta.st_size,
+        meta.st_mtime_ns,
+        meta.st_ctime_ns,
     )
     if stat.S_ISREG(meta.st_mode):
         return ("regular", *common, hashlib.sha256(path.read_bytes()).hexdigest())
@@ -674,10 +822,18 @@ def _legacy_capture_body(reader: Any, tree: dict[str, Any]) -> str:
         "OPS_CLI_ATTESTATION_COMMAND_TIMEOUT_SECONDS=2\n"
         "REPO_URL='https://github.com/Epicevent/agent-runtime-ops.git'\n"
         f"LEGACY_RESTRICTIVE_UMASK_BASELINE_REF={LEGACY_RESTRICTIVE_UMASK_REF!r}\n"
+        f"LEGACY_RESTRICTIVE_UMASK_SOURCE_PROJECTION_SHA256={tree['source_projection']!r}\n"
+        f"LEGACY_RESTRICTIVE_UMASK_SOURCE_FILE_COUNT={tree['source_files']}\n"
+        f"LEGACY_RESTRICTIVE_UMASK_SOURCE_DIR_COUNT={tree['source_dirs']}\n"
+        f"LEGACY_RESTRICTIVE_UMASK_SOURCE_BYTE_COUNT={tree['source_bytes']}\n"
         "RESTORED_CLI_RESULT=''\n"
         "die() { printf 'error:%s\\n' \"$*\" >&2; exit 23; }\n"
-        "attest_restored_cli_as_ops() { return 1; }\n"
+        + _function("manifest_value")
         + _function("run_cli_as_ops")
+        + _function("path_is_not_executable_as_ops")
+        + _function("validate_update_status_output")
+        + _function("attest_restored_cli_as_ops")
+        + _function("legacy_restrictive_umask_baseline_is_shaped")
         + _function("exact_preexisting_unrunnable_cli_baseline_identity")
         + _function("attest_exact_preexisting_unrunnable_cli_baseline")
         + _function("attest_restored_cli_or_exact_preexisting_unrunnable")
@@ -690,6 +846,12 @@ def test_exact_legacy_0700_baseline_is_admitted_without_mutation() -> None:
     reader = _reader()
     with _root_temp(reader) as root:
         tree = _legacy_unrunnable_fixture(reader, root)
+        assert stat.S_IMODE(tree["venv"].stat().st_mode) == 0o700
+        assert stat.S_IMODE(tree["venv_bin"].stat().st_mode) == 0o700
+        assert stat.S_IMODE(tree["inner_opsctl"].stat().st_mode) == 0o755
+        assert stat.S_IMODE(tree["inner_mcp"].stat().st_mode) == 0o755
+        assert stat.S_IMODE(tree["gemini_package"].stat().st_mode) == 0o600
+        assert stat.S_IMODE(tree["gemini_bundle"].stat().st_mode) == 0o700
         denied = _as_reader(reader, [str(tree["inner_opsctl"])])
         assert denied.returncode == 126
         before = _legacy_fixture_snapshot(tree)
@@ -701,6 +863,30 @@ def test_exact_legacy_0700_baseline_is_admitted_without_mutation() -> None:
             "restored_exact_but_preexisting_unrunnable\n"
             in completed.stderr
         )
+        assert _legacy_fixture_snapshot(tree) == before
+
+
+def test_legacy_shaped_altered_wrapper_never_executes_before_rejection() -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        tree = _legacy_unrunnable_fixture(reader, root)
+        trace_dir = root / "reader-trace"
+        trace_dir.mkdir()
+        os.chown(trace_dir, reader.pw_uid, reader.pw_gid)
+        trace_dir.chmod(0o700)
+        sentinel = trace_dir / "altered-wrapper-executed"
+        tree["wrappers"]["opsctl"].write_text(
+            "#!/usr/bin/env bash\n"
+            f"printf 'executed\\n' > {str(sentinel)!r}\n"
+            "exit 126\n",
+            encoding="utf-8",
+        )
+        os.chown(tree["wrappers"]["opsctl"], 0, reader.pw_gid)
+        tree["wrappers"]["opsctl"].chmod(0o755)
+        before = _legacy_fixture_snapshot(tree)
+        completed = _run_contract_script(root, _legacy_capture_body(reader, tree))
+        assert completed.returncode != 0
+        assert not sentinel.exists()
         assert _legacy_fixture_snapshot(tree) == before
 
 
@@ -728,13 +914,21 @@ def test_exact_legacy_0700_recovery_finalizes_with_honest_degraded_state() -> No
             "OPS_CLI_ATTESTATION_COMMAND_TIMEOUT_SECONDS=2\n"
             "REPO_URL='https://github.com/Epicevent/agent-runtime-ops.git'\n"
             f"LEGACY_RESTRICTIVE_UMASK_BASELINE_REF={LEGACY_RESTRICTIVE_UMASK_REF!r}\n"
+            f"LEGACY_RESTRICTIVE_UMASK_SOURCE_PROJECTION_SHA256={tree['source_projection']!r}\n"
+            f"LEGACY_RESTRICTIVE_UMASK_SOURCE_FILE_COUNT={tree['source_files']}\n"
+            f"LEGACY_RESTRICTIVE_UMASK_SOURCE_DIR_COUNT={tree['source_dirs']}\n"
+            f"LEGACY_RESTRICTIVE_UMASK_SOURCE_BYTE_COUNT={tree['source_bytes']}\n"
             "RESTORED_CLI_RESULT=''\n"
-            "attest_restored_cli_as_ops() { return 1; }\n"
             "quiesce_root_action_broker_before_recovery() { printf 'quiesce\\n' >>\"$TRACE\"; }\n"
             "run_activation_transaction() { printf 'tx:%s\\n' \"$2\" >>\"$TRACE\"; }\n"
             "restore_broker_service_from_transaction() { printf 'broker\\n' >>\"$TRACE\"; }\n"
             "info() { printf 'info:%s\\n' \"$*\" >>\"$TRACE\"; }\n"
+            + _function("manifest_value")
             + _function("run_cli_as_ops")
+            + _function("path_is_not_executable_as_ops")
+            + _function("validate_update_status_output")
+            + _function("attest_restored_cli_as_ops")
+            + _function("legacy_restrictive_umask_baseline_is_shaped")
             + _function("exact_preexisting_unrunnable_cli_baseline_identity")
             + _function("attest_exact_preexisting_unrunnable_cli_baseline")
             + _function("attest_restored_cli_or_exact_preexisting_unrunnable")
@@ -770,8 +964,15 @@ def test_exact_legacy_0700_baseline_reaches_real_candidate_svcops_attestation() 
         )
         candidate_opsctl.parent.mkdir(parents=True)
         candidate_gemini.parent.mkdir(parents=True)
+        trace_dir = root / "candidate-reader-trace"
+        trace_dir.mkdir()
+        os.chown(trace_dir, reader.pw_uid, reader.pw_gid)
+        trace_dir.chmod(0o700)
+        opsctl_trace = trace_dir / "opsctl"
+        gemini_trace = trace_dir / "gemini"
         candidate_opsctl.write_text(
             "#!/bin/sh\n"
+            f"printf 'uid=%s\\nargv=%s\\n' \"$(id -u)\" \"$*\" > {str(opsctl_trace)!r}\n"
             "cat <<'EOF'\n"
             "update_status=ready\n"
             f"installed_ref={LEGACY_RESTRICTIVE_UMASK_REF}\n"
@@ -782,7 +983,9 @@ def test_exact_legacy_0700_baseline_reaches_real_candidate_svcops_attestation() 
             encoding="utf-8",
         )
         candidate_gemini.write_text(
-            "#!/bin/sh\nprintf 'candidate-gemini-ok\\n'\n",
+            "#!/bin/sh\n"
+            f"printf 'uid=%s\\nargv=%s\\n' \"$(id -u)\" \"$*\" > {str(gemini_trace)!r}\n"
+            "printf 'candidate-gemini-ok\\n'\n",
             encoding="utf-8",
         )
         for path in [candidate, *candidate.rglob("*")]:
@@ -793,16 +996,25 @@ def test_exact_legacy_0700_baseline_reaches_real_candidate_svcops_attestation() 
 
         body = (
             _legacy_capture_body(reader, tree)
-            + _function("validate_update_status_output")
+            + _function("normalize_generated_runtime_tree_permissions")
             + _function("attest_candidate_cli_as_ops")
-            + f"\nattest_candidate_cli_as_ops {str(candidate)!r} {ACTIVATION_COMMIT}\n"
-            + "printf 'candidate_svcops_attestation=passed\\n'\n"
+            + _function("prepare_release_for_activation")
+            + "info() { printf '%s\\n' \"$*\"; }\n"
+            + f"\nprepare_release_for_activation {str(candidate)!r} {ACTIVATION_COMMIT}\n"
         )
         completed = _run_contract_script(root, body)
         assert completed.returncode == 0, completed.stderr
         assert completed.stdout.splitlines() == [
             str(tree["release"]),
-            "candidate_svcops_attestation=passed",
+            "ops_cli_pre_activation=svcops_verified",
+        ]
+        assert opsctl_trace.read_text(encoding="utf-8").splitlines() == [
+            f"uid={reader.pw_uid}",
+            f"argv=--state-root {tree['state_root']} update status",
+        ]
+        assert gemini_trace.read_text(encoding="utf-8").splitlines() == [
+            f"uid={reader.pw_uid}",
+            "argv=--version",
         ]
 
 
@@ -817,6 +1029,17 @@ def test_exact_legacy_0700_baseline_reaches_real_candidate_svcops_attestation() 
         "policy-mismatch",
         "manifest-mismatch",
         "successor-gemini-body",
+        "missing-inner-mcp",
+        "replaced-inner-mcp",
+        "appended-inner-mcp",
+        "unsafe-inner-mcp-mode",
+        "missing-gemini-link",
+        "wrong-gemini-link-target",
+        "unsafe-gemini-package-mode",
+        "missing-gemini-bundle",
+        "unsafe-gemini-bundle-mode",
+        "source-projection-changed",
+        "source-projection-extra",
     ),
 )
 def test_legacy_baseline_exception_rejects_unsafe_identity_without_writes(
@@ -855,7 +1078,7 @@ def test_legacy_baseline_exception_rejects_unsafe_identity_without_writes(
             )
             os.chown(tree["release_manifest"], 0, reader.pw_gid)
             tree["release_manifest"].chmod(0o644)
-        else:
+        elif invalid == "successor-gemini-body":
             legacy = tree["wrappers"]["gemini"].read_text(encoding="utf-8")
             successor = legacy.replace(
                 "      --)\n        break\n        ;;\n",
@@ -870,6 +1093,41 @@ def test_legacy_baseline_exception_rejects_unsafe_identity_without_writes(
             tree["wrappers"]["gemini"].write_text(successor, encoding="utf-8")
             os.chown(tree["wrappers"]["gemini"], 0, reader.pw_gid)
             tree["wrappers"]["gemini"].chmod(0o755)
+        elif invalid == "missing-inner-mcp":
+            tree["inner_mcp"].unlink()
+        elif invalid == "replaced-inner-mcp":
+            tree["inner_mcp"].write_text(
+                "#!/bin/sh\nprintf 'not-the-mcp-entrypoint\\n'\n", encoding="utf-8"
+            )
+            os.chown(tree["inner_mcp"], 0, reader.pw_gid)
+            tree["inner_mcp"].chmod(0o755)
+        elif invalid == "appended-inner-mcp":
+            with tree["inner_mcp"].open("a", encoding="utf-8") as stream:
+                stream.write("open('/tmp/unexpected-side-effect', 'w').close()\n")
+        elif invalid == "unsafe-inner-mcp-mode":
+            tree["inner_mcp"].chmod(0o775)
+        elif invalid == "missing-gemini-link":
+            tree["inner_gemini"].unlink()
+        elif invalid == "wrong-gemini-link-target":
+            tree["inner_gemini"].unlink()
+            tree["inner_gemini"].symlink_to("../attacker/gemini.js")
+            os.lchown(tree["inner_gemini"], 0, reader.pw_gid)
+        elif invalid == "unsafe-gemini-package-mode":
+            tree["gemini_package"].chmod(0o660)
+        elif invalid == "missing-gemini-bundle":
+            tree["gemini_bundle"].unlink()
+        elif invalid == "unsafe-gemini-bundle-mode":
+            tree["gemini_bundle"].chmod(0o775)
+        elif invalid == "source-projection-changed":
+            source = tree["release"] / "README.md"
+            source.write_bytes(source.read_bytes() + b"\nchanged\n")
+            os.chown(source, 0, reader.pw_gid)
+            source.chmod(0o644)
+        else:
+            source = tree["release"] / "unexpected-source.txt"
+            source.write_text("not part of 443\n", encoding="utf-8")
+            os.chown(source, 0, reader.pw_gid)
+            source.chmod(0o644)
 
         before = _legacy_fixture_snapshot(tree)
         completed = _run_contract_script(root, _legacy_capture_body(reader, tree))
@@ -877,7 +1135,10 @@ def test_legacy_baseline_exception_rejects_unsafe_identity_without_writes(
         assert _legacy_fixture_snapshot(tree) == before
 
 
-def test_legacy_baseline_identity_drift_during_rc126_probe_is_rejected() -> None:
+@pytest.mark.parametrize("drift_key", ("release_manifest", "inner_mcp", "gemini_bundle"))
+def test_legacy_baseline_identity_drift_during_nonexecuting_probe_is_rejected(
+    drift_key: str,
+) -> None:
     reader = _reader()
     with _root_temp(reader) as root:
         tree = _legacy_unrunnable_fixture(reader, root)
@@ -897,8 +1158,15 @@ def test_legacy_baseline_identity_drift_during_rc126_probe_is_rejected() -> None
             f"GEMINI_HOME={reader.pw_dir!r}\n"
             "REPO_URL='https://github.com/Epicevent/agent-runtime-ops.git'\n"
             f"LEGACY_RESTRICTIVE_UMASK_BASELINE_REF={LEGACY_RESTRICTIVE_UMASK_REF!r}\n"
-            f"DRIFT_PATH={str(tree['release_manifest'])!r}\n"
-            "run_cli_as_ops() { chmod 0600 \"$DRIFT_PATH\"; chmod 0644 \"$DRIFT_PATH\"; return 126; }\n"
+            f"LEGACY_RESTRICTIVE_UMASK_SOURCE_PROJECTION_SHA256={tree['source_projection']!r}\n"
+            f"LEGACY_RESTRICTIVE_UMASK_SOURCE_FILE_COUNT={tree['source_files']}\n"
+            f"LEGACY_RESTRICTIVE_UMASK_SOURCE_DIR_COUNT={tree['source_dirs']}\n"
+            f"LEGACY_RESTRICTIVE_UMASK_SOURCE_BYTE_COUNT={tree['source_bytes']}\n"
+            f"DRIFT_PATH={str(tree[drift_key])!r}\n"
+            "path_is_not_executable_as_ops() { "
+            "local original_mode; original_mode=\"$(/usr/bin/stat -c %a -- \"$DRIFT_PATH\")\"; "
+            "/usr/bin/chmod 0600 \"$DRIFT_PATH\"; "
+            "/usr/bin/chmod \"$original_mode\" \"$DRIFT_PATH\"; return 0; }\n"
             + _function("exact_preexisting_unrunnable_cli_baseline_identity")
             + _function("attest_exact_preexisting_unrunnable_cli_baseline")
             + f"\nattest_exact_preexisting_unrunnable_cli_baseline {str(tree['release'])!r} {ACTIVATION_COMMIT}\n"

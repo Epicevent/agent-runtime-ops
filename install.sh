@@ -29,6 +29,10 @@ ACTIVATION_CANDIDATE_DIR="$INSTALL_ROOT/.activation-candidate.prepare"
 ACTIVATION_HELPER_BLOB=""
 RESTORED_CLI_RESULT=""
 LEGACY_RESTRICTIVE_UMASK_BASELINE_REF="443c5fdaac231a1c62d4a927ca93e19d055e400a"
+LEGACY_RESTRICTIVE_UMASK_SOURCE_PROJECTION_SHA256="c615067ad8d61a09f116bd9f9e22d949d45b9603af8de184fd90718ebf27765e"
+LEGACY_RESTRICTIVE_UMASK_SOURCE_FILE_COUNT=322
+LEGACY_RESTRICTIVE_UMASK_SOURCE_DIR_COUNT=41
+LEGACY_RESTRICTIVE_UMASK_SOURCE_BYTE_COUNT=2881364
 REPO_URL="${AGENT_RUNTIME_OPS_REPO_URL:-https://github.com/Epicevent/agent-runtime-ops.git}"
 REPO_REF="${AGENT_RUNTIME_OPS_REF:-}"
 SUDOERS_FILE="${AGENT_RUNTIME_OPS_SUDOERS_FILE:-/etc/sudoers.d/agent-runtime-ops}"
@@ -1634,6 +1638,17 @@ run_cli_as_ops() {
       "$cli" "$@"
 }
 
+path_is_not_executable_as_ops() {
+  local path="$1"
+  /usr/bin/timeout --kill-after=1 "$OPS_CLI_ATTESTATION_COMMAND_TIMEOUT_SECONDS" \
+    runuser -u "$OPS_USER" -- env -i \
+      HOME="$OPS_HOME" \
+      USER="$OPS_USER" \
+      LOGNAME="$OPS_USER" \
+      PATH=/usr/local/bin:/usr/bin:/bin \
+      /usr/bin/test ! -x "$path"
+}
+
 validate_update_status_output() {
   local output="$1"
   local expected_ref="$2"
@@ -1752,6 +1767,97 @@ attest_restored_cli_as_ops() {
   [[ -x "$MCP_BIN_LINK" ]] || return 1
 }
 
+legacy_restrictive_umask_baseline_is_shaped() {
+  local release_dir="$1"
+  /usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/python3 -I - \
+    "$release_dir" "$LEGACY_RESTRICTIVE_UMASK_BASELINE_REF" <<'PY'
+import os
+import re
+import stat
+import sys
+
+release_raw, legacy_ref = sys.argv[1:]
+release_name = os.path.basename(os.path.normpath(release_raw))
+legacy_named = release_name.startswith(f"{legacy_ref}.")
+manifest = os.path.join(release_raw, ".agent-runtime-ops-manifest")
+
+
+def fail_closed() -> None:
+    raise SystemExit(0 if legacy_named else 2)
+
+
+try:
+    before = os.lstat(manifest)
+except OSError:
+    fail_closed()
+if (
+    not stat.S_ISREG(before.st_mode)
+    or stat.S_ISLNK(before.st_mode)
+    or before.st_nlink != 1
+    or before.st_size <= 0
+    or before.st_size > 256 * 1024
+):
+    fail_closed()
+try:
+    descriptor = os.open(manifest, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+except OSError:
+    fail_closed()
+try:
+    opened = os.fstat(descriptor)
+    before_identity = (
+        before.st_dev,
+        before.st_ino,
+        before.st_mode,
+        before.st_nlink,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    )
+    opened_identity = (
+        opened.st_dev,
+        opened.st_ino,
+        opened.st_mode,
+        opened.st_nlink,
+        opened.st_size,
+        opened.st_mtime_ns,
+        opened.st_ctime_ns,
+    )
+    if opened_identity != before_identity:
+        fail_closed()
+    payload = os.read(descriptor, before.st_size + 1)
+    if len(payload) != before.st_size:
+        fail_closed()
+    after = os.lstat(manifest)
+    after_identity = (
+        after.st_dev,
+        after.st_ino,
+        after.st_mode,
+        after.st_nlink,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    )
+    if after_identity != opened_identity:
+        fail_closed()
+finally:
+    os.close(descriptor)
+try:
+    text = payload.decode("utf-8", errors="strict")
+except UnicodeDecodeError:
+    fail_closed()
+source_refs = [
+    line.removeprefix("source_commit=")
+    for line in text.splitlines()
+    if line.startswith("source_commit=")
+]
+if source_refs == [legacy_ref] or legacy_named:
+    raise SystemExit(0)
+if len(source_refs) != 1 or re.fullmatch(r"[0-9a-f]{40}", source_refs[0]) is None:
+    raise SystemExit(2)
+raise SystemExit(1)
+PY
+}
+
 exact_preexisting_unrunnable_cli_baseline_identity() {
   local release_dir="$1"
   local expected_ref="$2"
@@ -1763,9 +1869,14 @@ exact_preexisting_unrunnable_cli_baseline_identity() {
     "$BIN_LINK" "$MCP_BIN_LINK" "$GEMINI_BIN_LINK" "$MANIFEST" \
     "$STATE_ROOT/ops-update.yaml" "$REPO_URL" "$expected_ref" "$ops_gid" \
     "$OPS_USER" "$OPS_GROUP" "$INSTALL_ROOT" "$STATE_ROOT" "$GEMINI_HOME" \
-    "$LEGACY_RESTRICTIVE_UMASK_BASELINE_REF" <<'PY' \
+    "$LEGACY_RESTRICTIVE_UMASK_BASELINE_REF" \
+    "$LEGACY_RESTRICTIVE_UMASK_SOURCE_PROJECTION_SHA256" \
+    "$LEGACY_RESTRICTIVE_UMASK_SOURCE_FILE_COUNT" \
+    "$LEGACY_RESTRICTIVE_UMASK_SOURCE_DIR_COUNT" \
+    "$LEGACY_RESTRICTIVE_UMASK_SOURCE_BYTE_COUNT" <<'PY' \
     || return 1
 import hashlib
+import json
 import os
 import re
 import stat
@@ -1789,10 +1900,17 @@ import sys
     state_root,
     gemini_home,
     legacy_ref,
+    expected_source_projection,
+    expected_source_files_raw,
+    expected_source_dirs_raw,
+    expected_source_bytes_raw,
 ) = sys.argv[1:]
 release = os.path.realpath(release_raw)
 releases = os.path.realpath(releases_raw)
 ops_gid = int(ops_gid_raw)
+expected_source_files = int(expected_source_files_raw)
+expected_source_dirs = int(expected_source_dirs_raw)
+expected_source_bytes = int(expected_source_bytes_raw)
 if os.path.dirname(release) != releases:
     raise SystemExit(1)
 
@@ -1889,6 +2007,127 @@ def require_symlink(path: str, target: str) -> None:
         raise SystemExit(1)
 
 
+def read_regular_bytes(path: str, mode: int, maximum: int) -> bytes:
+    before = lstat(path)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or stat.S_ISLNK(before.st_mode)
+        or before.st_uid != 0
+        or before.st_gid != ops_gid
+        or stat.S_IMODE(before.st_mode) != mode
+        or before.st_nlink != 1
+        or before.st_size < 0
+        or before.st_size > maximum
+    ):
+        raise SystemExit(1)
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise SystemExit(1) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if not same_instance(before, opened):
+            raise SystemExit(1)
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(65536, maximum + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > maximum:
+                raise SystemExit(1)
+        if not same_instance(opened, lstat(path)):
+            raise SystemExit(1)
+    finally:
+        os.close(descriptor)
+    return b"".join(chunks)
+
+
+def require_generated_dir(path: str) -> None:
+    value = lstat(path)
+    if (
+        not stat.S_ISDIR(value.st_mode)
+        or stat.S_ISLNK(value.st_mode)
+        or value.st_uid != 0
+        or value.st_gid != ops_gid
+        or value.st_nlink < 2
+        or (stat.S_IMODE(value.st_mode) & 0o022) != 0
+    ):
+        raise SystemExit(1)
+
+
+def validate_source_projection() -> str:
+    rows = []
+    source_files = 0
+    source_dirs = 0
+    source_bytes = 0
+    generated_roots = {
+        ".venv",
+        "agent-clis/gemini-cli/node_modules",
+        "build",
+        "opsctl/agent_runtime_ops.egg-info",
+    }
+
+    def visit(directory: str, relative: str) -> None:
+        nonlocal source_files, source_dirs, source_bytes
+        try:
+            entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
+        except OSError as exc:
+            raise SystemExit(1) from exc
+        for entry in entries:
+            child_relative = entry.name if not relative else f"{relative}/{entry.name}"
+            if not relative and entry.name == ".agent-runtime-ops-manifest":
+                continue
+            if child_relative in generated_roots or entry.name == "__pycache__":
+                require_generated_dir(entry.path)
+                continue
+            value = lstat(entry.path)
+            if stat.S_ISDIR(value.st_mode) and not stat.S_ISLNK(value.st_mode):
+                if (
+                    value.st_uid != 0
+                    or value.st_gid != ops_gid
+                    or stat.S_IMODE(value.st_mode) != 0o755
+                ):
+                    raise SystemExit(1)
+                rows.append("\0".join(("D", child_relative, "0755")))
+                source_dirs += 1
+                visit(entry.path, child_relative)
+                if not same_instance(value, lstat(entry.path)):
+                    raise SystemExit(1)
+                continue
+            expected_mode = 0o755 if child_relative == "install.sh" else 0o644
+            payload = read_regular_bytes(entry.path, expected_mode, 4 * 1024 * 1024)
+            source_bytes += len(payload)
+            if source_bytes > 16 * 1024 * 1024:
+                raise SystemExit(1)
+            rows.append(
+                "\0".join(
+                    (
+                        "F",
+                        child_relative,
+                        f"{expected_mode:04o}",
+                        hashlib.sha256(payload).hexdigest(),
+                    )
+                )
+            )
+            source_files += 1
+
+    visit(release, "")
+    rows.sort()
+    if (
+        source_files != expected_source_files
+        or source_dirs != expected_source_dirs
+        or source_bytes != expected_source_bytes
+    ):
+        raise SystemExit(1)
+    observed = hashlib.sha256("\0".join(rows).encode("utf-8")).hexdigest()
+    if observed != expected_source_projection:
+        raise SystemExit(1)
+    return observed
+
+
 release_meta = lstat(release)
 if (
     not stat.S_ISDIR(release_meta.st_mode)
@@ -1961,17 +2200,38 @@ release_manifest = os.path.join(release, ".agent-runtime-ops-manifest")
 manifest_text = read_regular(release_manifest, 0o644, 256 * 1024)
 manifest_lines = manifest_text.splitlines()
 manifest_rows = {}
+manifest_keys = []
 for line in manifest_lines:
     key, separator, value = line.partition("=")
     if not separator or key in manifest_rows:
         raise SystemExit(1)
     manifest_rows[key] = value
+    manifest_keys.append(key)
 previous_ref = manifest_rows.get("source_commit", "")
 if previous_ref != legacy_ref or re.fullmatch(r"[0-9a-f]{40}", previous_ref) is None:
     raise SystemExit(1)
 if not os.path.basename(release).startswith(f"{previous_ref}."):
     raise SystemExit(1)
+expected_manifest_keys = [
+    "source_commit",
+    "source_summary",
+    "installed_at",
+    "installed_dir",
+    "install_root",
+    "ops_user",
+    "ops_group",
+    "state_root",
+    "opsctl",
+    "mcp",
+    "source_path",
+]
+if manifest_keys != expected_manifest_keys:
+    raise SystemExit(1)
 required_manifest = {
+    "source_summary": (
+        "Merge pull request #71 from Epicevent/"
+        "codex/kwrag-legacy-backup-collision-recovery"
+    ),
     "installed_dir": release,
     "install_root": install_root,
     "ops_user": ops_user,
@@ -1982,6 +2242,13 @@ required_manifest = {
 }
 if any(manifest_rows.get(key) != value for key, value in required_manifest.items()):
     raise SystemExit(1)
+if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\n]+", manifest_rows["installed_at"]) is None:
+    raise SystemExit(1)
+source_path = manifest_rows["source_path"]
+if not os.path.isabs(source_path) or os.path.normpath(source_path) != source_path:
+    raise SystemExit(1)
+
+source_projection = validate_source_projection()
 
 venv = os.path.join(release, ".venv")
 venv_meta = lstat(venv)
@@ -2015,6 +2282,73 @@ if (
     or (stat.S_IMODE(venv_opsctl_meta.st_mode) & 0o100) == 0
     or (stat.S_IMODE(venv_opsctl_meta.st_mode) & 0o077) != 0
 ):
+    raise SystemExit(1)
+
+
+def require_console_entrypoint(path: str, import_target: str) -> str:
+    payload = read_regular(path, 0o755, 64 * 1024)
+    shebang, separator, body = payload.partition("\n")
+    if not separator or re.fullmatch(
+        rf"#!{re.escape(venv)}/bin/python(?:3(?:\.[0-9]+)?)?", shebang
+    ) is None:
+        raise SystemExit(1)
+    distlib_template = (
+        "# -*- coding: utf-8 -*-\n"
+        "import re\n"
+        "import sys\n"
+        "if __name__ == '__main__':\n"
+        f"    from {import_target} import main\n"
+        "    sys.argv[0] = re.sub(r'(-script\\.pyw|\\.exe)?$', '', sys.argv[0])\n"
+        "    sys.exit(main())\n"
+    )
+    legacy_template = (
+        "import sys\n"
+        f"from {import_target} import main\n"
+        "if __name__ == '__main__':\n"
+        "    if sys.argv[0].endswith('.exe'):\n"
+        "        sys.argv[0] = sys.argv[0][:-4]\n"
+        "    sys.exit(main())\n"
+    )
+    if body not in (distlib_template, legacy_template):
+        raise SystemExit(1)
+    return payload
+
+
+venv_opsctl_text = require_console_entrypoint(
+    venv_opsctl, "agent_runtime_ops.cli"
+)
+venv_mcp = os.path.join(venv, "bin", "agent-runtime-ops-mcp")
+venv_mcp_text = require_console_entrypoint(
+    venv_mcp, "agent_runtime_ops.mcp_server"
+)
+gemini_cli_root = os.path.join(release, "agent-clis", "gemini-cli")
+gemini_link = os.path.join(gemini_cli_root, "node_modules", ".bin", "gemini")
+require_symlink(gemini_link, "../@google/gemini-cli/bundle/gemini.js")
+gemini_package = os.path.join(
+    gemini_cli_root, "node_modules", "@google", "gemini-cli", "package.json"
+)
+gemini_package_text = read_regular(gemini_package, 0o600, 256 * 1024)
+try:
+    gemini_package_data = json.loads(gemini_package_text)
+except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    raise SystemExit(1) from exc
+if (
+    not isinstance(gemini_package_data, dict)
+    or gemini_package_data.get("name") != "@google/gemini-cli"
+    or gemini_package_data.get("version") != "0.45.2"
+    or gemini_package_data.get("bin") != {"gemini": "bundle/gemini.js"}
+):
+    raise SystemExit(1)
+gemini_bundle = os.path.join(
+    gemini_cli_root,
+    "node_modules",
+    "@google",
+    "gemini-cli",
+    "bundle",
+    "gemini.js",
+)
+gemini_bundle_bytes = read_regular_bytes(gemini_bundle, 0o700, 16 * 1024 * 1024)
+if not gemini_bundle_bytes.startswith(b"#!/usr/bin/env node\n"):
     raise SystemExit(1)
 
 policy_text = read_regular(policy_raw, 0o640, 256 * 1024)
@@ -2064,6 +2398,10 @@ identity_paths = (
     venv,
     venv_bin,
     venv_opsctl,
+    venv_mcp,
+    gemini_link,
+    gemini_package,
+    gemini_bundle,
     policy_raw,
 )
 identity_rows = []
@@ -2092,9 +2430,14 @@ identity_rows.extend(
         mcp_wrapper,
         gemini_wrapper,
         manifest_text,
+        source_projection,
+        venv_opsctl_text,
+        venv_mcp_text,
+        gemini_package_text,
         policy_text,
     )
 )
+identity_rows.append(hashlib.sha256(gemini_bundle_bytes).hexdigest())
 identity_rows.extend((os.readlink(current_raw), os.readlink(manifest_link_raw)))
 print(hashlib.sha256("\0".join(identity_rows).encode("utf-8")).hexdigest())
 PY
@@ -2103,16 +2446,14 @@ PY
 attest_exact_preexisting_unrunnable_cli_baseline() {
   local release_dir="$1"
   local expected_ref="$2"
-  local before_identity after_identity cli_rc=0
+  local before_identity after_identity
   before_identity="$(
     exact_preexisting_unrunnable_cli_baseline_identity \
       "$release_dir" "$expected_ref"
   )" || return 1
   [[ "$before_identity" =~ ^[0-9a-f]{64}$ ]] || return 1
-  run_cli_as_ops "$release_dir/.venv/bin/opsctl" \
-    --state-root "$STATE_ROOT" update status \
-    >/dev/null 2>&1 || cli_rc="$?"
-  [[ "$cli_rc" -eq 126 ]] || return 1
+  path_is_not_executable_as_ops "$release_dir/.venv/bin/opsctl" \
+    >/dev/null 2>&1 || return 1
   after_identity="$(
     exact_preexisting_unrunnable_cli_baseline_identity \
       "$release_dir" "$expected_ref"
@@ -2123,13 +2464,21 @@ attest_exact_preexisting_unrunnable_cli_baseline() {
 attest_restored_cli_or_exact_preexisting_unrunnable() {
   local release_dir="$1"
   local expected_ref="$2"
+  local legacy_shape_rc=0
   RESTORED_CLI_RESULT=""
+  if legacy_restrictive_umask_baseline_is_shaped "$release_dir"; then
+    if attest_exact_preexisting_unrunnable_cli_baseline \
+      "$release_dir" "$expected_ref"; then
+      RESTORED_CLI_RESULT="restored_exact_but_preexisting_unrunnable"
+      return 0
+    fi
+    return 1
+  else
+    legacy_shape_rc="$?"
+  fi
+  [[ "$legacy_shape_rc" -eq 1 ]] || return 1
   if attest_restored_cli_as_ops "$release_dir" "$expected_ref"; then
     RESTORED_CLI_RESULT="svcops_verified"
-    return 0
-  fi
-  if attest_exact_preexisting_unrunnable_cli_baseline "$release_dir" "$expected_ref"; then
-    RESTORED_CLI_RESULT="restored_exact_but_preexisting_unrunnable"
     return 0
   fi
   return 1

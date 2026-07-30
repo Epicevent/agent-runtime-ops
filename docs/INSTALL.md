@@ -180,12 +180,27 @@ One compatibility admission exists for the exact historical
 caller `umask 077` into its generated `.venv`, so an otherwise exact root-owned
 baseline can have `.venv` mode `0700` and be unexecutable by `svcops`. The
 successor does not chmod or otherwise repair that active baseline in place. It
-requires the exact legacy source, release manifest, policy approval, wrapper
-bytes, ownership, link topology, and restrictive mode; proves the direct
-legacy CLI fails with rc 126 while the complete identity remains unchanged;
-then admits it only as `restored_exact_but_preexisting_unrunnable`. Every other
-unrunnable or malformed baseline remains fail-closed. The newly materialized
-candidate must still pass the normal pre-activation `svcops` CLI attestation.
+requires the exact tracked-source projection (322 files, 41 directories,
+2,881,364 bytes, digest-bound to the 443 commit), release manifest, policy
+approval, global wrapper bytes, exact generated console-entrypoint templates,
+Gemini launcher/package coordinates, root ownership, links, and a narrowly
+admitted non-writable legacy mode tuple. It uses fixed `/usr/bin/test` under the
+`svcops` identity to prove that the inner CLI is not executable; it never runs
+old release code during this admission. The selected generated files and
+Gemini bundle are no-follow read and content-hashed into the before/after
+identity so concurrent drift fails closed. This is an exact preservation check
+of the observed root-controlled legacy payload, not a claim that every
+generated `.venv` or `node_modules` byte belongs to the Git tree. The complete
+identity is rechecked unchanged before the baseline is admitted only as
+`restored_exact_but_preexisting_unrunnable`. Every other unrunnable or malformed
+baseline remains fail-closed. The newly materialized candidate must still be
+rebuilt from the approved Git tree and pass the normal pre-activation `svcops`
+CLI attestation.
+
+If later activation fails, transaction recovery restores the transaction-bound
+previous broker/release identity. That is continuity to the exact observed
+pre-install state; it is not a retrospective claim that the legacy
+site-packages tree was canonically reproduced from Git.
 
 If the installer is interrupted after any publication or broker transition,
 the pending transaction remains under the install root. The next invocation
