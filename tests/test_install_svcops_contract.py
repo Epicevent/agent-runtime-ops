@@ -20,6 +20,12 @@ def _function(name: str) -> str:
     return INSTALL[start:end]
 
 
+def _function_block(name: str, next_name: str) -> str:
+    start = INSTALL.index(f"{name}() {{")
+    end = INSTALL.index(f"\n{next_name}() {{", start)
+    return INSTALL[start:end] + "\n"
+
+
 def _bash() -> str:
     bash = shutil.which("bash")
     if bash is not None:
@@ -120,13 +126,15 @@ def test_svcops_attestations_are_bounded_minimal_and_prune_is_last() -> None:
     assert 'run_cli_as_ops "$BIN_LINK" --state-root "$STATE_ROOT" update status' in active
     assert "recover_and_attest_activation_baseline" in finalizer
     assert '"$helper" "$commit" "$previous_release"' in finalizer
-    assert "previous active identity restored" in finalizer
+    assert "baseline_state=$RESTORED_CLI_RESULT" in finalizer
     assert 'run_activation_transaction "$helper" recover' in recovery
     assert recovery.index('quiesce_root_action_broker_before_recovery "$helper"') < recovery.index(
         'run_activation_transaction "$helper" recover'
     )
     assert 'restore_broker_service_from_transaction "$helper" "$previous_release"' in recovery
-    assert 'attest_restored_cli_as_ops "$previous_release" "$expected_commit"' in recovery
+    assert "attest_restored_cli_or_exact_preexisting_unrunnable" in recovery
+    assert '"$previous_release" "$expected_commit"' in recovery
+    assert 'info "ops_cli_restoration=$RESTORED_CLI_RESULT"' in recovery
     assert 'run_activation_transaction "$helper" finalize --expect baseline' in recovery
     assert '/usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS"' in broker_restart
     assert 'systemctl restart "$service_name"' in broker_restart
@@ -166,6 +174,48 @@ def test_svcops_attestations_are_bounded_minimal_and_prune_is_last() -> None:
     )
     assert '[[ -x /usr/bin/timeout ]] || die "missing executable: /usr/bin/timeout"' in _function(
         "require_commands"
+    )
+
+
+def test_legacy_unrunnable_baseline_exception_is_narrow_and_candidate_gate_remains() -> None:
+    identity = _function_block(
+        "exact_preexisting_unrunnable_cli_baseline_identity",
+        "attest_exact_preexisting_unrunnable_cli_baseline",
+    )
+    degraded = _function("attest_exact_preexisting_unrunnable_cli_baseline")
+    combined = _function("attest_restored_cli_or_exact_preexisting_unrunnable")
+    capture = _function("capture_previous_active_release")
+    recovery = _function("recover_and_attest_activation_baseline")
+    prepare = _function("prepare_release_for_activation")
+    package = _function("install_package")
+
+    assert "LEGACY_RESTRICTIVE_UMASK_BASELINE_REF" in identity
+    assert 'stat.S_IMODE(venv_meta.st_mode) != 0o700' in identity
+    assert "venv_opsctl_meta.st_uid != 0" in identity
+    assert "venv_opsctl_meta.st_gid != ops_gid" in identity
+    assert "venv_opsctl_meta.st_nlink != 1" in identity
+    assert "os.O_NOFOLLOW" in identity
+    assert "st_mtime_ns" in identity and "st_ctime_ns" in identity
+    assert 'line == "updates:"' in identity
+    assert 'line == "  agent-runtime-ops:"' in identity
+    assert "gemini_wrapper != expected_gemini_wrapper" in identity
+    assert 'run_cli_as_ops "$release_dir/.venv/bin/opsctl"' in degraded
+    assert '[[ "$cli_rc" -eq 126 ]]' in degraded
+    assert degraded.count("exact_preexisting_unrunnable_cli_baseline_identity") == 2
+    assert 'RESTORED_CLI_RESULT="svcops_verified"' in combined
+    assert (
+        'RESTORED_CLI_RESULT="restored_exact_but_preexisting_unrunnable"'
+        in combined
+    )
+    assert "attest_restored_cli_or_exact_preexisting_unrunnable" in capture
+    assert "attest_restored_cli_or_exact_preexisting_unrunnable" in recovery
+    assert "attest_restored_cli_as_ops" not in recovery
+    assert 'attest_candidate_cli_as_ops "$release_dir" "$commit"' in prepare
+    assert package.index("capture_previous_active_release") < package.index(
+        "materialize_exact_source_tree"
+    )
+    assert package.index('prepare_release_for_activation "$release_dir" "$commit"') < package.index(
+        "activate_and_attest_cli_or_restore"
     )
 
 
@@ -371,7 +421,7 @@ def test_post_activation_failure_restores_before_returning_failure(tmp_path: Pat
         + "info() { printf 'info:%s\\n' \"$*\" >>\"$TRACE\"; }\n"
         + "activate_release() { printf 'activate\\n' >>\"$TRACE\"; }\n"
         + "attest_active_cli_as_ops() { return 1; }\n"
-        + "recover_and_attest_activation_baseline() { printf 'recover:%s:%s:%s\\n' \"$1\" \"$2\" \"$3\" >>\"$TRACE\"; }\n"
+        + "recover_and_attest_activation_baseline() { printf 'recover:%s:%s:%s\\n' \"$1\" \"$2\" \"$3\" >>\"$TRACE\"; RESTORED_CLI_RESULT=svcops_verified; }\n"
         + _function("activate_and_attest_cli_or_restore")
         + f"\nactivate_and_attest_cli_or_restore /release {TARGET} /previous active /helper\n"
     )
@@ -380,7 +430,7 @@ def test_post_activation_failure_restores_before_returning_failure(tmp_path: Pat
     assert trace.read_text(encoding="utf-8").splitlines() == [
         "activate",
         f"recover:/helper:{TARGET}:/previous",
-        "die:post-activation svcops CLI attestation failed; previous active identity restored",
+        "die:post-activation svcops CLI attestation failed; baseline_state=svcops_verified",
     ]
 
 
@@ -487,7 +537,7 @@ def test_broker_partial_failure_restores_unit_then_exact_active_identity(
         + "run_activation_transaction() { [[ \"$2\" == show ]] && { printf 'active\\n'; return; }; return 1; }\n"
         + "install_root_action_broker_contract() { printf 'broker-partial:%s:%s\\n' \"$1\" \"$2\" >>\"$TRACE\"; return 1; }\n"
         + "attest_candidate_root_action_broker_state() { printf 'unexpected-attest\\n' >>\"$TRACE\"; return 1; }\n"
-        + "recover_and_attest_activation_baseline() { printf 'recover:%s:%s:%s\\n' \"$1\" \"$2\" \"$3\" >>\"$TRACE\"; }\n"
+        + "recover_and_attest_activation_baseline() { printf 'recover:%s:%s:%s\\n' \"$1\" \"$2\" \"$3\" >>\"$TRACE\"; RESTORED_CLI_RESULT=svcops_verified; }\n"
         + _function("install_root_action_broker_or_restore")
         + f"\ninstall_root_action_broker_or_restore /candidate {TARGET} /previous active /helper\n"
     )
@@ -496,7 +546,7 @@ def test_broker_partial_failure_restores_unit_then_exact_active_identity(
     assert trace.read_text(encoding="utf-8").splitlines() == [
         "broker-partial:/candidate:/helper",
         f"recover:/helper:{TARGET}:/previous",
-        "die:root-action broker setup failed; previous active identity restored",
+        "die:root-action broker setup failed; previous active identity restored exactly; recovery_state=svcops_verified",
     ]
 
 
@@ -528,7 +578,7 @@ def test_real_broker_publish_failure_reaches_durable_recovery_boundary(tmp_path:
         + "run_activation_transaction() { [[ \"$2\" == show ]] && { printf 'active\\n'; return; }; return 1; }\n"
         + "install_root_action_broker_contract() { printf 'publish-broker:%s:%s\\n' \"$1\" \"$2\" >>\"$TRACE\"; return 19; }\n"
         + "attest_candidate_root_action_broker_state() { printf 'unexpected-attest\\n' >>\"$TRACE\"; return 1; }\n"
-        + "recover_and_attest_activation_baseline() { printf 'recover:%s:%s:%s\\n' \"$1\" \"$2\" \"$3\" >>\"$TRACE\"; }\n"
+        + "recover_and_attest_activation_baseline() { printf 'recover:%s:%s:%s\\n' \"$1\" \"$2\" \"$3\" >>\"$TRACE\"; RESTORED_CLI_RESULT=svcops_verified; }\n"
         + _function("install_root_action_broker_or_restore")
         + f"\ninstall_root_action_broker_or_restore /candidate {TARGET} /previous active /helper\n"
     )
@@ -537,7 +587,7 @@ def test_real_broker_publish_failure_reaches_durable_recovery_boundary(tmp_path:
     assert trace.read_text(encoding="utf-8").splitlines() == [
         "publish-broker:/candidate:/helper",
         f"recover:/helper:{TARGET}:/previous",
-        "die:root-action broker setup failed; previous active identity restored",
+        "die:root-action broker setup failed; previous active identity restored exactly; recovery_state=svcops_verified",
     ]
 
 
@@ -551,7 +601,7 @@ def test_recorded_inactive_broker_drift_to_active_recovers_without_finalize(
         + "run_activation_transaction() { if [[ \"$2\" == show ]]; then printf 'inactive\\n'; else printf 'unexpected-finalize\\n' >>\"$TRACE\"; fi; }\n"
         + "install_root_action_broker_contract() { printf 'drift:inactive-to-active\\n' >>\"$TRACE\"; return 1; }\n"
         + "attest_candidate_root_action_broker_state() { printf 'unexpected-attest\\n' >>\"$TRACE\"; return 1; }\n"
-        + "recover_and_attest_activation_baseline() { printf 'recover:%s:%s:%s\\n' \"$1\" \"$2\" \"$3\" >>\"$TRACE\"; }\n"
+        + "recover_and_attest_activation_baseline() { printf 'recover:%s:%s:%s\\n' \"$1\" \"$2\" \"$3\" >>\"$TRACE\"; RESTORED_CLI_RESULT=svcops_verified; }\n"
         + _function("install_root_action_broker_or_restore")
         + f"\ninstall_root_action_broker_or_restore /candidate {TARGET} /previous inactive /helper\n"
     )
@@ -560,7 +610,7 @@ def test_recorded_inactive_broker_drift_to_active_recovers_without_finalize(
     assert trace.read_text(encoding="utf-8").splitlines() == [
         "drift:inactive-to-active",
         f"recover:/helper:{TARGET}:/previous",
-        "die:root-action broker setup failed; previous active identity restored",
+        "die:root-action broker setup failed; previous active identity restored exactly; recovery_state=svcops_verified",
     ]
 
 
@@ -616,7 +666,7 @@ def test_post_publish_inactive_broker_drift_recovers_without_candidate_finalize(
         + "install_root_action_broker_contract() { printf 'broker-published\\n' >>\"$TRACE\"; }\n"
         + "root_action_broker_release_attested() { printf 'unexpected-release-attest\\n' >>\"$TRACE\"; return 1; }\n"
         + "root_action_broker_inactive_attested() { printf 'observed-live-active\\n' >>\"$TRACE\"; return 1; }\n"
-        + "recover_and_attest_activation_baseline() { printf 'recover:%s:%s:%s\\n' \"$1\" \"$2\" \"$3\" >>\"$TRACE\"; }\n"
+        + "recover_and_attest_activation_baseline() { printf 'recover:%s:%s:%s\\n' \"$1\" \"$2\" \"$3\" >>\"$TRACE\"; RESTORED_CLI_RESULT=svcops_verified; }\n"
         + _function("attest_candidate_root_action_broker_state")
         + _function("install_root_action_broker_or_restore")
         + f"\ninstall_root_action_broker_or_restore /candidate {TARGET} /previous inactive /helper\n"
@@ -627,7 +677,7 @@ def test_post_publish_inactive_broker_drift_recovers_without_candidate_finalize(
         "broker-published",
         "observed-live-active",
         f"recover:/helper:{TARGET}:/previous",
-        "die:root-action broker setup failed; previous active identity restored",
+        "die:root-action broker setup failed; previous active identity restored exactly; recovery_state=svcops_verified",
     ]
 
 
@@ -642,7 +692,7 @@ def test_caller_broker_state_cannot_override_durable_journal(
         + f"run_activation_transaction() {{ [[ \"$2\" == show ]] && printf '{journal_state}\\n' || printf 'unexpected-finalize\\n' >>\"$TRACE\"; }}\n"
         + "install_root_action_broker_contract() { printf 'unexpected-install\\n' >>\"$TRACE\"; }\n"
         + "attest_candidate_root_action_broker_state() { printf 'unexpected-attest\\n' >>\"$TRACE\"; }\n"
-        + "recover_and_attest_activation_baseline() { printf 'recover:%s:%s:%s\\n' \"$1\" \"$2\" \"$3\" >>\"$TRACE\"; }\n"
+        + "recover_and_attest_activation_baseline() { printf 'recover:%s:%s:%s\\n' \"$1\" \"$2\" \"$3\" >>\"$TRACE\"; RESTORED_CLI_RESULT=svcops_verified; }\n"
         + _function("install_root_action_broker_or_restore")
         + f"\ninstall_root_action_broker_or_restore /candidate {TARGET} /previous {caller_state} /helper\n"
     )
@@ -650,5 +700,5 @@ def test_caller_broker_state_cannot_override_durable_journal(
     assert completed.returncode == 23, completed.stderr
     assert trace.read_text(encoding="utf-8").splitlines() == [
         f"recover:/helper:{TARGET}:/previous",
-        "die:root-action broker setup failed; previous active identity restored",
+        "die:root-action broker setup failed; previous active identity restored exactly; recovery_state=svcops_verified",
     ]

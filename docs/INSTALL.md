@@ -175,12 +175,26 @@ was active, inactive, absent, or unavailable. Unsafe pre-state (including a
 dangling managed symlink, hard link, special node, wrong owner, or unexpected
 type) is rejected before the journal or a managed entry is written.
 
+One compatibility admission exists for the exact historical
+`443c5fdaac231a1c62d4a927ca93e19d055e400a` release. That installer inherited a
+caller `umask 077` into its generated `.venv`, so an otherwise exact root-owned
+baseline can have `.venv` mode `0700` and be unexecutable by `svcops`. The
+successor does not chmod or otherwise repair that active baseline in place. It
+requires the exact legacy source, release manifest, policy approval, wrapper
+bytes, ownership, link topology, and restrictive mode; proves the direct
+legacy CLI fails with rc 126 while the complete identity remains unchanged;
+then admits it only as `restored_exact_but_preexisting_unrunnable`. Every other
+unrunnable or malformed baseline remains fail-closed. The newly materialized
+candidate must still pass the normal pre-activation `svcops` CLI attestation.
+
 If the installer is interrupted after any publication or broker transition,
 the pending transaction remains under the install root. The next invocation
 must use the exact same commit-bound helper. Under the install lock it restores
 the complete previous identity, restores and attests the prior broker state,
-re-attests the previous CLI as `svcops`, durably retires the transaction, and
-then stops. It never continues into a new activation in that invocation; the
+re-attests a normally runnable previous CLI as `svcops`, or revalidates the
+exact unchanged 443 restrictive-umask baseline and records
+`restored_exact_but_preexisting_unrunnable`, durably retires the transaction,
+and then stops. It never continues into a new activation in that invocation; the
 operator reruns the installer only after recovery has completed. A failed first
 install converges to the exact all-absent baseline.
 

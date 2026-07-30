@@ -24,6 +24,7 @@ except ImportError:  # pragma: no cover - exercised by Windows collection
 INSTALL = Path("install.sh").read_text(encoding="utf-8")
 ACTIVATION_HELPER = Path("scripts/activation_transaction.py").resolve()
 ACTIVATION_COMMIT = "b" * 40
+LEGACY_RESTRICTIVE_UMASK_REF = "443c5fdaac231a1c62d4a927ca93e19d055e400a"
 SYSTEMD_TUPLE_SHOW = (
     "show --property=LoadState --property=ActiveState --property=SubState "
     "--property=MainPID --property=Job broker.service"
@@ -316,6 +317,171 @@ def _activation_fixture(reader: Any, root: Path, *, previous: bool = False) -> d
     }
 
 
+def _legacy_gemini_wrapper(current: Path, ops_user: str, gemini_home: str) -> str:
+    return (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "# agent-runtime-ops managed gemini wrapper\n"
+        f'OPS_USER="{ops_user}"\n'
+        f'GEMINI_ENV="${{AGENT_RUNTIME_GEMINI_ENV:-{gemini_home}/.env}}"\n'
+        'if [[ -r "$GEMINI_ENV" ]]; then\n'
+        "  set -a\n"
+        "  # shellcheck disable=SC1090\n"
+        '  . "$GEMINI_ENV"\n'
+        "  set +a\n"
+        "fi\n"
+        'if [[ "$(id -un 2>/dev/null || true)" == "$OPS_USER" ]]; then\n'
+        '  export GEMINI_CLI_TRUST_WORKSPACE="${GEMINI_CLI_TRUST_WORKSPACE:-true}"\n'
+        "  skip_agent_runtime_mcp_default=0\n"
+        '  for arg in "$@"; do\n'
+        '    case "$arg" in\n'
+        "      --)\n"
+        "        break\n"
+        "        ;;\n"
+        "      mcp|extensions|extension|skills|skill|hooks|hook|gemma)\n"
+        "        skip_agent_runtime_mcp_default=1\n"
+        "        ;;\n"
+        "    esac\n"
+        "  done\n"
+        "  has_allowed_mcp=0\n"
+        '  for arg in "$@"; do\n'
+        '    case "$arg" in\n'
+        "      --allowed-mcp-server-names|--allowed-mcp-server-names=*)\n"
+        "        has_allowed_mcp=1\n"
+        "        ;;\n"
+        "    esac\n"
+        "  done\n"
+        '  if [[ "$skip_agent_runtime_mcp_default" -eq 0 '
+        '&& "$has_allowed_mcp" -eq 0 ]]; then\n'
+        '    set -- --allowed-mcp-server-names agent-runtime-ops "$@"\n'
+        "  fi\n"
+        "fi\n"
+        f'exec "{current}/agent-clis/gemini-cli/node_modules/.bin/gemini" "$@"\n'
+    )
+
+
+def _legacy_unrunnable_fixture(reader: Any, root: Path) -> dict[str, Any]:
+    install_root = root / "legacy-install"
+    releases = install_root / "releases"
+    state_root = root / "state"
+    bin_dir = root / "legacy-bin"
+    for directory, mode in (
+        (install_root, 0o755),
+        (releases, 0o755),
+        (state_root, 0o750),
+        (bin_dir, 0o755),
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+        os.chown(directory, 0, reader.pw_gid)
+        directory.chmod(mode)
+
+    release = releases / f"{LEGACY_RESTRICTIVE_UMASK_REF}.20260730095851.891379"
+    release.mkdir()
+    os.chown(release, 0, reader.pw_gid)
+    release.chmod(0o755)
+    current = install_root / "current"
+    manifest_link = install_root / ".agent-runtime-ops-manifest"
+    os.symlink(f"releases/{release.name}", current)
+    os.symlink("current/.agent-runtime-ops-manifest", manifest_link)
+    os.lchown(current, 0, reader.pw_gid)
+    os.lchown(manifest_link, 0, reader.pw_gid)
+
+    wrappers = {
+        "opsctl": bin_dir / "opsctl",
+        "mcp": bin_dir / "agent-runtime-ops-mcp",
+        "gemini": bin_dir / "gemini",
+    }
+    wrappers["opsctl"].write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f'exec "{current}/.venv/bin/opsctl" "$@"\n',
+        encoding="utf-8",
+    )
+    wrappers["mcp"].write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        f'exec "{current}/.venv/bin/agent-runtime-ops-mcp" "$@"\n',
+        encoding="utf-8",
+    )
+    wrappers["gemini"].write_text(
+        _legacy_gemini_wrapper(current, reader.pw_name, reader.pw_dir),
+        encoding="utf-8",
+    )
+    for wrapper in wrappers.values():
+        os.chown(wrapper, 0, reader.pw_gid)
+        wrapper.chmod(0o755)
+
+    venv = release / ".venv"
+    venv_bin = venv / "bin"
+    venv_bin.mkdir(parents=True)
+    inner_opsctl = venv_bin / "opsctl"
+    inner_opsctl.write_text("#!/bin/sh\nprintf 'should-not-run\\n'\n", encoding="utf-8")
+    for path in (venv, venv_bin, inner_opsctl):
+        os.chown(path, 0, reader.pw_gid)
+        path.chmod(0o700)
+
+    ops_group = "fixture-ops"
+    release_manifest = release / ".agent-runtime-ops-manifest"
+    release_manifest.write_text(
+        "\n".join(
+            (
+                f"source_commit={LEGACY_RESTRICTIVE_UMASK_REF}",
+                "source_summary=legacy restrictive umask fixture",
+                "installed_at=2026-07-30T09:58:51+09:00",
+                f"installed_dir={release}",
+                f"install_root={install_root}",
+                f"ops_user={reader.pw_name}",
+                f"ops_group={ops_group}",
+                f"state_root={state_root}",
+                f"opsctl={wrappers['opsctl']}",
+                f"mcp={wrappers['mcp']}",
+                "source_path=/root/agent-runtime-ops",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    os.chown(release_manifest, 0, reader.pw_gid)
+    release_manifest.chmod(0o644)
+
+    policy = state_root / "ops-update.yaml"
+    policy.write_text(
+        "meta:\n"
+        "  schema_version: 1\n"
+        "updates:\n"
+        "  agent-runtime-ops:\n"
+        "    repo_url: https://github.com/Epicevent/agent-runtime-ops.git\n"
+        f"    approved_ref: {ACTIVATION_COMMIT}\n",
+        encoding="utf-8",
+    )
+    os.chown(policy, 0, reader.pw_gid)
+    policy.chmod(0o640)
+    return {
+        "install_root": install_root,
+        "releases": releases,
+        "state_root": state_root,
+        "release": release,
+        "current": current,
+        "manifest_link": manifest_link,
+        "release_manifest": release_manifest,
+        "policy": policy,
+        "wrappers": wrappers,
+        "venv": venv,
+        "venv_bin": venv_bin,
+        "inner_opsctl": inner_opsctl,
+        "ops_group": ops_group,
+    }
+
+
+def _legacy_fixture_snapshot(tree: dict[str, Any]) -> dict[str, tuple[Any, ...]]:
+    paths = (
+        tree["install_root"],
+        tree["state_root"],
+        *tree["wrappers"].values(),
+    )
+    return {str(path): _path_fingerprint(path) for path in paths}
+
+
 def _validate_install_paths(tree: dict[str, Any]) -> subprocess.CompletedProcess[str]:
     paths = tree["paths"]
     return _run_contract_script(
@@ -487,6 +653,258 @@ def _activation_state_snapshot(tree: dict[str, Any]) -> dict[str, tuple[Any, ...
         str(path): _path_fingerprint(path)
         for path in (*live, *journal, *temps)
     }
+
+
+def _legacy_capture_body(reader: Any, tree: dict[str, Any]) -> str:
+    wrappers = tree["wrappers"]
+    return (
+        f"PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'\n"
+        f"INSTALL_ROOT={str(tree['install_root'])!r}\n"
+        f"RELEASES_DIR={str(tree['releases'])!r}\n"
+        f"CURRENT_LINK={str(tree['current'])!r}\n"
+        f"BIN_LINK={str(wrappers['opsctl'])!r}\n"
+        f"MCP_BIN_LINK={str(wrappers['mcp'])!r}\n"
+        f"GEMINI_BIN_LINK={str(wrappers['gemini'])!r}\n"
+        f"MANIFEST={str(tree['manifest_link'])!r}\n"
+        f"STATE_ROOT={str(tree['state_root'])!r}\n"
+        f"OPS_USER={reader.pw_name!r}\n"
+        f"OPS_GROUP={tree['ops_group']!r}\n"
+        f"OPS_HOME={reader.pw_dir!r}\n"
+        f"GEMINI_HOME={reader.pw_dir!r}\n"
+        "OPS_CLI_ATTESTATION_COMMAND_TIMEOUT_SECONDS=2\n"
+        "REPO_URL='https://github.com/Epicevent/agent-runtime-ops.git'\n"
+        f"LEGACY_RESTRICTIVE_UMASK_BASELINE_REF={LEGACY_RESTRICTIVE_UMASK_REF!r}\n"
+        "RESTORED_CLI_RESULT=''\n"
+        "die() { printf 'error:%s\\n' \"$*\" >&2; exit 23; }\n"
+        "attest_restored_cli_as_ops() { return 1; }\n"
+        + _function("run_cli_as_ops")
+        + _function("exact_preexisting_unrunnable_cli_baseline_identity")
+        + _function("attest_exact_preexisting_unrunnable_cli_baseline")
+        + _function("attest_restored_cli_or_exact_preexisting_unrunnable")
+        + _function("capture_previous_active_release")
+        + f"\ncapture_previous_active_release {ACTIVATION_COMMIT}\n"
+    )
+
+
+def test_exact_legacy_0700_baseline_is_admitted_without_mutation() -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        tree = _legacy_unrunnable_fixture(reader, root)
+        denied = _as_reader(reader, [str(tree["inner_opsctl"])])
+        assert denied.returncode == 126
+        before = _legacy_fixture_snapshot(tree)
+        completed = _run_contract_script(root, _legacy_capture_body(reader, tree))
+        assert completed.returncode == 0, completed.stderr
+        assert completed.stdout == f"{tree['release']}\n"
+        assert (
+            "previous_active_cli_state="
+            "restored_exact_but_preexisting_unrunnable\n"
+            in completed.stderr
+        )
+        assert _legacy_fixture_snapshot(tree) == before
+
+
+def test_exact_legacy_0700_recovery_finalizes_with_honest_degraded_state() -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        tree = _legacy_unrunnable_fixture(reader, root)
+        wrappers = tree["wrappers"]
+        trace = root / "legacy-recovery-trace"
+        body = (
+            f"PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'\n"
+            f"TRACE={str(trace)!r}\n"
+            f"INSTALL_ROOT={str(tree['install_root'])!r}\n"
+            f"RELEASES_DIR={str(tree['releases'])!r}\n"
+            f"CURRENT_LINK={str(tree['current'])!r}\n"
+            f"BIN_LINK={str(wrappers['opsctl'])!r}\n"
+            f"MCP_BIN_LINK={str(wrappers['mcp'])!r}\n"
+            f"GEMINI_BIN_LINK={str(wrappers['gemini'])!r}\n"
+            f"MANIFEST={str(tree['manifest_link'])!r}\n"
+            f"STATE_ROOT={str(tree['state_root'])!r}\n"
+            f"OPS_USER={reader.pw_name!r}\n"
+            f"OPS_GROUP={tree['ops_group']!r}\n"
+            f"OPS_HOME={reader.pw_dir!r}\n"
+            f"GEMINI_HOME={reader.pw_dir!r}\n"
+            "OPS_CLI_ATTESTATION_COMMAND_TIMEOUT_SECONDS=2\n"
+            "REPO_URL='https://github.com/Epicevent/agent-runtime-ops.git'\n"
+            f"LEGACY_RESTRICTIVE_UMASK_BASELINE_REF={LEGACY_RESTRICTIVE_UMASK_REF!r}\n"
+            "RESTORED_CLI_RESULT=''\n"
+            "attest_restored_cli_as_ops() { return 1; }\n"
+            "quiesce_root_action_broker_before_recovery() { printf 'quiesce\\n' >>\"$TRACE\"; }\n"
+            "run_activation_transaction() { printf 'tx:%s\\n' \"$2\" >>\"$TRACE\"; }\n"
+            "restore_broker_service_from_transaction() { printf 'broker\\n' >>\"$TRACE\"; }\n"
+            "info() { printf 'info:%s\\n' \"$*\" >>\"$TRACE\"; }\n"
+            + _function("run_cli_as_ops")
+            + _function("exact_preexisting_unrunnable_cli_baseline_identity")
+            + _function("attest_exact_preexisting_unrunnable_cli_baseline")
+            + _function("attest_restored_cli_or_exact_preexisting_unrunnable")
+            + _function("recover_and_attest_activation_baseline")
+            + f"\nrecover_and_attest_activation_baseline /helper {ACTIVATION_COMMIT} {str(tree['release'])!r}\n"
+        )
+        before = _legacy_fixture_snapshot(tree)
+        completed = _run_contract_script(root, body)
+        assert completed.returncode == 0, completed.stderr
+        assert trace.read_text(encoding="utf-8").splitlines() == [
+            "quiesce",
+            "tx:recover",
+            "broker",
+            "info:ops_cli_restoration=restored_exact_but_preexisting_unrunnable",
+            "tx:finalize",
+        ]
+        assert _legacy_fixture_snapshot(tree) == before
+
+
+def test_exact_legacy_0700_baseline_reaches_real_candidate_svcops_attestation() -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        tree = _legacy_unrunnable_fixture(reader, root)
+        candidate = root / "candidate"
+        candidate_opsctl = candidate / ".venv" / "bin" / "opsctl"
+        candidate_gemini = (
+            candidate
+            / "agent-clis"
+            / "gemini-cli"
+            / "node_modules"
+            / ".bin"
+            / "gemini"
+        )
+        candidate_opsctl.parent.mkdir(parents=True)
+        candidate_gemini.parent.mkdir(parents=True)
+        candidate_opsctl.write_text(
+            "#!/bin/sh\n"
+            "cat <<'EOF'\n"
+            "update_status=ready\n"
+            f"installed_ref={LEGACY_RESTRICTIVE_UMASK_REF}\n"
+            "repo_url=https://github.com/Epicevent/agent-runtime-ops.git\n"
+            f"approved_ref={ACTIVATION_COMMIT}\n"
+            "approved_matches_installed=no\n"
+            "EOF\n",
+            encoding="utf-8",
+        )
+        candidate_gemini.write_text(
+            "#!/bin/sh\nprintf 'candidate-gemini-ok\\n'\n",
+            encoding="utf-8",
+        )
+        for path in [candidate, *candidate.rglob("*")]:
+            os.chown(path, 0, reader.pw_gid, follow_symlinks=False)
+            path.chmod(0o750 if path.is_dir() or os.access(path, os.X_OK) else 0o640)
+        candidate_opsctl.chmod(0o750)
+        candidate_gemini.chmod(0o750)
+
+        body = (
+            _legacy_capture_body(reader, tree)
+            + _function("validate_update_status_output")
+            + _function("attest_candidate_cli_as_ops")
+            + f"\nattest_candidate_cli_as_ops {str(candidate)!r} {ACTIVATION_COMMIT}\n"
+            + "printf 'candidate_svcops_attestation=passed\\n'\n"
+        )
+        completed = _run_contract_script(root, body)
+        assert completed.returncode == 0, completed.stderr
+        assert completed.stdout.splitlines() == [
+            str(tree["release"]),
+            "candidate_svcops_attestation=passed",
+        ]
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    (
+        "venv-mode",
+        "venv-bin-symlink",
+        "inner-hardlink",
+        "wrapper-hardlink",
+        "wrapper-owner",
+        "policy-mismatch",
+        "manifest-mismatch",
+        "successor-gemini-body",
+    ),
+)
+def test_legacy_baseline_exception_rejects_unsafe_identity_without_writes(
+    invalid: str,
+) -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        tree = _legacy_unrunnable_fixture(reader, root)
+        if invalid == "venv-mode":
+            tree["venv"].chmod(0o750)
+        elif invalid == "venv-bin-symlink":
+            real_bin = tree["venv"] / "real-bin"
+            tree["venv_bin"].rename(real_bin)
+            tree["venv_bin"].symlink_to(real_bin, target_is_directory=True)
+        elif invalid == "inner-hardlink":
+            os.link(tree["inner_opsctl"], tree["venv_bin"] / "opsctl-copy")
+        elif invalid == "wrapper-hardlink":
+            os.link(tree["wrappers"]["opsctl"], root / "opsctl-copy")
+        elif invalid == "wrapper-owner":
+            os.chown(tree["wrappers"]["opsctl"], reader.pw_uid, reader.pw_gid)
+        elif invalid == "policy-mismatch":
+            tree["policy"].write_text(
+                tree["policy"].read_text(encoding="utf-8").replace(
+                    ACTIVATION_COMMIT, "c" * 40
+                ),
+                encoding="utf-8",
+            )
+            os.chown(tree["policy"], 0, reader.pw_gid)
+            tree["policy"].chmod(0o640)
+        elif invalid == "manifest-mismatch":
+            tree["release_manifest"].write_text(
+                tree["release_manifest"].read_text(encoding="utf-8").replace(
+                    LEGACY_RESTRICTIVE_UMASK_REF, "a" * 40, 1
+                ),
+                encoding="utf-8",
+            )
+            os.chown(tree["release_manifest"], 0, reader.pw_gid)
+            tree["release_manifest"].chmod(0o644)
+        else:
+            legacy = tree["wrappers"]["gemini"].read_text(encoding="utf-8")
+            successor = legacy.replace(
+                "      --)\n        break\n        ;;\n",
+                "      --) break ;;\n",
+            ).replace(
+                "      mcp|extensions|extension|skills|skill|hooks|hook|gemma)\n"
+                "        skip_agent_runtime_mcp_default=1\n"
+                "        ;;\n",
+                "      mcp|extensions|extension|skills|skill|hooks|hook|gemma) "
+                "skip_agent_runtime_mcp_default=1 ;;\n",
+            )
+            tree["wrappers"]["gemini"].write_text(successor, encoding="utf-8")
+            os.chown(tree["wrappers"]["gemini"], 0, reader.pw_gid)
+            tree["wrappers"]["gemini"].chmod(0o755)
+
+        before = _legacy_fixture_snapshot(tree)
+        completed = _run_contract_script(root, _legacy_capture_body(reader, tree))
+        assert completed.returncode != 0
+        assert _legacy_fixture_snapshot(tree) == before
+
+
+def test_legacy_baseline_identity_drift_during_rc126_probe_is_rejected() -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        tree = _legacy_unrunnable_fixture(reader, root)
+        wrappers = tree["wrappers"]
+        body = (
+            f"INSTALL_ROOT={str(tree['install_root'])!r}\n"
+            f"RELEASES_DIR={str(tree['releases'])!r}\n"
+            f"CURRENT_LINK={str(tree['current'])!r}\n"
+            f"BIN_LINK={str(wrappers['opsctl'])!r}\n"
+            f"MCP_BIN_LINK={str(wrappers['mcp'])!r}\n"
+            f"GEMINI_BIN_LINK={str(wrappers['gemini'])!r}\n"
+            f"MANIFEST={str(tree['manifest_link'])!r}\n"
+            f"STATE_ROOT={str(tree['state_root'])!r}\n"
+            f"OPS_USER={reader.pw_name!r}\n"
+            f"OPS_GROUP={tree['ops_group']!r}\n"
+            f"OPS_HOME={reader.pw_dir!r}\n"
+            f"GEMINI_HOME={reader.pw_dir!r}\n"
+            "REPO_URL='https://github.com/Epicevent/agent-runtime-ops.git'\n"
+            f"LEGACY_RESTRICTIVE_UMASK_BASELINE_REF={LEGACY_RESTRICTIVE_UMASK_REF!r}\n"
+            f"DRIFT_PATH={str(tree['release_manifest'])!r}\n"
+            "run_cli_as_ops() { chmod 0600 \"$DRIFT_PATH\"; chmod 0644 \"$DRIFT_PATH\"; return 126; }\n"
+            + _function("exact_preexisting_unrunnable_cli_baseline_identity")
+            + _function("attest_exact_preexisting_unrunnable_cli_baseline")
+            + f"\nattest_exact_preexisting_unrunnable_cli_baseline {str(tree['release'])!r} {ACTIVATION_COMMIT}\n"
+        )
+        completed = _run_contract_script(root, body)
+        assert completed.returncode != 0
 
 
 def _symlink_instance(path: Path) -> tuple[Any, ...]:
@@ -1563,7 +1981,18 @@ def test_unavailable_broker_quiesce_requires_systemctl_absent(
         assert completed.returncode == (1 if systemctl_present else 0)
 
 
-def test_recovery_finalizes_only_after_broker_and_cli_attestation() -> None:
+@pytest.mark.parametrize(
+    "restoration_state,expected_rc",
+    (
+        ("svcops_verified", 0),
+        ("restored_exact_but_preexisting_unrunnable", 0),
+        ("rejected", 1),
+    ),
+)
+def test_recovery_finalizes_only_after_broker_and_cli_attestation(
+    restoration_state: str,
+    expected_rc: int,
+) -> None:
     reader = _reader()
     with _root_temp(reader) as root:
         trace = root / "trace"
@@ -1573,18 +2002,32 @@ def test_recovery_finalizes_only_after_broker_and_cli_attestation() -> None:
             "quiesce_root_action_broker_before_recovery() { printf 'quiesce\\n' >>\"$TRACE\"; }\n"
             "run_activation_transaction() { printf 'tx:%s\\n' \"$2\" >>\"$TRACE\"; }\n"
             "restore_broker_service_from_transaction() { printf 'broker\\n' >>\"$TRACE\"; }\n"
-            "attest_restored_cli_as_ops() { printf 'cli\\n' >>\"$TRACE\"; }\n"
+            f"RESTORATION_STATE={restoration_state!r}\n"
+            "RESTORED_CLI_RESULT=''\n"
+            "attest_restored_cli_or_exact_preexisting_unrunnable() {\n"
+            "  printf 'cli:%s\\n' \"$RESTORATION_STATE\" >>\"$TRACE\"\n"
+            "  [[ \"$RESTORATION_STATE\" != rejected ]] || return 1\n"
+            "  RESTORED_CLI_RESULT=\"$RESTORATION_STATE\"\n"
+            "}\n"
+            "info() { printf 'info:%s\\n' \"$*\" >>\"$TRACE\"; }\n"
             + _function("recover_and_attest_activation_baseline")
             + f"\nrecover_and_attest_activation_baseline /helper {ACTIVATION_COMMIT} /previous\n",
         )
-        assert completed.returncode == 0, completed.stderr
-        assert trace.read_text(encoding="utf-8").splitlines() == [
+        assert completed.returncode == expected_rc, completed.stderr
+        expected_trace = [
             "quiesce",
             "tx:recover",
             "broker",
-            "cli",
-            "tx:finalize",
+            f"cli:{restoration_state}",
         ]
+        if expected_rc == 0:
+            expected_trace.extend(
+                [
+                    f"info:ops_cli_restoration={restoration_state}",
+                    "tx:finalize",
+                ]
+            )
+        assert trace.read_text(encoding="utf-8").splitlines() == expected_trace
 
 
 @pytest.mark.parametrize("journal_state", ("active", "inactive", "absent"))

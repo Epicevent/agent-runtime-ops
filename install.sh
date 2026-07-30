@@ -27,6 +27,8 @@ MANIFEST="${AGENT_RUNTIME_OPS_MANIFEST:-$INSTALL_ROOT/.agent-runtime-ops-manifes
 ACTIVATION_TRANSACTION_DIR="$INSTALL_ROOT/.activation-transaction.pending"
 ACTIVATION_CANDIDATE_DIR="$INSTALL_ROOT/.activation-candidate.prepare"
 ACTIVATION_HELPER_BLOB=""
+RESTORED_CLI_RESULT=""
+LEGACY_RESTRICTIVE_UMASK_BASELINE_REF="443c5fdaac231a1c62d4a927ca93e19d055e400a"
 REPO_URL="${AGENT_RUNTIME_OPS_REPO_URL:-https://github.com/Epicevent/agent-runtime-ops.git}"
 REPO_REF="${AGENT_RUNTIME_OPS_REF:-}"
 SUDOERS_FILE="${AGENT_RUNTIME_OPS_SUDOERS_FILE:-/etc/sudoers.d/agent-runtime-ops}"
@@ -1329,8 +1331,12 @@ recover_and_attest_activation_baseline() {
   run_activation_transaction "$helper" recover || return 1
   restore_broker_service_from_transaction "$helper" "$previous_release" || return 1
   if [[ -n "$previous_release" ]]; then
-    attest_restored_cli_as_ops "$previous_release" "$expected_commit" || return 1
+    attest_restored_cli_or_exact_preexisting_unrunnable \
+      "$previous_release" "$expected_commit" || return 1
+  else
+    RESTORED_CLI_RESULT="first_install_absent"
   fi
+  info "ops_cli_restoration=$RESTORED_CLI_RESULT"
   run_activation_transaction "$helper" finalize --expect baseline || return 1
 }
 
@@ -1356,7 +1362,8 @@ recover_pending_activation_transaction() {
     || cleanup_rc="$?"
   [[ "$cleanup_rc" -eq 2 ]] \
     || die "activation baseline recovered but durable completion acknowledgement failed"
-  info "activation_recovery=previous_identity_restored"
+  info "activation_recovery=previous_identity_restored_exactly"
+  info "activation_recovery_cli_state=$RESTORED_CLI_RESULT"
   return 0
 }
 
@@ -1745,6 +1752,389 @@ attest_restored_cli_as_ops() {
   [[ -x "$MCP_BIN_LINK" ]] || return 1
 }
 
+exact_preexisting_unrunnable_cli_baseline_identity() {
+  local release_dir="$1"
+  local expected_ref="$2"
+  local ops_gid
+  ops_gid="$(/usr/bin/id -g "$OPS_USER")" || return 1
+  [[ "$ops_gid" =~ ^[0-9]+$ ]] || return 1
+  /usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/python3 -I - \
+    "$release_dir" "$RELEASES_DIR" "$CURRENT_LINK" \
+    "$BIN_LINK" "$MCP_BIN_LINK" "$GEMINI_BIN_LINK" "$MANIFEST" \
+    "$STATE_ROOT/ops-update.yaml" "$REPO_URL" "$expected_ref" "$ops_gid" \
+    "$OPS_USER" "$OPS_GROUP" "$INSTALL_ROOT" "$STATE_ROOT" "$GEMINI_HOME" \
+    "$LEGACY_RESTRICTIVE_UMASK_BASELINE_REF" <<'PY' \
+    || return 1
+import hashlib
+import os
+import re
+import stat
+import sys
+
+(
+    release_raw,
+    releases_raw,
+    current_raw,
+    opsctl_raw,
+    mcp_raw,
+    gemini_raw,
+    manifest_link_raw,
+    policy_raw,
+    expected_repo,
+    expected_ref,
+    ops_gid_raw,
+    ops_user,
+    ops_group,
+    install_root,
+    state_root,
+    gemini_home,
+    legacy_ref,
+) = sys.argv[1:]
+release = os.path.realpath(release_raw)
+releases = os.path.realpath(releases_raw)
+ops_gid = int(ops_gid_raw)
+if os.path.dirname(release) != releases:
+    raise SystemExit(1)
+
+
+def lstat(path: str) -> os.stat_result:
+    try:
+        return os.lstat(path)
+    except OSError as exc:
+        raise SystemExit(1) from exc
+
+
+def same_instance(left: os.stat_result, right: os.stat_result) -> bool:
+    return (
+        left.st_dev,
+        left.st_ino,
+        left.st_uid,
+        left.st_gid,
+        left.st_mode,
+        left.st_nlink,
+        left.st_size,
+        left.st_mtime_ns,
+        left.st_ctime_ns,
+    ) == (
+        right.st_dev,
+        right.st_ino,
+        right.st_uid,
+        right.st_gid,
+        right.st_mode,
+        right.st_nlink,
+        right.st_size,
+        right.st_mtime_ns,
+        right.st_ctime_ns,
+    )
+
+
+def read_regular(path: str, mode: int, maximum: int) -> str:
+    before = lstat(path)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or stat.S_ISLNK(before.st_mode)
+        or before.st_uid != 0
+        or before.st_gid != ops_gid
+        or stat.S_IMODE(before.st_mode) != mode
+        or before.st_nlink != 1
+        or before.st_size <= 0
+        or before.st_size > maximum
+    ):
+        raise SystemExit(1)
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise SystemExit(1) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if not same_instance(before, opened):
+            raise SystemExit(1)
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(65536, maximum + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > maximum:
+                raise SystemExit(1)
+        after = lstat(path)
+        if not same_instance(opened, after):
+            raise SystemExit(1)
+    finally:
+        os.close(descriptor)
+    try:
+        return b"".join(chunks).decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise SystemExit(1) from exc
+
+
+def require_symlink(path: str, target: str) -> None:
+    before = lstat(path)
+    if (
+        not stat.S_ISLNK(before.st_mode)
+        or before.st_uid != 0
+        or before.st_gid != ops_gid
+        or before.st_nlink != 1
+    ):
+        raise SystemExit(1)
+    try:
+        observed_target = os.readlink(path)
+    except OSError as exc:
+        raise SystemExit(1) from exc
+    after = lstat(path)
+    if not same_instance(before, after) or observed_target != target:
+        raise SystemExit(1)
+
+
+release_meta = lstat(release)
+if (
+    not stat.S_ISDIR(release_meta.st_mode)
+    or stat.S_ISLNK(release_meta.st_mode)
+    or release_meta.st_uid != 0
+    or release_meta.st_gid != ops_gid
+    or stat.S_IMODE(release_meta.st_mode) != 0o755
+):
+    raise SystemExit(1)
+require_symlink(current_raw, f"releases/{os.path.basename(release)}")
+require_symlink(manifest_link_raw, "current/.agent-runtime-ops-manifest")
+opsctl_wrapper = read_regular(opsctl_raw, 0o755, 256 * 1024)
+mcp_wrapper = read_regular(mcp_raw, 0o755, 256 * 1024)
+gemini_wrapper = read_regular(gemini_raw, 0o755, 256 * 1024)
+expected_opsctl_wrapper = (
+    "#!/usr/bin/env bash\n"
+    "set -euo pipefail\n"
+    f'exec "{current_raw}/.venv/bin/opsctl" "$@"\n'
+)
+expected_mcp_wrapper = (
+    "#!/usr/bin/env bash\n"
+    "set -euo pipefail\n"
+    f'exec "{current_raw}/.venv/bin/agent-runtime-ops-mcp" "$@"\n'
+)
+if opsctl_wrapper != expected_opsctl_wrapper or mcp_wrapper != expected_mcp_wrapper:
+    raise SystemExit(1)
+expected_gemini_wrapper = (
+    "#!/usr/bin/env bash\n"
+    "set -euo pipefail\n"
+    "# agent-runtime-ops managed gemini wrapper\n"
+    f'OPS_USER="{ops_user}"\n'
+    f'GEMINI_ENV="${{AGENT_RUNTIME_GEMINI_ENV:-{gemini_home}/.env}}"\n'
+    'if [[ -r "$GEMINI_ENV" ]]; then\n'
+    "  set -a\n"
+    "  # shellcheck disable=SC1090\n"
+    '  . "$GEMINI_ENV"\n'
+    "  set +a\n"
+    "fi\n"
+    'if [[ "$(id -un 2>/dev/null || true)" == "$OPS_USER" ]]; then\n'
+    '  export GEMINI_CLI_TRUST_WORKSPACE="${GEMINI_CLI_TRUST_WORKSPACE:-true}"\n'
+    "  skip_agent_runtime_mcp_default=0\n"
+    '  for arg in "$@"; do\n'
+    '    case "$arg" in\n'
+    "      --)\n"
+    "        break\n"
+    "        ;;\n"
+    "      mcp|extensions|extension|skills|skill|hooks|hook|gemma)\n"
+    "        skip_agent_runtime_mcp_default=1\n"
+    "        ;;\n"
+    "    esac\n"
+    "  done\n"
+    "  has_allowed_mcp=0\n"
+    '  for arg in "$@"; do\n'
+    '    case "$arg" in\n'
+    "      --allowed-mcp-server-names|--allowed-mcp-server-names=*)\n"
+    "        has_allowed_mcp=1\n"
+    "        ;;\n"
+    "    esac\n"
+    "  done\n"
+    '  if [[ "$skip_agent_runtime_mcp_default" -eq 0 '
+    '&& "$has_allowed_mcp" -eq 0 ]]; then\n'
+    '    set -- --allowed-mcp-server-names agent-runtime-ops "$@"\n'
+    "  fi\n"
+    "fi\n"
+    f'exec "{current_raw}/agent-clis/gemini-cli/node_modules/.bin/gemini" "$@"\n'
+)
+if gemini_wrapper != expected_gemini_wrapper:
+    raise SystemExit(1)
+release_manifest = os.path.join(release, ".agent-runtime-ops-manifest")
+manifest_text = read_regular(release_manifest, 0o644, 256 * 1024)
+manifest_lines = manifest_text.splitlines()
+manifest_rows = {}
+for line in manifest_lines:
+    key, separator, value = line.partition("=")
+    if not separator or key in manifest_rows:
+        raise SystemExit(1)
+    manifest_rows[key] = value
+previous_ref = manifest_rows.get("source_commit", "")
+if previous_ref != legacy_ref or re.fullmatch(r"[0-9a-f]{40}", previous_ref) is None:
+    raise SystemExit(1)
+if not os.path.basename(release).startswith(f"{previous_ref}."):
+    raise SystemExit(1)
+required_manifest = {
+    "installed_dir": release,
+    "install_root": install_root,
+    "ops_user": ops_user,
+    "ops_group": ops_group,
+    "state_root": state_root,
+    "opsctl": opsctl_raw,
+    "mcp": mcp_raw,
+}
+if any(manifest_rows.get(key) != value for key, value in required_manifest.items()):
+    raise SystemExit(1)
+
+venv = os.path.join(release, ".venv")
+venv_meta = lstat(venv)
+if (
+    not stat.S_ISDIR(venv_meta.st_mode)
+    or stat.S_ISLNK(venv_meta.st_mode)
+    or venv_meta.st_uid != 0
+    or venv_meta.st_gid != ops_gid
+    or stat.S_IMODE(venv_meta.st_mode) != 0o700
+):
+    raise SystemExit(1)
+venv_bin = os.path.join(venv, "bin")
+venv_bin_meta = lstat(venv_bin)
+if (
+    not stat.S_ISDIR(venv_bin_meta.st_mode)
+    or stat.S_ISLNK(venv_bin_meta.st_mode)
+    or venv_bin_meta.st_uid != 0
+    or venv_bin_meta.st_gid != ops_gid
+    or venv_bin_meta.st_nlink < 2
+    or (stat.S_IMODE(venv_bin_meta.st_mode) & 0o022) != 0
+):
+    raise SystemExit(1)
+venv_opsctl = os.path.join(venv, "bin", "opsctl")
+venv_opsctl_meta = lstat(venv_opsctl)
+if (
+    not stat.S_ISREG(venv_opsctl_meta.st_mode)
+    or stat.S_ISLNK(venv_opsctl_meta.st_mode)
+    or venv_opsctl_meta.st_uid != 0
+    or venv_opsctl_meta.st_gid != ops_gid
+    or venv_opsctl_meta.st_nlink != 1
+    or (stat.S_IMODE(venv_opsctl_meta.st_mode) & 0o100) == 0
+    or (stat.S_IMODE(venv_opsctl_meta.st_mode) & 0o077) != 0
+):
+    raise SystemExit(1)
+
+policy_text = read_regular(policy_raw, 0o640, 256 * 1024)
+policy_lines = policy_text.splitlines()
+updates_seen = 0
+agent_seen = 0
+repo_rows = []
+approved_rows = []
+in_updates = False
+in_agent = False
+for line in policy_lines:
+    if line == "updates:":
+        updates_seen += 1
+        in_updates = True
+        in_agent = False
+        continue
+    if line and not line.startswith(" "):
+        in_updates = False
+        in_agent = False
+        continue
+    if in_updates and line == "  agent-runtime-ops:":
+        agent_seen += 1
+        in_agent = True
+        continue
+    if in_agent and line.startswith("  ") and not line.startswith("    "):
+        in_agent = False
+        continue
+    if in_agent and line.startswith("    repo_url: "):
+        repo_rows.append(line.removeprefix("    repo_url: "))
+    if in_agent and line.startswith("    approved_ref: "):
+        approved_rows.append(line.removeprefix("    approved_ref: "))
+if (
+    updates_seen != 1
+    or agent_seen != 1
+    or repo_rows != [expected_repo]
+    or approved_rows != [expected_ref]
+):
+    raise SystemExit(1)
+identity_paths = (
+    release,
+    current_raw,
+    opsctl_raw,
+    mcp_raw,
+    gemini_raw,
+    manifest_link_raw,
+    release_manifest,
+    venv,
+    venv_bin,
+    venv_opsctl,
+    policy_raw,
+)
+identity_rows = []
+for path in identity_paths:
+    value = lstat(path)
+    identity_rows.append(
+        ":".join(
+            str(item)
+            for item in (
+                value.st_dev,
+                value.st_ino,
+                value.st_uid,
+                value.st_gid,
+                value.st_mode,
+                value.st_nlink,
+                value.st_size,
+                value.st_mtime_ns,
+                value.st_ctime_ns,
+            )
+        )
+    )
+identity_rows.extend(
+    hashlib.sha256(value.encode("utf-8")).hexdigest()
+    for value in (
+        opsctl_wrapper,
+        mcp_wrapper,
+        gemini_wrapper,
+        manifest_text,
+        policy_text,
+    )
+)
+identity_rows.extend((os.readlink(current_raw), os.readlink(manifest_link_raw)))
+print(hashlib.sha256("\0".join(identity_rows).encode("utf-8")).hexdigest())
+PY
+}
+
+attest_exact_preexisting_unrunnable_cli_baseline() {
+  local release_dir="$1"
+  local expected_ref="$2"
+  local before_identity after_identity cli_rc=0
+  before_identity="$(
+    exact_preexisting_unrunnable_cli_baseline_identity \
+      "$release_dir" "$expected_ref"
+  )" || return 1
+  [[ "$before_identity" =~ ^[0-9a-f]{64}$ ]] || return 1
+  run_cli_as_ops "$release_dir/.venv/bin/opsctl" \
+    --state-root "$STATE_ROOT" update status \
+    >/dev/null 2>&1 || cli_rc="$?"
+  [[ "$cli_rc" -eq 126 ]] || return 1
+  after_identity="$(
+    exact_preexisting_unrunnable_cli_baseline_identity \
+      "$release_dir" "$expected_ref"
+  )" || return 1
+  [[ "$after_identity" == "$before_identity" ]]
+}
+
+attest_restored_cli_or_exact_preexisting_unrunnable() {
+  local release_dir="$1"
+  local expected_ref="$2"
+  RESTORED_CLI_RESULT=""
+  if attest_restored_cli_as_ops "$release_dir" "$expected_ref"; then
+    RESTORED_CLI_RESULT="svcops_verified"
+    return 0
+  fi
+  if attest_exact_preexisting_unrunnable_cli_baseline "$release_dir" "$expected_ref"; then
+    RESTORED_CLI_RESULT="restored_exact_but_preexisting_unrunnable"
+    return 0
+  fi
+  return 1
+}
+
 capture_previous_active_release() {
   local expected_ref="$1"
   local previous_release releases_real
@@ -1769,8 +2159,10 @@ capture_previous_active_release() {
     || die "current release resolves outside the releases directory"
   [[ -d "$previous_release" && ! -L "$previous_release" ]] \
     || die "current release target is not a fixed release directory"
-  attest_restored_cli_as_ops "$previous_release" "$expected_ref" \
-    || die "previous active svcops CLI identity is not restorable"
+  attest_restored_cli_or_exact_preexisting_unrunnable \
+    "$previous_release" "$expected_ref" \
+    || die "previous active CLI is neither svcops-verifiable nor an exact restrictive-umask baseline"
+  printf 'previous_active_cli_state=%s\n' "$RESTORED_CLI_RESULT" >&2
   printf '%s\n' "$previous_release"
 }
 
@@ -1839,8 +2231,10 @@ activate_and_attest_cli_or_restore() {
       recover_and_attest_activation_baseline \
         "$helper" "$commit" "$previous_release" \
         || die "activation failed and durable previous identity restoration failed"
+    else
+      RESTORED_CLI_RESULT="unchanged_prepublication"
     fi
-    die "post-activation svcops CLI attestation failed; previous active identity restored"
+    die "post-activation svcops CLI attestation failed; baseline_state=$RESTORED_CLI_RESULT"
   fi
   info "ops_cli_post_activation=svcops_verified"
 }
@@ -1874,7 +2268,7 @@ install_root_action_broker_or_restore() {
   fi
   recover_and_attest_activation_baseline "$helper" "$commit" "$previous_release" \
     || die "root-action broker setup failed and durable previous identity restoration failed"
-  die "root-action broker setup failed; previous active identity restored"
+  die "root-action broker setup failed; previous active identity restored exactly; recovery_state=$RESTORED_CLI_RESULT"
 }
 
 register_codex_mcp() {
