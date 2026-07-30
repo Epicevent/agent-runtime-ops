@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any
 
 import pytest
@@ -27,7 +28,7 @@ ACTIVATION_COMMIT = "b" * 40
 LEGACY_RESTRICTIVE_UMASK_REF = "443c5fdaac231a1c62d4a927ca93e19d055e400a"
 SYSTEMD_TUPLE_SHOW = (
     "show --property=LoadState --property=ActiveState --property=SubState "
-    "--property=MainPID --property=Job broker.service"
+    "--property=MainPID --property=Job --property=UnitFileState broker.service"
 )
 
 
@@ -320,6 +321,7 @@ def _activation_fixture(reader: Any, root: Path, *, previous: bool = False) -> d
     broker_unit = root / "agent-runtime-root-action-broker.service"
     previous_release: Path | None = None
     broker_state = "absent"
+    broker_unit_file_state = "absent"
     if previous:
         previous_release = releases / f"{'a' * 40}.20260729000000.1234"
         previous_release.mkdir()
@@ -338,6 +340,7 @@ def _activation_fixture(reader: Any, root: Path, *, previous: bool = False) -> d
         os.chown(broker_unit, 0, 0)
         broker_unit.chmod(0o644)
         broker_state = "inactive"
+        broker_unit_file_state = "disabled"
     return {
         "install_root": install_root,
         "releases": releases,
@@ -347,6 +350,7 @@ def _activation_fixture(reader: Any, root: Path, *, previous: bool = False) -> d
         "paths": paths,
         "broker_unit": broker_unit,
         "broker_state": broker_state,
+        "broker_unit_file_state": broker_unit_file_state,
         "ops_gid": reader.pw_gid,
         "tx": install_root / ".activation-transaction.pending",
     }
@@ -819,7 +823,41 @@ def _begin(tree: dict[str, Any]) -> subprocess.CompletedProcess[str]:
         "--previous-release", str(previous) if previous is not None else "",
         "--broker-service-name", tree["broker_unit"].name,
         "--broker-state", tree["broker_state"],
+        "--broker-unit-file-state", tree["broker_unit_file_state"],
     )
+
+
+def _active_intent_carrier(tree: dict[str, Any]) -> None:
+    tree["broker_state"] = "active"
+    tree["broker_unit_file_state"] = "enabled"
+    begun = _begin(tree)
+    assert begun.returncode == 0, begun.stderr
+    recovered = _run_tx(tree, "recover")
+    assert recovered.returncode == 0, recovered.stderr
+    deferred = _run_tx(
+        tree,
+        "defer-broker-reactivation",
+        "--expected-commit",
+        ACTIVATION_COMMIT,
+        "--expected-previous-release",
+        str(tree["previous"]),
+        "--expected-service-name",
+        tree["broker_unit"].name,
+    )
+    assert deferred.returncode == 0, deferred.stderr
+    assert deferred.stdout == "broker_reactivation_intent=recorded\n"
+    finalized = _run_tx(tree, "finalize", "--expect", "baseline")
+    assert finalized.returncode == 0, finalized.stderr
+    first_ack = _run_tx(
+        tree, "ack-recovered", "--expected-commit", ACTIVATION_COMMIT
+    )
+    assert first_ack.returncode == 0, first_ack.stderr
+    assert first_ack.stdout == "recovered_completion_acknowledged=yes\n"
+    ready = _run_tx(
+        tree, "ack-recovered", "--expected-commit", ACTIVATION_COMMIT
+    )
+    assert ready.returncode == 0, ready.stderr
+    assert ready.stdout == "broker_reactivation_intent=ready\n"
 
 
 def _path_fingerprint(path: Path) -> tuple[Any, ...]:
@@ -1142,7 +1180,7 @@ def test_exact_legacy_recovery_finalizes_with_honest_degraded_state(
             "RESTORED_BROKER_RESULT=''\n"
             "quiesce_root_action_broker_before_recovery() { printf 'quiesce\\n' >>\"$TRACE\"; }\n"
             "run_activation_transaction() { printf 'tx:%s\\n' \"$2\" >>\"$TRACE\"; }\n"
-            "restore_broker_service_after_baseline_validation() { printf 'broker\\n' >>\"$TRACE\"; RESTORED_BROKER_RESULT=restored_unit_preexisting_active_left_quiesced; }\n"
+            "restore_broker_service_after_baseline_validation() { printf 'broker\\n' >>\"$TRACE\"; RESTORED_BROKER_RESULT=restored_unit_active_intent_carried_candidate_only; }\n"
             "info() { printf 'info:%s\\n' \"$*\" >>\"$TRACE\"; }\n"
             + _function("manifest_value")
             + _function("run_cli_as_ops")
@@ -1171,7 +1209,7 @@ def test_exact_legacy_recovery_finalizes_with_honest_degraded_state(
             "tx:recover",
             "broker",
             f"info:ops_cli_restoration={expected_cli_result}",
-            "info:broker_restoration=restored_unit_preexisting_active_left_quiesced",
+            "info:broker_restoration=restored_unit_active_intent_carried_candidate_only",
             "tx:finalize",
         ]
         assert not legacy_execution_trace.exists()
@@ -1447,6 +1485,735 @@ def test_activation_begin_rejects_negative_gid_without_writes() -> None:
         before = _activation_state_snapshot(tree)
         completed = _begin(tree)
         assert completed.returncode != 0
+        assert _activation_state_snapshot(tree) == before
+
+
+def test_broker_reactivation_intent_adopts_distinct_baseline_and_desired_state() -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        tree = _activation_fixture(reader, root, previous=True)
+        _active_intent_carrier(tree)
+        acknowledged = Path(f"{tree['tx']}.recovered.acknowledged")
+        assert acknowledged.is_dir()
+
+        tree["broker_state"] = "inactive"
+        tree["broker_unit_file_state"] = "disabled"
+        begun = _begin(tree)
+        assert begun.returncode == 0, begun.stderr
+        assert not os.path.lexists(acknowledged)
+        expected = {
+            "broker_state": "inactive\n",
+            "broker_unit_file_state": "disabled\n",
+            "broker_carried_baseline_state": "inactive\n",
+            "broker_carried_baseline_unit_file_state": "disabled\n",
+            "broker_desired_state": "active\n",
+            "broker_desired_unit_file_state": "enabled\n",
+            "broker_activation_phase": "candidate_bound\n",
+        }
+        for field, output in expected.items():
+            observed = _run_tx(tree, "show", "--field", field)
+            assert observed.returncode == 0, observed.stderr
+            assert observed.stdout == output
+
+
+def test_carried_broker_start_is_at_most_once_and_finalizes_after_attestation() -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        tree = _activation_fixture(reader, root, previous=True)
+        _active_intent_carrier(tree)
+        tree["broker_state"] = "inactive"
+        tree["broker_unit_file_state"] = "disabled"
+        assert _begin(tree).returncode == 0
+        assert _run_tx(tree, "publish").returncode == 0
+        assert _run_tx(tree, "publish-broker").returncode == 0
+        binding = (
+            "--expected-commit",
+            ACTIVATION_COMMIT,
+            "--expected-candidate-release",
+            str(tree["candidate"]),
+            "--expected-service-name",
+            tree["broker_unit"].name,
+        )
+        wrong = _run_tx(
+            tree,
+            "commit-broker-start",
+            *binding[:-1],
+            "wrong.service",
+        )
+        assert wrong.returncode != 0
+        committed = _run_tx(tree, "commit-broker-start", *binding)
+        assert committed.returncode == 0, committed.stderr
+        assert committed.stdout == "broker_start_dispatch=committed\n"
+        assert _run_tx(tree, "commit-broker-start", *binding).returncode != 0
+        assert _run_tx(tree, "recover").returncode != 0
+        assert _run_tx(tree, "finalize", "--expect", "candidate").returncode != 0
+        attested = _run_tx(tree, "mark-broker-active", *binding)
+        assert attested.returncode == 0, attested.stderr
+        assert attested.stdout == "broker_active_attestation=recorded\n"
+        assert (
+            _run_tx(tree, "show", "--field", "broker_activation_phase").stdout
+            == "active_attested\n"
+        )
+        finalized = _run_tx(tree, "finalize", "--expect", "candidate")
+        assert finalized.returncode == 0, finalized.stderr
+        assert not os.path.lexists(tree["tx"])
+
+
+def test_concurrent_broker_start_commit_has_one_dispatch_authority() -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        tree = _activation_fixture(reader, root, previous=True)
+        _active_intent_carrier(tree)
+        tree["broker_state"] = "inactive"
+        tree["broker_unit_file_state"] = "disabled"
+        assert _begin(tree).returncode == 0
+        assert _run_tx(tree, "publish").returncode == 0
+        assert _run_tx(tree, "publish-broker").returncode == 0
+        binding = (
+            "--expected-commit",
+            ACTIVATION_COMMIT,
+            "--expected-candidate-release",
+            str(tree["candidate"]),
+            "--expected-service-name",
+            tree["broker_unit"].name,
+        )
+        barrier = root / "dispatch-barrier"
+        barrier.mkdir()
+        child = (
+            "import importlib.util, os, pathlib, sys, time\n"
+            f"spec=importlib.util.spec_from_file_location('tx', {str(ACTIVATION_HELPER)!r})\n"
+            "mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)\n"
+            "original=mod._write_phase_marker\n"
+            f"barrier=pathlib.Path({str(barrier)!r})\n"
+            "def gated(tx_dir,name,data):\n"
+            " (barrier/f'ready-{os.getpid()}').write_text('ready')\n"
+            " deadline=time.monotonic()+5\n"
+            " while len(list(barrier.glob('ready-*')))<2 and time.monotonic()<deadline: time.sleep(0.01)\n"
+            " if len(list(barrier.glob('ready-*')))<2: raise RuntimeError('barrier timeout')\n"
+            " return original(tx_dir,name,data)\n"
+            "mod._write_phase_marker=gated\n"
+            "sys.argv=sys.argv[1:]\n"
+            "raise SystemExit(mod.main())\n"
+        )
+        processes = [
+            subprocess.Popen(
+                _fault_injected_tx_argv(
+                    tree, child, "commit-broker-start", *binding
+                ),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for _ in range(2)
+        ]
+        results = [process.communicate(timeout=10) for process in processes]
+        returncodes = [process.returncode for process in processes]
+        assert returncodes.count(0) == 1, (returncodes, results)
+        assert sum(code != 0 for code in returncodes) == 1
+        assert (
+            _run_tx(tree, "show", "--field", "broker_activation_phase").stdout
+            == "start_dispatch_committed\n"
+        )
+
+
+def test_failed_imported_candidate_recovers_without_losing_active_intent() -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        tree = _activation_fixture(reader, root, previous=True)
+        _active_intent_carrier(tree)
+        tree["broker_state"] = "inactive"
+        tree["broker_unit_file_state"] = "disabled"
+        assert _begin(tree).returncode == 0
+        assert _run_tx(tree, "publish").returncode == 0
+        assert _run_tx(tree, "recover").returncode == 0
+        bypass = _run_tx(tree, "finalize", "--expect", "baseline")
+        assert bypass.returncode != 0
+        assert tree["tx"].is_dir()
+        deferred = _run_tx(
+            tree,
+            "defer-broker-reactivation",
+            "--expected-commit",
+            ACTIVATION_COMMIT,
+            "--expected-previous-release",
+            str(tree["previous"]),
+            "--expected-service-name",
+            tree["broker_unit"].name,
+        )
+        assert deferred.returncode == 0, deferred.stderr
+        assert _run_tx(tree, "finalize", "--expect", "baseline").returncode == 0
+        assert (
+            _run_tx(
+                tree, "ack-recovered", "--expected-commit", ACTIVATION_COMMIT
+            ).stdout
+            == "recovered_completion_acknowledged=yes\n"
+        )
+        ready = _run_tx(
+            tree, "ack-recovered", "--expected-commit", ACTIVATION_COMMIT
+        )
+        assert ready.returncode == 0, ready.stderr
+        assert ready.stdout == "broker_reactivation_intent=ready\n"
+
+        # A second failed candidate must carry the same authority forward.  The
+        # next begin adopts that second-generation carrier into a fresh pending
+        # transaction instead of silently collapsing the desired target back to
+        # the recovered inactive/disabled baseline.
+        tree["broker_state"] = "inactive"
+        tree["broker_unit_file_state"] = "disabled"
+        adopted_again = _begin(tree)
+        assert adopted_again.returncode == 0, adopted_again.stderr
+        assert (
+            _run_tx(tree, "show", "--field", "broker_carried_baseline_state").stdout
+            == "inactive\n"
+        )
+        assert (
+            _run_tx(tree, "show", "--field", "broker_desired_state").stdout
+            == "active\n"
+        )
+        assert (
+            _run_tx(
+                tree, "show", "--field", "broker_desired_unit_file_state"
+            ).stdout
+            == "enabled\n"
+        )
+
+
+def test_broker_reactivation_intent_has_exact_typed_revocation() -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        tree = _activation_fixture(reader, root, previous=True)
+        _active_intent_carrier(tree)
+        acknowledged = Path(f"{tree['tx']}.recovered.acknowledged")
+        origin_sha256 = hashlib.sha256(
+            (acknowledged / "manifest.json").read_bytes()
+        ).hexdigest()
+        revocation = (
+            "--expected-commit",
+            ACTIVATION_COMMIT,
+            "--expected-previous-release",
+            str(tree["previous"]),
+            "--expected-service-name",
+            tree["broker_unit"].name,
+            "--expected-origin-sha256",
+            origin_sha256,
+        )
+        wrong = _run_tx(
+            tree,
+            "revoke-broker-reactivation",
+            *revocation[:-1],
+            "0" * 64,
+        )
+        assert wrong.returncode != 0
+        assert acknowledged.is_dir()
+        revoked = _run_tx(tree, "revoke-broker-reactivation", *revocation)
+        assert revoked.returncode == 0, revoked.stderr
+        assert revoked.stdout == "broker_reactivation_revocation=recorded\n"
+        repeated = _run_tx(tree, "revoke-broker-reactivation", *revocation)
+        assert repeated.returncode == 0, repeated.stderr
+        assert repeated.stdout == "broker_reactivation_revocation=preserved\n"
+        cleaned = _run_tx(
+            tree, "ack-recovered", "--expected-commit", ACTIVATION_COMMIT
+        )
+        assert cleaned.returncode == 0, cleaned.stderr
+        assert cleaned.stdout == "broker_reactivation_intent=revoked\n"
+        assert not os.path.lexists(acknowledged)
+
+        tree["broker_state"] = "inactive"
+        tree["broker_unit_file_state"] = "disabled"
+        assert _begin(tree).returncode == 0
+        assert _run_tx(tree, "show", "--field", "broker_desired_state").stdout == "inactive\n"
+        assert (
+            _run_tx(
+                tree, "show", "--field", "broker_desired_unit_file_state"
+            ).stdout
+            == "disabled\n"
+        )
+
+
+def test_revocation_cannot_race_after_authority_transfers_to_pending() -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        tree = _activation_fixture(reader, root, previous=True)
+        _active_intent_carrier(tree)
+        acknowledged = Path(f"{tree['tx']}.recovered.acknowledged")
+        origin_sha256 = hashlib.sha256(
+            (acknowledged / "manifest.json").read_bytes()
+        ).hexdigest()
+        tree["broker_state"] = "inactive"
+        tree["broker_unit_file_state"] = "disabled"
+        child = (
+            "import importlib.util, os, signal, sys\n"
+            f"spec=importlib.util.spec_from_file_location('tx', {str(ACTIVATION_HELPER)!r})\n"
+            "mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)\n"
+            "def kill_before_retire(*args,**kwargs): os.kill(os.getpid(), signal.SIGKILL)\n"
+            "mod._retire_adopted_carrier=kill_before_retire\n"
+            "sys.argv=sys.argv[1:]\n"
+            "raise SystemExit(mod.main())\n"
+        )
+        previous = tree["previous"]
+        killed = subprocess.run(
+            _fault_injected_tx_argv(
+                tree,
+                child,
+                "begin",
+                "--install-root",
+                str(tree["install_root"]),
+                "--releases-dir",
+                str(tree["releases"]),
+                "--candidate-dir",
+                str(tree["candidate_dir"]),
+                "--candidate-release",
+                str(tree["candidate"]),
+                "--candidate-commit",
+                ACTIVATION_COMMIT,
+                "--previous-release",
+                str(previous),
+                "--broker-service-name",
+                tree["broker_unit"].name,
+                "--broker-state",
+                "inactive",
+                "--broker-unit-file-state",
+                "disabled",
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert killed.returncode == -signal.SIGKILL
+        assert tree["tx"].is_dir()
+        assert acknowledged.is_dir()
+
+        revoked = _run_tx(
+            tree,
+            "revoke-broker-reactivation",
+            "--expected-commit",
+            ACTIVATION_COMMIT,
+            "--expected-previous-release",
+            str(previous),
+            "--expected-service-name",
+            tree["broker_unit"].name,
+            "--expected-origin-sha256",
+            origin_sha256,
+        )
+        assert revoked.returncode != 0
+        assert acknowledged.is_dir()
+        recovered = _run_tx(tree, "recover")
+        assert recovered.returncode == 0, recovered.stderr
+        assert not os.path.lexists(acknowledged)
+        assert (
+            _run_tx(tree, "show", "--field", "broker_activation_phase").stdout
+            == "candidate_bound\n"
+        )
+
+
+def test_claimed_reactivation_intent_is_replayable_and_excludes_revocation() -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        tree = _activation_fixture(reader, root, previous=True)
+        _active_intent_carrier(tree)
+        acknowledged = Path(f"{tree['tx']}.recovered.acknowledged")
+        origin_sha256 = hashlib.sha256(
+            (acknowledged / "manifest.json").read_bytes()
+        ).hexdigest()
+        tree["broker_state"] = "inactive"
+        tree["broker_unit_file_state"] = "disabled"
+        child = (
+            "import importlib.util, os, signal, sys\n"
+            f"spec=importlib.util.spec_from_file_location('tx', {str(ACTIVATION_HELPER)!r})\n"
+            "mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)\n"
+            "original=mod._claim_reactivation_carrier\n"
+            "def kill_after_claim(*args,**kwargs):\n"
+            " original(*args,**kwargs)\n"
+            " os.kill(os.getpid(), signal.SIGKILL)\n"
+            "mod._claim_reactivation_carrier=kill_after_claim\n"
+            "sys.argv=sys.argv[1:]\n"
+            "raise SystemExit(mod.main())\n"
+        )
+        previous = tree["previous"]
+        killed = subprocess.run(
+            _fault_injected_tx_argv(
+                tree,
+                child,
+                "begin",
+                "--install-root",
+                str(tree["install_root"]),
+                "--releases-dir",
+                str(tree["releases"]),
+                "--candidate-dir",
+                str(tree["candidate_dir"]),
+                "--candidate-release",
+                str(tree["candidate"]),
+                "--candidate-commit",
+                ACTIVATION_COMMIT,
+                "--previous-release",
+                str(previous),
+                "--broker-service-name",
+                tree["broker_unit"].name,
+                "--broker-state",
+                "inactive",
+                "--broker-unit-file-state",
+                "disabled",
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert killed.returncode == -signal.SIGKILL
+        assert not os.path.lexists(tree["tx"])
+        assert acknowledged.is_dir()
+        assert not (acknowledged / "recovered-active-intent").exists()
+        assert (acknowledged / "broker-reactivation-adoption-claimed").is_file()
+
+        revoked = _run_tx(
+            tree,
+            "revoke-broker-reactivation",
+            "--expected-commit",
+            ACTIVATION_COMMIT,
+            "--expected-previous-release",
+            str(previous),
+            "--expected-service-name",
+            tree["broker_unit"].name,
+            "--expected-origin-sha256",
+            origin_sha256,
+        )
+        assert revoked.returncode != 0
+        claimed = _run_tx(
+            tree, "ack-recovered", "--expected-commit", ACTIVATION_COMMIT
+        )
+        assert claimed.returncode == 0, claimed.stderr
+        assert claimed.stdout == "broker_reactivation_intent=adoption_claimed\n"
+
+        resumed = _begin(tree)
+        assert resumed.returncode == 0, resumed.stderr
+        assert tree["tx"].is_dir()
+        assert not os.path.lexists(acknowledged)
+        assert (
+            _run_tx(tree, "show", "--field", "broker_activation_phase").stdout
+            == "candidate_bound\n"
+        )
+
+
+def test_revocation_wins_atomically_before_reactivation_claim() -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        tree = _activation_fixture(reader, root, previous=True)
+        _active_intent_carrier(tree)
+        acknowledged = Path(f"{tree['tx']}.recovered.acknowledged")
+        origin_sha256 = hashlib.sha256(
+            (acknowledged / "manifest.json").read_bytes()
+        ).hexdigest()
+        tree["broker_state"] = "inactive"
+        tree["broker_unit_file_state"] = "disabled"
+        ready = root / "claim-ready"
+        release = root / "claim-release"
+        child = (
+            "import importlib.util, pathlib, sys, time\n"
+            f"spec=importlib.util.spec_from_file_location('tx', {str(ACTIVATION_HELPER)!r})\n"
+            "mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)\n"
+            "original=mod._claim_reactivation_carrier\n"
+            f"ready=pathlib.Path({str(ready)!r}); release=pathlib.Path({str(release)!r})\n"
+            "def gated_claim(*args,**kwargs):\n"
+            " ready.write_text('ready')\n"
+            " deadline=time.monotonic()+5\n"
+            " while not release.exists() and time.monotonic()<deadline: time.sleep(0.01)\n"
+            " if not release.exists(): raise RuntimeError('claim barrier timeout')\n"
+            " return original(*args,**kwargs)\n"
+            "mod._claim_reactivation_carrier=gated_claim\n"
+            "sys.argv=sys.argv[1:]\n"
+            "raise SystemExit(mod.main())\n"
+        )
+        previous = tree["previous"]
+        process = subprocess.Popen(
+            _fault_injected_tx_argv(
+                tree,
+                child,
+                "begin",
+                "--install-root",
+                str(tree["install_root"]),
+                "--releases-dir",
+                str(tree["releases"]),
+                "--candidate-dir",
+                str(tree["candidate_dir"]),
+                "--candidate-release",
+                str(tree["candidate"]),
+                "--candidate-commit",
+                ACTIVATION_COMMIT,
+                "--previous-release",
+                str(previous),
+                "--broker-service-name",
+                tree["broker_unit"].name,
+                "--broker-state",
+                "inactive",
+                "--broker-unit-file-state",
+                "disabled",
+            ),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists()
+
+        revoked = _run_tx(
+            tree,
+            "revoke-broker-reactivation",
+            "--expected-commit",
+            ACTIVATION_COMMIT,
+            "--expected-previous-release",
+            str(previous),
+            "--expected-service-name",
+            tree["broker_unit"].name,
+            "--expected-origin-sha256",
+            origin_sha256,
+        )
+        assert revoked.returncode == 0, revoked.stderr
+        assert revoked.stdout == "broker_reactivation_revocation=recorded\n"
+        release.write_text("release", encoding="utf-8")
+        stdout, stderr = process.communicate(timeout=10)
+        assert process.returncode != 0, (stdout, stderr)
+        assert not os.path.lexists(tree["tx"])
+        assert (acknowledged / "broker-reactivation-revoked").is_file()
+        assert not (acknowledged / "broker-reactivation-adoption-claimed").exists()
+
+        cleaned = _run_tx(
+            tree, "ack-recovered", "--expected-commit", ACTIVATION_COMMIT
+        )
+        assert cleaned.returncode == 0, cleaned.stderr
+        assert cleaned.stdout == "broker_reactivation_intent=revoked\n"
+        assert not os.path.lexists(acknowledged)
+
+
+def test_first_install_absent_baseline_targets_inactive_disabled_candidate() -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        tree = _activation_fixture(reader, root)
+        assert _begin(tree).returncode == 0
+        assert _run_tx(tree, "show", "--field", "broker_state").stdout == "absent\n"
+        assert (
+            _run_tx(tree, "show", "--field", "broker_unit_file_state").stdout
+            == "absent\n"
+        )
+        assert (
+            _run_tx(
+                tree, "show", "--field", "broker_carried_baseline_state"
+            ).stdout
+            == "absent\n"
+        )
+        assert (
+            _run_tx(tree, "show", "--field", "broker_desired_state").stdout
+            == "inactive\n"
+        )
+        assert (
+            _run_tx(
+                tree, "show", "--field", "broker_desired_unit_file_state"
+            ).stdout
+            == "disabled\n"
+        )
+        assert _run_tx(tree, "publish").returncode == 0
+        assert _run_tx(tree, "publish-broker").returncode == 0
+        assert _run_tx(tree, "finalize", "--expect", "candidate").returncode == 0
+
+
+@pytest.mark.parametrize(
+    ("marker_name", "command"),
+    (
+        (".broker-start-dispatch-committed.next", "commit-broker-start"),
+        (".broker-active-attested.next", "mark-broker-active"),
+    ),
+)
+def test_broker_phase_marker_partial_write_is_monotonic_and_replayable(
+    marker_name: str,
+    command: str,
+) -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        tree = _activation_fixture(reader, root, previous=True)
+        _active_intent_carrier(tree)
+        tree["broker_state"] = "inactive"
+        tree["broker_unit_file_state"] = "disabled"
+        assert _begin(tree).returncode == 0
+        assert _run_tx(tree, "publish").returncode == 0
+        assert _run_tx(tree, "publish-broker").returncode == 0
+        binding = (
+            "--expected-commit",
+            ACTIVATION_COMMIT,
+            "--expected-candidate-release",
+            str(tree["candidate"]),
+            "--expected-service-name",
+            tree["broker_unit"].name,
+        )
+        if command == "mark-broker-active":
+            assert _run_tx(tree, "commit-broker-start", *binding).returncode == 0
+        child = (
+            "import importlib.util, os, signal, sys\n"
+            f"spec=importlib.util.spec_from_file_location('tx', {str(ACTIVATION_HELPER)!r})\n"
+            "mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)\n"
+            "original=mod._write_file\n"
+            "def write_file(path,data,**kwargs):\n"
+            f" if path.name=={marker_name!r}:\n"
+            "  flags=os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0)\n"
+            "  fd=os.open(path,flags,0o600)\n"
+            "  try:\n"
+            "   os.fchmod(fd,0o600); os.fchown(fd,0,0)\n"
+            "   os.write(fd,data[:max(1,len(data)//2)]); os.fsync(fd)\n"
+            "  finally: os.close(fd)\n"
+            "  os.kill(os.getpid(), signal.SIGKILL)\n"
+            " original(path,data,**kwargs)\n"
+            "mod._write_file=write_file\n"
+            "sys.argv=sys.argv[1:]\n"
+            "raise SystemExit(mod.main())\n"
+        )
+        killed = subprocess.run(
+            _fault_injected_tx_argv(tree, child, command, *binding),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert killed.returncode == -signal.SIGKILL
+        expected_phase = (
+            "start_dispatch_committed"
+            if command == "commit-broker-start"
+            else "active_attested"
+        )
+        observed = _run_tx(tree, "show", "--field", "broker_activation_phase")
+        assert observed.returncode == 0, observed.stderr
+        assert observed.stdout == f"{expected_phase}\n"
+        assert _run_tx(tree, "commit-broker-start", *binding).returncode != 0
+        assert _run_tx(tree, "recover").returncode != 0
+        if command == "mark-broker-active":
+            assert _run_tx(tree, "finalize", "--expect", "candidate").returncode == 0
+
+
+def test_adopted_carrier_partial_retirement_cleanup_replays() -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        tree = _activation_fixture(reader, root, previous=True)
+        _active_intent_carrier(tree)
+        acknowledged = Path(f"{tree['tx']}.recovered.acknowledged")
+        retired = Path(f"{tree['tx']}.recovered.retired")
+        kill_after = max(1, len(list(acknowledged.iterdir())) // 2)
+        tree["broker_state"] = "inactive"
+        tree["broker_unit_file_state"] = "disabled"
+        child = (
+            "import importlib.util, os, signal, sys\n"
+            f"spec=importlib.util.spec_from_file_location('tx', {str(ACTIVATION_HELPER)!r})\n"
+            "mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)\n"
+            f"retired={str(retired)!r}; target={kill_after}; count=0; original=mod.os.unlink\n"
+            "def unlink(path):\n"
+            " global count\n"
+            " original(path)\n"
+            " if str(os.path.dirname(str(path)))==retired:\n"
+            "  count += 1\n"
+            "  if count==target: os.kill(os.getpid(), signal.SIGKILL)\n"
+            "mod.os.unlink=unlink\n"
+            "sys.argv=sys.argv[1:]\n"
+            "raise SystemExit(mod.main())\n"
+        )
+        begin_extra = (
+            "--install-root",
+            str(tree["install_root"]),
+            "--releases-dir",
+            str(tree["releases"]),
+            "--candidate-dir",
+            str(tree["candidate_dir"]),
+            "--candidate-release",
+            str(tree["candidate"]),
+            "--candidate-commit",
+            ACTIVATION_COMMIT,
+            "--previous-release",
+            str(tree["previous"]),
+            "--broker-service-name",
+            tree["broker_unit"].name,
+            "--broker-state",
+            "inactive",
+            "--broker-unit-file-state",
+            "disabled",
+        )
+        killed = subprocess.run(
+            _fault_injected_tx_argv(tree, child, "begin", *begin_extra),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert killed.returncode == -signal.SIGKILL
+        assert os.path.lexists(tree["tx"])
+        assert retired.is_dir()
+        replay = _run_tx(tree, "recover")
+        assert replay.returncode == 0, replay.stderr
+        assert not os.path.lexists(retired)
+
+
+@pytest.mark.parametrize("tamper", ("v1-schema", "origin-null-mismatch", "recovered-dispatch"))
+def test_activation_transaction_malformed_authority_fails_without_live_writes(
+    tamper: str,
+) -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        tree = _activation_fixture(reader, root, previous=True)
+        assert _begin(tree).returncode == 0
+        manifest_path = tree["tx"] / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if tamper == "v1-schema":
+            manifest["schema"] = "agent-runtime-ops-activation-transaction/v1"
+        elif tamper == "origin-null-mismatch":
+            manifest["broker"]["desired_state"] = "active"
+        else:
+            assert _run_tx(tree, "recover").returncode == 0
+            dispatch = tree["tx"] / "broker-start-dispatch-committed"
+            dispatch.write_text("start_dispatch_committed\n", encoding="utf-8")
+            os.chown(dispatch, 0, 0)
+            dispatch.chmod(0o600)
+        if tamper != "recovered-dispatch":
+            manifest_path.write_text(
+                json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="ascii",
+            )
+            os.chown(manifest_path, 0, 0)
+            manifest_path.chmod(0o600)
+        before = _activation_state_snapshot(tree)
+        observed = _run_tx(tree, "show", "--field", "broker_state")
+        assert observed.returncode != 0
+        assert _activation_state_snapshot(tree) == before
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ("carried-unit-state", "origin-unit-digest", "origin-failed-commit"),
+)
+def test_carried_broker_origin_tamper_fails_without_live_writes(tamper: str) -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        tree = _activation_fixture(reader, root, previous=True)
+        _active_intent_carrier(tree)
+        tree["broker_state"] = "inactive"
+        tree["broker_unit_file_state"] = "disabled"
+        assert _begin(tree).returncode == 0
+
+        manifest_path = tree["tx"] / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        origin = manifest["broker"]["reactivation_origin"]
+        assert isinstance(origin, dict)
+        if tamper == "carried-unit-state":
+            manifest["broker"]["carried_baseline_unit_file_state"] = "enabled"
+        elif tamper == "origin-unit-digest":
+            origin["baseline_unit_sha256"] = "0" * 64
+        else:
+            origin["failed_candidate_commit"] = "f" * 40
+        manifest_path.write_text(
+            json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="ascii",
+        )
+        os.chown(manifest_path, 0, 0)
+        manifest_path.chmod(0o600)
+
+        before = _activation_state_snapshot(tree)
+        observed = _run_tx(tree, "show", "--field", "broker_activation_phase")
+        assert observed.returncode != 0
         assert _activation_state_snapshot(tree) == before
 
 
@@ -1914,7 +2681,7 @@ def test_activation_kill_at_recovered_marker_is_terminal_and_replayable() -> Non
             "original=mod._write_file\n"
             "def write_file(path,data,**kwargs):\n"
             " original(path,data,**kwargs)\n"
-            " if path.name=='recovered': os.kill(os.getpid(), signal.SIGKILL)\n"
+            " if path.name=='.recovered.next': os.kill(os.getpid(), signal.SIGKILL)\n"
             "mod._write_file=write_file\n"
             "sys.argv=sys.argv[1:]\n"
             "raise SystemExit(mod.main())\n"
@@ -2150,12 +2917,14 @@ def test_broker_service_state_is_restored_before_transaction_finalize(
             "printf '%s\\n' \"$*\" >>\"$TRACE\"\n"
             "case \"$1\" in\n"
             "  daemon-reload) exit 0 ;;\n"
+            "  disable) exit 0 ;;\n"
             "  stop) printf 'inactive\\n' >\"$LIVE\"; exit 0 ;;\n"
             "  show)\n"
             "    current=$(cat \"$LIVE\")\n"
             "    printf 'LoadState=%s\\n' \"$LOAD_STATE\"\n"
             "    [[ \"$current\" == active ]] && printf 'ActiveState=active\\nSubState=running\\nMainPID=123\\n' || { [[ \"$current\" == auto_restart ]] && printf 'ActiveState=activating\\nSubState=auto-restart\\nMainPID=0\\n' || printf 'ActiveState=inactive\\nSubState=dead\\nMainPID=0\\n'; }\n"
             "    [[ \"$current\" == queued ]] && printf 'Job=77\\n' || printf 'Job=\\n'\n"
+            "    [[ \"$LOAD_STATE\" == loaded ]] && printf 'UnitFileState=disabled\\n' || printf 'UnitFileState=\\n'\n"
             "    ;;\n"
             "  *) exit 19 ;;\n"
             "esac\n",
@@ -2172,13 +2941,14 @@ def test_broker_service_state_is_restored_before_transaction_finalize(
             "ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS=5\n"
             "ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=5\n"
             f"BROKER_STATE={state!r}\n"
-            "run_activation_transaction() { if [[ \"$*\" == *broker_state* ]]; then printf '%s\\n' \"$BROKER_STATE\"; else printf 'broker.service\\n'; fi; }\n"
+            "run_activation_transaction() { case \"$4\" in broker_state) printf '%s\\n' \"$BROKER_STATE\" ;; broker_unit_file_state) [[ \"$BROKER_STATE\" == absent ]] && printf 'absent\\n' || printf 'disabled\\n' ;; *) printf 'broker.service\\n' ;; esac; }\n"
             "restart_root_action_broker_for_release() { printf 'restart:%s:%s\\n' \"$1\" \"$2\" >>\"$TRACE\"; }\n"
             + _function("read_root_action_broker_systemd_tuple")
             + _function("root_action_broker_terminal_tuple_attested")
             + _function("root_action_broker_inactive_attested")
             + _function("root_action_broker_absent_attested")
             + _function("root_action_broker_quiesced_attested")
+            + _function("root_action_broker_active_tuple_attested")
             + _function("quiesce_root_action_broker_for_transaction")
             + _function("restore_broker_service_from_transaction")
             + f"\nrestore_broker_service_from_transaction /helper {previous!r}\n",
@@ -2186,15 +2956,14 @@ def test_broker_service_state_is_restored_before_transaction_finalize(
         assert completed.returncode == 0, completed.stderr
         tuple_trace = [SYSTEMD_TUPLE_SHOW]
         if state == "active":
-            expected = ["daemon-reload", "restart:broker.service:/previous"]
+            expected = ["daemon-reload", "disable broker.service", "restart:broker.service:/previous", *tuple_trace]
         elif state == "inactive":
-            expected = ["daemon-reload", "stop broker.service", *tuple_trace]
+            expected = ["daemon-reload", "disable broker.service", "stop broker.service", *tuple_trace]
         elif live_state == "inactive":
             expected = ["daemon-reload", *tuple_trace, *tuple_trace]
         else:
             expected = [
                 "daemon-reload",
-                *tuple_trace,
                 *tuple_trace,
                 "stop broker.service",
                 *tuple_trace,
@@ -2223,7 +2992,8 @@ def test_candidate_inactive_attestation_rejects_restart_or_job_drift(
             "printf 'LoadState=loaded\\n'\n"
             "[[ \"$LIVE_STATE\" == auto_restart ]] && printf 'ActiveState=activating\\nSubState=auto-restart\\n' || printf 'ActiveState=inactive\\nSubState=dead\\n'\n"
             "printf 'MainPID=0\\n'\n"
-            "[[ \"$LIVE_STATE\" == queued ]] && printf 'Job=77\\n' || printf 'Job=\\n'\n",
+            "[[ \"$LIVE_STATE\" == queued ]] && printf 'Job=77\\n' || printf 'Job=\\n'\n"
+            "printf 'UnitFileState=disabled\\n'\n",
             encoding="utf-8",
             newline="\n",
         )
@@ -2233,14 +3003,15 @@ def test_candidate_inactive_attestation_rejects_restart_or_job_drift(
             root,
             f"TRACE={str(trace)!r}\n"
             f"LIVE_STATE={live_state!r}\n"
-            "export TRACE LIVE_STATE\n"
+            "export TRACE LIVE_STATE BROKER_STATE\n"
             f"PATH={str(fake_bin)!r}:/usr/bin:/bin\n"
             "ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=1\n"
             f"BROKER_STATE={journal_state!r}\n"
-            "run_activation_transaction() { if [[ \"$*\" == *broker_state* ]]; then printf '%s\\n' \"$BROKER_STATE\"; else printf 'broker.service\\n'; fi; }\n"
+            "run_activation_transaction() { case \"$4\" in broker_state) printf '%s\\n' \"$BROKER_STATE\" ;; broker_desired_state) printf 'inactive\\n' ;; broker_desired_unit_file_state) printf 'disabled\\n' ;; broker_activation_phase) printf 'none\\n' ;; *) printf 'broker.service\\n' ;; esac; }\n"
             + _function("read_root_action_broker_systemd_tuple")
             + _function("root_action_broker_terminal_tuple_attested")
             + _function("root_action_broker_inactive_attested")
+            + _function("root_action_broker_absent_attested")
             + _function("attest_candidate_root_action_broker_state")
             + f"\nattest_candidate_root_action_broker_state /candidate /helper {journal_state!r}\n",
         )
@@ -2274,6 +3045,7 @@ def test_loaded_broker_is_quiesced_before_managed_publication(
             "    printf 'LoadState=loaded\\n'\n"
             "    [[ \"$current\" == active ]] && printf 'ActiveState=active\\nSubState=running\\nMainPID=123\\n' || { [[ \"$current\" == auto_restart ]] && printf 'ActiveState=activating\\nSubState=auto-restart\\nMainPID=0\\n' || printf 'ActiveState=inactive\\nSubState=dead\\nMainPID=0\\n'; }\n"
             "    [[ \"$current\" == queued ]] && printf 'Job=77\\n' || printf 'Job=\\n'\n"
+            "    printf 'UnitFileState=disabled\\n'\n"
             "    exit 0 ;;\n"
             "  *) exit 19 ;;\n"
             "esac\n",
@@ -2291,7 +3063,7 @@ def test_loaded_broker_is_quiesced_before_managed_publication(
             f"ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS=1\n"
             f"ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=1\n"
             "run_activation_transaction() {\n"
-            "  [[ \"$4\" == broker_state ]] && printf 'active\\n' || printf 'broker.service\\n'\n"
+            "  case \"$4\" in broker_state) printf 'active\\n' ;; broker_unit_file_state) printf 'disabled\\n' ;; *) printf 'broker.service\\n' ;; esac\n"
             "}\n"
             + _function("read_root_action_broker_systemd_tuple")
             + _function("root_action_broker_terminal_tuple_attested")
@@ -2306,11 +3078,218 @@ def test_loaded_broker_is_quiesced_before_managed_publication(
         if live_state != "inactive":
             expected = [
                 *initial_tuple,
-                *initial_tuple,
                 "stop broker.service",
                 *initial_tuple,
             ]
         assert trace.read_text(encoding="utf-8").splitlines() == expected
+
+
+def test_enabled_active_legacy_broker_is_disabled_before_stop() -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        fake_bin = root / "bin"
+        fake_bin.mkdir(mode=0o750)
+        os.chown(fake_bin, 0, reader.pw_gid)
+        trace = root / "trace"
+        runtime_state = root / "runtime"
+        unit_state = root / "unit"
+        runtime_state.write_text("active\n", encoding="utf-8")
+        unit_state.write_text("enabled\n", encoding="utf-8")
+        systemctl = fake_bin / "systemctl"
+        systemctl.write_text(
+            "#!/usr/bin/env bash\nset -euo pipefail\n"
+            "printf '%s\\n' \"$*\" >>\"$TRACE\"\n"
+            "case \"$1\" in\n"
+            "  disable) printf 'disabled\\n' >\"$UNIT_STATE\" ;;\n"
+            "  stop) printf 'inactive\\n' >\"$RUNTIME_STATE\" ;;\n"
+            "  show)\n"
+            "    printf 'LoadState=loaded\\n'\n"
+            "    if [[ \"$(cat \"$RUNTIME_STATE\")\" == active ]]; then printf 'ActiveState=active\\nSubState=running\\nMainPID=91\\n'; else printf 'ActiveState=inactive\\nSubState=dead\\nMainPID=0\\n'; fi\n"
+            "    printf 'Job=\\nUnitFileState=%s\\n' \"$(cat \"$UNIT_STATE\")\" ;;\n"
+            "  *) exit 91 ;;\n"
+            "esac\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        os.chown(systemctl, 0, reader.pw_gid)
+        systemctl.chmod(0o750)
+        completed = _run_contract_script(
+            root,
+            f"TRACE={str(trace)!r}\nRUNTIME_STATE={str(runtime_state)!r}\nUNIT_STATE={str(unit_state)!r}\n"
+            "export TRACE RUNTIME_STATE UNIT_STATE\n"
+            f"PATH={str(fake_bin)!r}:/usr/bin:/bin\n"
+            "ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS=1\n"
+            "ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=1\n"
+            "run_activation_transaction() { case \"$4\" in broker_state) printf 'active\\n' ;; broker_unit_file_state) printf 'enabled\\n' ;; *) printf 'broker.service\\n' ;; esac; }\n"
+            + _function("read_root_action_broker_systemd_tuple")
+            + _function("root_action_broker_quiesced_attested")
+            + _function("quiesce_root_action_broker_for_transaction")
+            + "\nquiesce_root_action_broker_for_transaction /helper\n",
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert trace.read_text(encoding="utf-8").splitlines() == [
+            SYSTEMD_TUPLE_SHOW,
+            "disable broker.service",
+            "stop broker.service",
+            SYSTEMD_TUPLE_SHOW,
+        ]
+        assert runtime_state.read_text(encoding="utf-8") == "inactive\n"
+        assert unit_state.read_text(encoding="utf-8") == "disabled\n"
+
+
+def test_carried_candidate_broker_is_enabled_and_started_only_after_commit() -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        fake_bin = root / "bin"
+        fake_bin.mkdir(mode=0o750)
+        os.chown(fake_bin, 0, reader.pw_gid)
+        trace = root / "trace"
+        runtime_state = root / "runtime-state"
+        unit_state = root / "unit-state"
+        phase = root / "phase"
+        runtime_state.write_text("inactive\n", encoding="utf-8")
+        unit_state.write_text("disabled\n", encoding="utf-8")
+        phase.write_text("candidate_bound\n", encoding="utf-8")
+        for name, body in {
+            "getent": "#!/usr/bin/env bash\nexit 0\n",
+            "id": "#!/usr/bin/env bash\nprintf 'svcops\\n'\n",
+            "install": (
+                "#!/usr/bin/env bash\nset -euo pipefail\n"
+                "target=${!#}\nmkdir -p -- \"$target\"\n"
+            ),
+            "systemctl": (
+                "#!/usr/bin/env bash\nset -euo pipefail\n"
+                "printf 'systemctl:%s\\n' \"$*\" >>\"$TRACE\"\n"
+                "case \"$1\" in\n"
+                "  daemon-reload) exit 0 ;;\n"
+                "  enable) printf 'enabled\\n' >\"$UNIT_STATE\" ;;\n"
+                "  start) [[ \"$(cat \"$PHASE\")\" == start_dispatch_committed ]] || exit 81; printf 'active\\n' >\"$RUNTIME_STATE\" ;;\n"
+                "  show)\n"
+                "    printf 'LoadState=loaded\\n'\n"
+                "    if [[ \"$(cat \"$RUNTIME_STATE\")\" == active ]]; then printf 'ActiveState=active\\nSubState=running\\nMainPID=91\\n'; else printf 'ActiveState=inactive\\nSubState=dead\\nMainPID=0\\n'; fi\n"
+                "    printf 'Job=\\nUnitFileState=%s\\n' \"$(cat \"$UNIT_STATE\")\" ;;\n"
+                "  *) exit 82 ;;\n"
+                "esac\n"
+            ),
+        }.items():
+            path = fake_bin / name
+            path.write_text(body, encoding="utf-8", newline="\n")
+            os.chown(path, 0, reader.pw_gid)
+            path.chmod(0o750)
+        release = root / "candidate"
+        completed = _run_contract_script(
+            root,
+            f"TRACE={str(trace)!r}\n"
+            f"RUNTIME_STATE={str(runtime_state)!r}\n"
+            f"UNIT_STATE={str(unit_state)!r}\n"
+            f"PHASE={str(phase)!r}\n"
+            "export TRACE RUNTIME_STATE UNIT_STATE PHASE\n"
+            f"PATH={str(fake_bin)!r}:/usr/bin:/bin\n"
+            "ROOT_ACTION_TRUSTED_ACCOUNT=svcops\n"
+            f"ROOT_ACTION_STATE_ROOT={str(root / 'state')!r}\n"
+            f"ROOT_ACTION_PRIVATE_ROOT={str(root / 'private')!r}\n"
+            f"ROOT_ACTION_PUBLIC_ROOT={str(root / 'public')!r}\n"
+            f"ROOT_ACTION_RUNTIME_ROOT={str(root / 'runtime')!r}\n"
+            f"ROOT_ACTION_BROKER_SERVICE_FILE={str(root / 'broker.service')!r}\n"
+            "ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS=2\n"
+            "ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=2\n"
+            f"EXPECTED_COMMIT={ACTIVATION_COMMIT!r}\n"
+            "run_activation_transaction() {\n"
+            "  case \"$2\" in\n"
+            "    show) case \"$4\" in broker_state) printf 'inactive\\n' ;; broker_unit_file_state) printf 'disabled\\n' ;; broker_desired_state) printf 'active\\n' ;; broker_desired_unit_file_state) printf 'enabled\\n' ;; broker_activation_phase) cat \"$PHASE\" ;; broker_service_name) printf 'broker.service\\n' ;; candidate_commit) printf '%s\\n' \"$EXPECTED_COMMIT\" ;; *) return 88 ;; esac ;;\n"
+            "    publish-broker) printf 'tx:publish-broker\\n' >>\"$TRACE\" ;;\n"
+            "    commit-broker-start) [[ \"$(cat \"$PHASE\")\" == candidate_bound ]] || return 89; printf 'start_dispatch_committed\\n' >\"$PHASE\"; printf 'tx:commit\\n' >>\"$TRACE\" ;;\n"
+            "    mark-broker-active) [[ \"$(cat \"$PHASE\")\" == start_dispatch_committed ]] || return 90; printf 'active_attested\\n' >\"$PHASE\"; printf 'tx:mark-active\\n' >>\"$TRACE\" ;;\n"
+            "    *) return 91 ;;\n"
+            "  esac\n"
+            "}\n"
+            "wait_for_root_action_broker_pinned_release() { printf 'pinned:%s:%s\\n' \"$1\" \"$2\" >>\"$TRACE\"; }\n"
+            "info() { printf 'info:%s\\n' \"$*\" >>\"$TRACE\"; }\n"
+            + _function("read_root_action_broker_systemd_tuple")
+            + _function("root_action_broker_terminal_tuple_attested")
+            + _function("root_action_broker_inactive_attested")
+            + _function("root_action_broker_quiesced_attested")
+            + _function("root_action_broker_active_tuple_attested")
+            + _function("attest_quiesced_root_action_broker_state")
+            + _function("install_root_action_broker_contract")
+            + f"\ninstall_root_action_broker_contract {str(release)!r} /helper\n",
+        )
+        assert completed.returncode == 0, completed.stderr
+        lines = trace.read_text(encoding="utf-8").splitlines()
+        assert lines.count("systemctl:start broker.service") == 1
+        assert lines.index("tx:commit") < lines.index("systemctl:enable broker.service")
+        assert lines.index("systemctl:enable broker.service") < lines.index(
+            "systemctl:start broker.service"
+        )
+        assert lines.index("systemctl:start broker.service") < lines.index(
+            "tx:mark-active"
+        )
+        assert runtime_state.read_text(encoding="utf-8") == "active\n"
+        assert unit_state.read_text(encoding="utf-8") == "enabled\n"
+        assert phase.read_text(encoding="utf-8") == "active_attested\n"
+
+
+@pytest.mark.parametrize("phase_name", ("start_dispatch_committed", "active_attested"))
+def test_committed_candidate_resume_is_attest_only_and_never_redispatches(
+    phase_name: str,
+) -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        trace = root / "trace"
+        phase = root / "phase"
+        phase.write_text(f"{phase_name}\n", encoding="utf-8")
+        completed = _run_contract_script(
+            root,
+            f"TRACE={str(trace)!r}\nPHASE={str(phase)!r}\nexport TRACE PHASE\n"
+            "run_activation_transaction() {\n"
+            "  case \"$2\" in\n"
+            "    show) case \"$4\" in broker_activation_phase) cat \"$PHASE\" ;; candidate_commit) printf '%s\\n' \"$EXPECTED_COMMIT\" ;; candidate_release) printf '/candidate\\n' ;; broker_service_name) printf 'broker.service\\n' ;; broker_desired_state) printf 'active\\n' ;; broker_desired_unit_file_state) printf 'enabled\\n' ;; *) return 88 ;; esac ;;\n"
+            "    mark-broker-active) printf 'active_attested\\n' >\"$PHASE\"; printf 'tx:mark\\n' >>\"$TRACE\" ;;\n"
+            "    finalize) printf 'tx:finalize\\n' >>\"$TRACE\" ;;\n"
+            "    *) return 89 ;;\n"
+            "  esac\n"
+            "}\n"
+            f"EXPECTED_COMMIT={ACTIVATION_COMMIT!r}\nexport EXPECTED_COMMIT\n"
+            "root_action_broker_pinned_release_attested() { printf 'pinned-attest\\n' >>\"$TRACE\"; }\n"
+            "root_action_broker_active_tuple_attested() { printf 'tuple-attest:%s\\n' \"$2\" >>\"$TRACE\"; }\n"
+            "systemctl() { printf 'unexpected-systemctl\\n' >>\"$TRACE\"; return 99; }\n"
+            "info() { printf 'info:%s\\n' \"$*\" >>\"$TRACE\"; }\n"
+            + _function("resume_committed_candidate_broker_activation")
+            + f"\nACTIVATION_TRANSACTION_DIR={str(root / 'pending')!r}\n"
+            + f"mkdir -p {str(root / 'pending')!r}\n"
+            + f"resume_committed_candidate_broker_activation /helper {ACTIVATION_COMMIT}\n",
+        )
+        assert completed.returncode == 0, completed.stderr
+        lines = trace.read_text(encoding="utf-8").splitlines()
+        assert "unexpected-systemctl" not in lines
+        assert lines[:2] == ["pinned-attest", "tuple-attest:enabled"]
+        assert ("tx:mark" in lines) == (phase_name == "start_dispatch_committed")
+        assert "tx:finalize" in lines
+
+
+def test_committed_candidate_resume_fails_closed_when_candidate_is_not_active() -> None:
+    reader = _reader()
+    with _root_temp(reader) as root:
+        trace = root / "trace"
+        pending = root / "pending"
+        pending.mkdir()
+        completed = _run_contract_script(
+            root,
+            f"TRACE={str(trace)!r}\nexport TRACE\n"
+            f"ACTIVATION_TRANSACTION_DIR={str(pending)!r}\n"
+            "run_activation_transaction() {\n"
+            "  [[ \"$2\" == show ]] || { printf 'unexpected-tx:%s\\n' \"$2\" >>\"$TRACE\"; return 99; }\n"
+            "  case \"$4\" in broker_activation_phase) printf 'start_dispatch_committed\\n' ;; candidate_commit) printf '%s\\n' \"$EXPECTED_COMMIT\" ;; candidate_release) printf '/candidate\\n' ;; broker_service_name) printf 'broker.service\\n' ;; broker_desired_state) printf 'active\\n' ;; broker_desired_unit_file_state) printf 'enabled\\n' ;; *) return 88 ;; esac\n"
+            "}\n"
+            f"EXPECTED_COMMIT={ACTIVATION_COMMIT!r}\nexport EXPECTED_COMMIT\n"
+            "root_action_broker_pinned_release_attested() { printf 'pinned-inactive\\n' >>\"$TRACE\"; return 1; }\n"
+            "root_action_broker_active_tuple_attested() { printf 'unexpected-active-tuple\\n' >>\"$TRACE\"; return 1; }\n"
+            "info() { printf 'unexpected-info\\n' >>\"$TRACE\"; }\n"
+            + _function("resume_committed_candidate_broker_activation")
+            + f"\nresume_committed_candidate_broker_activation /helper {ACTIVATION_COMMIT}\n",
+        )
+        assert completed.returncode == 2
+        assert trace.read_text(encoding="utf-8").splitlines() == ["pinned-inactive"]
 
 
 def test_absent_broker_quiesce_accepts_only_exact_not_found_without_stop() -> None:
@@ -2325,7 +3304,7 @@ def test_absent_broker_quiesce_accepts_only_exact_not_found_without_stop() -> No
             "#!/usr/bin/env bash\n"
             "printf '%s\\n' \"$*\" >>\"$TRACE\"\n"
             "[[ \"$1\" == show ]] || exit 19\n"
-            "printf 'LoadState=not-found\\nActiveState=inactive\\nSubState=dead\\nMainPID=0\\nJob=\\n'\n",
+            "printf 'LoadState=not-found\\nActiveState=inactive\\nSubState=dead\\nMainPID=0\\nJob=\\nUnitFileState=\\n'\n",
             encoding="utf-8",
             newline="\n",
         )
@@ -2339,7 +3318,7 @@ def test_absent_broker_quiesce_accepts_only_exact_not_found_without_stop() -> No
             "ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS=1\n"
             "ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=1\n"
             "run_activation_transaction() {\n"
-            "  [[ \"$4\" == broker_state ]] && printf 'absent\\n' || printf 'broker.service\\n'\n"
+            "  case \"$4\" in broker_state) printf 'absent\\n' ;; broker_unit_file_state) printf 'absent\\n' ;; *) printf 'broker.service\\n' ;; esac\n"
             "}\n"
             + _function("read_root_action_broker_systemd_tuple")
             + _function("root_action_broker_terminal_tuple_attested")
@@ -2367,8 +3346,8 @@ def test_terminal_attestation_uses_one_coherent_systemd_snapshot() -> None:
             "count=$((count + 1))\n"
             "printf '%s\\n' \"$count\" >\"$COUNTER\"\n"
             "case \"$*\" in\n"
-            "  'show --property=LoadState --property=ActiveState --property=SubState --property=MainPID --property=Job broker.service')\n"
-            "    printf 'LoadState=loaded\\nActiveState=activating\\nSubState=auto-restart\\nMainPID=0\\nJob=77\\n' ;;\n"
+            "  'show --property=LoadState --property=ActiveState --property=SubState --property=MainPID --property=Job --property=UnitFileState broker.service')\n"
+            "    printf 'LoadState=loaded\\nActiveState=activating\\nSubState=auto-restart\\nMainPID=0\\nJob=77\\nUnitFileState=disabled\\n' ;;\n"
             "  'show --property=LoadState --value broker.service') printf 'loaded\\n' ;;\n"
             "  'show --property=ActiveState --value broker.service') printf 'inactive\\n' ;;\n"
             "  'show --property=SubState --value broker.service') printf 'dead\\n' ;;\n"
@@ -2389,7 +3368,7 @@ def test_terminal_attestation_uses_one_coherent_systemd_snapshot() -> None:
             "ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=1\n"
             + _function("read_root_action_broker_systemd_tuple")
             + _function("root_action_broker_terminal_tuple_attested")
-            + "\nroot_action_broker_terminal_tuple_attested broker.service loaded\n",
+            + "\nroot_action_broker_terminal_tuple_attested broker.service loaded disabled\n",
         )
         assert completed.returncode == 1
         assert counter.read_text(encoding="utf-8") == "1\n"
@@ -2399,33 +3378,53 @@ def test_terminal_attestation_uses_one_coherent_systemd_snapshot() -> None:
     ("payload", "systemctl_rc", "expected_output"),
     (
         (
-            "Job=\nMainPID=0\nSubState=dead\nActiveState=inactive\nLoadState=loaded\n",
+            "Job=\nMainPID=0\nSubState=dead\nActiveState=inactive\nLoadState=loaded\nUnitFileState=disabled\n",
             0,
-            "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nJobPresent=no\n",
+            "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nJobPresent=no\nUnitFileState=disabled\n",
         ),
         (
-            "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nJob=77\n",
+            "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nJob=77\nUnitFileState=enabled\n",
             0,
-            "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nJobPresent=yes\n",
+            "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nJobPresent=yes\nUnitFileState=enabled\n",
+        ),
+        (
+            "LoadState=not-found\nActiveState=inactive\nSubState=dead\nMainPID=0\nJob=\nUnitFileState=\n",
+            0,
+            "LoadState=not-found\nActiveState=inactive\nSubState=dead\nMainPID=0\nJobPresent=no\nUnitFileState=absent\n",
         ),
         ("LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\n", 0, None),
         (
-            "LoadState=loaded\nLoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nJob=\n",
+            "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nJob=\nUnitFileState=\n",
             0,
             None,
         ),
         (
-            "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nJob=\nUnknown=value\n",
+            "LoadState=not-found\nActiveState=inactive\nSubState=dead\nMainPID=0\nJob=\nUnitFileState=enabled\n",
             0,
             None,
         ),
         (
-            "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=12345678901\nJob=\n",
+            "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nJob=\nUnitFileState=disabled\nUnitFileState=disabled\n",
             0,
             None,
         ),
         (
-            "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nJob=\n",
+            "LoadState=loaded\nLoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nJob=\nUnitFileState=disabled\n",
+            0,
+            None,
+        ),
+        (
+            "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nJob=\nUnitFileState=disabled\nUnknown=value\n",
+            0,
+            None,
+        ),
+        (
+            "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=12345678901\nJob=\nUnitFileState=disabled\n",
+            0,
+            None,
+        ),
+        (
+            "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nJob=\nUnitFileState=disabled\n",
             19,
             None,
         ),
@@ -2488,7 +3487,7 @@ def test_unavailable_broker_quiesce_requires_systemctl_absent(
             root,
             f"PATH={str(fake_bin)!r}\n"
             "run_activation_transaction() {\n"
-            "  [[ \"$4\" == broker_state ]] && printf 'unavailable\\n' || printf 'broker.service\\n'\n"
+            "  case \"$4\" in broker_state|broker_unit_file_state) printf 'unavailable\\n' ;; *) printf 'broker.service\\n' ;; esac\n"
             "}\n"
             + _function("read_root_action_broker_systemd_tuple")
             + _function("root_action_broker_terminal_tuple_attested")
@@ -2531,7 +3530,7 @@ def test_recovery_finalizes_only_after_cli_gate_then_broker_restoration(
             "restore_broker_service_after_baseline_validation() {\n"
             "  printf 'broker\\n' >>\"$TRACE\"\n"
             "  case \"$RESTORED_CLI_RESULT\" in\n"
-            "    restored_exact_but_preexisting_unrunnable|restored_admissible_preexisting_runnable_unexecuted) RESTORED_BROKER_RESULT=restored_unit_preexisting_active_left_quiesced ;;\n"
+            "    restored_exact_but_preexisting_unrunnable|restored_admissible_preexisting_runnable_unexecuted) RESTORED_BROKER_RESULT=restored_unit_active_intent_carried_candidate_only ;;\n"
             "    *) RESTORED_BROKER_RESULT=restored_recorded_active ;;\n"
             "  esac\n"
             "}\n"
@@ -2552,7 +3551,7 @@ def test_recovery_finalizes_only_after_cli_gate_then_broker_restoration(
                     f"info:ops_cli_restoration={restoration_state}",
                     "info:broker_restoration="
                     + (
-                        "restored_unit_preexisting_active_left_quiesced"
+                        "restored_unit_active_intent_carried_candidate_only"
                         if restoration_state
                         in {
                             "restored_exact_but_preexisting_unrunnable",
@@ -2603,6 +3602,7 @@ def test_exact_legacy_active_recovery_requires_terminal_inactive_before_finalize
             "      queued) printf 'ActiveState=inactive\\nSubState=dead\\nMainPID=0\\nJob=77\\n' ;;\n"
             "      *) exit 89 ;;\n"
             "    esac\n"
+            "    printf 'UnitFileState=disabled\\n'\n"
             "    exit 0 ;;\n"
             "  restart|start|stop) exit 97 ;;\n"
             "  *) exit 98 ;;\n"
@@ -2625,14 +3625,16 @@ def test_exact_legacy_active_recovery_requires_terminal_inactive_before_finalize
             "RESTORED_BROKER_RESULT=''\n"
             "quiesce_root_action_broker_before_recovery() { printf 'quiesce\\n' >>\"$TRACE\"; }\n"
             "run_activation_transaction() {\n"
-            "  case \"$2:${4:-}\" in\n"
-            "    show:broker_state) printf 'active\\n' ;;\n"
-            "    show:broker_service_name) printf 'broker.service\\n' ;;\n"
-            "    recover:) printf 'tx:recover\\n' >>\"$TRACE\" ;;\n"
-            "    finalize:baseline) printf 'tx:finalize\\n' >>\"$TRACE\"; rm -f \"$TX_MARKER\" ;;\n"
+            "  case \"$2\" in\n"
+            "    show) case \"$4\" in broker_state) printf 'active\\n' ;; broker_desired_state) printf 'active\\n' ;; broker_desired_unit_file_state) printf 'enabled\\n' ;; broker_service_name) printf 'broker.service\\n' ;; candidate_commit) printf '%s\\n' \"$EXPECTED_COMMIT\" ;; *) return 88 ;; esac ;;\n"
+            "    recover) printf 'tx:recover\\n' >>\"$TRACE\" ;;\n"
+            "    defer-broker-reactivation) printf 'tx:defer\\n' >>\"$TRACE\" ;;\n"
+            "    finalize) [[ \"$4\" == baseline ]] || return 88; printf 'tx:finalize\\n' >>\"$TRACE\"; rm -f \"$TX_MARKER\" ;;\n"
             "    *) return 88 ;;\n"
             "  esac\n"
             "}\n"
+            f"EXPECTED_COMMIT={ACTIVATION_COMMIT!r}\n"
+            "export EXPECTED_COMMIT\n"
             "attest_restored_cli_or_exact_preexisting_legacy() { RESTORED_CLI_RESULT=restored_exact_but_preexisting_unrunnable; printf 'cli:legacy-passive\\n' >>\"$TRACE\"; }\n"
             "restore_broker_service_from_transaction() { printf 'unexpected-normal-restore\\n' >>\"$TRACE\"; return 96; }\n"
             "info() { printf 'info:%s\\n' \"$*\" >>\"$TRACE\"; }\n"
@@ -2656,8 +3658,9 @@ def test_exact_legacy_active_recovery_requires_terminal_inactive_before_finalize
         assert lines[4] == f"systemctl:{SYSTEMD_TUPLE_SHOW}"
         if expected_rc == 0:
             assert lines[5:] == [
+                "tx:defer",
                 "info:ops_cli_restoration=restored_exact_but_preexisting_unrunnable",
-                "info:broker_restoration=restored_unit_preexisting_active_left_quiesced",
+                "info:broker_restoration=restored_unit_active_intent_carried_candidate_only",
                 "tx:finalize",
             ]
             assert not tx_marker.exists()
@@ -2678,7 +3681,7 @@ def test_svcops_verified_active_recovery_uses_normal_restart_path() -> None:
             "#!/usr/bin/env bash\n"
             "set -euo pipefail\n"
             "printf 'systemctl:%s\\n' \"$*\" >>\"$TRACE\"\n"
-            "[[ \"$1\" == daemon-reload ]]\n",
+            "[[ \"$1\" == daemon-reload || \"$1\" == enable ]]\n",
             encoding="utf-8",
             newline="\n",
         )
@@ -2694,9 +3697,10 @@ def test_svcops_verified_active_recovery_uses_normal_restart_path() -> None:
             "RESTORED_BROKER_RESULT=''\n"
             "run_activation_transaction() {\n"
             "  [[ \"$2\" == show && \"$3\" == --field ]] || return 88\n"
-            "  [[ \"$4\" == broker_state ]] && printf 'active\\n' || printf 'broker.service\\n'\n"
+            "  case \"$4\" in broker_state) printf 'active\\n' ;; broker_unit_file_state) printf 'enabled\\n' ;; *) printf 'broker.service\\n' ;; esac\n"
             "}\n"
             "restart_root_action_broker_for_release() { printf 'restart:%s:%s\\n' \"$1\" \"$2\" >>\"$TRACE\"; }\n"
+            "root_action_broker_active_tuple_attested() { printf 'active-attest:%s:%s\\n' \"$1\" \"$2\" >>\"$TRACE\"; }\n"
             "root_action_broker_inactive_attested() { return 95; }\n"
             "quiesce_root_action_broker_for_transaction() { return 94; }\n"
             "root_action_broker_absent_attested() { return 93; }\n"
@@ -2708,7 +3712,9 @@ def test_svcops_verified_active_recovery_uses_normal_restart_path() -> None:
         assert completed.returncode == 0, completed.stderr
         assert trace.read_text(encoding="utf-8").splitlines() == [
             "systemctl:daemon-reload",
+            "systemctl:enable broker.service",
             "restart:broker.service:/previous",
+            "active-attest:broker.service:enabled",
             "result:restored_recorded_active",
         ]
 
@@ -2745,6 +3751,7 @@ def test_recovery_sigkill_after_filesystem_restore_leaves_broker_quiesced(
             "    printf 'LoadState=%s\\n' \"$LOAD_STATE\"\n"
             "    [[ \"$current\" == active ]] && printf 'ActiveState=active\\nSubState=running\\nMainPID=123\\n' || { [[ \"$current\" == auto_restart ]] && printf 'ActiveState=activating\\nSubState=auto-restart\\nMainPID=0\\n' || printf 'ActiveState=inactive\\nSubState=dead\\nMainPID=0\\n'; }\n"
             "    [[ \"$current\" == queued ]] && printf 'Job=77\\n' || printf 'Job=\\n'\n"
+            "    [[ \"$LOAD_STATE\" == loaded ]] && printf 'UnitFileState=disabled\\n' || printf 'UnitFileState=\\n'\n"
             "    exit 0 ;;\n"
             "  *) exit 19 ;;\n"
             "esac\n",
@@ -2765,7 +3772,7 @@ def test_recovery_sigkill_after_filesystem_restore_leaves_broker_quiesced(
             "ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=1\n"
             "run_activation_transaction() {\n"
             "  if [[ \"$2\" == show ]]; then\n"
-            f"    [[ \"$4\" == broker_state ]] && printf '{journal_state}\\n' || printf 'broker.service\\n'\n"
+            f"    case \"$4\" in broker_state) printf '{journal_state}\\n' ;; broker_unit_file_state) [[ '{journal_state}' == absent ]] && printf 'absent\\n' || printf 'disabled\\n' ;; *) printf 'broker.service\\n' ;; esac\n"
             "  elif [[ \"$2\" == recover ]]; then\n"
             "    printf 'filesystem-recover\\n' >>\"$TRACE\"\n"
             "    kill -KILL $$\n"
@@ -2790,7 +3797,6 @@ def test_recovery_sigkill_after_filesystem_restore_leaves_broker_quiesced(
         expected = [*initial_tuple, "filesystem-recover"]
         if live_state != "inactive":
             expected = [
-                *initial_tuple,
                 *initial_tuple,
                 "systemctl:stop broker.service",
                 *initial_tuple,
@@ -2824,11 +3830,11 @@ def test_broker_state_drift_before_begin_prevents_publication() -> None:
             f"OPS_USER={reader.pw_name!r}\n"
             f"GEMINI_HOME={reader.pw_dir!r}\n"
             "run_trusted_activation_helper() { printf 'fsync\\n' >>\"$TRACE\"; }\n"
-            "capture_root_action_broker_state() { printf 'capture\\n' >>\"$TRACE\"; printf 'active\\n'; }\n"
+            "capture_root_action_broker_snapshot() { printf 'capture\\n' >>\"$TRACE\"; printf 'active enabled\\n'; }\n"
             "cleanup_abandoned_activation_staging() { printf 'cleanup\\n' >>\"$TRACE\"; return 0; }\n"
             "run_activation_transaction() { printf 'begin:%s\\n' \"$2\" >>\"$TRACE\"; }\n"
             + _function("activate_release")
-            + f"\nactivate_release {str(release)!r} {ACTIVATION_COMMIT} /previous /helper inactive\n",
+            + f"\nactivate_release {str(release)!r} {ACTIVATION_COMMIT} /previous /helper inactive disabled\n",
         )
         assert completed.returncode != 0
         assert trace.read_text(encoding="utf-8").splitlines() == [

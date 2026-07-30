@@ -10,7 +10,7 @@ import time
 import pytest
 
 
-def test_install_places_fixed_root_action_contract_without_activation_or_new_sudo() -> (
+def test_install_places_fixed_root_action_contract_with_marker_bound_activation() -> (
     None
 ):
     install = Path("install.sh").read_text(encoding="utf-8")
@@ -35,8 +35,36 @@ def test_install_places_fixed_root_action_contract_without_activation_or_new_sud
     assert '[[ "$release_dir" =~ ^/[A-Za-z0-9._/-]+$ ]]' in activation
     assert '-e "s|@@CURRENT_LINK@@|$release_dir|g"' in activation
     assert '-e "s|@@RELEASE_DIR@@|$release_dir|g"' in activation
-    assert "systemctl enable" not in function
-    assert "systemctl start" not in function
+    commit_start = function.index(
+        'run_activation_transaction "$helper" commit-broker-start'
+    )
+    inactive_attestation = function.rindex(
+        'root_action_broker_inactive_attested', 0, commit_start
+    )
+    enable_start = function.index('systemctl enable "$service_name"', commit_start)
+    dispatch_start = function.index('systemctl start "$service_name"', enable_start)
+    pinned_attestation = function.index(
+        'wait_for_root_action_broker_pinned_release "$service_name" "$release_dir"',
+        dispatch_start,
+    )
+    active_tuple_attestation = function.index(
+        'root_action_broker_active_tuple_attested', pinned_attestation
+    )
+    mark_active = function.index(
+        'run_activation_transaction "$helper" mark-broker-active',
+        active_tuple_attestation,
+    )
+    assert (
+        inactive_attestation
+        < commit_start
+        < enable_start
+        < dispatch_start
+        < pinned_attestation
+        < active_tuple_attestation
+        < mark_active
+    )
+    assert function.count('systemctl start "$service_name"') == 1
+    assert 'systemctl start "$service_name"' not in function[:commit_start]
     assert 'attest_quiesced_root_action_broker_state "$helper" || return 1' in function
     assert activation.index('quiesce_root_action_broker_for_publication "$helper"') \
         < activation.index('run_activation_transaction "$helper" publish')

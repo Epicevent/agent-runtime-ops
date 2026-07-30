@@ -513,8 +513,8 @@ root_action_broker_process_attested() {
 
 read_root_action_broker_systemd_tuple() {
   local service_name="$1"
-  local output line load_state active_state sub_state main_pid job
-  local seen_load=0 seen_active=0 seen_sub=0 seen_pid=0 seen_job=0
+  local output line load_state active_state sub_state main_pid job unit_file_state
+  local seen_load=0 seen_active=0 seen_sub=0 seen_pid=0 seen_job=0 seen_unit=0
   output="$(
     /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
       systemctl show \
@@ -523,6 +523,7 @@ read_root_action_broker_systemd_tuple() {
         --property=SubState \
         --property=MainPID \
         --property=Job \
+        --property=UnitFileState \
         "$service_name"
   )" || return 1
   while IFS= read -r line; do
@@ -552,6 +553,11 @@ read_root_action_broker_systemd_tuple() {
         job="${line#Job=}"
         seen_job=1
         ;;
+      UnitFileState=*)
+        [[ "$seen_unit" -eq 0 ]] || return 1
+        unit_file_state="${line#UnitFileState=}"
+        seen_unit=1
+        ;;
       *) return 1 ;;
     esac
   done <<<"$output"
@@ -559,11 +565,18 @@ read_root_action_broker_systemd_tuple() {
     && "$seen_active" -eq 1 \
     && "$seen_sub" -eq 1 \
     && "$seen_pid" -eq 1 \
-    && "$seen_job" -eq 1 ]] || return 1
+    && "$seen_job" -eq 1 \
+    && "$seen_unit" -eq 1 ]] || return 1
   [[ "$load_state" =~ ^[a-z][a-z-]*$ \
     && "$active_state" =~ ^[a-z][a-z-]*$ \
     && "$sub_state" =~ ^[a-z][a-z0-9-]*$ \
     && "$main_pid" =~ ^[0-9]{1,10}$ ]] || return 1
+  if [[ "$load_state" == not-found ]]; then
+    [[ -z "$unit_file_state" || "$unit_file_state" == not-found ]] || return 1
+    unit_file_state=absent
+  else
+    [[ "$unit_file_state" =~ ^[a-z][a-z-]*$ ]] || return 1
+  fi
   printf 'LoadState=%s\n' "$load_state"
   printf 'ActiveState=%s\n' "$active_state"
   printf 'SubState=%s\n' "$sub_state"
@@ -573,16 +586,18 @@ read_root_action_broker_systemd_tuple() {
   else
     printf 'JobPresent=yes\n'
   fi
+  printf 'UnitFileState=%s\n' "$unit_file_state"
 }
 
 root_action_broker_terminal_tuple_attested() {
   local service_name="$1"
   local expected_load_state="$2"
+  local expected_unit_file_state="$3"
   local tuple
   local -a tuple_fields=()
   tuple="$(read_root_action_broker_systemd_tuple "$service_name")" || return 1
   mapfile -t tuple_fields <<<"$tuple"
-  [[ "${#tuple_fields[@]}" -eq 5 ]] || return 1
+  [[ "${#tuple_fields[@]}" -eq 6 ]] || return 1
   case "$expected_load_state" in
     loaded|not-found)
       [[ "${tuple_fields[0]}" == "LoadState=$expected_load_state" ]] || return 1
@@ -596,19 +611,49 @@ root_action_broker_terminal_tuple_attested() {
   [[ "${tuple_fields[1]}" == ActiveState=inactive \
     && "${tuple_fields[2]}" == SubState=dead \
     && "${tuple_fields[3]}" == MainPID=0 \
-    && "${tuple_fields[4]}" == JobPresent=no ]]
+    && "${tuple_fields[4]}" == JobPresent=no \
+    && "${tuple_fields[5]}" == "UnitFileState=$expected_unit_file_state" ]]
 }
 
 root_action_broker_inactive_attested() {
-  root_action_broker_terminal_tuple_attested "$1" loaded
+  root_action_broker_terminal_tuple_attested "$1" loaded "$2"
 }
 
 root_action_broker_absent_attested() {
-  root_action_broker_terminal_tuple_attested "$1" not-found
+  root_action_broker_terminal_tuple_attested "$1" not-found absent
 }
 
 root_action_broker_quiesced_attested() {
-  root_action_broker_terminal_tuple_attested "$1" loaded-or-not-found
+  local service_name="$1"
+  local tuple
+  local -a tuple_fields=()
+  tuple="$(read_root_action_broker_systemd_tuple "$service_name")" || return 1
+  mapfile -t tuple_fields <<<"$tuple"
+  [[ "${#tuple_fields[@]}" -eq 6 \
+    && "${tuple_fields[1]}" == ActiveState=inactive \
+    && "${tuple_fields[2]}" == SubState=dead \
+    && "${tuple_fields[3]}" == MainPID=0 \
+    && "${tuple_fields[4]}" == JobPresent=no ]] || return 1
+  [[ "${tuple_fields[0]}:${tuple_fields[5]}" == \
+      LoadState=loaded:UnitFileState=disabled \
+    || "${tuple_fields[0]}:${tuple_fields[5]}" == \
+      LoadState=not-found:UnitFileState=absent ]]
+}
+
+root_action_broker_active_tuple_attested() {
+  local service_name="$1"
+  local expected_unit_file_state="$2"
+  local tuple
+  local -a tuple_fields=()
+  tuple="$(read_root_action_broker_systemd_tuple "$service_name")" || return 1
+  mapfile -t tuple_fields <<<"$tuple"
+  [[ "${#tuple_fields[@]}" -eq 6 \
+    && "${tuple_fields[0]}" == LoadState=loaded \
+    && "${tuple_fields[1]}" == ActiveState=active \
+    && "${tuple_fields[2]}" == SubState=running \
+    && "${tuple_fields[3]}" =~ ^MainPID=[1-9][0-9]{0,9}$ \
+    && "${tuple_fields[4]}" == JobPresent=no \
+    && "${tuple_fields[5]}" == "UnitFileState=$expected_unit_file_state" ]]
 }
 
 restart_root_action_broker_for_release() {
@@ -653,19 +698,29 @@ wait_for_root_action_broker_pinned_release() {
 
 attest_quiesced_root_action_broker_state() {
   local helper="$1"
-  local broker_state service_name
+  local broker_state broker_unit_file_state service_name
   broker_state="$(
     run_activation_transaction "$helper" show --field broker_state
   )" || return 1
   service_name="$(
     run_activation_transaction "$helper" show --field broker_service_name
   )" || return 1
+  broker_unit_file_state="$(
+    run_activation_transaction "$helper" show --field broker_unit_file_state
+  )" || return 1
   case "$broker_state" in
-    active|inactive|absent)
+    active|inactive)
+      [[ "$broker_unit_file_state" == enabled \
+        || "$broker_unit_file_state" == disabled ]] || return 1
+      root_action_broker_quiesced_attested "$service_name"
+      ;;
+    absent)
+      [[ "$broker_unit_file_state" == absent ]] || return 1
       root_action_broker_quiesced_attested "$service_name"
       ;;
     unavailable)
-      ! command -v systemctl >/dev/null 2>&1
+      [[ "$broker_unit_file_state" == unavailable ]] \
+        && ! command -v systemctl >/dev/null 2>&1
       ;;
     *) return 1 ;;
   esac
@@ -678,7 +733,8 @@ quiesce_root_action_broker_for_publication() {
 install_root_action_broker_contract() {
   local release_dir="$1"
   local helper="$2"
-  local broker_state service_name
+  local broker_state desired_state desired_unit_file_state activation_phase
+  local candidate_commit service_name
   # Resolve the trusted reader by its production account name at install time.
   # Numeric IDs are host facts and must never be embedded in the release.
   getent passwd "$ROOT_ACTION_TRUSTED_ACCOUNT" >/dev/null || return 1
@@ -695,15 +751,25 @@ install_root_action_broker_contract() {
   broker_state="$(
     run_activation_transaction "$helper" show --field broker_state
   )" || return 1
+  desired_state="$(
+    run_activation_transaction "$helper" show --field broker_desired_state
+  )" || return 1
+  desired_unit_file_state="$(
+    run_activation_transaction "$helper" show --field broker_desired_unit_file_state
+  )" || return 1
+  activation_phase="$(
+    run_activation_transaction "$helper" show --field broker_activation_phase
+  )" || return 1
   service_name="$(
     run_activation_transaction "$helper" show --field broker_service_name
   )" || return 1
   [[ "$service_name" == "$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")" ]] || return 1
   attest_quiesced_root_action_broker_state "$helper" || return 1
   run_activation_transaction "$helper" publish-broker || return 1
-  case "$broker_state" in
+  case "$desired_state" in
     unavailable)
-      ! command -v systemctl >/dev/null 2>&1 || return 1
+      [[ "$desired_unit_file_state" == unavailable ]] \
+        && ! command -v systemctl >/dev/null 2>&1 || return 1
       ;;
     active|inactive|absent)
       command -v systemctl >/dev/null 2>&1 || return 1
@@ -714,48 +780,129 @@ install_root_action_broker_contract() {
       ;;
     *) return 1 ;;
   esac
-  case "$broker_state" in
-    active)
+  case "$desired_unit_file_state" in
+    enabled)
+      if [[ "$desired_state" == active \
+        && "$activation_phase" == candidate_bound ]]; then
+        # Keep the rebuilt candidate disabled until the durable at-most-one
+        # start-dispatch marker exists.  A reboot before that marker therefore
+        # cannot start either the legacy broker or the candidate implicitly.
+        root_action_broker_inactive_attested "$service_name" disabled || return 1
+      else
+        /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+          systemctl enable "$service_name" >/dev/null || return 1
+      fi
+      ;;
+    disabled)
       /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
-        systemctl restart "$service_name" >/dev/null \
-        || return 1
-      wait_for_root_action_broker_pinned_release "$service_name" "$release_dir" \
-        || return 1
-      info "root_action_broker_update=active_restarted_release_verified" || return 1
+        systemctl disable "$service_name" >/dev/null || return 1
+      ;;
+    absent) [[ "$desired_state" == absent ]] || return 1 ;;
+    unavailable) [[ "$desired_state" == unavailable ]] || return 1 ;;
+    *) return 1 ;;
+  esac
+  case "$desired_state" in
+    active)
+      if [[ "$activation_phase" == candidate_bound ]]; then
+        root_action_broker_inactive_attested \
+          "$service_name" disabled || return 1
+        candidate_commit="$(
+          run_activation_transaction "$helper" show --field candidate_commit
+        )" || return 1
+        run_activation_transaction "$helper" commit-broker-start \
+          --expected-commit "$candidate_commit" \
+          --expected-candidate-release "$release_dir" \
+          --expected-service-name "$service_name" >/dev/null || return 1
+        /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+          systemctl enable "$service_name" >/dev/null || return 1
+        /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+          systemctl start "$service_name" >/dev/null || return 1
+        wait_for_root_action_broker_pinned_release "$service_name" "$release_dir" \
+          || return 1
+        root_action_broker_active_tuple_attested \
+          "$service_name" "$desired_unit_file_state" || return 1
+        run_activation_transaction "$helper" mark-broker-active \
+          --expected-commit "$candidate_commit" \
+          --expected-candidate-release "$release_dir" \
+          --expected-service-name "$service_name" >/dev/null || return 1
+        info "root_action_broker_update=carried_active_intent_candidate_started_once_verified" \
+          || return 1
+      elif [[ "$activation_phase" == none ]]; then
+        [[ "$broker_state" == active ]] || return 1
+        /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+          systemctl restart "$service_name" >/dev/null || return 1
+        wait_for_root_action_broker_pinned_release "$service_name" "$release_dir" \
+          || return 1
+        root_action_broker_active_tuple_attested \
+          "$service_name" "$desired_unit_file_state" || return 1
+        info "root_action_broker_update=active_restarted_release_verified" || return 1
+      else
+        return 1
+      fi
       ;;
     inactive|absent)
-      root_action_broker_inactive_attested "$service_name" || return 1
+      if [[ "$desired_state" == inactive ]]; then
+        root_action_broker_inactive_attested \
+          "$service_name" "$desired_unit_file_state" || return 1
+      else
+        root_action_broker_absent_attested "$service_name" || return 1
+      fi
       ;;
     unavailable) ;;
     *) return 1 ;;
   esac
-  # An inactive broker remains a separate ratified activation boundary. An
-  # already-active broker must move with self-update so old code can be pruned.
+  # Report the exact candidate state rather than the historical generic
+  # deferred string: a carried active intent is consumed only after the pinned
+  # candidate is running and attested above.
   info "root_action_broker_unit=$ROOT_ACTION_BROKER_SERVICE_FILE" || return 1
-  info "root_action_broker_activation=deferred_not_enabled_or_started" || return 1
+  case "$desired_state" in
+    active) info "root_action_broker_activation=active_candidate_verified" || return 1 ;;
+    inactive) info "root_action_broker_activation=inactive_disabled" || return 1 ;;
+    absent) info "root_action_broker_activation=absent" || return 1 ;;
+    unavailable) info "root_action_broker_activation=systemd_unavailable" || return 1 ;;
+    *) return 1 ;;
+  esac
 }
 
 attest_candidate_root_action_broker_state() {
   local release_dir="$1"
   local helper="$2"
   local expected_state="$3"
-  local journal_state service_name
+  local journal_state desired_state desired_unit_file_state activation_phase service_name
   journal_state="$(
     run_activation_transaction "$helper" show --field broker_state
   )" || return 1
   [[ "$journal_state" == "$expected_state" ]] || return 1
+  desired_state="$(
+    run_activation_transaction "$helper" show --field broker_desired_state
+  )" || return 1
+  desired_unit_file_state="$(
+    run_activation_transaction "$helper" show --field broker_desired_unit_file_state
+  )" || return 1
+  activation_phase="$(
+    run_activation_transaction "$helper" show --field broker_activation_phase
+  )" || return 1
   service_name="$(
     run_activation_transaction "$helper" show --field broker_service_name
   )" || return 1
-  case "$journal_state" in
+  case "$desired_state" in
     active)
-      root_action_broker_pinned_release_attested "$service_name" "$release_dir"
+      root_action_broker_pinned_release_attested "$service_name" "$release_dir" \
+        && root_action_broker_active_tuple_attested \
+          "$service_name" "$desired_unit_file_state" \
+        && [[ "$activation_phase" == none \
+          || "$activation_phase" == active_attested ]]
       ;;
-    inactive|absent)
-      root_action_broker_inactive_attested "$service_name"
+    inactive)
+      root_action_broker_inactive_attested \
+        "$service_name" "$desired_unit_file_state"
+      ;;
+    absent)
+      root_action_broker_absent_attested "$service_name"
       ;;
     unavailable)
-      ! command -v systemctl >/dev/null 2>&1
+      [[ "$desired_unit_file_state" == unavailable ]] \
+        && ! command -v systemctl >/dev/null 2>&1
       ;;
     *) return 1 ;;
   esac
@@ -1234,6 +1381,9 @@ cleanup_abandoned_activation_staging() {
     recovered_completion=absent) ;;
     recovered_completion_acknowledged=yes) return 2 ;;
     recovered_completion_cleaned=yes) return 2 ;;
+    broker_reactivation_intent=ready) ;;
+    broker_reactivation_intent=adoption_claimed) ;;
+    broker_reactivation_intent=revoked) return 2 ;;
     *) return 1 ;;
   esac
   output="$(
@@ -1251,14 +1401,18 @@ cleanup_abandoned_activation_staging() {
 restore_broker_service_from_transaction() {
   local helper="$1"
   local previous_release="$2"
-  local broker_state service_name
+  local broker_state broker_unit_file_state service_name
   broker_state="$(
     run_activation_transaction "$helper" show --field broker_state
   )" || return 1
   service_name="$(
     run_activation_transaction "$helper" show --field broker_service_name
   )" || return 1
+  broker_unit_file_state="$(
+    run_activation_transaction "$helper" show --field broker_unit_file_state
+  )" || return 1
   if [[ "$broker_state" == unavailable ]]; then
+    [[ "$broker_unit_file_state" == unavailable ]] || return 1
     ! command -v systemctl >/dev/null 2>&1 || return 1
     return 0
   fi
@@ -1266,16 +1420,31 @@ restore_broker_service_from_transaction() {
   [[ -x /usr/bin/timeout ]] || return 1
   /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
     systemctl daemon-reload >/dev/null || return 1
+  case "$broker_unit_file_state" in
+    enabled)
+      /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+        systemctl enable "$service_name" >/dev/null || return 1
+      ;;
+    disabled)
+      /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+        systemctl disable "$service_name" >/dev/null || return 1
+      ;;
+    absent) [[ "$broker_state" == absent ]] || return 1 ;;
+    *) return 1 ;;
+  esac
   case "$broker_state" in
     active)
       [[ -n "$previous_release" ]] || return 1
       restart_root_action_broker_for_release "$service_name" "$previous_release" \
         || return 1
+      root_action_broker_active_tuple_attested \
+        "$service_name" "$broker_unit_file_state" || return 1
       ;;
     inactive)
       /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
         systemctl stop "$service_name" >/dev/null || return 1
-      root_action_broker_inactive_attested "$service_name" || return 1
+      root_action_broker_inactive_attested \
+        "$service_name" "$broker_unit_file_state" || return 1
       ;;
     absent)
       quiesce_root_action_broker_for_transaction "$helper" || return 1
@@ -1288,15 +1457,25 @@ restore_broker_service_from_transaction() {
 restore_broker_service_after_baseline_validation() {
   local helper="$1"
   local previous_release="$2"
-  local broker_state service_name
+  local broker_state desired_state desired_unit_file_state service_name candidate_commit
   RESTORED_BROKER_RESULT=""
   broker_state="$(
     run_activation_transaction "$helper" show --field broker_state
   )" || return 1
+  desired_state="$(
+    run_activation_transaction "$helper" show --field broker_desired_state
+  )" || return 1
+  desired_unit_file_state="$(
+    run_activation_transaction "$helper" show --field broker_desired_unit_file_state
+  )" || return 1
   case "$RESTORED_CLI_RESULT" in
     restored_exact_but_preexisting_unrunnable|\
     restored_admissible_preexisting_runnable_unexecuted)
-      if [[ "$broker_state" == active ]]; then
+      if [[ "$desired_state" == active ]]; then
+        # Only the measured production active+enabled intent has a typed carry
+        # contract.  Never fall through to legacy root-code restart for another
+        # active unit-file state.
+        [[ "$desired_unit_file_state" == enabled ]] || return 1
         service_name="$(
           run_activation_transaction "$helper" show --field broker_service_name
         )" || return 1
@@ -1305,8 +1484,15 @@ restore_broker_service_after_baseline_validation() {
         /usr/bin/timeout --kill-after=1 \
           "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
           systemctl daemon-reload >/dev/null || return 1
-        root_action_broker_inactive_attested "$service_name" || return 1
-        RESTORED_BROKER_RESULT="restored_unit_preexisting_active_left_quiesced"
+        root_action_broker_inactive_attested "$service_name" disabled || return 1
+        candidate_commit="$(
+          run_activation_transaction "$helper" show --field candidate_commit
+        )" || return 1
+        run_activation_transaction "$helper" defer-broker-reactivation \
+          --expected-commit "$candidate_commit" \
+          --expected-previous-release "$previous_release" \
+          --expected-service-name "$service_name" >/dev/null || return 1
+        RESTORED_BROKER_RESULT="restored_unit_active_intent_carried_candidate_only"
         return 0
       fi
       ;;
@@ -1318,7 +1504,7 @@ restore_broker_service_after_baseline_validation() {
 
 quiesce_root_action_broker_for_transaction() {
   local helper="$1"
-  local broker_state service_name tuple
+  local broker_state broker_unit_file_state service_name tuple
   local -a tuple_fields=()
   broker_state="$(
     run_activation_transaction "$helper" show --field broker_state
@@ -1326,28 +1512,52 @@ quiesce_root_action_broker_for_transaction() {
   service_name="$(
     run_activation_transaction "$helper" show --field broker_service_name
   )" || return 1
+  broker_unit_file_state="$(
+    run_activation_transaction "$helper" show --field broker_unit_file_state
+  )" || return 1
   case "$broker_state" in
     unavailable)
-      ! command -v systemctl >/dev/null 2>&1
+      [[ "$broker_unit_file_state" == unavailable ]] \
+        && ! command -v systemctl >/dev/null 2>&1
       return
       ;;
-    active|inactive|absent) ;;
+    active|inactive)
+      [[ "$broker_unit_file_state" == enabled \
+        || "$broker_unit_file_state" == disabled ]] || return 1
+      ;;
+    absent)
+      [[ "$broker_unit_file_state" == absent ]] || return 1
+      ;;
     *) return 1 ;;
   esac
   command -v systemctl >/dev/null 2>&1 || return 1
   [[ -x /usr/bin/timeout ]] || return 1
-  # LoadState is orthogonal to process/job state.  In particular a unit whose
-  # configuration was removed can remain active or queued for restart.  Only
-  # the complete inactive tuple is already safe; every other loaded/not-found
-  # tuple is stopped before any transaction-owned filesystem mutation.
-  if root_action_broker_quiesced_attested "$service_name"; then
-    return 0
-  fi
+  # LoadState is orthogonal to process/job state.  Read one coherent tuple,
+  # accept only its exact terminal variants, and otherwise use that same
+  # snapshot to decide the bounded disable/stop sequence.
   tuple="$(read_root_action_broker_systemd_tuple "$service_name")" || return 1
   mapfile -t tuple_fields <<<"$tuple"
-  [[ "${#tuple_fields[@]}" -eq 5 ]] || return 1
+  [[ "${#tuple_fields[@]}" -eq 6 ]] || return 1
+  if [[ "${tuple_fields[1]}" == ActiveState=inactive \
+    && "${tuple_fields[2]}" == SubState=dead \
+    && "${tuple_fields[3]}" == MainPID=0 \
+    && "${tuple_fields[4]}" == JobPresent=no ]] \
+    && [[ "${tuple_fields[0]}:${tuple_fields[5]}" == \
+        LoadState=loaded:UnitFileState=disabled \
+      || "${tuple_fields[0]}:${tuple_fields[5]}" == \
+        LoadState=not-found:UnitFileState=absent ]]; then
+    return 0
+  fi
   case "${tuple_fields[0]}" in
     LoadState=loaded|LoadState=not-found) ;;
+    *) return 1 ;;
+  esac
+  case "${tuple_fields[5]}" in
+    UnitFileState=enabled)
+      /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+        systemctl disable "$service_name" >/dev/null || return 1
+      ;;
+    UnitFileState=disabled|UnitFileState=absent) ;;
     *) return 1 ;;
   esac
   /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
@@ -1406,13 +1616,61 @@ recover_pending_activation_transaction() {
   return 0
 }
 
+resume_committed_candidate_broker_activation() {
+  local helper="$1"
+  local expected_commit="$2"
+  local phase candidate_commit candidate_release service_name desired_state desired_unit_state
+  if [[ ! -e "$ACTIVATION_TRANSACTION_DIR" \
+    && ! -L "$ACTIVATION_TRANSACTION_DIR" ]]; then
+    return 1
+  fi
+  phase="$(
+    run_activation_transaction "$helper" show --field broker_activation_phase
+  )" || return 1
+  case "$phase" in
+    start_dispatch_committed|active_attested) ;;
+    *) return 1 ;;
+  esac
+  candidate_commit="$(
+    run_activation_transaction "$helper" show --field candidate_commit
+  )" || return 2
+  [[ "$candidate_commit" == "$expected_commit" ]] || return 2
+  candidate_release="$(
+    run_activation_transaction "$helper" show --field candidate_release
+  )" || return 2
+  service_name="$(
+    run_activation_transaction "$helper" show --field broker_service_name
+  )" || return 2
+  desired_state="$(
+    run_activation_transaction "$helper" show --field broker_desired_state
+  )" || return 2
+  desired_unit_state="$(
+    run_activation_transaction "$helper" show --field broker_desired_unit_file_state
+  )" || return 2
+  [[ "$desired_state" == active && "$desired_unit_state" == enabled ]] || return 2
+  root_action_broker_pinned_release_attested \
+    "$service_name" "$candidate_release" || return 2
+  root_action_broker_active_tuple_attested \
+    "$service_name" "$desired_unit_state" || return 2
+  if [[ "$phase" == start_dispatch_committed ]]; then
+    run_activation_transaction "$helper" mark-broker-active \
+      --expected-commit "$candidate_commit" \
+      --expected-candidate-release "$candidate_release" \
+      --expected-service-name "$service_name" >/dev/null || return 2
+  fi
+  run_activation_transaction "$helper" finalize --expect candidate || return 2
+  info "broker_reactivation_resume=exact_candidate_active_attested_and_finalized"
+  return 0
+}
+
 activate_release() {
   local release_dir="$1"
   local commit="$2"
   local previous_release="$3"
   local helper="$4"
   local broker_state="$5"
-  local release_name service_name unit_source broker_state_now
+  local broker_unit_file_state="$6"
+  local release_name service_name unit_source broker_state_now broker_unit_file_state_now
   release_name="$(basename "$release_dir")" || return 1
   service_name="$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")" || return 1
   unit_source="$release_dir/systemd/agent-runtime-root-action-broker.service"
@@ -1485,9 +1743,10 @@ EOF
   fi
   run_trusted_activation_helper "$helper" fsync-tree \
     --releases-dir "$RELEASES_DIR" --path "$release_dir" || return 1
-  broker_state_now="$(capture_root_action_broker_state "$previous_release")" \
-    || return 1
-  if [[ "$broker_state_now" != "$broker_state" ]]; then
+  read -r broker_state_now broker_unit_file_state_now \
+    < <(capture_root_action_broker_snapshot "$previous_release") || return 1
+  if [[ "$broker_state_now" != "$broker_state" \
+    || "$broker_unit_file_state_now" != "$broker_unit_file_state" ]]; then
     cleanup_abandoned_activation_staging "$helper" "$commit" || true
     return 1
   fi
@@ -1500,6 +1759,7 @@ EOF
     --previous-release "$previous_release" \
     --broker-service-name "$service_name" \
     --broker-state "$broker_state_now" \
+    --broker-unit-file-state "$broker_unit_file_state_now" \
     || return 1
   quiesce_root_action_broker_for_publication "$helper" || return 1
   cleanup_abandoned_activation_staging "$helper" "$commit" || return 1
@@ -2595,25 +2855,26 @@ capture_previous_active_release() {
   printf '%s\n' "$previous_release"
 }
 
-capture_root_action_broker_state() {
+capture_root_action_broker_snapshot() {
   local previous_release="$1"
-  local service_name tuple load_state active_state sub_state main_pid job_present
+  local service_name tuple load_state active_state sub_state main_pid job_present unit_file_state
   local -a tuple_fields=()
   if ! command -v systemctl >/dev/null 2>&1; then
-    printf 'unavailable\n'
+    printf 'unavailable unavailable\n'
     return 0
   fi
   service_name="$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")"
   tuple="$(read_root_action_broker_systemd_tuple "$service_name")" \
     || die "root-action broker pre-activation systemd tuple probe failed"
   mapfile -t tuple_fields <<<"$tuple"
-  [[ "${#tuple_fields[@]}" -eq 5 ]] \
+  [[ "${#tuple_fields[@]}" -eq 6 ]] \
     || die "root-action broker pre-activation systemd tuple is malformed"
   load_state="${tuple_fields[0]#LoadState=}"
   active_state="${tuple_fields[1]#ActiveState=}"
   sub_state="${tuple_fields[2]#SubState=}"
   main_pid="${tuple_fields[3]#MainPID=}"
   job_present="${tuple_fields[4]#JobPresent=}"
+  unit_file_state="${tuple_fields[5]#UnitFileState=}"
   case "$load_state" in
     loaded|not-found) ;;
     *) die "root-action broker pre-activation load state is not admissible: $load_state" ;;
@@ -2622,21 +2883,27 @@ capture_root_action_broker_state() {
     loaded:active:running:no)
       [[ "$main_pid" =~ ^[1-9][0-9]{0,9}$ ]] \
         || die "active root-action broker has an invalid MainPID"
+      [[ "$unit_file_state" == enabled || "$unit_file_state" == disabled ]] \
+        || die "active root-action broker unit-file state is not admissible"
       [[ -n "$previous_release" ]] \
         || die "active root-action broker has no previous active release"
       root_action_broker_release_attested "$service_name" "$previous_release" \
         || die "previous root-action broker release is not exactly attested"
-      printf 'active\n'
+      printf 'active %s\n' "$unit_file_state"
       ;;
     loaded:inactive:dead:no)
       [[ "$main_pid" == 0 ]] \
         || die "inactive root-action broker still has a MainPID"
-      printf 'inactive\n'
+      [[ "$unit_file_state" == enabled || "$unit_file_state" == disabled ]] \
+        || die "inactive root-action broker unit-file state is not admissible"
+      printf 'inactive %s\n' "$unit_file_state"
       ;;
     not-found:inactive:dead:no)
       [[ "$main_pid" == 0 ]] \
         || die "absent root-action broker still has a MainPID"
-      printf 'absent\n'
+      [[ "$unit_file_state" == absent ]] \
+        || die "absent root-action broker unit-file state is not exact"
+      printf 'absent absent\n'
       ;;
     *)
       die "root-action broker pre-activation state is transient or unsafe: $load_state/$active_state/$sub_state"
@@ -2648,9 +2915,11 @@ activate_and_attest_cli_or_restore() {
   local commit="$2"
   local previous_release="$3"
   local broker_state="$4"
-  local helper="$5"
+  local broker_unit_file_state="$5"
+  local helper="$6"
   local activation_rc=0
-  activate_release "$release_dir" "$commit" "$previous_release" "$helper" "$broker_state" \
+  activate_release "$release_dir" "$commit" "$previous_release" "$helper" \
+    "$broker_state" "$broker_unit_file_state" \
     || activation_rc="$?"
   if [[ "$activation_rc" -eq 0 ]]; then
     attest_active_cli_as_ops "$release_dir" "$commit" || activation_rc="$?"
@@ -2675,7 +2944,7 @@ install_root_action_broker_or_restore() {
   local previous_release="$3"
   local broker_state="$4"
   local helper="$5"
-  local broker_install_rc=0 journal_state
+  local broker_install_rc=0 journal_state activation_phase
   journal_state="$(
     run_activation_transaction "$helper" show --field broker_state
   )" || broker_install_rc="$?"
@@ -2696,6 +2965,14 @@ install_root_action_broker_or_restore() {
       || die "broker installed but activation transaction finalization failed"
     return 0
   fi
+  activation_phase="$(
+    run_activation_transaction "$helper" show --field broker_activation_phase
+  )" || die "root-action broker setup failed and activation phase is unavailable"
+  case "$activation_phase" in
+    start_dispatch_committed|active_attested)
+      die "root-action broker start dispatch was committed; transaction preserved and start will not be redispatched"
+      ;;
+  esac
   recover_and_attest_activation_baseline "$helper" "$commit" "$previous_release" \
     || die "root-action broker setup failed and durable journaled-baseline recovery failed"
   die "root-action broker setup failed; baseline_cli_state=$RESTORED_CLI_RESULT; baseline_broker_state=$RESTORED_BROKER_RESULT"
@@ -2717,7 +2994,8 @@ register_codex_mcp() {
 install_package() {
   local src commit summary release_name tmp_release release_dir
   local activation_helper previous_active_release previous_broker_state
-  local activation_cleanup_rc=0
+  local previous_broker_unit_file_state
+  local activation_cleanup_rc=0 activation_resume_rc=0
   require_root
   validate_activation_path_strings
   if ! src="$(repo_root)"; then
@@ -2754,6 +3032,13 @@ install_package() {
     verify_activation_helper_identity "$src" "$commit" "$activation_helper"
   )" || die "activation helper does not match the exact source commit"
   with_install_lock
+  resume_committed_candidate_broker_activation \
+    "$activation_helper" "$commit" || activation_resume_rc="$?"
+  case "$activation_resume_rc" in
+    0) die "committed candidate broker activation finalized; rerun install to continue" ;;
+    1) ;;
+    *) die "committed candidate broker activation is not exactly active; transaction preserved and start was not redispatched" ;;
+  esac
   if recover_pending_activation_transaction "$activation_helper" "$commit"; then
     die "pending activation recovered its journaled managed baseline; rerun install to begin a new activation"
   fi
@@ -2765,7 +3050,9 @@ install_package() {
     *) die "unsafe or unremovable activation staging residue" ;;
   esac
   previous_active_release="$(capture_previous_active_release "$commit")"
-  previous_broker_state="$(capture_root_action_broker_state "$previous_active_release")"
+  read -r previous_broker_state previous_broker_unit_file_state \
+    < <(capture_root_action_broker_snapshot "$previous_active_release") \
+    || die "root-action broker pre-activation snapshot failed"
   ensure_base_packages
   require_commands
   summary="$(source_summary "$src")"
@@ -2798,7 +3085,7 @@ install_package() {
 
   activate_and_attest_cli_or_restore \
     "$release_dir" "$commit" "$previous_active_release" \
-    "$previous_broker_state" "$activation_helper"
+    "$previous_broker_state" "$previous_broker_unit_file_state" "$activation_helper"
   install_root_action_broker_or_restore \
     "$release_dir" "$commit" "$previous_active_release" \
     "$previous_broker_state" "$activation_helper"

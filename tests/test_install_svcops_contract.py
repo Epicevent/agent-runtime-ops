@@ -151,19 +151,19 @@ def test_svcops_attestations_are_bounded_minimal_and_prune_is_last() -> None:
     assert 'run_activation_transaction "$helper" finalize --expect baseline' in recovery
     assert "restored_exact_but_preexisting_unrunnable" in broker_recovery_policy
     assert "restored_admissible_preexisting_runnable_unexecuted" in broker_recovery_policy
-    assert '[[ "$broker_state" == active ]]' in broker_recovery_policy
-    assert 'root_action_broker_inactive_attested "$service_name"' in broker_recovery_policy
+    assert '[[ "$desired_state" == active' in broker_recovery_policy
+    assert 'root_action_broker_inactive_attested "$service_name" disabled' in broker_recovery_policy
     assert (
-        'RESTORED_BROKER_RESULT="restored_unit_preexisting_active_left_quiesced"'
+        'RESTORED_BROKER_RESULT="restored_unit_active_intent_carried_candidate_only"'
         in broker_recovery_policy
     )
     assert broker_recovery_policy.index(
-        'root_action_broker_inactive_attested "$service_name"'
+        'root_action_broker_inactive_attested "$service_name" disabled'
     ) < broker_recovery_policy.index(
-        'RESTORED_BROKER_RESULT="restored_unit_preexisting_active_left_quiesced"'
+        'defer-broker-reactivation'
     )
     assert broker_recovery_policy.index(
-        'RESTORED_BROKER_RESULT="restored_unit_preexisting_active_left_quiesced"'
+        'RESTORED_BROKER_RESULT="restored_unit_active_intent_carried_candidate_only"'
     ) < broker_recovery_policy.index(
         'restore_broker_service_from_transaction "$helper" "$previous_release"'
     )
@@ -177,7 +177,7 @@ def test_svcops_attestations_are_bounded_minimal_and_prune_is_last() -> None:
     assert 'systemctl stop "$service_name"' in transaction_quiesce
     assert "root_action_broker_quiesced_attested" in transaction_quiesce
     assert tuple_reader.count("systemctl show") == 1
-    for property_name in ("LoadState", "ActiveState", "SubState", "MainPID", "Job"):
+    for property_name in ("LoadState", "ActiveState", "SubState", "MainPID", "Job", "UnitFileState"):
         assert f"--property={property_name}" in tuple_reader
     assert "--value" not in tuple_reader
     assert terminal_attestation.count("read_root_action_broker_systemd_tuple") == 1
@@ -186,12 +186,10 @@ def test_svcops_attestations_are_bounded_minimal_and_prune_is_last() -> None:
     assert "SubState=dead" in terminal_attestation
     assert "MainPID=0" in terminal_attestation
     assert "JobPresent=no" in terminal_attestation
-    assert 'root_action_broker_terminal_tuple_attested "$1" loaded' in inactive_attestation
-    assert 'root_action_broker_terminal_tuple_attested "$1" not-found' in absent_attestation
-    assert (
-        'root_action_broker_terminal_tuple_attested "$1" loaded-or-not-found'
-        in quiesced_attestation
-    )
+    assert 'root_action_broker_terminal_tuple_attested "$1" loaded "$2"' in inactive_attestation
+    assert 'root_action_broker_terminal_tuple_attested "$1" not-found absent' in absent_attestation
+    assert 'LoadState=loaded:UnitFileState=disabled' in quiesced_attestation
+    assert 'LoadState=not-found:UnitFileState=absent' in quiesced_attestation
     assert "recover_and_attest_activation_baseline" in broker_finalizer
     assert "finalize --expect candidate" in broker_finalizer
     assert package.index('previous_active_release="$(capture_previous_active_release "$commit")"') < package.index(
@@ -535,7 +533,7 @@ def test_post_activation_failure_restores_before_returning_failure(tmp_path: Pat
         + "attest_active_cli_as_ops() { return 1; }\n"
         + "recover_and_attest_activation_baseline() { printf 'recover:%s:%s:%s\\n' \"$1\" \"$2\" \"$3\" >>\"$TRACE\"; RESTORED_CLI_RESULT=svcops_verified; RESTORED_BROKER_RESULT=restored_recorded_active; }\n"
         + _function("activate_and_attest_cli_or_restore")
-        + f"\nactivate_and_attest_cli_or_restore /release {TARGET} /previous active /helper\n"
+        + f"\nactivate_and_attest_cli_or_restore /release {TARGET} /previous active enabled /helper\n"
     )
     completed = _run_bash(tmp_path, body)
     assert completed.returncode == 23
@@ -556,7 +554,7 @@ def test_post_activation_success_does_not_enter_restore(tmp_path: Path) -> None:
         + "attest_active_cli_as_ops() { return 0; }\n"
         + "recover_and_attest_activation_baseline() { printf 'recover\\n' >>\"$TRACE\"; return 1; }\n"
         + _function("activate_and_attest_cli_or_restore")
-        + f"\nactivate_and_attest_cli_or_restore /release {TARGET} /previous active /helper\n"
+        + f"\nactivate_and_attest_cli_or_restore /release {TARGET} /previous active enabled /helper\n"
     )
     completed = _run_bash(tmp_path, body)
     assert completed.returncode == 0, completed.stderr
@@ -581,6 +579,7 @@ def test_broker_pre_activation_distinguishes_inactive_from_absent(
         "printf 'SubState=dead\\n'\n"
         "printf 'MainPID=0\\n'\n"
         "printf 'Job=\\n'\n"
+        "[[ \"$LOAD_STATE\" == loaded ]] && printf 'UnitFileState=disabled\\n' || printf 'UnitFileState=\\n'\n"
         "exit 0\n",
         encoding="utf-8",
         newline="\n",
@@ -593,12 +592,13 @@ def test_broker_pre_activation_distinguishes_inactive_from_absent(
         + "ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=5\n"
         + "die() { printf 'die:%s\\n' \"$*\"; exit 23; }\n"
         + _function("read_root_action_broker_systemd_tuple")
-        + _function("capture_root_action_broker_state")
-        + "\ncapture_root_action_broker_state ''\n"
+        + _function("capture_root_action_broker_snapshot")
+        + "\ncapture_root_action_broker_snapshot ''\n"
     )
     completed = _run_bash(tmp_path, body)
     assert completed.returncode == 0, completed.stderr
-    assert completed.stdout == f"{expected}\n"
+    expected_unit = "disabled" if expected == "inactive" else "absent"
+    assert completed.stdout == f"{expected} {expected_unit}\n"
 
 
 @pytest.mark.parametrize("load_state", ("loaded", "not-found"))
@@ -616,6 +616,7 @@ def test_broker_pre_activation_rejects_queued_auto_restart(
         "printf 'SubState=auto-restart\\n'\n"
         "printf 'MainPID=0\\n'\n"
         "printf 'Job=77\\n'\n"
+        "[[ \"$LOAD_STATE\" == loaded ]] && printf 'UnitFileState=enabled\\n' || printf 'UnitFileState=\\n'\n"
         "exit 0\n",
         encoding="utf-8",
         newline="\n",
@@ -628,8 +629,8 @@ def test_broker_pre_activation_rejects_queued_auto_restart(
         + "ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS=5\n"
         + "die() { printf 'die:%s\\n' \"$*\"; exit 23; }\n"
         + _function("read_root_action_broker_systemd_tuple")
-        + _function("capture_root_action_broker_state")
-        + "\ncapture_root_action_broker_state /previous\n"
+        + _function("capture_root_action_broker_snapshot")
+        + "\ncapture_root_action_broker_snapshot /previous\n"
     )
     completed = _run_bash(tmp_path, body)
     assert completed.returncode == 23
@@ -772,7 +773,13 @@ def test_post_publish_inactive_broker_drift_recovers_without_candidate_finalize(
         + "die() { printf 'die:%s\\n' \"$*\" >>\"$TRACE\"; exit 23; }\n"
         + "run_activation_transaction() {\n"
         + "  if [[ \"$2\" == show ]]; then\n"
-        + "    [[ \"$4\" == broker_state ]] && printf 'inactive\\n' || printf 'agent-runtime-root-action-broker.service\\n'\n"
+        + "    case \"$4\" in\n"
+        + "      broker_state|broker_desired_state) printf 'inactive\\n' ;;\n"
+        + "      broker_desired_unit_file_state) printf 'disabled\\n' ;;\n"
+        + "      broker_activation_phase) printf 'none\\n' ;;\n"
+        + "      broker_service_name) printf 'agent-runtime-root-action-broker.service\\n' ;;\n"
+        + "      *) return 87 ;;\n"
+        + "    esac\n"
         + "  else printf 'unexpected-finalize\\n' >>\"$TRACE\"; fi\n"
         + "}\n"
         + "install_root_action_broker_contract() { printf 'broker-published\\n' >>\"$TRACE\"; }\n"
