@@ -839,33 +839,56 @@ archive_legacy_state_files() {
   fi
 }
 
+cleanup_activation_staging() {
+  local failed=0 path
+  for path in "$@"; do
+    [[ -n "$path" ]] || continue
+    rm -f -- "$path" || failed=1
+    [[ ! -e "$path" && ! -L "$path" ]] || failed=1
+  done
+  [[ "$failed" -eq 0 ]]
+}
+
 activate_release() {
   local release_dir="$1"
-  local release_name
+  local release_name bin_tmp="" mcp_tmp="" gemini_tmp=""
   release_name="$(basename "$release_dir")" || return 1
-  local next_link="$INSTALL_ROOT/.current.next"
+  local next_link="$INSTALL_ROOT/.current.next.$$"
+  local manifest_tmp="$INSTALL_ROOT/.manifest.next.$$"
   [[ -d "$release_dir" ]] || return 1
-  ln -sfn "releases/$release_name" "$next_link" || return 1
-  mv -Tf "$next_link" "$CURRENT_LINK" || return 1
-  rm -f "$BIN_LINK" || return 1
-  cat >"$BIN_LINK" <<EOF || return 1
+  for path in "$next_link" "$manifest_tmp"; do
+    [[ ! -e "$path" && ! -L "$path" ]] || return 1
+  done
+  bin_tmp="$(mktemp "${BIN_LINK}.next.XXXXXX")" || return 1
+  mcp_tmp="$(mktemp "${MCP_BIN_LINK}.next.XXXXXX")" \
+    || { cleanup_activation_staging "$bin_tmp"; return 1; }
+  gemini_tmp="$(mktemp "${GEMINI_BIN_LINK}.next.XXXXXX")" \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp"; return 1; }
+  cat >"$bin_tmp" <<EOF \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp"; return 1; }
 #!/usr/bin/env bash
 set -euo pipefail
 exec "$CURRENT_LINK/.venv/bin/opsctl" "\$@"
 EOF
-  chmod 0755 "$BIN_LINK" || return 1
-  rm -f "$MCP_BIN_LINK" || return 1
-  cat >"$MCP_BIN_LINK" <<EOF || return 1
+  chmod 0755 "$bin_tmp" \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp"; return 1; }
+  cat >"$mcp_tmp" <<EOF \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp"; return 1; }
 #!/usr/bin/env bash
 set -euo pipefail
 exec "$CURRENT_LINK/.venv/bin/agent-runtime-ops-mcp" "\$@"
 EOF
-  chmod 0755 "$MCP_BIN_LINK" || return 1
-  if [[ -e "$GEMINI_BIN_LINK" ]] && ! grep -q 'agent-runtime-ops managed gemini wrapper' "$GEMINI_BIN_LINK" 2>/dev/null; then
-    return 1
+  chmod 0755 "$mcp_tmp" \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp"; return 1; }
+  if [[ -e "$GEMINI_BIN_LINK" || -L "$GEMINI_BIN_LINK" ]]; then
+    if [[ ! -f "$GEMINI_BIN_LINK" || -L "$GEMINI_BIN_LINK" ]] \
+      || ! grep -q 'agent-runtime-ops managed gemini wrapper' "$GEMINI_BIN_LINK" 2>/dev/null; then
+      cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp" || true
+      return 1
+    fi
   fi
-  rm -f "$GEMINI_BIN_LINK" || return 1
-  cat >"$GEMINI_BIN_LINK" <<EOF || return 1
+  cat >"$gemini_tmp" <<EOF \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp"; return 1; }
 #!/usr/bin/env bash
 set -euo pipefail
 # agent-runtime-ops managed gemini wrapper
@@ -904,19 +927,38 @@ if [[ "\$(id -un 2>/dev/null || true)" == "\$OPS_USER" ]]; then
 fi
 exec "$CURRENT_LINK/agent-clis/gemini-cli/node_modules/.bin/gemini" "\$@"
 EOF
-  chmod 0755 "$GEMINI_BIN_LINK" || return 1
-  ln -sfn "current/.agent-runtime-ops-manifest" "$MANIFEST" || return 1
-  chown root:"$OPS_GROUP" "$BIN_LINK" || return 1
-  chown root:"$OPS_GROUP" "$MCP_BIN_LINK" || return 1
-  chown root:"$OPS_GROUP" "$GEMINI_BIN_LINK" || return 1
-  chown -h root:"$OPS_GROUP" "$CURRENT_LINK" "$MANIFEST" || return 1
+  chmod 0755 "$gemini_tmp" \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp"; return 1; }
+  chown root:"$OPS_GROUP" "$bin_tmp" "$mcp_tmp" "$gemini_tmp" \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp"; return 1; }
+  ln -s "current/.agent-runtime-ops-manifest" "$manifest_tmp" \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp" "$manifest_tmp"; return 1; }
+  ln -s "releases/$release_name" "$next_link" \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp" "$manifest_tmp" "$next_link"; return 1; }
+  mv -Tf "$bin_tmp" "$BIN_LINK" \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp" "$manifest_tmp" "$next_link"; return 1; }
+  mv -Tf "$mcp_tmp" "$MCP_BIN_LINK" \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp" "$manifest_tmp" "$next_link"; return 1; }
+  mv -Tf "$gemini_tmp" "$GEMINI_BIN_LINK" \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp" "$manifest_tmp" "$next_link"; return 1; }
+  mv -Tf "$manifest_tmp" "$MANIFEST" \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp" "$manifest_tmp" "$next_link"; return 1; }
+  mv -Tf "$next_link" "$CURRENT_LINK" \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp" "$manifest_tmp" "$next_link"; return 1; }
+  chown -h root:"$OPS_GROUP" "$CURRENT_LINK" "$MANIFEST" \
+    || { cleanup_activation_staging "$bin_tmp" "$mcp_tmp" "$gemini_tmp" "$manifest_tmp" "$next_link"; return 1; }
+  cleanup_activation_staging \
+    "$bin_tmp" "$mcp_tmp" "$gemini_tmp" "$manifest_tmp" "$next_link"
 }
 
 deactivate_first_release() {
   local release_dir="$1"
-  local path
-  [[ "$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)" == "$release_dir" ]] \
-    || return 1
+  local current_release path
+  if [[ -e "$CURRENT_LINK" || -L "$CURRENT_LINK" ]]; then
+    [[ -L "$CURRENT_LINK" ]] || return 1
+    current_release="$(readlink -f "$CURRENT_LINK" 2>/dev/null || true)"
+    [[ "$current_release" == "$release_dir" ]] || return 1
+  fi
   if [[ -e "$BIN_LINK" || -L "$BIN_LINK" ]]; then
     [[ -f "$BIN_LINK" && ! -L "$BIN_LINK" ]] || return 1
     grep -Fqx "exec \"$CURRENT_LINK/.venv/bin/opsctl\" \"\$@\"" "$BIN_LINK" \

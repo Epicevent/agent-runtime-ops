@@ -390,17 +390,12 @@ def _validate_runtime_fields(fields: dict[str, str], target: str) -> None:
         "retrieval_projection_labels_present",
         "retrieval_projection_complete",
         "retrieval_projection_consistent",
-        "retrieval_default_enabled",
         "retrieval_enabled",
     ):
         if fields.get(field) not in {"true", "false"}:
             raise ReadonlyObservationError(f"runtime_{field}_invalid")
     if fields.get("nas_read_only") != "true":
         raise ReadonlyObservationError("runtime_nas_read_only_policy_mismatch")
-    if fields.get("retrieval_default_enabled") != "false":
-        raise ReadonlyObservationError(
-            "runtime_retrieval_default_enabled_policy_mismatch"
-        )
     for field in ("wrapper_image", "product_image"):
         value = fields.get(field) or ""
         _validated_image_digest(value, f"runtime_{field}")
@@ -419,6 +414,7 @@ def _validate_runtime_fields(fields: dict[str, str], target: str) -> None:
     retrieval_enabled = fields.get("retrieval_enabled")
     retrieval_schema = fields.get("retrieval_schema") or ""
     retrieval_transport = fields.get("retrieval_transport") or ""
+    retrieval_default_enabled = fields.get("retrieval_default_enabled") or ""
     retrieval_component = fields.get("retrieval_component_digest") or ""
     retrieval_resource = fields.get("retrieval_resource_profile_digest") or ""
     if capability_declared:
@@ -426,6 +422,10 @@ def _validate_runtime_fields(fields: dict[str, str], target: str) -> None:
             raise ReadonlyObservationError("runtime_retrieval_schema_mismatch")
         if retrieval_transport != "in_process":
             raise ReadonlyObservationError("runtime_retrieval_transport_mismatch")
+        if retrieval_default_enabled != "false":
+            raise ReadonlyObservationError(
+                "runtime_retrieval_default_enabled_policy_mismatch"
+            )
         if not (
             _DIGEST_RE.fullmatch(retrieval_component)
             and _DIGEST_RE.fullmatch(retrieval_resource)
@@ -437,6 +437,7 @@ def _validate_runtime_fields(fields: dict[str, str], target: str) -> None:
         retrieval_enabled == "false"
         and retrieval_schema == ""
         and retrieval_transport == ""
+        and retrieval_default_enabled == ""
         and retrieval_component == ""
         and retrieval_resource == ""
     ):

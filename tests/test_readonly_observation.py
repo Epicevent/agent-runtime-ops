@@ -18,6 +18,7 @@ from agent_runtime_ops.commands.observation import (
     _canonical,
     cmd_observation_status,
 )
+from agent_runtime_ops.domain.runtime_truth import live_image_truth_from_info
 from agent_runtime_ops.routing import RuntimeBinding
 from agent_runtime_ops.state import RuntimeTarget
 
@@ -370,15 +371,71 @@ def test_default_off_rejects_empty_or_unbound_projection_identity(
         } in runtime["checks"]
 
 
-def test_capability_absent_disabled_projection_accepts_empty_optional_digests(
+def test_actual_capability_absent_truth_accepts_only_coherent_empty_optional_set(
     capsys, tmp_path: Path
 ) -> None:
     truth, checks = runtime_truth()
-    truth["retrieval_contract_complete"] = "false"
-    truth["retrieval_schema"] = ""
-    truth["retrieval_transport"] = ""
-    truth["retrieval_component_digest"] = ""
-    truth["retrieval_resource_profile_digest"] = ""
+    produced = live_image_truth_from_info(
+        runtime_binding(),
+        {
+            "Config": {
+                "Image": WRAPPER,
+                "Labels": {
+                    "agent-runtime.retrieval-enabled": "false",
+                    "agent-runtime.retrieval-component-digest": "",
+                    "agent-runtime.retrieval-binding-digest": BINDING,
+                    "agent-runtime.retrieval-resource-profile-digest": "",
+                },
+            }
+        },
+        SimpleNamespace(
+            public_host=runtime_binding().public_host,
+            gateway_port=runtime_binding().gateway_port,
+        ),
+    )
+    for field in (
+        "retrieval_labels_present",
+        "retrieval_contract_complete",
+        "retrieval_projection_labels_present",
+        "retrieval_projection_complete",
+        "retrieval_projection_consistent",
+        "retrieval_schema",
+        "retrieval_transport",
+        "retrieval_default_enabled",
+        "retrieval_enabled",
+        "retrieval_component_digest",
+        "retrieval_binding_digest",
+        "retrieval_resource_profile_digest",
+    ):
+        truth[field] = produced[field]
+    assert {
+        key: truth[key]
+        for key in (
+            "retrieval_labels_present",
+            "retrieval_contract_complete",
+            "retrieval_projection_complete",
+            "retrieval_projection_consistent",
+            "retrieval_schema",
+            "retrieval_transport",
+            "retrieval_default_enabled",
+            "retrieval_enabled",
+            "retrieval_component_digest",
+            "retrieval_binding_digest",
+            "retrieval_resource_profile_digest",
+        )
+    } == {
+        "retrieval_labels_present": "false",
+        "retrieval_contract_complete": "false",
+        "retrieval_projection_complete": "true",
+        "retrieval_projection_consistent": "true",
+        "retrieval_schema": "",
+        "retrieval_transport": "",
+        "retrieval_default_enabled": "",
+        "retrieval_enabled": "false",
+        "retrieval_component_digest": "",
+        "retrieval_binding_digest": BINDING,
+        "retrieval_resource_profile_digest": "",
+    }
     target = runtime_target()
     image_spec = dict(target.image_spec)
     image_spec["retrieval_component_digest"] = ""
@@ -401,6 +458,7 @@ def test_capability_absent_disabled_projection_accepts_empty_optional_digests(
     [
         ("retrieval_schema", "jitech-embedded-retrieval/v1"),
         ("retrieval_transport", "in_process"),
+        ("retrieval_default_enabled", "false"),
         ("retrieval_component_digest", COMPONENT),
         ("retrieval_resource_profile_digest", RESOURCE),
         ("retrieval_enabled", "true"),
@@ -413,6 +471,7 @@ def test_capability_absent_projection_rejects_partial_or_enabled_state(
     truth["retrieval_contract_complete"] = "false"
     truth["retrieval_schema"] = ""
     truth["retrieval_transport"] = ""
+    truth["retrieval_default_enabled"] = ""
     truth["retrieval_component_digest"] = ""
     truth["retrieval_resource_profile_digest"] = ""
     truth[field] = value
