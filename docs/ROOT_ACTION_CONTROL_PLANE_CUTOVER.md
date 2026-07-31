@@ -24,11 +24,16 @@ release tree and are covered by the same canonical tree digest.
 
 ## Immutable release boundary
 
-The root installer must build a root:root tree at:
+The root installer must build one root:root commit bundle at:
 
 ```text
-/opt/agent-runtime-root-action-broker/releases/<40-hex-source-commit>
+/opt/agent-runtime-root-action-broker/bundles/<40-hex-source-commit>
 ```
+
+The broker release tree is the exact nested path
+`release/<40-hex-source-commit>` inside that bundle; external launcher,
+descriptor, dependency lock, rendered unit, and bundle manifest are under
+`control/`. There is no second accepted layout.
 
 The release uses a slim `.runtime`, not a Python virtual environment. Its copied
 Python and dependency files must not contain `pyvenv.cfg`, `.pth`, `.egg-link`,
@@ -52,7 +57,8 @@ drift stops before broker imports or root-action state mutation.
 The same stdlib-only launcher provides a bounded `materialize` command for the
 future privileged install card. It reads the first-party closure, dependency
 lock, launcher, and unit template from one exact 40-hex Git commit, never from
-dirty worktree bytes. Dependencies are installed with `--require-hashes`,
+dirty worktree bytes. Git replacement refs and inherited Git object/config
+environment are disabled for every object read. Dependencies are installed with `--require-hashes`,
 `--only-binary`, `--no-deps`, and `--no-index` from an exact root-controlled
 offline wheelhouse. It creates a commit-named bundle containing the immutable
 release, external launcher, canonical descriptor, dependency lock, rendered

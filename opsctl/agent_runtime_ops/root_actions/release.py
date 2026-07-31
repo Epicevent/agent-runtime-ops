@@ -17,6 +17,7 @@ import re
 import stat
 import subprocess
 import sys
+import threading
 from typing import Any, Callable, Iterable
 
 
@@ -681,19 +682,26 @@ def _write_exact(
 def _checked_command(
     argv: list[str],
     *,
-    run_command: Callable[..., subprocess.CompletedProcess[bytes]],
+    run_command: Callable[..., subprocess.CompletedProcess[bytes]] | None,
     environment: dict[str, str] | None = None,
     maximum_output: int = MAX_GIT_BLOB_BYTES,
 ) -> bytes:
-    result = run_command(
-        argv,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=environment,
-        check=False,
-        timeout=300,
-    )
+    if run_command is None:
+        result = _run_bounded_process(
+            argv,
+            environment=environment,
+            maximum_output=maximum_output,
+        )
+    else:
+        result = run_command(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
+            check=False,
+            timeout=300,
+        )
     stdout = bytes(result.stdout or b"")
     stderr = bytes(result.stderr or b"")
     if result.returncode != 0:
@@ -705,18 +713,89 @@ def _checked_command(
     return stdout
 
 
+def _run_bounded_process(
+    argv: list[str],
+    *,
+    environment: dict[str, str] | None,
+    maximum_output: int,
+) -> subprocess.CompletedProcess[bytes]:
+    try:
+        process = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
+        )
+    except OSError as exc:
+        raise StandaloneReleaseError("bounded build command could not start") from exc
+    assert process.stdout is not None
+    assert process.stderr is not None
+    overflow = threading.Event()
+    buffers = {"stdout": bytearray(), "stderr": bytearray()}
+
+    def read_stream(name: str, stream) -> None:
+        while True:
+            chunk = stream.read(64 * 1024)
+            if not chunk:
+                return
+            buffers[name].extend(chunk)
+            if len(buffers[name]) > maximum_output:
+                overflow.set()
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+                return
+
+    threads = [
+        threading.Thread(
+            target=read_stream,
+            args=("stdout", process.stdout),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=read_stream,
+            args=("stderr", process.stderr),
+            daemon=True,
+        ),
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        returncode = process.wait(timeout=300)
+    except subprocess.TimeoutExpired as exc:
+        process.kill()
+        process.wait()
+        raise StandaloneReleaseError("bounded build command timed out") from exc
+    finally:
+        for thread in threads:
+            thread.join(timeout=5)
+        process.stdout.close()
+        process.stderr.close()
+    if overflow.is_set():
+        raise StandaloneReleaseError("bounded build command output exceeded its limit")
+    return subprocess.CompletedProcess(
+        argv,
+        returncode,
+        stdout=bytes(buffers["stdout"]),
+        stderr=bytes(buffers["stderr"]),
+    )
+
+
 def _git_blob(
     source_repo: Path,
     source_commit: str,
     relative: str,
     *,
     git_executable: Path,
-    run_command: Callable[..., subprocess.CompletedProcess[bytes]],
+    run_command: Callable[..., subprocess.CompletedProcess[bytes]] | None,
 ) -> bytes:
     relative = _safe_relative_path(relative)
     return _checked_command(
         [
             str(git_executable),
+            "--no-replace-objects",
             "-c",
             f"safe.directory={source_repo}",
             "-C",
@@ -725,7 +804,22 @@ def _git_blob(
             f"{source_commit}:{relative}",
         ],
         run_command=run_command,
+        environment=_git_environment(source_repo),
     )
+
+
+def _git_environment(source_repo: Path) -> dict[str, str]:
+    return {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_KEY_0": "safe.directory",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_VALUE_0": str(source_repo),
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "HOME": "/nonexistent",
+        "LANG": "C",
+        "LC_ALL": "C",
+    }
 
 
 def _require_git_commit_object(
@@ -733,11 +827,12 @@ def _require_git_commit_object(
     source_commit: str,
     *,
     git_executable: Path,
-    run_command: Callable[..., subprocess.CompletedProcess[bytes]],
+    run_command: Callable[..., subprocess.CompletedProcess[bytes]] | None,
 ) -> None:
     object_kind = _checked_command(
         [
             str(git_executable),
+            "--no-replace-objects",
             "-c",
             f"safe.directory={source_repo}",
             "-C",
@@ -747,6 +842,7 @@ def _require_git_commit_object(
             source_commit,
         ],
         run_command=run_command,
+        environment=_git_environment(source_repo),
         maximum_output=128,
     )
     if object_kind != b"commit\n":
@@ -996,7 +1092,7 @@ def validate_materialized_bundle(
     required_gid: int = 0,
     git_required_uid: int = 0,
     git_required_gid: int = 0,
-    run_command: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
+    run_command: Callable[..., subprocess.CompletedProcess[bytes]] | None = None,
 ) -> dict[str, Any]:
     source_commit = _validate_commit(source_commit)
     source_repo = _canonical_absolute(source_repo, "source repository")
@@ -1168,7 +1264,7 @@ def materialize_bundle(
     runtime_required_gid: int = 0,
     git_required_uid: int = 0,
     git_required_gid: int = 0,
-    run_command: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
+    run_command: Callable[..., subprocess.CompletedProcess[bytes]] | None = None,
 ) -> dict[str, Any]:
     source_commit = _validate_commit(source_commit)
     source_repo = _canonical_absolute(source_repo, "source repository")

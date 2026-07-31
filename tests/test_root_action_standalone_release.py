@@ -173,6 +173,23 @@ class StandaloneReleaseContractTests(unittest.TestCase):
         with self.assertRaises(release.StandaloneReleaseError):
             release.parse_descriptor(b" " + descriptor.canonical_bytes())
 
+    @unittest.skipUnless(os.name == "posix", "bounded child streaming is POSIX CI")
+    def test_build_command_output_is_capped_while_the_child_runs(self) -> None:
+        with self.assertRaisesRegex(
+            release.StandaloneReleaseError,
+            "bounded build command output exceeded its limit",
+        ):
+            release._checked_command(
+                [
+                    sys.executable,
+                    "-c",
+                    "import os;os.write(1,b'x'*(2*1024*1024))",
+                ],
+                run_command=None,
+                environment=dict(os.environ),
+                maximum_output=1024,
+            )
+
     @unittest.skipUnless(os.name == "posix", "release identity is POSIX-only")
     def test_descriptor_binds_complete_tree_and_minimal_first_party_package(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -486,6 +503,77 @@ class StandaloneReleaseContractTests(unittest.TestCase):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             ).stdout
+            git = shutil.which("git") or "git"
+            malicious = b"raise RuntimeError('replacement source')\n"
+            dirty_release.write_bytes(malicious)
+            for argv in (
+                [
+                    git,
+                    "-C",
+                    str(repository),
+                    "add",
+                    "--",
+                    "opsctl/agent_runtime_ops/root_actions/release.py",
+                ],
+                [
+                    git,
+                    "-C",
+                    str(repository),
+                    "-c",
+                    "user.name=contract-test",
+                    "-c",
+                    "user.email=contract-test@example.invalid",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "replacement",
+                ],
+            ):
+                subprocess.run(
+                    argv,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+            replacement = subprocess.run(
+                [git, "-C", str(repository), "rev-parse", "HEAD"],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            ).stdout.decode("ascii").strip()
+            subprocess.run(
+                [git, "-C", str(repository), "replace", commit, replacement],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            replaced_view = subprocess.run(
+                [
+                    git,
+                    "-C",
+                    str(repository),
+                    "show",
+                    f"{commit}:opsctl/agent_runtime_ops/root_actions/release.py",
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            ).stdout
+            original_view = subprocess.run(
+                [
+                    git,
+                    "--no-replace-objects",
+                    "-C",
+                    str(repository),
+                    "show",
+                    f"{commit}:opsctl/agent_runtime_ops/root_actions/release.py",
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            ).stdout
+            self.assertEqual(replaced_view, malicious)
+            self.assertEqual(original_view, committed_release)
             dirty_release.write_text("raise RuntimeError('dirty source')\n", encoding="utf-8")
 
             bundles = base / "bundles"
