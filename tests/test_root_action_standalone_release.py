@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import tomllib
@@ -90,6 +91,62 @@ def _copy_launcher(base: Path) -> Path:
     shutil.copy2(Path(release.__file__), path)
     os.chmod(path, 0o644)
     return path
+
+
+def _source_repo(base: Path) -> tuple[Path, str]:
+    repository = base / "source"
+    repository.mkdir()
+    os.chmod(repository, 0o755)
+    tracked = {
+        release._DEPENDENCY_LOCK_PATH,
+        release._UNIT_TEMPLATE_PATH,
+        *(source for source, _ in release._source_file_map()),
+    }
+    for relative in sorted(tracked):
+        target = repository / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((REPO_ROOT / relative).read_bytes())
+    git = shutil.which("git")
+    if not git:
+        raise RuntimeError("git is required for standalone materializer tests")
+    for argv in (
+        [git, "init", "-q", str(repository)],
+        [git, "-C", str(repository), "add", "--", "."],
+        [
+            git,
+            "-C",
+            str(repository),
+            "-c",
+            "user.name=contract-test",
+            "-c",
+            "user.email=contract-test@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "fixture",
+        ],
+    ):
+        subprocess.run(argv, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    commit = subprocess.run(
+        [git, "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ).stdout.decode("ascii").strip()
+    return repository, commit
+
+
+def _materializer_runner(argv, **kwargs):
+    if "-m" in argv and "pip" in argv:
+        target = Path(argv[argv.index("--target") + 1])
+        third_party = target / "webauthn"
+        third_party.mkdir()
+        (third_party / "__init__.py").write_text(
+            "# exact offline wheelhouse fixture\n",
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+    return subprocess.run(argv, **kwargs)
 
 
 class StandaloneReleaseContractTests(unittest.TestCase):
@@ -404,6 +461,175 @@ class StandaloneReleaseContractTests(unittest.TestCase):
             self.assertNotIn("LD_PRELOAD", environment)
             self.assertNotIn("PYTHONPATH", environment)
 
+    @unittest.skipUnless(os.name == "posix", "materialization is POSIX-only")
+    def test_materializer_reads_exact_git_commit_and_renders_pinned_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            os.chmod(base, 0o755)
+            repository, commit = _source_repo(base)
+            dirty_release = (
+                repository
+                / "opsctl"
+                / "agent_runtime_ops"
+                / "root_actions"
+                / "release.py"
+            )
+            committed_release = subprocess.run(
+                [
+                    shutil.which("git") or "git",
+                    "-C",
+                    str(repository),
+                    "show",
+                    f"{commit}:opsctl/agent_runtime_ops/root_actions/release.py",
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            ).stdout
+            dirty_release.write_text("raise RuntimeError('dirty source')\n", encoding="utf-8")
+
+            bundles = base / "bundles"
+            wheelhouse = base / "wheelhouse"
+            bundles.mkdir()
+            wheelhouse.mkdir()
+            os.chmod(bundles, 0o755)
+            os.chmod(wheelhouse, 0o755)
+            output_identity = bundles.stat()
+            runtime_python = Path("/usr/bin/python3")
+            if not runtime_python.exists():
+                runtime_python = Path(sys.executable)
+            runtime_python = runtime_python.resolve()
+            git_executable = Path(shutil.which("git") or "/usr/bin/git").resolve()
+            runtime_identity = runtime_python.stat()
+            git_identity = git_executable.stat()
+            bundle_root = bundles / commit
+            pip_calls: list[list[str]] = []
+
+            def recording_runner(argv, **kwargs):
+                if "-m" in argv and "pip" in argv:
+                    pip_calls.append(list(argv))
+                return _materializer_runner(argv, **kwargs)
+
+            manifest = release.materialize_bundle(
+                source_repo=repository.resolve(),
+                source_commit=commit,
+                bundle_root=bundle_root.resolve(),
+                wheelhouse=wheelhouse.resolve(),
+                runtime_python=runtime_python,
+                git_executable=git_executable,
+                required_uid=output_identity.st_uid,
+                required_gid=output_identity.st_gid,
+                runtime_required_uid=runtime_identity.st_uid,
+                runtime_required_gid=runtime_identity.st_gid,
+                git_required_uid=git_identity.st_uid,
+                git_required_gid=git_identity.st_gid,
+                run_command=recording_runner,
+            )
+
+            self.assertEqual(manifest["schema"], release.BUNDLE_MANIFEST_SCHEMA)
+            self.assertEqual(manifest["source_commit"], commit)
+            self.assertEqual(manifest["bundle_root"], str(bundle_root))
+            self.assertEqual(len(pip_calls), 1)
+            for required in (
+                "--require-hashes",
+                "--only-binary=:all:",
+                "--no-deps",
+                "--no-index",
+            ):
+                self.assertIn(required, pip_calls[0])
+            self.assertIn(f"--find-links={wheelhouse.resolve()}", pip_calls[0])
+            packaged_release = (
+                bundle_root
+                / "release"
+                / commit
+                / ".runtime"
+                / "lib"
+                / next(
+                    path.name
+                    for path in (
+                        bundle_root / "release" / commit / ".runtime" / "lib"
+                    ).iterdir()
+                    if path.name.startswith("python3.")
+                )
+                / "site-packages"
+                / "agent_runtime_ops"
+                / "root_actions"
+                / "release.py"
+            )
+            self.assertEqual(packaged_release.read_bytes(), committed_release)
+            copied_python = (
+                bundle_root / "release" / commit / ".runtime" / "bin" / "python"
+            )
+            isolated = subprocess.run(
+                [
+                    str(copied_python),
+                    "-I",
+                    "-B",
+                    "-S",
+                    "-c",
+                    "import json,sys;print(json.dumps(sys.path,separators=(',',':')))",
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env={"PYTHONDONTWRITEBYTECODE": "1"},
+            )
+            isolated_paths = json.loads(isolated.stdout.decode("utf-8"))
+            runtime_lib = str(bundle_root / "release" / commit / ".runtime" / "lib")
+            self.assertTrue(
+                any(runtime_lib in path for path in isolated_paths)
+            )
+            self.assertFalse(any("site-packages" in path for path in isolated_paths))
+            unit = (
+                bundle_root
+                / "control"
+                / "agent-runtime-root-action-broker-standalone.service"
+            ).read_text(encoding="utf-8")
+            self.assertNotIn("@@", unit)
+            self.assertIn(str(bundle_root / "release" / commit), unit)
+            self.assertNotIn(str(repository), unit)
+            self.assertFalse((bundles / f".{commit}.prepare").exists())
+
+            def no_second_pip(argv, **kwargs):
+                if "-m" in argv and "pip" in argv:
+                    raise AssertionError("complete bundle replay must not invoke pip")
+                return subprocess.run(argv, **kwargs)
+
+            reused = release.materialize_bundle(
+                source_repo=repository.resolve(),
+                source_commit=commit,
+                bundle_root=bundle_root.resolve(),
+                wheelhouse=(base / "missing-wheelhouse").resolve(),
+                runtime_python=runtime_python,
+                git_executable=git_executable,
+                required_uid=output_identity.st_uid,
+                required_gid=output_identity.st_gid,
+                runtime_required_uid=runtime_identity.st_uid,
+                runtime_required_gid=runtime_identity.st_gid,
+                git_required_uid=git_identity.st_uid,
+                git_required_gid=git_identity.st_gid,
+                run_command=no_second_pip,
+            )
+            self.assertEqual(reused, manifest)
+
+            unit_path = bundle_root / "control" / release._BUNDLE_UNIT
+            unit_path.write_bytes(unit_path.read_bytes() + b"# drift\n")
+            with self.assertRaisesRegex(
+                release.StandaloneReleaseError,
+                "bundle source or rendered unit binding is invalid",
+            ):
+                release.validate_materialized_bundle(
+                    source_repo=repository.resolve(),
+                    source_commit=commit,
+                    bundle_root=bundle_root.resolve(),
+                    git_executable=git_executable,
+                    required_uid=output_identity.st_uid,
+                    required_gid=output_identity.st_gid,
+                    git_required_uid=git_identity.st_uid,
+                    git_required_gid=git_identity.st_gid,
+                    run_command=subprocess.run,
+                )
+
     @unittest.skipUnless(os.name == "posix", "POSIX ownership is required")
     def test_file_owner_validator_rejects_the_entry_it_reads(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -478,12 +704,16 @@ class StandaloneReleaseContractTests(unittest.TestCase):
             "does **not** expose a bootstrap command",
             "response-loss idempotency",
             "user-ratified secret transport",
+            "exact-Git offline materializer",
+            "`--require-hashes`",
             "MCP `root_action_submit`",
             "No browserless machine mutation authority",
             "`kwrag.network_ensure`",
         ):
             self.assertIn(required, document)
-        self.assertNotIn("bootstrap-create", release._runtime_parser().format_help())
+        parser_help = release._runtime_parser().format_help()
+        self.assertIn("materialize", parser_help)
+        self.assertNotIn("bootstrap-create", parser_help)
 
 
 if __name__ == "__main__":

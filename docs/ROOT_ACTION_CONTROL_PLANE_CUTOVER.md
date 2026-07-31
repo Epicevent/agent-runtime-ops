@@ -49,6 +49,26 @@ and import the broker service. Python site startup, user packages, environment
 path injection, and mutable ops releases are therefore not import sources. Any
 drift stops before broker imports or root-action state mutation.
 
+The same stdlib-only launcher provides a bounded `materialize` command for the
+future privileged install card. It reads the first-party closure, dependency
+lock, launcher, and unit template from one exact 40-hex Git commit, never from
+dirty worktree bytes. Dependencies are installed with `--require-hashes`,
+`--only-binary`, `--no-deps`, and `--no-index` from an exact root-controlled
+offline wheelhouse. It creates a commit-named bundle containing the immutable
+release, external launcher, canonical descriptor, dependency lock, rendered
+unit, and canonical bundle manifest. Every output is owner/mode/type/link and
+complete-tree bound before publication. The rendered unit contains no
+placeholder and points only into that commit-named bundle. A complete existing
+bundle is revalidated and returns the same secret-free manifest without running
+pip again; drift fails closed.
+
+`materialize` does not call systemd, replace the live unit, stop the old broker,
+start the standalone broker, or delete an incomplete staging directory. Those
+effects belong to the later exact install/cutover card, which must preflight and
+either atomically publish the validated bundle or preserve a failed staging
+identity for explicit inspection. This source slice therefore provides the
+artifact producer and verifier, not root installation authority.
+
 The dedicated unit is
 `systemd/agent-runtime-root-action-broker-standalone.service`. It retains the
 existing state root, socket, reader group, WebAuthn environment file, and
@@ -84,8 +104,8 @@ supplied here.
 
 ## Source slices and stop line
 
-This first slice provides only the standalone release verifier/launcher and
-dedicated unit template. The next bounded source
+This first slice provides the exact-Git offline materializer, standalone release
+verifier/launcher, and dedicated unit template. The next bounded source
 slice converts MCP `root_action_submit`, `root_action_retrieve`, and
 `root_action_wait` from an `opsctl` subprocess to the existing direct AF_UNIX
 client. The OPS web adapter remains presentation-only and must validate direct
