@@ -630,6 +630,74 @@ class StandaloneReleaseContractTests(unittest.TestCase):
                     run_command=subprocess.run,
                 )
 
+    @unittest.skipUnless(os.name == "posix", "materialization is POSIX-only")
+    def test_materializer_never_publishes_after_dependency_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            os.chmod(base, 0o755)
+            repository, commit = _source_repo(base)
+            bundles = base / "bundles"
+            wheelhouse = base / "wheelhouse"
+            stdlib = base / "stdlib"
+            for path in (bundles, wheelhouse, stdlib):
+                path.mkdir()
+                os.chmod(path, 0o755)
+            (stdlib / "os.py").write_text("# bounded stdlib fixture\n", encoding="utf-8")
+            os.chmod(stdlib / "os.py", 0o644)
+            runtime_python = base / "python3.11"
+            runtime_python.write_bytes(b"bounded runtime fixture\n")
+            os.chmod(runtime_python, 0o755)
+            git_executable = Path(shutil.which("git") or "/usr/bin/git").resolve()
+            output_identity = bundles.stat()
+            runtime_identity = runtime_python.stat()
+            git_identity = git_executable.stat()
+
+            def failing_runner(argv, **kwargs):
+                if argv[0] == str(runtime_python) and "-c" in argv:
+                    value = {
+                        "stdlib": str(stdlib),
+                        "version": "3.11",
+                    }
+                    return subprocess.CompletedProcess(
+                        argv,
+                        0,
+                        stdout=release._canonical_json(value),
+                        stderr=b"",
+                    )
+                if "-m" in argv and "pip" in argv:
+                    return subprocess.CompletedProcess(
+                        argv,
+                        42,
+                        stdout=b"",
+                        stderr=b"secret must not escape",
+                    )
+                return subprocess.run(argv, **kwargs)
+
+            bundle_root = bundles / commit
+            with self.assertRaisesRegex(
+                release.StandaloneReleaseError,
+                "bounded build command failed: python3.11 rc=42",
+            ):
+                release.materialize_bundle(
+                    source_repo=repository.resolve(),
+                    source_commit=commit,
+                    bundle_root=bundle_root.resolve(),
+                    wheelhouse=wheelhouse.resolve(),
+                    runtime_python=runtime_python.resolve(),
+                    git_executable=git_executable,
+                    required_uid=output_identity.st_uid,
+                    required_gid=output_identity.st_gid,
+                    runtime_required_uid=runtime_identity.st_uid,
+                    runtime_required_gid=runtime_identity.st_gid,
+                    git_required_uid=git_identity.st_uid,
+                    git_required_gid=git_identity.st_gid,
+                    run_command=failing_runner,
+                )
+            self.assertFalse(bundle_root.exists())
+            staging = bundles / f".{commit}.prepare"
+            self.assertTrue(staging.is_dir())
+            self.assertFalse((staging / "control" / release._BUNDLE_MANIFEST).exists())
+
     @unittest.skipUnless(os.name == "posix", "POSIX ownership is required")
     def test_file_owner_validator_rejects_the_entry_it_reads(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
