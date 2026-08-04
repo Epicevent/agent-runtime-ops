@@ -250,7 +250,7 @@ def publish_hermes_p1_runtime_inputs(
     _require_directory(hermes_home)
     _require_directory(nas_root)
     state_parent = hermes_home / "agent-runtime" / "kwrag-p1-state"
-    _require_directory(state_parent.parent)
+    _ensure_directory(state_parent.parent, mode=0o700)
     _ensure_directory(state_parent, mode=0o700)
     state_root = _host_state_root(desired)
     _ensure_directory(state_root, mode=0o700)
