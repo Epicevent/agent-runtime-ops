@@ -135,7 +135,7 @@ class RootActionManifestContractTests(unittest.TestCase):
     ) -> None:
         projection = DEFAULT_REGISTRY.projection()
         self.assertEqual(projection["schema"], REGISTRY_VERSION)
-        self.assertEqual(len(projection["operations"]), 8)
+        self.assertEqual(len(projection["operations"]), 9)
         forbidden = {"command", "argv", "path", "env", "payload", "shell"}
         for operation in projection["operations"]:
             self.assertFalse(forbidden & set(operation["parameters"]))
@@ -155,6 +155,7 @@ class RootActionManifestContractTests(unittest.TestCase):
 
     def test_all_registered_parameter_contracts_have_valid_examples(self) -> None:
         examples = {
+            "nas.observe_oc_slots": {},
             "artifact.probe_kwrag_product": {"revision": "c" * 40},
             "audit.verify": {
                 "target_identity": "kwrag-candidate",

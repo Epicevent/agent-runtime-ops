@@ -84,13 +84,17 @@ _READONLY_DOCKER_TARGET_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 
 
 def _validate_readonly_docker_command(command: list[str]) -> None:
-    if not isinstance(command, list) or not all(isinstance(item, str) for item in command):
+    if not isinstance(command, list) or not all(
+        isinstance(item, str) for item in command
+    ):
         raise ValueError("readonly_docker_argv_invalid")
-    if len(command) == 3 and command[:2] == ["docker", "inspect"]:
+    if not command or command[0] not in {"docker", "/usr/bin/docker"}:
+        raise ValueError("readonly_docker_executable_invalid")
+    if len(command) == 3 and command[1] == "inspect":
         if _READONLY_DOCKER_TARGET_RE.fullmatch(command[2]) is None:
             raise ValueError("readonly_docker_inspect_target_invalid")
         return
-    if len(command) < 7 or command[:3] != ["docker", "ps", "-a"]:
+    if len(command) < 7 or command[1:3] != ["ps", "-a"]:
         raise ValueError("readonly_docker_operation_not_allowed")
     index = 3
     saw_format = False
@@ -197,9 +201,7 @@ def run_readonly_docker(
     stdout_bytes = b"".join(streams["stdout"])
     stderr_bytes = b"".join(streams["stderr"])
     if timed_out:
-        return subprocess.CompletedProcess(
-            command, 124, "", "readonly_command_timeout"
-        )
+        return subprocess.CompletedProcess(command, 124, "", "readonly_command_timeout")
     if overflow:
         return subprocess.CompletedProcess(
             command,
@@ -217,8 +219,12 @@ def run_readonly_docker(
     return subprocess.CompletedProcess(command, returncode, stdout, stderr)
 
 
-def run_text_cwd(command: list[str], cwd: Path, timeout: int = 20) -> subprocess.CompletedProcess[str]:
+def run_text_cwd(
+    command: list[str], cwd: Path, timeout: int = 20
+) -> subprocess.CompletedProcess[str]:
     try:
-        return subprocess.run(command, cwd=str(cwd), text=True, capture_output=True, timeout=timeout)
+        return subprocess.run(
+            command, cwd=str(cwd), text=True, capture_output=True, timeout=timeout
+        )
     except FileNotFoundError as exc:
         return subprocess.CompletedProcess(command, 127, "", str(exc))

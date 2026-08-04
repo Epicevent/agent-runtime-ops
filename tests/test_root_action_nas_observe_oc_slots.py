@@ -26,27 +26,14 @@ def _slot(slot: str, ordinals: list[int]) -> dict[str, object]:
     count = len(ordinals)
     return {
         "slot": slot,
-        "alias_count": count,
         "alias_ordinals": ordinals,
-        "alias_target_digests": [D] * count,
-        "mount_exact_bits": [True] * count,
-        "mount_readonly_bits": [True] * count,
-        "exists_bits": [True] * count,
-        "directory_bits": [True] * count,
+        "present_bits": [True] * count,
+        "readonly_bits": [True] * count,
         "readable_bits": [True] * count,
         "count_complete_bits": [True] * count,
-        "entry_uid_values": [1022] * count,
-        "entry_gid_values": [1043] * count,
-        "entry_mode_values": [488] * count,
-        "file_counts": [2] * count,
-        "directory_counts": [1] * count,
-        "symlink_counts": [0] * count,
-        "other_counts": [0] * count,
-        "container_identity_digest": D,
-        "image_identity_digest": D,
-        "host_bind_identity_digest": D,
-        "container_bind_identity_digest": D,
-        "issues": [],
+        "alias_identity_digests": [D] * count,
+        "runtime_identity_digest": D,
+        "reason_codes": [],
     }
 
 
@@ -65,27 +52,26 @@ def valid_projection() -> dict[str, object]:
         "oc17": {
             "ops_release_matches": True,
             "ops_release_digest": D,
-            "mount_count": 37,
-            "mount_identity_digest": D,
+            "host_mount_count": 37,
+            "host_mount_digest": D,
             "container_mount_count": 37,
-            "container_mount_identity_digest": D,
+            "container_mount_digest": D,
             "logical_record_count": 2,
-            "logical_record_identity_digest": D,
+            "logical_record_digest": D,
             "intent_status": "present",
             "assignment_count": 2,
             "recreation_blocker_count": 0,
             "recreation_blocker_digest": D,
             "workspace_mount_count": 1,
-            "workspace_identity_digest": D,
-            "other_slot_mount_identity_digest": D,
+            "workspace_mount_digest": D,
             "session_count": 1,
-            "session_identity_digest": D,
+            "session_digest": D,
             "process_count": 1,
-            "process_identity_digest": D,
+            "process_digest": D,
             "gpu_process_count": 1,
-            "gpu_identity_digest": D,
+            "gpu_process_digest": D,
             "credential_count": 2,
-            "credential_metadata_digests": [D, D],
+            "credential_digest": D,
             "protected_read_guard_stable": True,
             "reason_codes": ["detach_prestate_present"],
         },
@@ -104,9 +90,11 @@ class NasObservePublicContractTests(unittest.TestCase):
 
     def test_red_observation_is_complete_evidence_not_handler_failure(self) -> None:
         projection = valid_projection()
-        projection["oc16"]["mount_readonly_bits"][0] = False
-        projection["oc16"]["issues"] = ["mount_not_readonly"]
-        self.assertEqual(validate_public_projection(projection)["operational_verdict"], "red")
+        projection["oc16"]["readonly_bits"][0] = False
+        projection["oc16"]["reason_codes"] = ["mount_not_readonly"]
+        self.assertEqual(
+            validate_public_projection(projection)["operational_verdict"], "red"
+        )
 
     def test_request_and_public_source_contract_cannot_drift(self) -> None:
         projection = valid_projection()
@@ -123,7 +111,7 @@ class NasObservePublicContractTests(unittest.TestCase):
         del missing["oc17"]["protected_read_guard_stable"]
         cases.append(missing)
         wrong_type = valid_projection()
-        wrong_type["oc20"]["file_counts"][0] = True
+        wrong_type["oc20"]["count_complete_bits"][0] = 1
         cases.append(wrong_type)
         for case in cases:
             with self.subTest(case=list(case)):
@@ -136,11 +124,16 @@ class NasObservePublicContractTests(unittest.TestCase):
             with self.assertRaises(NasObservationValidationError):
                 validate_public_facts(invalid)
         noncanonical = list(facts)
-        noncanonical[0] = (noncanonical[0][0], json.dumps(json.loads(noncanonical[0][1])))
+        noncanonical[0] = (
+            noncanonical[0][0],
+            json.dumps(json.loads(noncanonical[0][1])),
+        )
         with self.assertRaisesRegex(NasObservationValidationError, "canonical"):
             validate_public_facts(tuple(noncanonical))
 
-    def test_receipt_envelope_validator_rejects_mixed_generic_and_nas_facts(self) -> None:
+    def test_receipt_envelope_validator_rejects_mixed_generic_and_nas_facts(
+        self,
+    ) -> None:
         facts = public_facts(valid_projection())
         with self.assertRaisesRegex(ObservationValidationError, "nas observation"):
             validate_public_observation_facts((("writes", "0"), *facts))
@@ -149,7 +142,7 @@ class NasObservePublicContractTests(unittest.TestCase):
         for path in ("alias", "component"):
             projection = copy.deepcopy(valid_projection())
             if path == "alias":
-                projection["oc16"]["alias_target_digests"][0] = "not-a-digest"
+                projection["oc16"]["alias_identity_digests"][0] = "not-a-digest"
             else:
                 projection["component_receipt_digests"]["oc17_prestate"] = "sha256:ABC"
             with self.assertRaisesRegex(NasObservationValidationError, "digest"):

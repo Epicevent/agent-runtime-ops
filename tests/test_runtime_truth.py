@@ -31,6 +31,7 @@ PS_ARGV = [
         ["docker", "rm", "container"],
         ["docker", "inspect", "bad\ncontainer"],
         ["docker", "ps", "-a", "--format", "{{.Names}}"],
+        ["/tmp/docker", "inspect", "container"],
         ["sh", "-c", "docker ps"],
     ],
 )
@@ -96,6 +97,16 @@ def test_readonly_docker_preserves_bounded_valid_utf8_output() -> None:
     assert result.returncode == 0
     assert result.stdout.splitlines() == ["container-id"]
     assert result.stderr == ""
+
+
+def test_readonly_docker_accepts_the_fixed_absolute_executable() -> None:
+    argv = ["/usr/bin/docker", *PS_ARGV[1:]]
+    with patch(
+        "agent_runtime_ops.domain.common.subprocess.Popen",
+        side_effect=_substitute_process("print('container-id')"),
+    ):
+        result = common.run_readonly_docker(argv, timeout=5)
+    assert result.returncode == 0
 
 
 def test_live_runtime_truth_uses_only_the_bounded_readonly_runner() -> None:

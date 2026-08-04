@@ -85,6 +85,7 @@ from .execution import (
     ExecutionPolicyRegistry,
     HandlerResult,
     KwragProductArtifactProbeHandler,
+    NasObserveOcSlotsHandler,
     OperationAvailability,
     OperationHandlerRegistry,
 )
@@ -174,6 +175,7 @@ __all__ = [
     "ExecutionPolicyRegistry",
     "HandlerResult",
     "KwragProductArtifactProbeHandler",
+    "NasObserveOcSlotsHandler",
     "OperationAvailability",
     "OperationHandlerRegistry",
     "RootActionExecutionWorker",
