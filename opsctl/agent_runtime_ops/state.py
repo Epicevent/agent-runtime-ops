@@ -80,10 +80,13 @@ def image_spec_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
         image_spec["image_recipe"] = image_recipe_data
     retrieval_contract = recipe_data.get("retrieval_contract")
     retrieval_binding = recipe_data.get("retrieval_binding")
+    retrieval_attachment_contract = recipe_data.get("retrieval_attachment_contract")
     if isinstance(retrieval_contract, dict):
         image_spec["retrieval_contract"] = retrieval_contract
     if isinstance(retrieval_binding, dict):
         image_spec["retrieval_binding"] = retrieval_binding
+    if isinstance(retrieval_attachment_contract, dict):
+        image_spec["retrieval_attachment_contract"] = retrieval_attachment_contract
     image_spec["retrieval_component_digest"] = str(
         manifest.get("retrieval_component_digest") or ""
     )

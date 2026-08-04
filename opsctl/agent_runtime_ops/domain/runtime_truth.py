@@ -7,6 +7,7 @@ from ..apache import parse_apache_route
 from ..canonical_recipes import load_canonical_recipe
 from ..profiles import load_profile
 from ..routing import RuntimeBinding, get_runtime_binding
+from ..state import load_runtime_target
 from .apache_route_checks import apache_route_checks
 from .common import container_name, run_readonly_docker
 from .image_specs import (
@@ -14,10 +15,13 @@ from .image_specs import (
     recipe_label,
 )
 from .retrieval_contract import (
+    BINDING_V2_SCHEMA,
     RETRIEVAL_LABEL_PREFIX,
     SHA256_RE,
     bind_retrieval_intent,
+    retrieval_attachment_contract_from_labels,
     retrieval_contract_from_labels,
+    validate_retrieval_target_binding,
 )
 
 
@@ -326,16 +330,49 @@ def live_runtime_truth(slot: str, state_root: Path) -> tuple[dict[str, str], lis
         projected_enabled = truth.get("retrieval_enabled")
         if projected_enabled not in {"true", "false"}:
             raise ValueError("retrieval-enabled projection must be true or false")
-        retrieval_contract = retrieval_contract_from_labels(labels)
         profile = load_profile(str(truth.get("runtime_profile") or ""))
-        expected_spec = bind_retrieval_intent(
-            {"retrieval_contract": retrieval_contract},
-            instance_id=binding.instance_id,
-            family=binding.family,
-            runtime_profile_digest=profile.digest,
-            container_nas_root=str(profile.metadata.get("container_nas_root") or ""),
-            enabled=projected_enabled == "true",
+        attachment_contract = retrieval_attachment_contract_from_labels(
+            labels, family=binding.family
         )
+        if attachment_contract is not None:
+            persisted = load_runtime_target(binding.linux_account, state_root)
+            persisted_binding = persisted.image_spec.get("retrieval_binding")
+            if not (
+                isinstance(persisted_binding, dict)
+                and persisted_binding.get("schema") == BINDING_V2_SCHEMA
+            ):
+                raise ValueError("live attachment image is missing binding-v2 manifest")
+            if (
+                persisted.image_spec.get("wrapper_image") != truth.get("wrapper_image")
+                or persisted.image_spec.get("product_image") != truth.get("product_image")
+                or persisted.image_spec.get("retrieval_enabled")
+                is not (projected_enabled == "true")
+                or persisted.image_spec.get("retrieval_attachment_contract")
+                != attachment_contract
+            ):
+                raise ValueError(
+                    "retrieval binding v2 manifest does not match live tuple"
+                )
+            validate_retrieval_target_binding(
+                persisted.image_spec,
+                instance_id=binding.instance_id,
+                family=binding.family,
+                runtime_profile_digest=profile.digest,
+                container_nas_root=str(profile.metadata.get("container_nas_root") or ""),
+            )
+            expected_spec = persisted.image_spec
+        else:
+            retrieval_contract = retrieval_contract_from_labels(labels)
+            expected_spec = bind_retrieval_intent(
+                {"retrieval_contract": retrieval_contract},
+                instance_id=binding.instance_id,
+                family=binding.family,
+                runtime_profile_digest=profile.digest,
+                container_nas_root=str(
+                    profile.metadata.get("container_nas_root") or ""
+                ),
+                enabled=projected_enabled == "true",
+            )
         expected_retrieval_binding_digest = str(
             expected_spec.get("retrieval_binding_digest") or ""
         )

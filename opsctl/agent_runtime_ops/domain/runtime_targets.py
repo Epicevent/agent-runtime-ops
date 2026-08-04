@@ -7,7 +7,11 @@ from ..routing import get_runtime_binding
 from ..state import RuntimeTarget
 from .image_specs import IMAGE_ROLLOUT_IMAGE_NAME, image_spec_from_direct_images, image_spec_recipe
 from .runtime_truth import live_runtime_truth
-from .retrieval_contract import bind_retrieval_intent
+from .retrieval_contract import (
+    P1_IDENTITY_FIXED,
+    bind_retrieval_attachment_intent,
+    bind_retrieval_intent,
+)
 
 
 def desired_from_direct_images(
@@ -16,6 +20,7 @@ def desired_from_direct_images(
     state_root: Path,
     *,
     retrieval_enabled: bool = False,
+    retrieval_attachment_data: dict[str, object] | None = None,
 ):
     binding = get_runtime_binding(slot, state_root)
     runtime_class = binding.runtime_class
@@ -34,14 +39,26 @@ def desired_from_direct_images(
         )
     if family != binding.family:
         raise ValueError(f"binding image family mismatch: image={family} binding={binding.family}")
-    image_spec = bind_retrieval_intent(
-        image_spec,
-        instance_id=binding.instance_id,
-        family=family,
-        runtime_profile_digest=profile.digest,
-        container_nas_root=str(profile.metadata.get("container_nas_root") or ""),
-        enabled=retrieval_enabled,
-    )
+    binding_args = {
+        "instance_id": binding.instance_id,
+        "family": family,
+        "runtime_profile_digest": profile.digest,
+        "container_nas_root": str(profile.metadata.get("container_nas_root") or ""),
+        "enabled": retrieval_enabled,
+    }
+    if isinstance(image_spec.get("retrieval_attachment_contract"), dict):
+        image_spec = bind_retrieval_attachment_intent(
+            image_spec,
+            **binding_args,
+            p1_identity=P1_IDENTITY_FIXED,
+            attachment_data=retrieval_attachment_data,
+        )
+    else:
+        if retrieval_attachment_data is not None:
+            raise ValueError(
+                "retrieval attachment data requires a landed product interface"
+            )
+        image_spec = bind_retrieval_intent(image_spec, **binding_args)
     desired = RuntimeTarget(
         target=binding.linux_account,
         family=family,
@@ -63,6 +80,25 @@ def desired_from_live_image_truth(slot: str, state_root: Path):
     product_image = str(truth.get("product_image") or "")
     image_spec = image_spec_from_direct_images(wrapper_image, product_image)
     enabled = truth.get("retrieval_enabled") == "true"
+    if isinstance(image_spec.get("retrieval_attachment_contract"), dict):
+        from .runtime_manifest import desired_from_runtime_manifest
+
+        persisted, persisted_profile = desired_from_runtime_manifest(slot, state_root)
+        persisted_binding = persisted.image_spec.get("retrieval_binding")
+        if not (
+            isinstance(persisted_binding, dict)
+            and persisted_binding.get("schema") == "agent-runtime-retrieval-binding/v2"
+        ):
+            raise ValueError("live attachment image is missing binding-v2 manifest")
+        if (
+            persisted.image_spec.get("wrapper_image") != wrapper_image
+            or persisted.image_spec.get("product_image") != product_image
+            or persisted.image_spec.get("retrieval_enabled") is not enabled
+            or persisted.image_spec.get("retrieval_attachment_contract")
+            != image_spec.get("retrieval_attachment_contract")
+        ):
+            raise ValueError("live binding-v2 tuple does not match its runtime manifest")
+        return persisted, persisted_profile
     return desired_from_direct_images(
         slot, image_spec, state_root, retrieval_enabled=enabled
     )

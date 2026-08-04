@@ -236,10 +236,13 @@ def desired_from_manifest(slot: str, manifest: dict, state_root: Path):
     if isinstance(recipe, dict):
         retrieval_contract = recipe.get("retrieval_contract")
         retrieval_binding = recipe.get("retrieval_binding")
+        retrieval_attachment_contract = recipe.get("retrieval_attachment_contract")
         if isinstance(retrieval_contract, dict):
             image_spec["retrieval_contract"] = retrieval_contract
         if isinstance(retrieval_binding, dict):
             image_spec["retrieval_binding"] = retrieval_binding
+        if isinstance(retrieval_attachment_contract, dict):
+            image_spec["retrieval_attachment_contract"] = retrieval_attachment_contract
     image_spec["retrieval_component_digest"] = str(
         manifest.get("retrieval_component_digest") or ""
     )

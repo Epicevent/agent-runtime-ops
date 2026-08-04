@@ -16,7 +16,10 @@ from ..canonical_recipes import (
 from ..image_components import image_component_name as _image_component_name
 from ..image_components import image_repo as _image_repo
 from ..profiles import load_profile
-from .retrieval_contract import retrieval_contract_from_labels
+from .retrieval_contract import (
+    retrieval_attachment_contract_from_labels,
+    retrieval_contract_from_labels,
+)
 
 
 def _run_text(command: list[str], timeout: int = 20) -> subprocess.CompletedProcess[str]:
@@ -209,6 +212,9 @@ def image_spec_recipe_payload(image_spec: dict) -> dict[str, object]:
             image_spec.get("retrieval_binding_digest") or ""
         )
         payload["retrieval_enabled"] = image_spec.get("retrieval_enabled") is True
+    retrieval_attachment_contract = image_spec.get("retrieval_attachment_contract")
+    if isinstance(retrieval_attachment_contract, dict):
+        payload["retrieval_attachment_contract"] = retrieval_attachment_contract
     return payload
 
 
@@ -500,10 +506,10 @@ def image_spec_from_direct_images(wrapper_image: str, product_image: str) -> dic
             ),
         }
     )
+    wrapper_labels = image_recipe_labels_from_wrapper(wrapper_image)
+    product_labels = image_recipe_labels_from_wrapper(product_image)
     wrapper_retrieval = image_recipe.get("retrieval_contract")
-    product_retrieval = retrieval_contract_from_labels(
-        image_recipe_labels_from_wrapper(product_image)
-    )
+    product_retrieval = retrieval_contract_from_labels(product_labels)
     if wrapper_retrieval != product_retrieval:
         raise ValueError("wrapper and product embedded retrieval provenance do not match")
     result = {
@@ -519,6 +525,18 @@ def image_spec_from_direct_images(wrapper_image: str, product_image: str) -> dic
     }
     if isinstance(wrapper_retrieval, dict):
         result["retrieval_contract"] = wrapper_retrieval
+    wrapper_attachment = retrieval_attachment_contract_from_labels(
+        wrapper_labels, family=family
+    )
+    product_attachment = retrieval_attachment_contract_from_labels(
+        product_labels, family=family
+    )
+    if wrapper_attachment != product_attachment:
+        raise ValueError(
+            "wrapper and product retrieval attachment provenance do not match"
+        )
+    if isinstance(wrapper_attachment, dict):
+        result["retrieval_attachment_contract"] = wrapper_attachment
     return result
 
 

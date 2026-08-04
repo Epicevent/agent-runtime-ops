@@ -222,6 +222,7 @@ def apply_desired_slot(
     emit_progress: bool = False,
     prepare_runtime_env: Callable[[], None] | None = None,
     pre_apply_admission: Callable[[], None] | None = None,
+    post_live_retrieval_probe: Callable[[str], None] | None = None,
 ) -> int:
     try:
         with runtime_host_mutation_lock(state_root):
@@ -236,6 +237,7 @@ def apply_desired_slot(
                     action_name=action_name,
                     emit_progress=emit_progress,
                     prepare_runtime_env=prepare_runtime_env,
+                    post_live_retrieval_probe=post_live_retrieval_probe,
                 )
     except Exception as exc:
         print(f"target={getattr(desired, 'slot', '')}")
@@ -264,6 +266,7 @@ def _apply_desired_slot_locked(
     action_name: str = "apply",
     emit_progress: bool = False,
     prepare_runtime_env: Callable[[], None] | None = None,
+    post_live_retrieval_probe: Callable[[str], None] | None = None,
 ) -> int:
     backup_dir: Path | None = None
     runtime_env_prepared = False
@@ -458,6 +461,8 @@ def _apply_desired_slot_locked(
         try:
             if not container:
                 raise ValueError(f"container lookup failed: {lookup}")
+            if post_live_retrieval_probe is not None:
+                post_live_retrieval_probe(container)
             retrieval_status = run_retrieval_status_probe(
                 container, desired.image_spec
             )

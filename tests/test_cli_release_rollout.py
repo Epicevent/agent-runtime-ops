@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 import uuid
 from unittest.mock import patch
@@ -1388,6 +1389,54 @@ class CliReleaseRolloutTests(unittest.TestCase):
             )
             self.assertIn(f"wrapper_image={wrapper}", output.getvalue())
             self.assertIn(f"product_image={product}", output.getvalue())
+
+    def test_rollout_refuses_p1_attachment_fleet_promotion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = RuntimeTarget(
+                target="oc20",
+                family="hermes",
+                runtime_class="customer",
+                image_name="direct-image",
+                image_spec={
+                    "wrapper_image": wrapper_image_ref("agent-runtime-hermes", "9"),
+                    "product_image": wrapper_image_ref("hermes-runtime", "8"),
+                    "retrieval_enabled": True,
+                    "retrieval_attachment_contract": {"schema": "fixture"},
+                },
+                runtime_profile="hermes-runtime-customer",
+                route=binding("oc20", "hermes", "customer", 30689, 30690),
+            )
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.commands.rollout._is_root", return_value=True),
+                patch(
+                    "agent_runtime_ops.commands.rollout._desired_from_live_image_truth",
+                    return_value=(source, load_profile("hermes-runtime-customer")),
+                ),
+                patch(
+                    "agent_runtime_ops.commands.rollout.render_compose",
+                    return_value=SimpleNamespace(text="services: {}\n", sha256="digest"),
+                ),
+                patch(
+                    "agent_runtime_ops.commands.rollout._run_static_slot_checks",
+                    return_value=[],
+                ),
+                patch(
+                    "agent_runtime_ops.commands.rollout._run_live_slot_checks",
+                    return_value=[],
+                ),
+                patch("agent_runtime_ops.commands.rollout._apply_desired_slot") as apply,
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_rollout_image_promote(
+                    argparse.Namespace(
+                        state_root=str(root), from_slot="oc20", slots="oc3"
+                    )
+                )
+            self.assertEqual(rc, 1)
+            self.assertIn("bounded to image-canary", output.getvalue())
+            apply.assert_not_called()
 
     def test_wrapper_image_recipe_reads_oci_labels(self) -> None:
         product_image = wrapper_image_ref("hermes-workspace", "2")

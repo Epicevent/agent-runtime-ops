@@ -19,6 +19,12 @@ from ..domain.image_specs import (
     image_spec_recipe_payload,
     profile_runtime_contract,
 )
+from ..domain.hermes_p1_canary import (
+    HermesP1CanaryInputs,
+    build_hermes_p1_canary_inputs,
+    publish_hermes_p1_runtime_inputs,
+    run_hermes_p1_canary_probe,
+)
 from ..domain.dev_recipe_runtime import ensure_dev_runtime_dir as _ensure_runtime_dir
 from ..domain.dev_recipe_runtime import upsert_runtime_env_file as _upsert_runtime_env_file
 from ..domain.runtime_apply import apply_desired_slot as _apply_desired_slot
@@ -136,6 +142,59 @@ def _prepare_runtime_env_for_direct_image(desired, profile) -> None:
     )
 
 
+def _desired_with_hermes_p1_canary(
+    slot: str,
+    image_spec: dict[str, object],
+    state_root,
+    *,
+    retrieval_enabled: bool,
+):
+    if image_spec.get("family") != "hermes" or not isinstance(
+        image_spec.get("retrieval_attachment_contract"), dict
+    ):
+        desired, profile = _desired_from_direct_images(
+            slot,
+            image_spec,
+            state_root,
+            retrieval_enabled=retrieval_enabled,
+        )
+        return desired, profile, None
+    disabled, profile = _desired_from_direct_images(
+        slot, image_spec, state_root, retrieval_enabled=False
+    )
+    if not retrieval_enabled:
+        return disabled, profile, None
+    prepared = build_hermes_p1_canary_inputs(
+        slot=slot, instance_id=disabled.route.instance_id
+    )
+    desired, enabled_profile = _desired_from_direct_images(
+        slot,
+        image_spec,
+        state_root,
+        retrieval_enabled=True,
+        retrieval_attachment_data=prepared.attachment_data,
+    )
+    if enabled_profile != profile:
+        raise ValueError("Hermes P1 runtime profile changed during binding")
+    return desired, profile, prepared
+
+
+def _prepare_direct_image_runtime(desired, profile, prepared) -> None:
+    _prepare_runtime_env_for_direct_image(desired, profile)
+    if isinstance(desired.image_spec.get("retrieval_attachment_contract"), dict):
+        publish_hermes_p1_runtime_inputs(desired, prepared)
+
+
+def _run_direct_image_retrieval_probe(
+    container: str, desired, prepared: HermesP1CanaryInputs
+) -> None:
+    proof = run_hermes_p1_canary_probe(container, desired, prepared)
+    print(f"retrieval_canary_schema={proof['schema']}")
+    print("retrieval_canary_negative=zero_hits")
+    print("retrieval_canary_positive=response_observed")
+    print("retrieval_canary_tamper=rejected")
+
+
 def cmd_rollout_image_plan(args: argparse.Namespace) -> int:
     state_root = _state_root(args)
     try:
@@ -147,7 +206,7 @@ def cmd_rollout_image_plan(args: argparse.Namespace) -> int:
             slots = [binding.linux_account for binding in load_runtime_bindings(state_root) if binding.enabled]
         plans = []
         for slot in slots:
-            desired, profile = _desired_from_direct_images(
+            desired, profile, _prepared = _desired_with_hermes_p1_canary(
                 slot,
                 image_spec,
                 state_root,
@@ -209,7 +268,7 @@ def _cmd_rollout_image_apply_slot(args: argparse.Namespace, *, required_runtime_
         return 2
     try:
         image_spec = _direct_image_spec_from_args(args)
-        desired, profile = _desired_from_direct_images(
+        desired, profile, prepared = _desired_with_hermes_p1_canary(
             slot,
             image_spec,
             state_root,
@@ -241,8 +300,15 @@ def _cmd_rollout_image_apply_slot(args: argparse.Namespace, *, required_runtime_
         state_root=state_root,
         allow_first_apply=bool(getattr(args, "allow_first_apply", False)),
         action_name=f"rollout_{action_name}",
-        prepare_runtime_env=lambda: _prepare_runtime_env_for_direct_image(
-            desired, profile
+        prepare_runtime_env=lambda: _prepare_direct_image_runtime(
+            desired, profile, prepared
+        ),
+        post_live_retrieval_probe=(
+            (lambda container: _run_direct_image_retrieval_probe(
+                container, desired, prepared
+            ))
+            if prepared is not None
+            else None
         ),
     )
     if rc == 0:
@@ -270,6 +336,16 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
         source_desired, source_profile = _desired_from_live_image_truth(from_slot, state_root)
         if source_desired.runtime_class != "customer":
             raise ValueError(f"image-promote source must be a customer target: {from_slot}")
+        if (
+            source_desired.image_spec.get("retrieval_enabled") is True
+            and isinstance(
+                source_desired.image_spec.get("retrieval_attachment_contract"), dict
+            )
+        ):
+            raise ValueError(
+                "Hermes P1 attachment remains bounded to image-canary; "
+                "fleet promotion is unsupported"
+            )
         print("phase=projection_gate")
         rendered = render_compose(source_profile, source_desired)
         projection_failed = 0

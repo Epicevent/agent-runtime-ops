@@ -69,6 +69,7 @@ def render_compose(profile: RuntimeProfile, desired: RuntimeTarget, variables: d
         "retrieval_enabled": "true" if desired.image_spec.get("retrieval_enabled") is True else "false",
         "retrieval_component_digest": str(desired.image_spec.get("retrieval_component_digest") or ""),
         "retrieval_binding_digest": str(desired.image_spec.get("retrieval_binding_digest") or ""),
+        "retrieval_attachment_capable": isinstance(desired.image_spec.get("retrieval_attachment_contract"), dict),
         "retrieval_resource_profile_digest": (
             str(retrieval_resource.get("profileDigest") or "")
             if isinstance(retrieval_resource, dict)
