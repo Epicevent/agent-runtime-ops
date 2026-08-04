@@ -17,6 +17,12 @@ from agent_runtime_ops.domain.runtime_apply import (
     _restore_and_verify_backup,
     apply_desired_slot,
 )
+from agent_runtime_ops.domain.retrieval_contract import (
+    P1_IDENTITY_FIXED,
+    RETRIEVAL_SCHEMA,
+    bind_retrieval_attachment_intent,
+    canonical_digest,
+)
 from agent_runtime_ops.domain.runtime_backup import (
     _next_backup_path,
     backup_agent_runtime_state,
@@ -52,12 +58,7 @@ def rollback_transaction_path(state_root: Path, slot: str = "oc20") -> Path:
 
 
 def runtime_transaction_lock_path(state_root: Path, slot: str = "oc20") -> Path:
-    return (
-        state_root
-        / "runtime-recovery"
-        / slot
-        / ".agent-runtime-transaction.lock"
-    )
+    return state_root / "runtime-recovery" / slot / ".agent-runtime-transaction.lock"
 
 
 def runtime_host_mutation_lock_path(state_root: Path) -> Path:
@@ -73,7 +74,9 @@ def legacy_migration_path(state_root: Path, slot: str = "oc20") -> Path:
     )
 
 
-def exact_rollback_args(identity: dict[str, str], slot: str = "oc20") -> SimpleNamespace:
+def exact_rollback_args(
+    identity: dict[str, str], slot: str = "oc20"
+) -> SimpleNamespace:
     return SimpleNamespace(
         slot=slot,
         expected_backup_metadata_sha256=identity["backup_metadata_sha256"],
@@ -84,7 +87,9 @@ def exact_rollback_args(identity: dict[str, str], slot: str = "oc20") -> SimpleN
 
 
 @pytest.mark.skipif(os.name != "posix", reason="the production CLI imports POSIX pwd")
-def test_cli_exposes_all_four_exact_marker_expectations_without_finish_surface() -> None:
+def test_cli_exposes_all_four_exact_marker_expectations_without_finish_surface() -> (
+    None
+):
     from agent_runtime_ops.cli import build_parser
 
     parser = build_parser()
@@ -401,9 +406,7 @@ def test_restore_backup_replays_exact_transaction_after_mid_restore_crash(
     def crash_after_first_restore(source: Path, target: Path, **kwargs: object) -> None:
         nonlocal restore_calls
         restore_calls += 1
-        assert (
-            rollback_transaction_path(state_root)
-        ).is_file()
+        assert (rollback_transaction_path(state_root)).is_file()
         if restore_calls == 2:
             raise OSError("simulated host crash boundary")
         original_restore(source, target, **kwargs)
@@ -483,7 +486,9 @@ def test_restore_transaction_finishes_only_after_live_and_probe_pass(
             "agent_runtime_ops.domain.runtime_apply.run_live_slot_checks_with_wait",
             return_value=[(False, "restored_runtime_unhealthy", "fixture")],
         ),
-        patch("agent_runtime_ops.domain.runtime_apply.run_retrieval_status_probe") as probe,
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.run_retrieval_status_probe"
+        ) as probe,
     ):
         ok, reason = _restore_and_verify_backup(
             slot="oc20",
@@ -575,6 +580,96 @@ def test_restore_transaction_finishes_only_after_live_and_probe_pass(
     assert pending_rollback_backup(state_root, "oc20") is None
 
 
+def test_restore_binding_v2_preserves_transaction_until_product_verifier_lands(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    agent_compose_path(runtime_dir).write_text("services: {}\n", encoding="utf-8")
+    agent_manifest_path(runtime_dir).write_text("old-manifest\n", encoding="utf-8")
+    state_manifest_path(state_root, "oc20", create_parent=True).write_text(
+        "slot: oc20\n", encoding="utf-8"
+    )
+    backup_dir = backup_agent_runtime_state("oc20", runtime_dir, state_root)
+    agent_compose_path(runtime_dir).write_text("candidate\n", encoding="utf-8")
+    resource = {
+        "cpuReservationMillicores": 500,
+        "gpuAccess": "none",
+        "memoryReservationBytes": 536_870_912,
+        "pidsReservation": 64,
+    }
+    resource["profileDigest"] = canonical_digest(resource)
+    contract = {
+        "schema": RETRIEVAL_SCHEMA,
+        "component_digest": "sha256:" + "a" * 64,
+        "component_manifest_digest": "sha256:" + "b" * 64,
+        "contract_digest": "sha256:" + "c" * 64,
+        "default_enabled": False,
+        "host_port_count": 0,
+        "nas_read_only": True,
+        "resource": resource,
+        "source_archive_digest": "sha256:" + "d" * 64,
+        "source_revision": "8" * 40,
+        "transport": "in_process",
+        "verify_argv": ["hermes", "kwrag-slot", "status", "--json"],
+    }
+    spec = bind_retrieval_attachment_intent(
+        {"retrieval_contract": contract},
+        instance_id="11111111-1111-4111-8111-111111111111",
+        family="hermes",
+        runtime_profile_digest="sha256:" + "e" * 64,
+        container_nas_root="/workspace/nas_docs",
+        enabled=False,
+        p1_identity=dict(P1_IDENTITY_FIXED),
+        attachment_data=None,
+    )
+    previous_desired = SimpleNamespace(
+        image_spec=spec,
+        route=SimpleNamespace(linux_account="oc20"),
+    )
+    previous_profile = SimpleNamespace(name="profile")
+    completed = subprocess.CompletedProcess(["docker"], 0, "", "")
+
+    with (
+        patch(
+            "agent_runtime_ops.domain.runtime_backup.run_text_cwd",
+            return_value=completed,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.load_backup_runtime_contract",
+            return_value=(previous_desired, previous_profile),
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.profile_startup_timeout_seconds",
+            return_value=1,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.run_live_slot_checks_with_wait",
+            return_value=[(True, "restored_runtime_healthy", "fixture")],
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.find_gateway_container",
+            return_value=("container-1", "instance_label"),
+        ),
+    ):
+        ok, reason = _restore_and_verify_backup(
+            slot="oc20",
+            runtime_dir=runtime_dir,
+            backup_dir=backup_dir,
+            state_root=state_root,
+        )
+
+    assert ok is False
+    assert reason == (
+        "rollback_verification_failed:retrieval attachment verifier is pending a "
+        "landed product-owned interface"
+    )
+    assert pending_rollback_backup(state_root, "oc20") == backup_dir
+    assert rollback_transaction_path(state_root).is_file()
+
+
 def test_failed_first_apply_restores_verified_empty_baseline_and_finishes(
     tmp_path: Path,
 ) -> None:
@@ -654,9 +749,7 @@ def test_empty_baseline_residue_preserves_transaction_then_same_backup_resumes(
     assert not agent_compose_path(runtime_dir).exists()
 
     with (
-        patch(
-            "agent_runtime_ops.domain.runtime_backup.run_text_cwd"
-        ) as compose,
+        patch("agent_runtime_ops.domain.runtime_backup.run_text_cwd") as compose,
         patch(
             "agent_runtime_ops.domain.runtime_backup.run_text",
             return_value=completed,
@@ -1473,7 +1566,9 @@ def test_legacy_projection_absence_is_only_accepted_for_exact_pre_feature_backup
         assert receipt["backup_name"] == backup_dir.name
         assert receipt["slot"] == "oc20"
         if os.name != "nt":
-            assert stat.S_IMODE(legacy_migration_path(state_root).stat().st_mode) == 0o600
+            assert (
+                stat.S_IMODE(legacy_migration_path(state_root).stat().st_mode) == 0o600
+            )
     else:
         live_truth.assert_not_called()
         assert pending_rollback_backup(state_root, "oc20") == backup_dir
@@ -1673,9 +1768,9 @@ def test_legacy_projection_exemption_cannot_be_reused_by_fresh_same_backup_trans
         "oc20",
         backup_dir,
     )
-    first_transaction_id = json.loads(
-        first_receipt.read_text(encoding="utf-8")
-    )["rollback_transaction_id"]
+    first_transaction_id = json.loads(first_receipt.read_text(encoding="utf-8"))[
+        "rollback_transaction_id"
+    ]
     finish_rollback_transaction("oc20", state_root, backup_dir)
 
     _begin_rollback_transaction("oc20", state_root, backup_dir)
@@ -1800,7 +1895,9 @@ def test_env_restore_syncs_parent_after_atomic_replace(tmp_path: Path) -> None:
         original_replace(source, target)
 
     with (
-        patch("agent_runtime_ops.domain.runtime_backup.os.replace", side_effect=replace),
+        patch(
+            "agent_runtime_ops.domain.runtime_backup.os.replace", side_effect=replace
+        ),
         patch(
             "agent_runtime_ops.domain.runtime_backup.fsync_parent",
             side_effect=lambda path: events.append("parent_sync"),
@@ -2077,7 +2174,9 @@ def test_apply_backs_up_env_before_prepare_and_restores_on_pre_dispatch_failure(
         image_spec={},
         image_name="direct-image",
     )
-    profile = SimpleNamespace(name="hermes-runtime-customer", digest="sha256:" + "a" * 64)
+    profile = SimpleNamespace(
+        name="hermes-runtime-customer", digest="sha256:" + "a" * 64
+    )
     rendered = SimpleNamespace(text="services: {}\n", sha256="sha256:" + "b" * 64)
     observed: dict[str, object] = {}
 
@@ -2091,14 +2190,38 @@ def test_apply_backs_up_env_before_prepare_and_restores_on_pre_dispatch_failure(
         env_path.write_text("JITECH_RETRIEVAL_ENABLED=false\n", encoding="utf-8")
 
     with (
-        patch("agent_runtime_ops.domain.runtime_apply.render_compose", return_value=rendered),
-        patch("agent_runtime_ops.domain.runtime_apply.run_static_slot_checks", return_value=[]),
-        patch("agent_runtime_ops.domain.runtime_apply.slot_runtime_dir", return_value=runtime_dir),
-        patch("agent_runtime_ops.domain.runtime_apply.ensure_nas_workspace_dir", return_value=tmp_path / "nas"),
-        patch("agent_runtime_ops.domain.runtime_apply.ensure_runtime_workspace_guidance", return_value={}),
-        patch("agent_runtime_ops.domain.runtime_apply.image_spec_config_contract", return_value=None),
-        patch("agent_runtime_ops.domain.runtime_apply.required_compose_variables", return_value=set()),
-        patch("agent_runtime_ops.domain.runtime_apply.atomic_write", side_effect=RuntimeError("pre-dispatch-stop")),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.render_compose",
+            return_value=rendered,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.run_static_slot_checks",
+            return_value=[],
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.slot_runtime_dir",
+            return_value=runtime_dir,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.ensure_nas_workspace_dir",
+            return_value=tmp_path / "nas",
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.ensure_runtime_workspace_guidance",
+            return_value={},
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.image_spec_config_contract",
+            return_value=None,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.required_compose_variables",
+            return_value=set(),
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.atomic_write",
+            side_effect=RuntimeError("pre-dispatch-stop"),
+        ),
         patch("agent_runtime_ops.domain.runtime_apply.append_action_log"),
     ):
         rc = apply_desired_slot(
@@ -2258,27 +2381,59 @@ def test_apply_keeps_prepared_env_after_successful_dispatch(tmp_path: Path) -> N
         image_spec={},
         image_name="direct-image",
     )
-    profile = SimpleNamespace(name="hermes-runtime-customer", digest="sha256:" + "a" * 64)
+    profile = SimpleNamespace(
+        name="hermes-runtime-customer", digest="sha256:" + "a" * 64
+    )
     rendered = SimpleNamespace(text="services: {}\n", sha256="sha256:" + "b" * 64)
 
     def prepare() -> None:
         env_path.write_text("JITECH_RETRIEVAL_ENABLED=false\n", encoding="utf-8")
 
     with (
-        patch("agent_runtime_ops.domain.runtime_apply.render_compose", return_value=rendered),
-        patch("agent_runtime_ops.domain.runtime_apply.run_static_slot_checks", return_value=[]),
-        patch("agent_runtime_ops.domain.runtime_apply.slot_runtime_dir", return_value=runtime_dir),
-        patch("agent_runtime_ops.domain.runtime_apply.ensure_nas_workspace_dir", return_value=tmp_path / "nas"),
-        patch("agent_runtime_ops.domain.runtime_apply.ensure_runtime_workspace_guidance", return_value={}),
-        patch("agent_runtime_ops.domain.runtime_apply.image_spec_config_contract", return_value=None),
-        patch("agent_runtime_ops.domain.runtime_apply.required_compose_variables", return_value=set()),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.render_compose",
+            return_value=rendered,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.run_static_slot_checks",
+            return_value=[],
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.slot_runtime_dir",
+            return_value=runtime_dir,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.ensure_nas_workspace_dir",
+            return_value=tmp_path / "nas",
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.ensure_runtime_workspace_guidance",
+            return_value={},
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.image_spec_config_contract",
+            return_value=None,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.required_compose_variables",
+            return_value=set(),
+        ),
         patch(
             "agent_runtime_ops.domain.runtime_apply.run_text_cwd",
             return_value=subprocess.CompletedProcess(["docker"], 0, "", ""),
         ),
-        patch("agent_runtime_ops.domain.runtime_apply.run_live_slot_checks_with_wait", return_value=[]),
-        patch("agent_runtime_ops.domain.runtime_apply.profile_startup_timeout_seconds", return_value=1),
-        patch("agent_runtime_ops.domain.runtime_apply.FINAL_WORKSPACE_GUIDANCE_STABILIZE_DELAYS_SECONDS", []),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.run_live_slot_checks_with_wait",
+            return_value=[],
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.profile_startup_timeout_seconds",
+            return_value=1,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.FINAL_WORKSPACE_GUIDANCE_STABILIZE_DELAYS_SECONDS",
+            [],
+        ),
         patch("agent_runtime_ops.domain.runtime_apply.write_slot_manifests"),
         patch("agent_runtime_ops.domain.runtime_apply.append_action_log"),
     ):
