@@ -36,6 +36,31 @@ SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_./:@+=,-]+$")
 ALLOWED_VERIFY_ARGV = {
     ("hermes", "kwrag-slot", "status", "--json"),
 }
+ALLOWED_ATTACHMENT_VERIFY_ARGV = {
+    "hermes": ("hermes", "kwrag-slot", "p1-attachment-status", "--json"),
+}
+HERMES_P1_LABEL_PREFIX = "com.epicevent.hermes.kwrag.p1."
+HERMES_P1_LABEL_SUFFIXES = {
+    "attachment-decision-digest",
+    "caller-explicit",
+    "component-manifest-digest",
+    "component-wheel-digest",
+    "default-enabled",
+    "status-schema",
+    "verify-command.json",
+}
+HERMES_P1_DECISION_DIGEST = (
+    "sha256:fd4d1068407d0b28d41e7813f8cef7b193a5fe43f39db166588911e6fde3bbb5"
+)
+ATTACHMENT_CONTRACT_KEYS = {
+    "attachment_decision_digest",
+    "caller_explicit",
+    "component_manifest_digest",
+    "component_wheel_digest",
+    "default_enabled",
+    "status_schema",
+    "verify_argv",
+}
 RESOURCE_KEYS = {
     "cpuReservationMillicores",
     "gpuAccess",
@@ -445,6 +470,96 @@ def _validate_attachment_data(value: object) -> dict[str, object]:
     return dict(value)
 
 
+def retrieval_attachment_contract_from_labels(
+    labels: dict[str, str],
+    *,
+    family: str,
+) -> dict[str, object] | None:
+    """Read the exact product-owned attachment verifier contract from OCI labels."""
+
+    if family != "hermes":
+        return None
+    present = {
+        key.removeprefix(HERMES_P1_LABEL_PREFIX)
+        for key in labels
+        if key.startswith(HERMES_P1_LABEL_PREFIX)
+    }
+    if not present:
+        return None
+    if present != HERMES_P1_LABEL_SUFFIXES:
+        raise ValueError("Hermes P1 attachment label set is incomplete or unexpected")
+    values = {
+        suffix: str(labels.get(HERMES_P1_LABEL_PREFIX + suffix) or "")
+        for suffix in HERMES_P1_LABEL_SUFFIXES
+    }
+    for suffix in (
+        "attachment-decision-digest",
+        "component-manifest-digest",
+        "component-wheel-digest",
+    ):
+        _digest(values[suffix], f"Hermes P1 {suffix}")
+    if values["attachment-decision-digest"] != HERMES_P1_DECISION_DIGEST:
+        raise ValueError("Hermes P1 attachment decision digest mismatch")
+    if values["caller-explicit"] != "true" or values["default-enabled"] != "false":
+        raise ValueError(
+            "Hermes P1 attachment must remain caller-explicit and default-off"
+        )
+    if values["status-schema"] != RETRIEVAL_ATTACHMENT_STATUS_SCHEMA:
+        raise ValueError("Hermes P1 attachment status schema mismatch")
+    try:
+        argv = json.loads(values["verify-command.json"])
+    except json.JSONDecodeError as exc:
+        raise ValueError("Hermes P1 attachment verifier argv is invalid") from exc
+    expected_argv = ALLOWED_ATTACHMENT_VERIFY_ARGV[family]
+    if not isinstance(argv, list) or tuple(argv) != expected_argv:
+        raise ValueError("Hermes P1 attachment verifier argv mismatch")
+    return _validate_retrieval_attachment_contract(
+        {
+            "attachment_decision_digest": values["attachment-decision-digest"],
+            "caller_explicit": True,
+            "component_manifest_digest": values["component-manifest-digest"],
+            "component_wheel_digest": values["component-wheel-digest"],
+            "default_enabled": False,
+            "status_schema": values["status-schema"],
+            "verify_argv": list(expected_argv),
+        },
+        family=family,
+    )
+
+
+def _validate_retrieval_attachment_contract(
+    value: object,
+    *,
+    family: str,
+) -> dict[str, object]:
+    if not isinstance(value, dict) or set(value) != ATTACHMENT_CONTRACT_KEYS:
+        raise ValueError("retrieval attachment verifier contract has unexpected fields")
+    if family != "hermes":
+        raise ValueError("retrieval attachment verifier family is unsupported")
+    for field in (
+        "attachment_decision_digest",
+        "component_manifest_digest",
+        "component_wheel_digest",
+    ):
+        _digest(value.get(field), f"retrieval attachment verifier {field}")
+    if value.get("attachment_decision_digest") != HERMES_P1_DECISION_DIGEST:
+        raise ValueError("retrieval attachment verifier decision digest mismatch")
+    if (
+        value.get("caller_explicit") is not True
+        or value.get("default_enabled") is not False
+    ):
+        raise ValueError(
+            "retrieval attachment verifier must remain caller-explicit and default-off"
+        )
+    if value.get("status_schema") != RETRIEVAL_ATTACHMENT_STATUS_SCHEMA:
+        raise ValueError("retrieval attachment verifier status schema mismatch")
+    expected = ALLOWED_ATTACHMENT_VERIFY_ARGV[family]
+    argv = value.get("verify_argv")
+    if not isinstance(argv, list) or tuple(argv) != expected:
+        raise ValueError("retrieval attachment verifier argv mismatch")
+    return dict(value)
+
+
 def _validate_binding_common(binding: dict[str, object], enabled: bool) -> None:
     if binding.get("enabled") is not enabled:
         raise ValueError("retrieval binding enabled state mismatch")
@@ -518,6 +633,14 @@ def validate_bound_retrieval_spec(image_spec: dict[str, Any]) -> None:
         raise ValueError("retrieval cannot be enabled without a component contract")
     if schema == BINDING_V2_SCHEMA and contract is None:
         raise ValueError("retrieval binding v2 requires a component contract")
+    attachment_contract = image_spec.get("retrieval_attachment_contract")
+    if schema == BINDING_V2_SCHEMA:
+        _validate_retrieval_attachment_contract(
+            attachment_contract,
+            family=str(binding.get("family") or ""),
+        )
+    elif attachment_contract is not None:
+        raise ValueError("retrieval attachment verifier requires binding v2")
     expected_component = contract.get("component_digest") if contract else None
     expected_contract = contract.get("contract_digest") if contract else None
     resource = contract.get("resource") if contract else None
@@ -1083,10 +1206,15 @@ def run_retrieval_status_probe(
     validate_bound_retrieval_spec(image_spec)
     binding = image_spec["retrieval_binding"]
     if binding.get("schema") == BINDING_V2_SCHEMA:
-        raise ValueError(
-            "retrieval attachment verifier is pending a landed product-owned interface"
-        )
-    argv = contract.get("verify_argv")
+        attachment_contract = image_spec.get("retrieval_attachment_contract")
+        if not isinstance(attachment_contract, dict):
+            raise ValueError("retrieval attachment verifier contract is unavailable")
+        argv = attachment_contract.get("verify_argv")
+        expected = ALLOWED_ATTACHMENT_VERIFY_ARGV.get(str(binding.get("family") or ""))
+        if not isinstance(argv, list) or expected is None or tuple(argv) != expected:
+            raise ValueError("retrieval attachment verifier argv mismatch")
+    else:
+        argv = contract.get("verify_argv")
     if not isinstance(argv, list):
         raise ValueError("retrieval verifier argv is missing")
     command = ["docker", "exec", container, *[str(item) for item in argv]]

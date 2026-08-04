@@ -24,6 +24,7 @@ from agent_runtime_ops.domain.retrieval_contract import (
     load_retrieval_approvals,
     matched_retrieval_contract,
     parse_retrieval_status_output,
+    retrieval_attachment_contract_from_labels,
     retrieval_contract_from_labels,
     retrieval_contract_is_approved,
     retrieval_env,
@@ -36,7 +37,7 @@ from agent_runtime_ops.domain.retrieval_contract import (
     validate_retrieval_target_binding,
     write_retrieval_approval,
 )
-from agent_runtime_ops.domain import image_specs
+from agent_runtime_ops.domain import image_specs, runtime_targets
 from agent_runtime_ops.commands.retrieval import cmd_retrieval_approve
 from agent_runtime_ops.domain.runtime_manifest import desired_from_runtime_manifest
 from agent_runtime_ops.routing import RuntimeBinding
@@ -89,6 +90,27 @@ def retrieval_labels(**overrides: str) -> dict[str, str]:
     }
     values.update(overrides)
     return {RETRIEVAL_LABEL_PREFIX + key: value for key, value in values.items()}
+
+
+def hermes_p1_labels(**overrides: str) -> dict[str, str]:
+    values = {
+        "attachment-decision-digest": (
+            "sha256:fd4d1068407d0b28d41e7813f8cef7b193a5fe43f39db166588911e6fde3bbb5"
+        ),
+        "caller-explicit": "true",
+        "component-manifest-digest": DIGEST_A,
+        "component-wheel-digest": DIGEST_B,
+        "default-enabled": "false",
+        "status-schema": RETRIEVAL_ATTACHMENT_STATUS_SCHEMA,
+        "verify-command.json": json.dumps(
+            ["hermes", "kwrag-slot", "p1-attachment-status", "--json"],
+            separators=(",", ":"),
+        ),
+    }
+    values.update(overrides)
+    return {
+        "com.epicevent.hermes.kwrag.p1." + key: value for key, value in values.items()
+    }
 
 
 def capable_spec(*, enabled: bool) -> dict[str, object]:
@@ -155,13 +177,19 @@ def attachment_data() -> dict[str, object]:
 
 def attachment_spec(*, enabled: bool) -> dict[str, object]:
     contract = retrieval_contract_from_labels(retrieval_labels())
-    assert contract is not None
+    attachment_contract = retrieval_attachment_contract_from_labels(
+        hermes_p1_labels(), family="hermes"
+    )
+    assert contract is not None and attachment_contract is not None
     return bind_retrieval_attachment_intent(
-        {"retrieval_contract": contract},
+        {
+            "retrieval_contract": contract,
+            "retrieval_attachment_contract": attachment_contract,
+        },
         instance_id="11111111-1111-4111-8111-111111111111",
-        family="openclaw",
+        family="hermes",
         runtime_profile_digest=DIGEST_D,
-        container_nas_root="/home/node/nas_docs",
+        container_nas_root="/workspace/nas_docs",
         enabled=enabled,
         p1_identity=p1_identity(),
         attachment_data=attachment_data() if enabled else None,
@@ -604,17 +632,54 @@ def test_disabled_attachment_status_requires_capability_and_zero_dispatch(
         validate_retrieval_attachment_status(status, image_spec=spec)
 
 
-def test_attachment_probe_stays_fail_closed_until_product_fixture_lands() -> None:
+def test_attachment_probe_uses_exact_landed_hermes_product_interface() -> None:
     spec = attachment_spec(enabled=False)
     calls: list[list[str]] = []
 
     def runner(argv: list[str], **_: object) -> CommandResult:
         calls.append(argv)
-        return CommandResult(0, b"{}", b"")
+        return CommandResult(
+            0,
+            json.dumps(
+                attachment_status_payload(spec, enabled=False),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            + b"\n",
+            b"",
+        )
 
-    with pytest.raises(ValueError, match="pending a landed product-owned interface"):
-        run_retrieval_status_probe("container-id", spec, runner=runner)
-    assert calls == []
+    status = run_retrieval_status_probe("container-id", spec, runner=runner)
+    assert status is not None and status["attachmentHealth"] == "disabled"
+    assert calls == [
+        [
+            "docker",
+            "exec",
+            "container-id",
+            "hermes",
+            "kwrag-slot",
+            "p1-attachment-status",
+            "--json",
+        ]
+    ]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("caller-explicit", "false"),
+        ("default-enabled", "true"),
+        ("status-schema", RETRIEVAL_STATUS_SCHEMA),
+        ("verify-command.json", '["sh","-c","id"]'),
+    ],
+)
+def test_hermes_attachment_label_contract_rejects_policy_or_argv_drift(
+    field: str, value: str
+) -> None:
+    with pytest.raises(ValueError):
+        retrieval_attachment_contract_from_labels(
+            hermes_p1_labels(**{field: value}), family="hermes"
+        )
 
 
 def test_direct_image_tuple_requires_exact_wrapper_product_component_contract() -> None:
@@ -655,6 +720,117 @@ def test_direct_image_tuple_requires_exact_wrapper_product_component_contract() 
         pytest.raises(ValueError, match="do not match"),
     ):
         image_specs.image_spec_from_direct_images(wrapper, product)
+
+
+def test_direct_hermes_image_tuple_requires_matching_landed_attachment_contract() -> (
+    None
+):
+    contract = retrieval_contract_from_labels(retrieval_labels())
+    assert contract is not None
+    recipe = {
+        "family": "hermes",
+        "product_component": "hermes-runtime",
+        "wrapper_component": "hermes-wrapper",
+        "canonical_recipe_name": "hermes-runtime",
+        "canonical_recipe_digest": DIGEST_D,
+        "runtime_profiles": {
+            "customer": "hermes-runtime-customer",
+            "dev": "hermes-runtime-dev",
+        },
+        "retrieval_contract": contract,
+    }
+    wrapper = "ghcr.io/epicevent/agent-runtime-hermes@sha256:" + "1" * 64
+    product = "ghcr.io/epicevent/hermes-runtime@sha256:" + "2" * 64
+    exact_labels = retrieval_labels() | hermes_p1_labels()
+    with (
+        patch.object(
+            image_specs, "image_recipe_from_wrapper_image_auto", return_value=recipe
+        ),
+        patch.object(
+            image_specs,
+            "image_recipe_labels_from_wrapper",
+            side_effect=[exact_labels, exact_labels],
+        ),
+    ):
+        spec = image_specs.image_spec_from_direct_images(wrapper, product)
+    assert spec["retrieval_attachment_contract"]["verify_argv"] == [
+        "hermes",
+        "kwrag-slot",
+        "p1-attachment-status",
+        "--json",
+    ]
+
+    drifted_product = retrieval_labels() | hermes_p1_labels(
+        **{"component-wheel-digest": DIGEST_C}
+    )
+    with (
+        patch.object(
+            image_specs, "image_recipe_from_wrapper_image_auto", return_value=recipe
+        ),
+        patch.object(
+            image_specs,
+            "image_recipe_labels_from_wrapper",
+            side_effect=[exact_labels, drifted_product],
+        ),
+        pytest.raises(ValueError, match="attachment provenance"),
+    ):
+        image_specs.image_spec_from_direct_images(wrapper, product)
+
+
+def test_direct_hermes_target_projects_disabled_v2_and_requires_enabled_data(
+    tmp_path: Path,
+) -> None:
+    contract = retrieval_contract_from_labels(retrieval_labels())
+    attachment_contract = retrieval_attachment_contract_from_labels(
+        hermes_p1_labels(), family="hermes"
+    )
+    assert contract is not None and attachment_contract is not None
+    spec = {
+        "family": "hermes",
+        "retrieval_contract": contract,
+        "retrieval_attachment_contract": attachment_contract,
+        "image_recipe": {
+            "family": "hermes",
+            "runtime_profiles": {"customer": "hermes-runtime-customer"},
+        },
+    }
+    route = RuntimeBinding(
+        instance_id="11111111-1111-4111-8111-111111111111",
+        linux_account="oc20",
+        public_host="oc20.ji-tech.co.kr",
+        family="hermes",
+        runtime_class="customer",
+        gateway_port=30689,
+        bridge_port=30690,
+    )
+    profile = SimpleNamespace(
+        name="hermes-runtime-customer",
+        digest=DIGEST_D,
+        metadata={
+            "family": "hermes",
+            "slot_class": "customer",
+            "container_nas_root": "/workspace/nas_docs",
+        },
+    )
+    with (
+        patch.object(runtime_targets, "get_runtime_binding", return_value=route),
+        patch.object(runtime_targets, "load_profile", return_value=profile),
+    ):
+        disabled, _ = runtime_targets.desired_from_direct_images("oc20", spec, tmp_path)
+        assert disabled.image_spec["retrieval_binding"]["schema"] == BINDING_V2_SCHEMA
+        assert disabled.image_spec["retrieval_binding"]["attachmentData"] is None
+        with pytest.raises(ValueError, match="unexpected fields"):
+            runtime_targets.desired_from_direct_images(
+                "oc20", spec, tmp_path, retrieval_enabled=True
+            )
+        enabled, _ = runtime_targets.desired_from_direct_images(
+            "oc20",
+            spec,
+            tmp_path,
+            retrieval_enabled=True,
+            retrieval_attachment_data=attachment_data(),
+        )
+    assert enabled.image_spec["retrieval_binding"]["attachmentData"] == attachment_data()
 
 
 def test_status_is_content_free_exact_and_distinguishes_linkage_from_revocation() -> (
@@ -760,22 +936,24 @@ def test_private_runtime_manifest_round_trips_binding_v2_without_schema_coercion
 ) -> None:
     spec = attachment_spec(enabled=enabled)
     manifest = {
-        "family": "openclaw",
+        "family": "hermes",
         "image_name": "direct-image",
-        "wrapper_image": "ghcr.io/epicevent/agent-runtime-openclaw@sha256:" + "1" * 64,
-        "product_image": "ghcr.io/epicevent/openclaw-jitech@sha256:" + "2" * 64,
+        "wrapper_image": "ghcr.io/epicevent/agent-runtime-hermes@sha256:" + "1" * 64,
+        "product_image": "ghcr.io/epicevent/hermes-runtime@sha256:" + "2" * 64,
         "retrieval_component_digest": spec["retrieval_component_digest"],
         "retrieval_enabled": enabled,
         "retrieval_binding_digest": spec["retrieval_binding_digest"],
         "recipe": {
             "retrieval_contract": spec["retrieval_contract"],
             "retrieval_binding": spec["retrieval_binding"],
+            "retrieval_attachment_contract": spec["retrieval_attachment_contract"],
             "retrieval_binding_digest": spec["retrieval_binding_digest"],
             "retrieval_enabled": enabled,
         },
     }
     loaded = image_spec_from_manifest(manifest)
     assert loaded["retrieval_binding"] == spec["retrieval_binding"]
+    assert loaded["retrieval_attachment_contract"] == spec["retrieval_attachment_contract"]
     assert loaded["retrieval_binding"]["schema"] == BINDING_V2_SCHEMA
     assert loaded["retrieval_binding_digest"] == spec["retrieval_binding_digest"]
     assert loaded["retrieval_enabled"] is enabled

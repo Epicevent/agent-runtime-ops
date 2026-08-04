@@ -580,7 +580,7 @@ def test_restore_transaction_finishes_only_after_live_and_probe_pass(
     assert pending_rollback_backup(state_root, "oc20") is None
 
 
-def test_restore_binding_v2_preserves_transaction_until_product_verifier_lands(
+def test_restore_binding_v2_finishes_only_after_landed_product_verifier_passes(
     tmp_path: Path,
 ) -> None:
     runtime_dir = tmp_path / "runtime"
@@ -616,7 +616,23 @@ def test_restore_binding_v2_preserves_transaction_until_product_verifier_lands(
         "verify_argv": ["hermes", "kwrag-slot", "status", "--json"],
     }
     spec = bind_retrieval_attachment_intent(
-        {"retrieval_contract": contract},
+        {
+            "retrieval_contract": contract,
+            "retrieval_attachment_contract": {
+                "attachment_decision_digest": "sha256:fd4d1068407d0b28d41e7813f8cef7b193a5fe43f39db166588911e6fde3bbb5",
+                "caller_explicit": True,
+                "component_manifest_digest": "sha256:" + "f" * 64,
+                "component_wheel_digest": "sha256:" + "9" * 64,
+                "default_enabled": False,
+                "status_schema": "jitech-embedded-retrieval-attachment-status/v1",
+                "verify_argv": [
+                    "hermes",
+                    "kwrag-slot",
+                    "p1-attachment-status",
+                    "--json",
+                ],
+            },
+        },
         instance_id="11111111-1111-4111-8111-111111111111",
         family="hermes",
         runtime_profile_digest="sha256:" + "e" * 64,
@@ -653,6 +669,10 @@ def test_restore_binding_v2_preserves_transaction_until_product_verifier_lands(
             "agent_runtime_ops.domain.runtime_apply.find_gateway_container",
             return_value=("container-1", "instance_label"),
         ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.run_retrieval_status_probe",
+            return_value={"attachmentHealth": "disabled"},
+        ),
     ):
         ok, reason = _restore_and_verify_backup(
             slot="oc20",
@@ -661,13 +681,10 @@ def test_restore_binding_v2_preserves_transaction_until_product_verifier_lands(
             state_root=state_root,
         )
 
-    assert ok is False
-    assert reason == (
-        "rollback_verification_failed:retrieval attachment verifier is pending a "
-        "landed product-owned interface"
-    )
-    assert pending_rollback_backup(state_root, "oc20") == backup_dir
-    assert rollback_transaction_path(state_root).is_file()
+    assert ok is True
+    assert reason == "rollback_applied_verified"
+    assert pending_rollback_backup(state_root, "oc20") is None
+    assert not rollback_transaction_path(state_root).exists()
 
 
 def test_failed_first_apply_restores_verified_empty_baseline_and_finishes(
