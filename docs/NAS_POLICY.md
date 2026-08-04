@@ -24,9 +24,12 @@ assignment may report `content_validation=deferred_until_per_slot_mount`.
 
 The `hanpass_groupware` corpus has the fixed master contract
 `shared_policy_required`.  Its exact `corpus_master_mounts` entry, live
-read-only CIFS mount identity, and every selected grant path must validate.
-It never falls back to a per-slot credential or per-slot CIFS mount when that
-shared policy entry is absent or invalid.
+mount identity, and every selected grant path must validate before writes.
+That collector mount is content authority only: delivery uses a separate
+per-slot read-only CIFS master with the slot UID and runtime data GID.  This
+prevents collector ownership and mode bits from making an otherwise mounted
+view unreadable to the assigned slot.  A missing or invalid shared policy
+entry still fails closed before the per-slot mount is created.
 
 NAS 정책은 서버 private 상태에 둔다.
 

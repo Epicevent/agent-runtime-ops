@@ -451,6 +451,23 @@ def cmd_nas_view_assign(args: argparse.Namespace) -> int:
         configured_master = shared_master_for_share(decision.share, state_root)
         if spec.master_contract == "shared_policy_required" and configured_master is None:
             raise ValueError("shared_master_policy_missing")
+        if configured_master is not None and spec.delivery_master_contract == "per_slot_required":
+            if args.username or args.password_stdin:
+                raise ValueError("shared master policy forbids per-slot credential override")
+            # The collector mount is a content-authority source, not a customer
+            # execution mount. Validate every selected path there before the
+            # first write, then deliver through a slot-owned read-only CIFS
+            # master so the slot/runtime data group can actually traverse it.
+            _validate_shared_master(configured_master, decision.share.source)
+            build_view_plan(
+                slot,
+                user_id,
+                decision.share.source,
+                state_root,
+                list(getattr(args, "path", None) or []),
+                master_override=configured_master,
+            )
+            configured_master = None
         legacy_fstab_removed = False
         plan: ViewPlan | None = None
         if configured_master is not None:
