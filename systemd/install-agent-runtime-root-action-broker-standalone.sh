@@ -254,11 +254,13 @@ PY
 if [[ -e "$FINAL" ]]; then
     validate_release "$FINAL" "$WHEEL_SHA256" || die existing_release_invalid
 else
-    install -o root -g root -m 0400 "$WHEEL" "$WHEEL_COPY"
+    install -o root -g root -m 0400 "$WHEEL" "$WHEEL_COPY" \
+        || die wheel_copy_failed
     [[ "$(sha256sum "$WHEEL_COPY" | awk '{print $1}')" == "$WHEEL_SHA256" ]] \
         || die copied_wheel_sha256_mismatch
     STAGE=$TMP/release
-    install -d -o root -g root -m 0755 "$STAGE"
+    install -d -o root -g root -m 0755 "$STAGE" \
+        || die staged_release_directory_failed
     /usr/bin/python3 -m venv --copies "$STAGE/.venv" || die venv_creation_failed
     "$STAGE/.venv/bin/python" -I -B -m pip install \
         --no-index --only-binary=:all: --find-links "$WHEELHOUSE" \
@@ -280,6 +282,7 @@ fi
 
 TREE_SHA256=$(tree_digest "$FINAL") || die tree_digest_failed
 [[ "$TREE_SHA256" =~ $SHA256_RE ]] || die tree_digest_invalid
+failure_reason=rendered_unit_write_failed
 /usr/bin/python3 - "$TEMPLATE_COPY" "$UNIT_NEXT" "$FINAL" "$SOURCE_COMMIT" "$TREE_SHA256" <<'PY'
 import pathlib
 import sys
@@ -301,6 +304,7 @@ if "@@" in raw:
     raise SystemExit("unit has unresolved placeholder")
 target.write_text(raw, encoding="utf-8")
 PY
+failure_reason=unexpected_failure
 chmod 0644 "$UNIT_NEXT" || die rendered_unit_chmod_failed
 chown root:root "$UNIT_NEXT" || die rendered_unit_chown_failed
 systemd-analyze verify "$UNIT_NEXT" >/dev/null || die rendered_unit_verify_failed
@@ -310,10 +314,12 @@ systemctl is-enabled --quiet "$LEGACY_UNIT" && legacy_was_enabled=1 || true
 if [[ -e "$UNIT_PATH" ]]; then
     [[ -f "$UNIT_PATH" && ! -L "$UNIT_PATH" ]] || die existing_unit_invalid
     cmp -s "$UNIT_PATH" "$UNIT_NEXT" || die existing_unit_mismatch
-    cp --preserve=mode,ownership,timestamps "$UNIT_PATH" "$PREVIOUS_UNIT"
+    cp --preserve=mode,ownership,timestamps "$UNIT_PATH" "$PREVIOUS_UNIT" \
+        || die previous_unit_copy_failed
     unit_preexisted=1
 fi
-install -o root -g root -m 0644 "$UNIT_NEXT" "$UNIT_PATH"
+install -o root -g root -m 0644 "$UNIT_NEXT" "$UNIT_PATH" \
+    || die standalone_unit_publish_failed
 cutover_started=1
 systemctl daemon-reload || die daemon_reload_failed
 systemctl disable --now "$LEGACY_UNIT" || die legacy_disable_failed

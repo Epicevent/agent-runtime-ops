@@ -46,6 +46,8 @@ def test_standalone_installer_is_offline_and_phase_specific() -> None:
     assert "source_wheel_install_failed" in source
     assert "staged_release_chown_failed" in source
     assert "release_parent_fsync_failed" in source
+    assert "rendered_unit_write_failed" in source
+    assert "standalone_unit_publish_failed" in source
     assert "daemon_reload_failed" in source
     assert "legacy_disable_failed" in source
     assert "standalone_enable_failed" in source
