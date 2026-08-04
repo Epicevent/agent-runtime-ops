@@ -467,6 +467,19 @@ def _legacy_retrieval_migration_path(state_root: Path, slot: str) -> Path:
     return runtime_recovery_dir(state_root, slot) / _LEGACY_RETRIEVAL_MIGRATION_NAME
 
 
+def _legacy_retrieval_migration_transaction_path(
+    state_root: Path,
+    slot: str,
+    rollback_transaction_id: str,
+) -> Path:
+    if re.fullmatch(r"[0-9a-f]{64}", rollback_transaction_id) is None:
+        raise ValueError("legacy retrieval migration transaction id is invalid")
+    return runtime_recovery_dir(state_root, slot) / (
+        ".agent-runtime-legacy-retrieval-migration."
+        f"{rollback_transaction_id}.json"
+    )
+
+
 def _validate_controlled_directory(
     path: Path,
     *,
@@ -2025,12 +2038,11 @@ def _legacy_retrieval_migration_identity(
     }
 
 
-def _load_legacy_retrieval_migration(
-    state_root: Path,
+def _load_legacy_retrieval_migration_file(
+    recovery_dir: Path,
+    receipt_path: Path,
     slot: str,
 ) -> dict[str, object] | None:
-    recovery_dir = runtime_recovery_dir(state_root, slot)
-    receipt_path = _legacy_retrieval_migration_path(state_root, slot)
     if not receipt_path.exists() and not receipt_path.is_symlink():
         return None
     _validate_controlled_directory(recovery_dir, exact_mode=0o700)
@@ -2058,6 +2070,38 @@ def _load_legacy_retrieval_migration(
     return receipt
 
 
+def _load_legacy_retrieval_migration(
+    state_root: Path,
+    slot: str,
+) -> tuple[dict[str, object], Path] | None:
+    transaction = _load_rollback_transaction(state_root, slot)
+    if transaction is None:
+        return None
+    transaction_id = str(transaction["transaction_id"])
+    recovery_dir = runtime_recovery_dir(state_root, slot)
+    transaction_path = _legacy_retrieval_migration_transaction_path(
+        state_root,
+        slot,
+        transaction_id,
+    )
+    receipt = _load_legacy_retrieval_migration_file(
+        recovery_dir,
+        transaction_path,
+        slot,
+    )
+    if receipt is not None:
+        return receipt, transaction_path
+    legacy_path = _legacy_retrieval_migration_path(state_root, slot)
+    receipt = _load_legacy_retrieval_migration_file(
+        recovery_dir,
+        legacy_path,
+        slot,
+    )
+    if receipt is None or receipt.get("rollback_transaction_id") != transaction_id:
+        return None
+    return receipt, legacy_path
+
+
 def _legacy_retrieval_migration_is_available(
     state_root: Path,
     slot: str,
@@ -2072,9 +2116,10 @@ def _legacy_retrieval_migration_is_available(
         backup_dir,
         str(transaction["transaction_id"]),
     )
-    receipt = _load_legacy_retrieval_migration(state_root, slot)
-    if receipt is None:
+    loaded = _load_legacy_retrieval_migration(state_root, slot)
+    if loaded is None:
         return True
+    receipt, _ = loaded
     if any(receipt.get(key) != value for key, value in identity.items()):
         return False
     # A host crash after persisting consumption but before removing the rollback
@@ -2099,14 +2144,24 @@ def consume_legacy_retrieval_projection_exemption(
         backup_dir,
         str(transaction["transaction_id"]),
     )
-    receipt_path = _legacy_retrieval_migration_path(state_root, slot)
-    receipt = _load_legacy_retrieval_migration(state_root, slot)
-    if receipt is not None:
+    legacy_path = _legacy_retrieval_migration_path(state_root, slot)
+    loaded = _load_legacy_retrieval_migration(state_root, slot)
+    if loaded is not None:
+        receipt, receipt_path = loaded
         if any(receipt.get(key) != value for key, value in identity.items()):
             raise RuntimeError(
                 "legacy retrieval migration exemption was already consumed"
             )
         return receipt_path
+    receipt_path = (
+        _legacy_retrieval_migration_transaction_path(
+            state_root,
+            slot,
+            str(transaction["transaction_id"]),
+        )
+        if legacy_path.exists() or legacy_path.is_symlink()
+        else legacy_path
+    )
     payload = {
         **identity,
         "consumed_at": now_iso(),
@@ -2118,7 +2173,7 @@ def consume_legacy_retrieval_projection_exemption(
     )
     persisted = _load_legacy_retrieval_migration(state_root, slot)
     if persisted is None or any(
-        persisted.get(key) != value for key, value in identity.items()
+        persisted[0].get(key) != value for key, value in identity.items()
     ):
         raise RuntimeError("legacy retrieval migration receipt persistence failed")
     return receipt_path
