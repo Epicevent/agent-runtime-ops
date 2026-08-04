@@ -96,6 +96,35 @@ class RootActionStateMachineTests(unittest.TestCase):
                 )
             )
 
+    def test_claimed_execution_can_close_with_durable_timeout(self) -> None:
+        self.store.compare_and_append(
+            event(self.job, "event-timeout-claim", 0, TransitionKind.CLAIM_EXECUTION)
+        )
+        terminal = self.store.compare_and_append(
+            event(
+                self.job,
+                "event-timeout-complete",
+                1,
+                TransitionKind.COMPLETE_EXECUTION,
+                outcome=TerminalOutcome.TIMED_OUT,
+                reason="operation-deadline-exceeded",
+                second=2,
+            )
+        )
+        self.assertEqual(terminal.state, JobState.TERMINAL)
+        self.assertEqual(terminal.execution_count, 1)
+        self.assertEqual(terminal.terminal_outcome, TerminalOutcome.TIMED_OUT)
+        with self.assertRaises(ReplayBlocked):
+            self.store.compare_and_append(
+                event(
+                    self.job,
+                    "event-timeout-replay",
+                    2,
+                    TransitionKind.CLAIM_EXECUTION,
+                    second=3,
+                )
+            )
+
     def test_parallel_claims_execute_at_most_once(self) -> None:
         events = [
             event(self.job, f"event-claim-{index}", 0, TransitionKind.CLAIM_EXECUTION)

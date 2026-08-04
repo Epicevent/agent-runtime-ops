@@ -11,6 +11,7 @@ from agent_runtime_ops.root_actions import (
     OperationHandlerRegistry,
     seal_typed_manifest,
 )
+from agent_runtime_ops.root_actions.execution import HandlerResult
 from tests.test_root_action_contracts import encoded, valid_manifest
 
 
@@ -22,6 +23,18 @@ def artifact_job():
 
 
 class RootActionExecutionRegistryTests(unittest.TestCase):
+    def test_handler_result_admits_bounded_terminal_timeout(self) -> None:
+        result = HandlerResult(
+            raw_bytes=b'{"deadline":"operation"}\n',
+            public_status="timed_out",
+            public_facts=(("writes", "0"),),
+            terminal_outcome="timed_out",
+            reason_code="operation_deadline_exceeded",
+            exit_code=124,
+        )
+        self.assertEqual(result.terminal_outcome, "timed_out")
+        self.assertEqual(result.exit_code, 124)
+
     def test_historical_coverage_and_executable_handlers_are_separate(self) -> None:
         self.assertEqual(
             DEFAULT_EXECUTION_POLICIES.enabled_operation_ids,

@@ -145,7 +145,7 @@ class HandlerResult:
     def __post_init__(self) -> None:
         if not isinstance(self.raw_bytes, bytes) or not self.raw_bytes:
             raise ValueError("handler raw receipt must be non-empty bytes")
-        if self.terminal_outcome not in {"succeeded", "failed"}:
+        if self.terminal_outcome not in {"succeeded", "failed", "timed_out"}:
             raise ValueError("handler terminal outcome is invalid")
         if not isinstance(self.reason_code, str) or not self.reason_code:
             raise ValueError("handler reason code is invalid")

@@ -219,7 +219,7 @@ def _validate_common(value: dict[str, Any], *, raw_receipt: bool = True) -> None
 def _validate_public(value: dict[str, Any]) -> None:
     _exact(value, _PUBLIC_KEYS, "public receipt")
     _validate_common(value)
-    if value["terminal_outcome"] not in {"succeeded", "failed"}:
+    if value["terminal_outcome"] not in {"succeeded", "failed", "timed_out"}:
         raise ReceiptValidationError("public receipt has an invalid terminal_outcome")
     started_at = _timestamp(value["started_at"], "started_at")
     ended_at = _timestamp(value["ended_at"], "ended_at")
@@ -257,7 +257,7 @@ def _validate_public(value: dict[str, Any]) -> None:
 def _validate_quarantine(value: dict[str, Any]) -> None:
     _exact(value, _QUARANTINE_KEYS, "quarantine receipt")
     _validate_common(value)
-    if value["terminal_outcome"] not in {"succeeded", "failed"}:
+    if value["terminal_outcome"] not in {"succeeded", "failed", "timed_out"}:
         raise ReceiptValidationError(
             "quarantine receipt has an invalid terminal_outcome"
         )
