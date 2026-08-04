@@ -35,9 +35,11 @@ REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_./:@+=,-]+$")
 ALLOWED_VERIFY_ARGV = {
     ("hermes", "kwrag-slot", "status", "--json"),
+    ("openclaw", "kwrag-p0", "p1-attachment-status", "--json"),
 }
 ALLOWED_ATTACHMENT_VERIFY_ARGV = {
     "hermes": ("hermes", "kwrag-slot", "p1-attachment-status", "--json"),
+    "openclaw": ("openclaw", "kwrag-p0", "p1-attachment-status", "--json"),
 }
 HERMES_P1_LABEL_PREFIX = "com.epicevent.hermes.kwrag.p1."
 HERMES_P1_LABEL_SUFFIXES = {
@@ -51,6 +53,14 @@ HERMES_P1_LABEL_SUFFIXES = {
 }
 HERMES_P1_DECISION_DIGEST = (
     "sha256:fd4d1068407d0b28d41e7813f8cef7b193a5fe43f39db166588911e6fde3bbb5"
+)
+OPENCLAW_P1_LABEL_PREFIX = "com.epicevent.openclaw.kwrag.p1."
+OPENCLAW_P1_LABEL_SUFFIXES = HERMES_P1_LABEL_SUFFIXES | {
+    "python-runtime-digest",
+    "python-version",
+}
+OPENCLAW_P1_PYTHON_DIGEST = (
+    "sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b"
 )
 
 
@@ -484,42 +494,51 @@ def retrieval_attachment_contract_from_labels(
 ) -> dict[str, object] | None:
     """Read the exact product-owned attachment verifier contract from OCI labels."""
 
-    if family != "hermes":
+    profile = {
+        "hermes": (HERMES_P1_LABEL_PREFIX, HERMES_P1_LABEL_SUFFIXES),
+        "openclaw": (OPENCLAW_P1_LABEL_PREFIX, OPENCLAW_P1_LABEL_SUFFIXES),
+    }.get(family)
+    if profile is None:
         return None
+    prefix, suffixes = profile
     present = {
-        key.removeprefix(HERMES_P1_LABEL_PREFIX)
+        key.removeprefix(prefix)
         for key in labels
-        if key.startswith(HERMES_P1_LABEL_PREFIX)
+        if key.startswith(prefix)
     }
     if not present:
         return None
-    if present != HERMES_P1_LABEL_SUFFIXES:
-        raise ValueError("Hermes P1 attachment label set is incomplete or unexpected")
+    if present != suffixes:
+        raise ValueError("P1 attachment label set is incomplete or unexpected")
     values = {
-        suffix: str(labels.get(HERMES_P1_LABEL_PREFIX + suffix) or "")
-        for suffix in HERMES_P1_LABEL_SUFFIXES
+        suffix: str(labels.get(prefix + suffix) or "")
+        for suffix in suffixes
     }
     for suffix in (
         "attachment-decision-digest",
         "component-manifest-digest",
         "component-wheel-digest",
     ):
-        _digest(values[suffix], f"Hermes P1 {suffix}")
+        _digest(values[suffix], f"P1 {suffix}")
+    if family == "openclaw":
+        _digest(values["python-runtime-digest"], "OpenClaw P1 Python runtime")
+        if values["python-runtime-digest"] != OPENCLAW_P1_PYTHON_DIGEST or values["python-version"] != "3.12.13":
+            raise ValueError("OpenClaw P1 Python runtime identity mismatch")
     if values["attachment-decision-digest"] != HERMES_P1_DECISION_DIGEST:
-        raise ValueError("Hermes P1 attachment decision digest mismatch")
+        raise ValueError("P1 attachment decision digest mismatch")
     if values["caller-explicit"] != "true" or values["default-enabled"] != "false":
         raise ValueError(
-            "Hermes P1 attachment must remain caller-explicit and default-off"
+            "P1 attachment must remain caller-explicit and default-off"
         )
     if values["status-schema"] != RETRIEVAL_ATTACHMENT_STATUS_SCHEMA:
-        raise ValueError("Hermes P1 attachment status schema mismatch")
+        raise ValueError("P1 attachment status schema mismatch")
     try:
         argv = json.loads(values["verify-command.json"])
     except json.JSONDecodeError as exc:
-        raise ValueError("Hermes P1 attachment verifier argv is invalid") from exc
+        raise ValueError("P1 attachment verifier argv is invalid") from exc
     expected_argv = ALLOWED_ATTACHMENT_VERIFY_ARGV[family]
     if not isinstance(argv, list) or tuple(argv) != expected_argv:
-        raise ValueError("Hermes P1 attachment verifier argv mismatch")
+        raise ValueError("P1 attachment verifier argv mismatch")
     return _validate_retrieval_attachment_contract(
         {
             "attachment_decision_digest": values["attachment-decision-digest"],
@@ -541,7 +560,7 @@ def _validate_retrieval_attachment_contract(
 ) -> dict[str, object]:
     if not isinstance(value, dict) or set(value) != ATTACHMENT_CONTRACT_KEYS:
         raise ValueError("retrieval attachment verifier contract has unexpected fields")
-    if family != "hermes":
+    if family not in ALLOWED_ATTACHMENT_VERIFY_ARGV:
         raise ValueError("retrieval attachment verifier family is unsupported")
     for field in (
         "attachment_decision_digest",

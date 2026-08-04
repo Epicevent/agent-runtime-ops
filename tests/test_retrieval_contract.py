@@ -115,6 +115,24 @@ def hermes_p1_labels(**overrides: str) -> dict[str, str]:
     }
 
 
+def openclaw_p1_labels(**overrides: str) -> dict[str, str]:
+    values = {
+        key.removeprefix("com.epicevent.hermes.kwrag.p1."): value
+        for key, value in hermes_p1_labels().items()
+    }
+    values.update(
+        {
+            "python-runtime-digest": "sha256:d50fb7611f86d04a3b0471b46d7557818d88983fc3136726336b2a4c657aa30b",
+            "python-version": "3.12.13",
+            "verify-command.json": '["openclaw","kwrag-p0","p1-attachment-status","--json"]',
+            **overrides,
+        }
+    )
+    return {
+        "com.epicevent.openclaw.kwrag.p1." + key: value for key, value in values.items()
+    }
+
+
 def capable_spec(*, enabled: bool) -> dict[str, object]:
     contract = retrieval_contract_from_labels(retrieval_labels())
     assert contract is not None
@@ -684,6 +702,24 @@ def test_hermes_attachment_label_contract_rejects_policy_or_argv_drift(
         )
 
 
+def test_openclaw_attachment_label_contract_binds_python_and_fixed_argv() -> None:
+    contract = retrieval_attachment_contract_from_labels(
+        openclaw_p1_labels(), family="openclaw"
+    )
+    assert contract is not None
+    assert contract["verify_argv"] == [
+        "openclaw",
+        "kwrag-p0",
+        "p1-attachment-status",
+        "--json",
+    ]
+    with pytest.raises(ValueError, match="Python runtime identity"):
+        retrieval_attachment_contract_from_labels(
+            openclaw_p1_labels(**{"python-version": "3.12.14"}),
+            family="openclaw",
+        )
+
+
 def test_direct_image_tuple_requires_exact_wrapper_product_component_contract() -> None:
     contract = retrieval_contract_from_labels(retrieval_labels())
     assert contract is not None
@@ -1136,6 +1172,18 @@ def test_every_hermes_profile_isolates_p1_state_by_binding_digest() -> None:
         assert "target: /opt/data/kwrag-p1-attachment" in text
 
 
+def test_openclaw_profiles_mount_only_binding_scoped_p1_state() -> None:
+    profile_root = Path(__file__).parents[1] / "profiles" / "runtime"
+    for template in sorted(profile_root.glob("openclaw-*/compose.yml.tpl")):
+        text = template.read_text(encoding="utf-8")
+        assert (
+            'source: "{{ target_home }}/.openclaw/agent-runtime/kwrag-p1-state/'
+            '{{ retrieval_binding_path_component }}"' in text
+        )
+        assert "target: /run/kwrag" in text
+        assert "read_only: true" in text
+
+
 def test_hermes_profiles_make_managed_retrieval_intent_authoritative() -> None:
     profile_root = Path(__file__).parents[1] / "profiles" / "runtime"
     hermes_templates = sorted(profile_root.glob("hermes-*/compose.yml.tpl"))
@@ -1451,7 +1499,9 @@ def test_cli_surface_has_enable_flag_but_no_third_image_or_policy_inputs() -> No
         Path(__file__).parents[1] / "opsctl" / "agent_runtime_ops" / "cli.py"
     ).read_text(encoding="utf-8")
     assert cli_source.count('"--retrieval-enabled"') == 3
+    assert cli_source.count('"--retrieval-runtime-capsule-sha256"') == 1
     assert "retrieval-image" not in cli_source
+    assert "retrieval-runtime-capsule-path" not in cli_source
     assert "retrieval-network" not in cli_source
     assert "retrieval-backend" not in cli_source
     assert "retrieval-query" not in cli_source
