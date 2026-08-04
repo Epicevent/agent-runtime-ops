@@ -7,6 +7,7 @@ from jinja2 import Environment, StrictUndefined
 
 from .profiles import RuntimeProfile
 from .state import RuntimeTarget
+from .domain.retrieval_contract import digest_path_component
 
 try:
     import grp
@@ -48,6 +49,14 @@ def render_compose(profile: RuntimeProfile, desired: RuntimeTarget, variables: d
     retrieval_resource = (
         retrieval_contract.get("resource") if isinstance(retrieval_contract, dict) else None
     )
+    retrieval_attachment_capable = isinstance(
+        desired.image_spec.get("retrieval_attachment_contract"), dict
+    )
+    retrieval_binding_path_component = (
+        digest_path_component(desired.image_spec.get("retrieval_binding_digest"))
+        if retrieval_attachment_capable
+        else ""
+    )
     merged = {
         "slot": desired.slot,
         "instance_id": desired.route.instance_id if desired.route else "",
@@ -69,7 +78,8 @@ def render_compose(profile: RuntimeProfile, desired: RuntimeTarget, variables: d
         "retrieval_enabled": "true" if desired.image_spec.get("retrieval_enabled") is True else "false",
         "retrieval_component_digest": str(desired.image_spec.get("retrieval_component_digest") or ""),
         "retrieval_binding_digest": str(desired.image_spec.get("retrieval_binding_digest") or ""),
-        "retrieval_attachment_capable": isinstance(desired.image_spec.get("retrieval_attachment_contract"), dict),
+        "retrieval_binding_path_component": retrieval_binding_path_component,
+        "retrieval_attachment_capable": retrieval_attachment_capable,
         "retrieval_resource_profile_digest": (
             str(retrieval_resource.get("profileDigest") or "")
             if isinstance(retrieval_resource, dict)

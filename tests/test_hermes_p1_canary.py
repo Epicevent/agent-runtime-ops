@@ -446,7 +446,20 @@ def test_compose_mounts_only_attachment_capable_binding_state() -> None:
     )
     profile = load_profile("hermes-runtime-customer")
     rendered = render_compose(profile, desired).text
-    assert f"kwrag-p1-state/{DIGEST_B}" in rendered
+    assert f"kwrag-p1-state/{DIGEST_B.removeprefix('sha256:')}" in rendered
+    assert f"kwrag-p1-state/{DIGEST_B}" not in rendered
+    assert f'agent-runtime.retrieval-binding-digest: "{DIGEST_B}"' in rendered
+    malformed = RuntimeTarget(
+        target="oc20",
+        family="hermes",
+        runtime_class="customer",
+        image_name="direct-image",
+        image_spec={**spec, "retrieval_binding_digest": "sha256:invalid"},
+        runtime_profile="hermes-runtime-customer",
+        route=route,
+    )
+    with pytest.raises(ValueError, match="exact sha256 digest"):
+        render_compose(profile, malformed)
     plain = RuntimeTarget(
         target="oc20",
         family="hermes",

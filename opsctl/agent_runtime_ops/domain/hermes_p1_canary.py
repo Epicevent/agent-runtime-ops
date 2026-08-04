@@ -15,7 +15,11 @@ import uuid
 from ..host.files import fsync_parent
 from ..routing import validate_linux_account
 from .common import run_text
-from .retrieval_contract import canonical_digest, parse_retrieval_status_output
+from .retrieval_contract import (
+    canonical_digest,
+    digest_path_component,
+    parse_retrieval_status_output,
+)
 from .retrieval_resources import measure_retrieval_promotion_headroom
 
 
@@ -192,7 +196,7 @@ def _host_state_root(desired) -> Path:
         raise ValueError("Hermes P1 binding digest is invalid")
     return Path(
         f"/home/{validate_linux_account(desired.slot)}/.hermes/agent-runtime/"
-        f"kwrag-p1-state/{digest}"
+        f"kwrag-p1-state/{digest_path_component(digest)}"
     )
 
 
