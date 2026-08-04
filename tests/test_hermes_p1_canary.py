@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -13,6 +14,7 @@ from agent_runtime_ops.domain.hermes_p1_canary import (
     P1_PIPELINE_FINGERPRINT,
     _validate_positive_proof,
     build_hermes_p1_canary_inputs,
+    publish_hermes_p1_runtime_inputs,
     run_hermes_p1_canary_probe,
 )
 from agent_runtime_ops.domain.retrieval_contract import canonical_digest
@@ -242,6 +244,63 @@ def test_rollout_disabled_p1_has_no_product_probe_input() -> None:
     desired_from_images.assert_called_once_with(
         "oc20", image_spec, Path("state"), retrieval_enabled=False
     )
+
+
+def test_runtime_input_publication_creates_missing_managed_state_parent(
+    tmp_path: Path,
+) -> None:
+    home_root = tmp_path / "home"
+    slot_home = home_root / "oc20"
+    (slot_home / ".hermes").mkdir(parents=True)
+    (slot_home / "nas_docs").mkdir()
+    state_root = (
+        slot_home / ".hermes" / "agent-runtime" / "kwrag-p1-state" / "binding-b"
+    )
+    desired = SimpleNamespace(
+        slot="oc20",
+        image_spec={
+            "retrieval_binding": {
+                "schema": "agent-runtime-retrieval-binding/v2",
+                "family": "hermes",
+                "enabled": False,
+            }
+        },
+    )
+    real_path = Path
+
+    def path_factory(value: object) -> Path:
+        return home_root if value == "/home" else real_path(value)
+
+    class PosixOsProxy:
+        name = "posix"
+
+        @staticmethod
+        def chown(*_args: object) -> None:
+            return None
+
+        @staticmethod
+        def fchown(*_args: object) -> None:
+            return None
+
+        @staticmethod
+        def fchmod(*_args: object) -> None:
+            return None
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(os, name)
+
+    with (
+        patch("agent_runtime_ops.domain.hermes_p1_canary.Path", side_effect=path_factory),
+        patch("agent_runtime_ops.domain.hermes_p1_canary.os", PosixOsProxy()),
+        patch(
+            "agent_runtime_ops.domain.hermes_p1_canary._host_state_root",
+            return_value=state_root,
+        ),
+    ):
+        publish_hermes_p1_runtime_inputs(desired, None)
+
+    assert (slot_home / ".hermes" / "agent-runtime").is_dir()
+    assert (state_root / "binding-v2.json").is_file()
 
 
 def test_live_binding_v2_rejects_persisted_attachment_contract_drift() -> None:
