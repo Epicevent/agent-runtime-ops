@@ -26,6 +26,7 @@ from agent_runtime_ops.domain.retrieval_contract import (
 from agent_runtime_ops.domain.runtime_backup import (
     _next_backup_path,
     backup_agent_runtime_state,
+    backup_allows_legacy_retrieval_projection_absence,
     consume_legacy_retrieval_projection_exemption,
     finish_rollback_transaction,
     legacy_retrieval_projection_failures_may_be_expected,
@@ -1594,6 +1595,53 @@ def test_legacy_projection_absence_is_only_accepted_for_exact_pre_feature_backup
         live_truth.assert_not_called()
         assert pending_rollback_backup(state_root, "oc20") == backup_dir
         assert not legacy_migration_path(state_root).exists()
+
+
+@pytest.mark.parametrize(
+    ("projection", "expected"),
+    [
+        (
+            {
+                "retrieval_enabled": False,
+                "retrieval_component_digest": "",
+                "retrieval_binding_digest": "",
+            },
+            True,
+        ),
+        ({"retrieval_enabled": True}, False),
+        ({"retrieval_enabled": 0}, False),
+        ({"retrieval_component_digest": "sha256:" + "1" * 64}, False),
+        ({"retrieval_component_digest": []}, False),
+        ({"retrieval_binding_digest": "sha256:" + "2" * 64}, False),
+    ],
+)
+def test_legacy_projection_absence_accepts_only_exact_normalized_disabled_state(
+    tmp_path: Path,
+    projection: dict[str, object],
+    expected: bool,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    agent_compose_path(runtime_dir).write_text(
+        "services:\n  gateway:\n    image: legacy-wrapper@sha256:old\n",
+        encoding="utf-8",
+    )
+    manifest = {
+        "family": "hermes",
+        "runtime_profile": "hermes-runtime-customer",
+        "recipe": {},
+        **projection,
+    }
+    state_manifest_path(state_root, "oc20", create_parent=True).write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+
+    backup_dir = backup_agent_runtime_state("oc20", runtime_dir, state_root)
+
+    assert backup_allows_legacy_retrieval_projection_absence(backup_dir) is expected
 
 
 def test_legacy_projection_exemption_is_one_time_but_same_transaction_resumes(

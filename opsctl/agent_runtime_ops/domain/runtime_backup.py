@@ -2149,13 +2149,16 @@ def backup_allows_legacy_retrieval_projection_absence(backup_dir: Path) -> bool:
         key in recipe for key in ("retrieval_contract", "retrieval_binding")
     ):
         return False
+    if (
+        "retrieval_enabled" in manifest
+        and manifest.get("retrieval_enabled") is not False
+    ):
+        return False
     if any(
         key in manifest
-        for key in (
-            "retrieval_binding_digest",
-            "retrieval_component_digest",
-            "retrieval_enabled",
-        )
+        and manifest.get(key) is not None
+        and manifest.get(key) != ""
+        for key in ("retrieval_binding_digest", "retrieval_component_digest")
     ):
         return False
     compose_path = backup_dir / "docker-compose.agent-runtime.yml"
