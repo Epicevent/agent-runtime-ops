@@ -52,6 +52,11 @@ services:
       - "{{ data_gid }}"
     volumes:
       - "{{ target_home }}/.hermes:/opt/data"
+{% if retrieval_attachment_capable %}
+      - type: bind
+        source: "{{ target_home }}/.hermes/agent-runtime/kwrag-p1-state/{{ retrieval_binding_digest }}"
+        target: /opt/data/kwrag-p1-attachment
+{% endif %}
       - "{{ target_home }}/.hermes/workspace:/workspace"
       # corpus (read-only knowledge): single-intent tree. read_only here is a
       # defense-in-depth second lock — the source mount / ro account is the

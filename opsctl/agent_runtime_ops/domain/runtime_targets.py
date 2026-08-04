@@ -94,6 +94,8 @@ def desired_from_live_image_truth(slot: str, state_root: Path):
             persisted.image_spec.get("wrapper_image") != wrapper_image
             or persisted.image_spec.get("product_image") != product_image
             or persisted.image_spec.get("retrieval_enabled") is not enabled
+            or persisted.image_spec.get("retrieval_attachment_contract")
+            != image_spec.get("retrieval_attachment_contract")
         ):
             raise ValueError("live binding-v2 tuple does not match its runtime manifest")
         return persisted, persisted_profile

@@ -257,6 +257,8 @@ def test_apply_holds_runtime_transaction_lock_for_the_entire_slot_operation(
     state_root = tmp_path / "state"
     state_root.mkdir()
     desired = SimpleNamespace(slot="oc20")
+    def post_probe(_container: str) -> None:
+        return None
 
     def observe_locked_operation(**_: object) -> int:
         with pytest.raises(RuntimeError, match="another runtime host mutation"):
@@ -276,10 +278,12 @@ def test_apply_holds_runtime_transaction_lock_for_the_entire_slot_operation(
             profile=SimpleNamespace(),
             state_root=state_root,
             allow_first_apply=False,
+            post_live_retrieval_probe=post_probe,
         )
 
     assert rc == 0
     locked_apply.assert_called_once()
+    assert locked_apply.call_args.kwargs["post_live_retrieval_probe"] is post_probe
 
 
 def test_apply_runs_admission_while_host_and_slot_locks_are_held(
@@ -2465,3 +2469,54 @@ def test_apply_keeps_prepared_env_after_successful_dispatch(tmp_path: Path) -> N
     assert rc == 0
     assert pending_rollback_backup(state_root, "oc20") is None
     assert env_path.read_text(encoding="utf-8") == "JITECH_RETRIEVAL_ENABLED=false\n"
+
+
+def test_post_live_product_probe_failure_rolls_back_before_status(
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    (runtime_dir / ".env").write_text("", encoding="utf-8")
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    desired = SimpleNamespace(
+        slot="oc20",
+        route=SimpleNamespace(instance_id="instance-oc20"),
+        image_spec={"retrieval_contract": {"schema": "fixture"}},
+        image_name="direct-image",
+    )
+    profile = SimpleNamespace(name="hermes-runtime-customer", digest="sha256:" + "a" * 64)
+    rendered = SimpleNamespace(text="services: {}\n", sha256="sha256:" + "b" * 64)
+    completed = subprocess.CompletedProcess(["docker"], 0, "", "")
+
+    def fail_probe(_container: str) -> None:
+        raise ValueError("conversation proof failed")
+
+    with (
+        patch("agent_runtime_ops.domain.runtime_apply.require_retrieval_approval"),
+        patch("agent_runtime_ops.domain.runtime_apply.render_compose", return_value=rendered),
+        patch("agent_runtime_ops.domain.runtime_apply.run_static_slot_checks", return_value=[]),
+        patch("agent_runtime_ops.domain.runtime_apply.slot_runtime_dir", return_value=runtime_dir),
+        patch("agent_runtime_ops.domain.runtime_apply.ensure_nas_workspace_dir", return_value=tmp_path / "nas"),
+        patch("agent_runtime_ops.domain.runtime_apply.ensure_runtime_workspace_guidance", return_value={}),
+        patch("agent_runtime_ops.domain.runtime_apply.image_spec_config_contract", return_value=None),
+        patch("agent_runtime_ops.domain.runtime_apply.required_compose_variables", return_value=set()),
+        patch("agent_runtime_ops.domain.runtime_apply.run_text_cwd", return_value=completed),
+        patch("agent_runtime_ops.domain.runtime_apply.run_live_slot_checks_with_wait", return_value=[]),
+        patch("agent_runtime_ops.domain.runtime_apply.profile_startup_timeout_seconds", return_value=1),
+        patch("agent_runtime_ops.domain.runtime_apply.find_gateway_container", return_value=("container-1", "label")),
+        patch("agent_runtime_ops.domain.runtime_apply._restore_and_verify_backup", return_value=(True, "restored")) as restore,
+        patch("agent_runtime_ops.domain.runtime_apply.run_retrieval_status_probe") as status,
+        patch("agent_runtime_ops.domain.runtime_apply.append_action_log"),
+    ):
+        rc = apply_desired_slot(
+            desired=desired,
+            profile=profile,
+            state_root=state_root,
+            allow_first_apply=True,
+            post_live_retrieval_probe=fail_probe,
+        )
+
+    assert rc == 1
+    restore.assert_called_once()
+    status.assert_not_called()

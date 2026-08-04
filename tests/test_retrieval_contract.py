@@ -49,6 +49,8 @@ DIGEST_A = "sha256:" + "a" * 64
 DIGEST_B = "sha256:" + "b" * 64
 DIGEST_C = "sha256:" + "c" * 64
 DIGEST_D = "sha256:" + "d" * 64
+DIGEST_E = "sha256:" + "e" * 64
+DIGEST_F = "sha256:" + "f" * 64
 REVISION = "8" * 40
 HERMES_COMPATIBILITY_FIXTURE = (
     Path(__file__).parent
@@ -98,8 +100,8 @@ def hermes_p1_labels(**overrides: str) -> dict[str, str]:
             "sha256:fd4d1068407d0b28d41e7813f8cef7b193a5fe43f39db166588911e6fde3bbb5"
         ),
         "caller-explicit": "true",
-        "component-manifest-digest": DIGEST_A,
-        "component-wheel-digest": DIGEST_B,
+        "component-manifest-digest": DIGEST_E,
+        "component-wheel-digest": DIGEST_F,
         "default-enabled": "false",
         "status-schema": RETRIEVAL_ATTACHMENT_STATUS_SCHEMA,
         "verify-command.json": json.dumps(
@@ -759,6 +761,14 @@ def test_direct_hermes_image_tuple_requires_matching_landed_attachment_contract(
         "p1-attachment-status",
         "--json",
     ]
+    assert (
+        spec["retrieval_attachment_contract"]["component_wheel_digest"]
+        != spec["retrieval_contract"]["component_digest"]
+    )
+    assert (
+        spec["retrieval_attachment_contract"]["component_manifest_digest"]
+        != spec["retrieval_contract"]["component_manifest_digest"]
+    )
 
     drifted_product = retrieval_labels() | hermes_p1_labels(
         **{"component-wheel-digest": DIGEST_C}
@@ -1113,6 +1123,17 @@ def test_every_runtime_profile_projects_same_in_process_binding_labels() -> None
         assert all(item in text for item in required)
         assert "retrieval_image" not in text
         assert "kwrag_net" not in text
+
+
+def test_every_hermes_profile_isolates_p1_state_by_binding_digest() -> None:
+    profile_root = Path(__file__).parents[1] / "profiles" / "runtime"
+    for template in sorted(profile_root.glob("hermes*/compose.yml.tpl")):
+        text = template.read_text(encoding="utf-8")
+        assert (
+            'source: "{{ target_home }}/.hermes/agent-runtime/kwrag-p1-state/'
+            '{{ retrieval_binding_digest }}"' in text
+        )
+        assert "target: /opt/data/kwrag-p1-attachment" in text
 
 
 def test_hermes_profiles_make_managed_retrieval_intent_authoritative() -> None:
