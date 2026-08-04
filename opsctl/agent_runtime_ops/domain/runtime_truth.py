@@ -347,6 +347,8 @@ def live_runtime_truth(slot: str, state_root: Path) -> tuple[dict[str, str], lis
                 or persisted.image_spec.get("product_image") != truth.get("product_image")
                 or persisted.image_spec.get("retrieval_enabled")
                 is not (projected_enabled == "true")
+                or persisted.image_spec.get("retrieval_attachment_contract")
+                != attachment_contract
             ):
                 raise ValueError(
                     "retrieval binding v2 manifest does not match live tuple"
