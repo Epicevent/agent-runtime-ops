@@ -11,7 +11,11 @@ from typing import Any, Mapping
 
 
 ROOT_ACTION_PREFLIGHT_SCHEMA = "agent-runtime-root-action-preflight/v1"
-TRUSTED_READER_ACCOUNT = "svcops"
+TRUSTED_READER_ACCOUNT_ENV = "AGENT_RUNTIME_OPS_TRUSTED_ACCOUNT"
+TRUSTED_READER_ACCOUNT_FALLBACK = "svcops"
+TRUSTED_READER_ACCOUNT = os.environ.get(
+    TRUSTED_READER_ACCOUNT_ENV, TRUSTED_READER_ACCOUNT_FALLBACK
+)
 STATE_ROOT = Path("/var/lib/agent-runtime-ops/root-actions")
 PRIVATE_ROOT = STATE_ROOT / "private"
 PUBLIC_ROOT = STATE_ROOT / "public"

@@ -1429,8 +1429,9 @@ EOF
     sed \
       -e "s|@@CURRENT_LINK@@|$release_dir|g" \
       -e "s|@@RELEASE_DIR@@|$release_dir|g" \
+      -e "s|@@TRUSTED_ACCOUNT@@|$ROOT_ACTION_TRUSTED_ACCOUNT|g" \
       "$unit_source" >"$ACTIVATION_CANDIDATE_DIR/broker-unit" || exit 1
-    ! grep -Eq '@@(CURRENT_LINK|RELEASE_DIR)@@' \
+    ! grep -Eq '@@(CURRENT_LINK|RELEASE_DIR|TRUSTED_ACCOUNT)@@' \
       "$ACTIVATION_CANDIDATE_DIR/broker-unit" || exit 1
     chmod 0600 "$ACTIVATION_CANDIDATE_DIR"/* || exit 1
     chown root:root "$ACTIVATION_CANDIDATE_DIR"/* || exit 1
