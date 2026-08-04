@@ -15,6 +15,7 @@ def test_document_baseline_installs_into_path_selected_python() -> None:
     assert 'active_python="$(command -v python3)"' in script
     assert 'readlink -f "$active_python"' in script
     assert 'readlink -f /usr/bin/python3' in script
+    assert '"$active_python" -m ensurepip --upgrade' in script
     assert '"$active_python" -m pip install --no-cache-dir' in script
     assert '"${document_python_packages[@]}"' in script
 

@@ -102,6 +102,8 @@ debian_python_pip_packages=(
 # actual runtime interpreter fails with ModuleNotFoundError.
 active_python="$(command -v python3)"
 if [[ "$(readlink -f "$active_python")" != "$(readlink -f /usr/bin/python3)" ]]; then
+  "$active_python" -m pip --version >/dev/null 2>&1 \
+    || "$active_python" -m ensurepip --upgrade
   "$active_python" -m pip install --no-cache-dir \
     "${document_python_packages[@]}"
 fi
