@@ -120,6 +120,17 @@ def validate_public_observation_facts(
         raise ObservationValidationError(
             "terminal status must come from the receipt envelope"
         )
+    nas_names = tuple(name for name in names if name.startswith("nas_observation_"))
+    if nas_names:
+        from .nas_observe_oc_slots import validate_public_facts
+
+        try:
+            validate_public_facts(facts)
+        except ValueError as exc:
+            raise ObservationValidationError(
+                "nas observation facts violate their fixed public contract"
+            ) from exc
+        return
     observed = tuple(
         name for name in names if name in EXECUTION_OBSERVATION_FACT_NAMES
     )
