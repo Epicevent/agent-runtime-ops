@@ -29,6 +29,78 @@ die() {
     exit 1
 }
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd -P)
+TEMPLATE=$SCRIPT_DIR/agent-runtime-root-action-broker-standalone.service
+REQUIREMENTS=$SCRIPT_DIR/../requirements.lock
+WHEELHOUSE=$SCRIPT_DIR/wheelhouse
+
+validate_wheelhouse() {
+    local wheelhouse=$1 wheel_count wheelhouse_bytes
+    [[ -d "$wheelhouse" && ! -L "$wheelhouse" ]] || die wheelhouse_identity_invalid
+    wheel_count=$(find "$wheelhouse" -xdev -mindepth 1 -maxdepth 1 \
+        -type f -name '*.whl' -links 1 -printf . | wc -c) \
+        || die wheelhouse_scan_failed
+    [[ "$wheel_count" -ge 1 && "$wheel_count" -le 64 ]] \
+        || die wheelhouse_file_count_invalid
+    if find "$wheelhouse" -xdev -mindepth 1 -maxdepth 1 \
+        ! \( -type f -name '*.whl' -links 1 \) -print -quit | grep -q .; then
+        die wheelhouse_entry_invalid
+    fi
+    wheelhouse_bytes=$(find "$wheelhouse" -xdev -mindepth 1 -maxdepth 1 \
+        -type f -name '*.whl' -links 1 -printf '%s\n' \
+        | awk '{total += $1} END {print total + 0}') || die wheelhouse_scan_failed
+    [[ "$wheelhouse_bytes" -le 67108864 ]] || die wheelhouse_too_large
+}
+
+prepare_wheelhouse() {
+    local prepare_tmp prepare_venv prepare_files
+    [[ "${EUID:-$(id -u)}" -ne 0 ]] || die wheelhouse_prepare_must_be_unprivileged
+    [[ -f "$REQUIREMENTS" && ! -L "$REQUIREMENTS" ]] \
+        || die requirements_lock_invalid
+    [[ "$(sha256sum "$REQUIREMENTS" | awk '{print $1}')" == "$REQUIREMENTS_SHA256" ]] \
+        || die requirements_lock_sha256_mismatch
+    if [[ -e "$WHEELHOUSE" ]]; then
+        validate_wheelhouse "$WHEELHOUSE"
+        printf 'wheelhouse=%s\n' "$WHEELHOUSE"
+        return
+    fi
+    prepare_tmp=$(mktemp -d "$SCRIPT_DIR/.wheelhouse.prepare.XXXXXX") \
+        || die wheelhouse_prepare_temp_failed
+    case "$prepare_tmp" in
+        "$SCRIPT_DIR"/.wheelhouse.prepare.*) ;;
+        *) die wheelhouse_prepare_temp_invalid ;;
+    esac
+    prepare_venv=$prepare_tmp/.venv
+    prepare_files=$prepare_tmp/files
+    cleanup_prepare() {
+        case "$prepare_tmp" in
+            "$SCRIPT_DIR"/.wheelhouse.prepare.*)
+                rm -rf --one-file-system -- "$prepare_tmp"
+                ;;
+        esac
+    }
+    trap cleanup_prepare EXIT
+    /usr/bin/python3 -m venv --copies "$prepare_venv" \
+        || die wheelhouse_prepare_venv_failed
+    install -d -m 0755 "$prepare_files" || die wheelhouse_prepare_directory_failed
+    "$prepare_venv/bin/python" -I -B -m pip download \
+        --require-hashes --only-binary=:all: --no-cache-dir \
+        --dest "$prepare_files" -r "$REQUIREMENTS" >/dev/null \
+        || die wheelhouse_prepare_download_failed
+    validate_wheelhouse "$prepare_files"
+    rm -rf --one-file-system -- "$prepare_venv"
+    mv -- "$prepare_files" "$WHEELHOUSE" || die wheelhouse_prepare_publish_failed
+    sync -f "$SCRIPT_DIR" || die wheelhouse_prepare_parent_fsync_failed
+    rmdir -- "$prepare_tmp" || die wheelhouse_prepare_cleanup_failed
+    trap - EXIT
+    printf 'wheelhouse=%s\n' "$WHEELHOUSE"
+}
+
+if [[ "$#" -eq 1 && "$1" == prepare-wheelhouse ]]; then
+    prepare_wheelhouse
+    exit 0
+fi
+
 [[ "${EUID:-$(id -u)}" -eq 0 ]] || die root_required
 [[ "$#" -eq 3 ]] || die usage_wheel_wheel_sha_source_commit
 WHEEL=$1
@@ -47,9 +119,6 @@ flock -n 9 || die install_lock_busy
 [[ "$(stat -c '%u/%a/%h' "$ENV_FILE")" == 0/600/1 ]] \
     || die webauthn_env_identity_invalid
 
-SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd -P)
-TEMPLATE=$SCRIPT_DIR/agent-runtime-root-action-broker-standalone.service
-REQUIREMENTS=$SCRIPT_DIR/../requirements.lock
 [[ -f "$TEMPLATE" && ! -L "$TEMPLATE" ]] || die unit_template_invalid
 [[ "$(sha256sum "$TEMPLATE" | awk '{print $1}')" == "$TEMPLATE_SHA256" ]] \
     || die unit_template_sha256_mismatch
@@ -176,6 +245,8 @@ install -o root -g root -m 0400 "$REQUIREMENTS" "$REQUIREMENTS_COPY"
     || die copied_requirements_lock_sha256_mismatch
 receipt_enabled=1
 
+validate_wheelhouse "$WHEELHOUSE"
+
 tree_digest() {
     /usr/bin/python3 - "$1" <<'PY'
 import hashlib
@@ -239,27 +310,35 @@ PY
 if [[ -e "$FINAL" ]]; then
     validate_release "$FINAL" "$WHEEL_SHA256" || die existing_release_invalid
 else
-    install -o root -g root -m 0400 "$WHEEL" "$WHEEL_COPY"
+    install -o root -g root -m 0400 "$WHEEL" "$WHEEL_COPY" \
+        || die wheel_copy_failed
     [[ "$(sha256sum "$WHEEL_COPY" | awk '{print $1}')" == "$WHEEL_SHA256" ]] \
         || die copied_wheel_sha256_mismatch
     STAGE=$TMP/release
-    install -d -o root -g root -m 0755 "$STAGE"
-    /usr/bin/python3 -m venv --copies "$STAGE/.venv"
+    install -d -o root -g root -m 0755 "$STAGE" \
+        || die staged_release_directory_failed
+    /usr/bin/python3 -m venv --copies "$STAGE/.venv" || die venv_creation_failed
     "$STAGE/.venv/bin/python" -I -B -m pip install \
-        --require-hashes -r "$REQUIREMENTS_COPY" >/dev/null
+        --no-index --only-binary=:all: --find-links "$WHEELHOUSE" \
+        --require-hashes -r "$REQUIREMENTS_COPY" >/dev/null \
+        || die dependency_install_failed
     "$STAGE/.venv/bin/python" -I -B -m pip install \
-        --no-deps --force-reinstall "$WHEEL_COPY" >/dev/null
-    printf '%s\n' "$SOURCE_COMMIT" >"$STAGE/.source-commit"
-    printf '%s\n' "$WHEEL_SHA256" >"$STAGE/.source-wheel-sha256"
-    chown -R root:root "$STAGE"
-    chmod -R go-w "$STAGE"
+        --no-index --no-deps --force-reinstall "$WHEEL_COPY" >/dev/null \
+        || die source_wheel_install_failed
+    printf '%s\n' "$SOURCE_COMMIT" >"$STAGE/.source-commit" \
+        || die source_commit_marker_write_failed
+    printf '%s\n' "$WHEEL_SHA256" >"$STAGE/.source-wheel-sha256" \
+        || die source_wheel_marker_write_failed
+    chown -R root:root "$STAGE" || die staged_release_chown_failed
+    chmod -R go-w "$STAGE" || die staged_release_chmod_failed
     validate_release "$STAGE" "$WHEEL_SHA256" || die staged_release_invalid
-    mv -- "$STAGE" "$FINAL"
-    sync -f "$RELEASE_ROOT"
+    mv -- "$STAGE" "$FINAL" || die release_publish_failed
+    sync -f "$RELEASE_ROOT" || die release_parent_fsync_failed
 fi
 
-TREE_SHA256=$(tree_digest "$FINAL")
+TREE_SHA256=$(tree_digest "$FINAL") || die tree_digest_failed
 [[ "$TREE_SHA256" =~ $SHA256_RE ]] || die tree_digest_invalid
+failure_reason=rendered_unit_write_failed
 /usr/bin/python3 - "$TEMPLATE_COPY" "$UNIT_NEXT" "$FINAL" "$SOURCE_COMMIT" "$TREE_SHA256" <<'PY'
 import pathlib
 import sys
@@ -281,23 +360,26 @@ if "@@" in raw:
     raise SystemExit("unit has unresolved placeholder")
 target.write_text(raw, encoding="utf-8")
 PY
-chmod 0644 "$UNIT_NEXT"
-chown root:root "$UNIT_NEXT"
-systemd-analyze verify "$UNIT_NEXT" >/dev/null
+failure_reason=unexpected_failure
+chmod 0644 "$UNIT_NEXT" || die rendered_unit_chmod_failed
+chown root:root "$UNIT_NEXT" || die rendered_unit_chown_failed
+systemd-analyze verify "$UNIT_NEXT" >/dev/null || die rendered_unit_verify_failed
 
 systemctl is-active --quiet "$LEGACY_UNIT" && legacy_was_active=1 || true
 systemctl is-enabled --quiet "$LEGACY_UNIT" && legacy_was_enabled=1 || true
 if [[ -e "$UNIT_PATH" ]]; then
     [[ -f "$UNIT_PATH" && ! -L "$UNIT_PATH" ]] || die existing_unit_invalid
     cmp -s "$UNIT_PATH" "$UNIT_NEXT" || die existing_unit_mismatch
-    cp --preserve=mode,ownership,timestamps "$UNIT_PATH" "$PREVIOUS_UNIT"
+    cp --preserve=mode,ownership,timestamps "$UNIT_PATH" "$PREVIOUS_UNIT" \
+        || die previous_unit_copy_failed
     unit_preexisted=1
 fi
-install -o root -g root -m 0644 "$UNIT_NEXT" "$UNIT_PATH"
+install -o root -g root -m 0644 "$UNIT_NEXT" "$UNIT_PATH" \
+    || die standalone_unit_publish_failed
 cutover_started=1
-systemctl daemon-reload
-systemctl disable --now "$LEGACY_UNIT"
-systemctl enable --now "$UNIT_NAME"
+systemctl daemon-reload || die daemon_reload_failed
+systemctl disable --now "$LEGACY_UNIT" || die legacy_disable_failed
+systemctl enable --now "$UNIT_NAME" || die standalone_enable_failed
 
 for _ in $(seq 1 30); do
     systemctl is-active --quiet "$UNIT_NAME" && [[ -S "$SOCKET" ]] && break
