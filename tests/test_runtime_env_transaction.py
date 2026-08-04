@@ -1754,7 +1754,8 @@ def test_legacy_projection_exemption_is_one_time_but_same_transaction_resumes(
             return_value=retrieval_failures,
         ),
         patch(
-            "agent_runtime_ops.domain.runtime_apply.live_runtime_truth"
+            "agent_runtime_ops.domain.runtime_apply.live_runtime_truth",
+            return_value=(truth, []),
         ) as later_truth,
     ):
         ok, reason = _restore_and_verify_backup(
@@ -1764,10 +1765,10 @@ def test_legacy_projection_exemption_is_one_time_but_same_transaction_resumes(
             state_root=state_root,
         )
 
-    assert ok is False
-    assert reason.startswith("rollback_live_failed:")
-    later_truth.assert_not_called()
-    assert pending_rollback_backup(state_root, "oc20") == second_backup
+    assert ok is True
+    assert reason == "rollback_applied_verified_legacy_projection_absence"
+    later_truth.assert_called_once_with("oc20", state_root)
+    assert pending_rollback_backup(state_root, "oc20") is None
 
 
 def test_legacy_projection_exemption_requires_exact_pending_backup(
@@ -1812,7 +1813,7 @@ def test_legacy_projection_exemption_requires_exact_pending_backup(
     )
 
 
-def test_legacy_projection_exemption_cannot_be_reused_by_fresh_same_backup_transaction(
+def test_legacy_projection_exemption_records_each_fresh_same_backup_transaction(
     tmp_path: Path,
 ) -> None:
     runtime_dir = tmp_path / "runtime"
@@ -1847,21 +1848,21 @@ def test_legacy_projection_exemption_cannot_be_reused_by_fresh_same_backup_trans
         rollback_transaction_path(state_root).read_text(encoding="utf-8")
     )["transaction_id"]
     assert fresh_transaction_id != first_transaction_id
-    assert not legacy_retrieval_projection_failures_may_be_expected(
+    assert legacy_retrieval_projection_failures_may_be_expected(
         state_root,
         "oc20",
         backup_dir,
         failures,
     )
-    with pytest.raises(
-        RuntimeError,
-        match="legacy retrieval migration exemption was already consumed",
-    ):
-        consume_legacy_retrieval_projection_exemption(
-            state_root,
-            "oc20",
-            backup_dir,
-        )
+    second_receipt = consume_legacy_retrieval_projection_exemption(
+        state_root,
+        "oc20",
+        backup_dir,
+    )
+    assert second_receipt != first_receipt
+    assert first_receipt.is_file()
+    second_payload = json.loads(second_receipt.read_text(encoding="utf-8"))
+    assert second_payload["rollback_transaction_id"] == fresh_transaction_id
     assert pending_rollback_backup(state_root, "oc20") == backup_dir
 
 
