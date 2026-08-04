@@ -52,6 +52,13 @@ HERMES_P1_LABEL_SUFFIXES = {
 HERMES_P1_DECISION_DIGEST = (
     "sha256:fd4d1068407d0b28d41e7813f8cef7b193a5fe43f39db166588911e6fde3bbb5"
 )
+
+
+def digest_path_component(value: object) -> str:
+    digest = str(value or "")
+    if SHA256_RE.fullmatch(digest) is None:
+        raise ValueError("digest path component requires an exact sha256 digest")
+    return digest.removeprefix("sha256:")
 ATTACHMENT_CONTRACT_KEYS = {
     "attachment_decision_digest",
     "caller_explicit",

@@ -1131,7 +1131,7 @@ def test_every_hermes_profile_isolates_p1_state_by_binding_digest() -> None:
         text = template.read_text(encoding="utf-8")
         assert (
             'source: "{{ target_home }}/.hermes/agent-runtime/kwrag-p1-state/'
-            '{{ retrieval_binding_digest }}"' in text
+            '{{ retrieval_binding_path_component }}"' in text
         )
         assert "target: /opt/data/kwrag-p1-attachment" in text
 
