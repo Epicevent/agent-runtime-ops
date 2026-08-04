@@ -1393,12 +1393,6 @@ class CliReleaseRolloutTests(unittest.TestCase):
     def test_rollout_refuses_p1_attachment_fleet_promotion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            write_state(root)
-            route = next(
-                item
-                for item in load_runtime_bindings(root)
-                if item.linux_account == "oc20"
-            )
             source = RuntimeTarget(
                 target="oc20",
                 family="hermes",
@@ -1411,7 +1405,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
                     "retrieval_attachment_contract": {"schema": "fixture"},
                 },
                 runtime_profile="hermes-runtime-customer",
-                route=route,
+                route=binding("oc20", "hermes", "customer", 30689, 30690),
             )
             output = io.StringIO()
             with (

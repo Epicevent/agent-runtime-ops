@@ -336,6 +336,16 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
         source_desired, source_profile = _desired_from_live_image_truth(from_slot, state_root)
         if source_desired.runtime_class != "customer":
             raise ValueError(f"image-promote source must be a customer target: {from_slot}")
+        if (
+            source_desired.image_spec.get("retrieval_enabled") is True
+            and isinstance(
+                source_desired.image_spec.get("retrieval_attachment_contract"), dict
+            )
+        ):
+            raise ValueError(
+                "Hermes P1 attachment remains bounded to image-canary; "
+                "fleet promotion is unsupported"
+            )
         print("phase=projection_gate")
         rendered = render_compose(source_profile, source_desired)
         projection_failed = 0
@@ -401,13 +411,6 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
         if source_desired.image_spec.get("retrieval_enabled") is True:
             print("phase=retrieval_source_gate")
             source_retrieval_enabled = True
-            if isinstance(
-                source_desired.image_spec.get("retrieval_attachment_contract"), dict
-            ):
-                raise ValueError(
-                    "Hermes P1 attachment remains bounded to image-canary; "
-                    "fleet promotion is unsupported"
-                )
         wrapper_image = str(source_desired.image_spec.get("wrapper_image") or "")
         product_image = str(source_desired.image_spec.get("product_image") or "")
         image_spec = image_spec_from_direct_images(wrapper_image, product_image)
