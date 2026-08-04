@@ -50,6 +50,7 @@ flock -n 9 || die install_lock_busy
 SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd -P)
 TEMPLATE=$SCRIPT_DIR/agent-runtime-root-action-broker-standalone.service
 REQUIREMENTS=$SCRIPT_DIR/../requirements.lock
+WHEELHOUSE=$SCRIPT_DIR/wheelhouse
 [[ -f "$TEMPLATE" && ! -L "$TEMPLATE" ]] || die unit_template_invalid
 [[ "$(sha256sum "$TEMPLATE" | awk '{print $1}')" == "$TEMPLATE_SHA256" ]] \
     || die unit_template_sha256_mismatch
@@ -176,6 +177,20 @@ install -o root -g root -m 0400 "$REQUIREMENTS" "$REQUIREMENTS_COPY"
     || die copied_requirements_lock_sha256_mismatch
 receipt_enabled=1
 
+[[ -d "$WHEELHOUSE" && ! -L "$WHEELHOUSE" ]] || die wheelhouse_identity_invalid
+wheel_count=$(find "$WHEELHOUSE" -xdev -mindepth 1 -maxdepth 1 \
+    -type f -name '*.whl' -links 1 -printf . | wc -c) \
+    || die wheelhouse_scan_failed
+[[ "$wheel_count" -ge 1 && "$wheel_count" -le 64 ]] || die wheelhouse_file_count_invalid
+if find "$WHEELHOUSE" -xdev -mindepth 1 -maxdepth 1 \
+    ! \( -type f -name '*.whl' -links 1 \) -print -quit | grep -q .; then
+    die wheelhouse_entry_invalid
+fi
+wheelhouse_bytes=$(find "$WHEELHOUSE" -xdev -mindepth 1 -maxdepth 1 \
+    -type f -name '*.whl' -links 1 -printf '%s\n' \
+    | awk '{total += $1} END {print total + 0}') || die wheelhouse_scan_failed
+[[ "$wheelhouse_bytes" -le 67108864 ]] || die wheelhouse_too_large
+
 tree_digest() {
     /usr/bin/python3 - "$1" <<'PY'
 import hashlib
@@ -244,21 +259,26 @@ else
         || die copied_wheel_sha256_mismatch
     STAGE=$TMP/release
     install -d -o root -g root -m 0755 "$STAGE"
-    /usr/bin/python3 -m venv --copies "$STAGE/.venv"
+    /usr/bin/python3 -m venv --copies "$STAGE/.venv" || die venv_creation_failed
     "$STAGE/.venv/bin/python" -I -B -m pip install \
-        --require-hashes -r "$REQUIREMENTS_COPY" >/dev/null
+        --no-index --only-binary=:all: --find-links "$WHEELHOUSE" \
+        --require-hashes -r "$REQUIREMENTS_COPY" >/dev/null \
+        || die dependency_install_failed
     "$STAGE/.venv/bin/python" -I -B -m pip install \
-        --no-deps --force-reinstall "$WHEEL_COPY" >/dev/null
-    printf '%s\n' "$SOURCE_COMMIT" >"$STAGE/.source-commit"
-    printf '%s\n' "$WHEEL_SHA256" >"$STAGE/.source-wheel-sha256"
-    chown -R root:root "$STAGE"
-    chmod -R go-w "$STAGE"
+        --no-index --no-deps --force-reinstall "$WHEEL_COPY" >/dev/null \
+        || die source_wheel_install_failed
+    printf '%s\n' "$SOURCE_COMMIT" >"$STAGE/.source-commit" \
+        || die source_commit_marker_write_failed
+    printf '%s\n' "$WHEEL_SHA256" >"$STAGE/.source-wheel-sha256" \
+        || die source_wheel_marker_write_failed
+    chown -R root:root "$STAGE" || die staged_release_chown_failed
+    chmod -R go-w "$STAGE" || die staged_release_chmod_failed
     validate_release "$STAGE" "$WHEEL_SHA256" || die staged_release_invalid
-    mv -- "$STAGE" "$FINAL"
-    sync -f "$RELEASE_ROOT"
+    mv -- "$STAGE" "$FINAL" || die release_publish_failed
+    sync -f "$RELEASE_ROOT" || die release_parent_fsync_failed
 fi
 
-TREE_SHA256=$(tree_digest "$FINAL")
+TREE_SHA256=$(tree_digest "$FINAL") || die tree_digest_failed
 [[ "$TREE_SHA256" =~ $SHA256_RE ]] || die tree_digest_invalid
 /usr/bin/python3 - "$TEMPLATE_COPY" "$UNIT_NEXT" "$FINAL" "$SOURCE_COMMIT" "$TREE_SHA256" <<'PY'
 import pathlib
@@ -281,9 +301,9 @@ if "@@" in raw:
     raise SystemExit("unit has unresolved placeholder")
 target.write_text(raw, encoding="utf-8")
 PY
-chmod 0644 "$UNIT_NEXT"
-chown root:root "$UNIT_NEXT"
-systemd-analyze verify "$UNIT_NEXT" >/dev/null
+chmod 0644 "$UNIT_NEXT" || die rendered_unit_chmod_failed
+chown root:root "$UNIT_NEXT" || die rendered_unit_chown_failed
+systemd-analyze verify "$UNIT_NEXT" >/dev/null || die rendered_unit_verify_failed
 
 systemctl is-active --quiet "$LEGACY_UNIT" && legacy_was_active=1 || true
 systemctl is-enabled --quiet "$LEGACY_UNIT" && legacy_was_enabled=1 || true
@@ -295,9 +315,9 @@ if [[ -e "$UNIT_PATH" ]]; then
 fi
 install -o root -g root -m 0644 "$UNIT_NEXT" "$UNIT_PATH"
 cutover_started=1
-systemctl daemon-reload
-systemctl disable --now "$LEGACY_UNIT"
-systemctl enable --now "$UNIT_NAME"
+systemctl daemon-reload || die daemon_reload_failed
+systemctl disable --now "$LEGACY_UNIT" || die legacy_disable_failed
+systemctl enable --now "$UNIT_NAME" || die standalone_enable_failed
 
 for _ in $(seq 1 30); do
     systemctl is-active --quiet "$UNIT_NAME" && [[ -S "$SOCKET" ]] && break

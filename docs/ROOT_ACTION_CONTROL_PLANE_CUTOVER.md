@@ -22,8 +22,9 @@ user-ratified gate.
 ## Minimal standalone lifecycle
 
 The installer consumes one reviewed wheel, its SHA-256 digest, and the exact
-40-hex source commit. It builds dependencies from the repository's hash-locked
-requirements and materializes the result at the immutable path:
+40-hex source commit. It builds dependencies from the adjacent
+`systemd/wheelhouse/` with the repository's hash-locked requirements and
+`--no-index`, then materializes the result at the immutable path:
 
 ```text
 /opt/agent-runtime-root-action-broker/releases/<40-hex-source-commit>
@@ -45,6 +46,8 @@ legacy active/enabled intent. Once input copies are bound, both failed and
 successful terminal outcomes write a sanitized, root-owned, `svcops`-readable
 durable receipt under
 `/var/lib/agent-runtime-ops/install-receipts/`.
+The privileged build never depends on root network or cache state, and each
+pre-cutover build phase records a typed failure reason in that receipt.
 
 The rendered unit directly executes the commit-pinned release Python with
 `-I -B -m agent_runtime_ops.root_actions.service`. It contains no `opsctl`,

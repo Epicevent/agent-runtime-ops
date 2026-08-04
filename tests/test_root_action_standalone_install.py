@@ -33,6 +33,24 @@ def test_standalone_installer_has_one_exact_artifact_contract() -> None:
     assert "/opt/agent-runtime-ops/current" not in source
 
 
+def test_standalone_installer_is_offline_and_phase_specific() -> None:
+    source = _source()
+    assert "WHEELHOUSE=$SCRIPT_DIR/wheelhouse" in source
+    assert "wheelhouse_identity_invalid" in source
+    assert "wheelhouse_entry_invalid" in source
+    assert "wheelhouse_file_count_invalid" in source
+    assert "wheelhouse_too_large" in source
+    assert '--no-index --only-binary=:all: --find-links "$WHEELHOUSE"' in source
+    assert "venv_creation_failed" in source
+    assert "dependency_install_failed" in source
+    assert "source_wheel_install_failed" in source
+    assert "staged_release_chown_failed" in source
+    assert "release_parent_fsync_failed" in source
+    assert "daemon_reload_failed" in source
+    assert "legacy_disable_failed" in source
+    assert "standalone_enable_failed" in source
+
+
 def test_standalone_installer_builds_only_from_hash_locked_inputs() -> None:
     source = _source()
     template_digest = re.search(r"^TEMPLATE_SHA256=([0-9a-f]{64})$", source, re.M)
@@ -44,7 +62,7 @@ def test_standalone_installer_builds_only_from_hash_locked_inputs() -> None:
     assert template_digest.group(1) == hashlib.sha256(UNIT.read_bytes()).hexdigest()
     assert lock_digest.group(1) == hashlib.sha256(LOCK.read_bytes()).hexdigest()
     assert "--require-hashes -r \"$REQUIREMENTS_COPY\"" in source
-    assert "--no-deps --force-reinstall \"$WHEEL_COPY\"" in source
+    assert "--no-index --no-deps --force-reinstall \"$WHEEL_COPY\"" in source
     assert "/usr/bin/python3 -m venv --copies \"$STAGE/.venv\"" in source
     assert "copied_wheel_sha256_mismatch" in source
     assert "unit_template_sha256_mismatch" in source
