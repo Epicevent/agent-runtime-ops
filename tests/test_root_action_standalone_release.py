@@ -49,6 +49,8 @@ def test_standalone_unit_keeps_the_existing_broker_security_boundary() -> None:
         "RestrictAddressFamilies=AF_UNIX",
         "ReadWritePaths=/var/lib/agent-runtime-ops/root-actions /run/agent-runtime-ops",
         "EnvironmentFile=/etc/agent-runtime-ops/root-action-webauthn.env",
+        "ConditionFileIsExecutable=@@BROKER_RELEASE_DIR@@/.venv/bin/python",
+        "ConditionPathExists=/etc/agent-runtime-ops/root-action-webauthn.env",
     ):
         assert expected in unit
     assert "WantedBy=multi-user.target" in unit
@@ -67,7 +69,12 @@ def test_standalone_unit_targets_the_existing_broker_not_a_new_control_plane() -
 @pytest.mark.skipif(shutil.which("systemd-analyze") is None, reason="systemd unavailable")
 def test_rendered_standalone_unit_is_accepted_by_systemd(tmp_path: Path) -> None:
     rendered = tmp_path / "agent-runtime-root-action-broker-standalone.service"
-    rendered.write_text(_rendered_unit(), encoding="utf-8")
+    syntax_only = _rendered_unit().replace(
+        f"ExecStart={RELEASE}/.venv/bin/python -I -B -m "
+        "agent_runtime_ops.root_actions.service",
+        "ExecStart=/bin/true",
+    )
+    rendered.write_text(syntax_only, encoding="utf-8")
     result = subprocess.run(
         ["systemd-analyze", "verify", str(rendered)],
         check=False,

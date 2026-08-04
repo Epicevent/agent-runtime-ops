@@ -2,8 +2,8 @@
 Description=Standalone root-action WebAuthn approval and execution broker
 After=local-fs.target
 ConditionPathIsDirectory=@@BROKER_RELEASE_DIR@@
-ConditionPathIsFile=@@BROKER_RELEASE_DIR@@/.venv/bin/python
-ConditionPathIsFile=/etc/agent-runtime-ops/root-action-webauthn.env
+ConditionFileIsExecutable=@@BROKER_RELEASE_DIR@@/.venv/bin/python
+ConditionPathExists=/etc/agent-runtime-ops/root-action-webauthn.env
 
 [Service]
 Type=simple
