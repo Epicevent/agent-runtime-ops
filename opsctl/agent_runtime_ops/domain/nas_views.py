@@ -22,6 +22,7 @@ import json
 import os
 import sqlite3
 import re
+import tempfile
 from pathlib import Path
 
 from ..host.fstab import managed_fstab_marker
@@ -501,15 +502,53 @@ def drop_view_record(views: dict, slot: str, corpus: str = PRIMARY_CORPUS) -> bo
     return removed
 
 
+def effective_granted_paths(record: dict) -> list[str]:
+    """Return paths that the last successful mutation actually bound."""
+    requested_raw = record.get("paths") or []
+    missing_raw = record.get("rooms_missing_media") or []
+    if not isinstance(requested_raw, list) or not isinstance(missing_raw, list):
+        raise ValueError("granted_paths_not_lists")
+    requested = [validate_relative_path(value) for value in requested_raw]
+    missing = [validate_relative_path(value) for value in missing_raw]
+    if len(set(requested)) != len(requested) or len(set(missing)) != len(missing):
+        raise ValueError("granted_paths_duplicate")
+    unexpected = set(missing).difference(requested)
+    if unexpected:
+        raise ValueError("missing_path_not_requested")
+    missing_set = set(missing)
+    return [value for value in requested if value not in missing_set]
+
+
+def _svcops_gid() -> int:
+    import grp
+
+    return grp.getgrnam("svcops").gr_gid
+
+
 def save_views_state(state_root: Path, data: dict) -> None:
     data.setdefault("meta", {"schema_version": 1})
     path = state_path(state_root, VIEWS_STATE_NAME)
-    tmp = path.with_name(path.name + ".tmp")
-    with tmp.open("w", encoding="utf-8") as handle:
-        handle.write(dump_yaml(data))
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp, path)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    tmp = Path(tmp_name)
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o640)
+        else:
+            os.chmod(tmp, 0o640)
+        if getattr(os, "geteuid", lambda: -1)() == 0:
+            if not hasattr(os, "fchown"):
+                raise OSError("fchown unavailable for root-owned state")
+            os.fchown(fd, 0, _svcops_gid())
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            handle.write(dump_yaml(data))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        tmp.unlink(missing_ok=True)
     if hasattr(os, "O_DIRECTORY"):
         fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:

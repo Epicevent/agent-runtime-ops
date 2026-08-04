@@ -20,10 +20,12 @@ from agent_runtime_ops.commands.nas_view import (
     cmd_nas_view_assign,
     cmd_nas_view_detach,
     cmd_nas_view_preflight,
+    cmd_nas_view_restore,
     cmd_nas_view_status,
 )
 from agent_runtime_ops.domain.nas_views import (
     Corpus,
+    effective_granted_paths,
     load_views_state,
     put_view_record,
     save_views_state,
@@ -222,6 +224,35 @@ class SharedMasterAssignTest(unittest.TestCase):
         self.assertIn("selected_bind_count=1", output.getvalue())
         self.assertIn("mutates=false", output.getvalue())
         self.assertIn("view_preflight_status=pass", output.getvalue())
+        ensure_dirs.assert_not_called()
+        write_fstab.assert_not_called()
+        mount_master.assert_not_called()
+        bind.assert_not_called()
+
+    def test_require_content_ready_rejects_missing_path_before_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_state(root)
+            output = io.StringIO()
+            plan = SimpleNamespace(room_binds=[], missing_rooms=["mails/seung23"])
+            with (
+                patch("agent_runtime_ops.commands.nas_view._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.nas_view._findmnt_one", return_value=(1, "", [])),
+                patch("agent_runtime_ops.commands.nas_view.shared_master_for_share", return_value=Path(tmp)),
+                patch("agent_runtime_ops.commands.nas_view._validate_shared_master"),
+                patch("agent_runtime_ops.commands.nas_view.build_view_plan", return_value=plan),
+                patch("agent_runtime_ops.commands.nas_view._ensure_hidden_dirs") as ensure_dirs,
+                patch("agent_runtime_ops.commands.nas_view._write_managed_fstab_entry") as write_fstab,
+                patch("agent_runtime_ops.commands.nas_view._mount_master") as mount_master,
+                patch("agent_runtime_ops.commands.nas_view.bind_ro") as bind,
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_nas_view_preflight(argparse.Namespace(
+                    state_root=str(root), slot="oc3", user_id="seung23", share=SHARE,
+                    path=["groupware/approval/example", "mails/seung23"], require_content_ready=True,
+                ))
+        self.assertEqual(rc, 1)
+        self.assertIn("reason=content_paths_missing", output.getvalue())
         ensure_dirs.assert_not_called()
         write_fstab.assert_not_called()
         mount_master.assert_not_called()
@@ -466,7 +497,7 @@ class SharedMasterAssignTest(unittest.TestCase):
             "user_id": "seung23", "share": SHARE, "paths": ["mails/seung23"],
             "master_mode": "shared_policy_mount", "master_path": "/mnt/nas/hanpass_groupware",
         }
-        plan = SimpleNamespace(user_id="seung23")
+        plan = SimpleNamespace(user_id="seung23", missing_rooms=[])
         with (
             patch("agent_runtime_ops.commands.nas_view._ensure_hidden_dirs"),
             patch("agent_runtime_ops.commands.nas_view._shared_master_for_record", return_value=Path("/mnt/nas/hanpass_groupware")),
@@ -479,6 +510,92 @@ class SharedMasterAssignTest(unittest.TestCase):
         self.assertEqual(failed, 0)
         mount_master.assert_not_called()
         self.assertEqual(build.call_args.kwargs["master_override"], Path("/mnt/nas/hanpass_groupware"))
+        self.assertEqual(record["rooms_bound"], 1)
+        self.assertEqual(record["rooms_missing_media"], [])
+
+    def test_restore_persists_updated_bound_path_state(self) -> None:
+        views = {"views": {}, "corpus_views": {"oc3": {"groupware": {"share": SHARE}}}}
+        with (
+            patch("agent_runtime_ops.commands.nas_view._is_root", return_value=True),
+            patch("agent_runtime_ops.commands.nas_view.load_views_state", return_value=views),
+            patch("agent_runtime_ops.commands.nas_view._restore_lock", return_value=contextlib.nullcontext()),
+            patch("agent_runtime_ops.commands.nas_view.wait_for_nas_ready", return_value={}),
+            patch("agent_runtime_ops.commands.nas_view._run_text", return_value=SimpleNamespace(returncode=0)),
+            patch("agent_runtime_ops.commands.nas_view._restore_views", return_value=0),
+            patch("agent_runtime_ops.commands.nas_view.save_views_state") as save,
+        ):
+            rc = cmd_nas_view_restore(SimpleNamespace(state_root="/unused", nas_wait_seconds=0))
+        self.assertEqual(rc, 0)
+        save.assert_called_once_with(Path("/unused"), views)
+
+    def test_effective_paths_exclude_missing_intent_and_reject_drift(self) -> None:
+        record = {
+            "paths": ["groupware/approval/example", "mails/seung23"],
+            "rooms_missing_media": ["mails/seung23"],
+        }
+        self.assertEqual(effective_granted_paths(record), ["groupware/approval/example"])
+        with self.assertRaisesRegex(ValueError, "not_requested"):
+            effective_granted_paths({"paths": ["a/b"], "rooms_missing_media": ["c/d"]})
+
+    def test_status_reports_only_paths_actually_bound_by_last_mutation(self) -> None:
+        master = Path("/mnt/nas/hanpass_groupware")
+        record = {
+            "user_id": "seung23", "share": SHARE,
+            "paths": ["groupware/approval/example", "mails/seung23"],
+            "rooms_missing_media": ["mails/seung23"],
+            "master_mode": "shared_policy_mount", "master_path": master.as_posix(),
+        }
+        records = {"views": {}, "corpus_views": {"oc3": {"groupware": record}}}
+        fstab = f"{SHARE} {master.as_posix()} cifs credentials=/not-output,rw 0 0\n"
+        observed_records: list[dict] = []
+
+        def findmnt(path: Path):
+            return 0, "", [{
+                "target": str(path), "source": SHARE,
+                "fstype": "cifs" if path == master else "none",
+                "options": "rw" if path == master else "ro,nosuid,nodev,bind",
+            }]
+
+        def evidence(_slot: str, _corpus: str, observed: dict, _master: Path):
+            observed_records.append(observed)
+            return "yes", [_valid_grant_item("groupware/approval/example")], True, True
+
+        output = io.StringIO()
+        with (
+            patch("agent_runtime_ops.commands.nas_view.load_views_state", return_value=records),
+            patch("agent_runtime_ops.commands.nas_view._shared_master_for_record", return_value=master),
+            patch("agent_runtime_ops.commands.nas_view.shared_master_for_share", return_value=master),
+            patch("agent_runtime_ops.commands.nas_view._findmnt_one", side_effect=findmnt),
+            patch("agent_runtime_ops.commands.nas_view._read_fstab", return_value=fstab),
+            patch("agent_runtime_ops.commands.nas_view._is_root", return_value=False),
+            patch("agent_runtime_ops.commands.nas_view.failed_cifs_mount_units", return_value=([], None)),
+            patch("agent_runtime_ops.commands.nas_view._view_grant_evidence", side_effect=evidence),
+            contextlib.redirect_stdout(output),
+        ):
+            rc = cmd_nas_view_status(SimpleNamespace(state_root="/unused"))
+        self.assertEqual(rc, 0, output.getvalue())
+        self.assertIn('view_1_paths_json=["groupware/approval/example"]', output.getvalue())
+        self.assertEqual(observed_records[0]["paths"], ["groupware/approval/example"])
+        self.assertEqual(record["paths"], ["groupware/approval/example", "mails/seung23"])
+
+    def test_state_writer_sets_svcops_identity_before_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with (
+                patch("agent_runtime_ops.domain.nas_views.os.geteuid", return_value=0, create=True),
+                patch("agent_runtime_ops.domain.nas_views.os.fchown", create=True) as fchown,
+                patch("agent_runtime_ops.domain.nas_views._svcops_gid", return_value=1048),
+            ):
+                save_views_state(root, {"views": {}, "corpus_views": {}})
+        fchown.assert_called_once()
+        self.assertEqual(fchown.call_args.args[1:], (0, 1048))
+
+    @unittest.skipUnless(os.name == "posix", "POSIX mode semantics")
+    def test_state_writer_publishes_group_readable_not_world_readable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            save_views_state(root, {"views": {}, "corpus_views": {}})
+            self.assertEqual((root / "nas-views.yaml").stat().st_mode & 0o777, 0o640)
 
     def test_status_is_honest_about_rw_collector_but_requires_ro_entry(self) -> None:
         master = Path("/mnt/nas/hanpass_groupware")

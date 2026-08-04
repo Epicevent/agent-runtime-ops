@@ -25,6 +25,7 @@ from ..domain.nas_views import (
     corpus_for_share,
     crontab_has_reboot_restore,
     drop_view_record,
+    effective_granted_paths,
     fstab_boot_entry_present,
     shared_master_fstab_entry_present,
     get_view_record,
@@ -369,6 +370,13 @@ def cmd_nas_view_preflight(args: argparse.Namespace) -> int:
                 if bool(getattr(args, "require_content_ready", False)):
                     raise ValueError("content_validation_incomplete")
 
+        if (
+            plan is not None
+            and bool(getattr(args, "require_content_ready", False))
+            and plan.missing_rooms
+        ):
+            raise ValueError("content_paths_missing")
+
         print("view_preflight_schema=agent-runtime-nas-view-preflight/v1")
         print(f"target={slot}")
         print(f"corpus={spec.name}")
@@ -685,13 +693,21 @@ def cmd_nas_view_status(args: argparse.Namespace) -> int:
     exit_code = 0
     for index, (slot, corpus, record) in enumerate(records, start=1):
         prefix = f"view_{index}"
+        status_record = dict(record)
+        status_paths_valid = True
+        try:
+            if corpus_named(corpus)[1].layout == "granted_paths":
+                status_record["paths"] = effective_granted_paths(record)
+        except Exception:
+            status_record["paths"] = []
+            status_paths_valid = False
         print(f"{prefix}_target={slot}")
         print(f"{prefix}_corpus={corpus}")
         print(f"{prefix}_user_id={record.get('user_id', '')}")
         print(f"{prefix}_share={record.get('share', '')}")
         print(f"{prefix}_package={record.get('package', '')}")
-        print(f"{prefix}_paths_json={json.dumps(record.get('paths') or [], ensure_ascii=False, separators=(',', ':'))}")
-        healthy = True
+        print(f"{prefix}_paths_json={json.dumps(status_record.get('paths') or [], ensure_ascii=False, separators=(',', ':'))}")
+        healthy = status_paths_valid
         try:
             master_mode = _record_master_mode(record)
             if master_mode == _MASTER_MODE_SHARED:
@@ -739,7 +755,7 @@ def cmd_nas_view_status(args: argparse.Namespace) -> int:
             grant_evidence,
             grant_evidence_complete,
             grant_evidence_green,
-        ) = _view_grant_evidence(slot, corpus, record, master)
+        ) = _view_grant_evidence(slot, corpus, status_record, master)
         print(f"{prefix}_grant_evidence_applicable={evidence_applicable}")
         print(f"{prefix}_grant_evidence_count={len(grant_evidence)}")
         print(
@@ -1012,6 +1028,12 @@ def cmd_nas_view_restore(args: argparse.Namespace) -> int:
                 boot_failed += 1
             print(f"cifs_mount_all={'ok' if proc.returncode == 0 else 'rc=' + str(proc.returncode)}")
         failed = _restore_views(state_root, records)
+        if records:
+            try:
+                save_views_state(state_root, views)
+            except Exception as exc:
+                failed += 1
+                print(f"restore_state_persist_failed reason={exc}")
     ok = failed == 0 and boot_failed == 0
     print(f"view_restore_status={'ok' if ok else 'fail'}")
     return 0 if ok else 1
@@ -1045,6 +1067,8 @@ def _restore_views(state_root: Path, records: list) -> int:
             ok, reason, bound_rooms = _apply_binds(plan)
             if not ok:
                 raise ValueError(f"bind_failed: {reason}")
+            record["rooms_bound"] = bound_rooms
+            record["rooms_missing_media"] = list(getattr(plan, "missing_rooms", []) or [])
             print(
                 f"restored target={slot} corpus={corpus} user_id={user_id} "
                 f"master_mode={master_mode} rooms_bound={bound_rooms}"

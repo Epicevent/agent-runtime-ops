@@ -113,34 +113,39 @@ def _run_restore(*, readiness: dict, mount_all_rc: int = 0, nas_wait_seconds: fl
         ) as run_text,
         patch("agent_runtime_ops.commands.nas_view._ensure_hidden_dirs"),
         patch("agent_runtime_ops.commands.nas_view._mount_master", return_value=(True, "ok")),
-        patch("agent_runtime_ops.commands.nas_view.build_view_plan", return_value=SimpleNamespace(user_id="7362168")),
+        patch(
+            "agent_runtime_ops.commands.nas_view.build_view_plan",
+            return_value=SimpleNamespace(user_id="7362168", missing_rooms=[]),
+        ),
         patch("agent_runtime_ops.commands.nas_view._apply_binds", return_value=(True, "ok", 13)),
+        patch("agent_runtime_ops.commands.nas_view.save_views_state") as save_state,
         patch("agent_runtime_ops.commands.nas_view._append_action_log"),
         contextlib.redirect_stdout(stdout),
     ):
         rc = cmd_nas_view_restore(SimpleNamespace(state_root="/unused", nas_wait_seconds=nas_wait_seconds))
-    return rc, stdout.getvalue(), wait, run_text
+    return rc, stdout.getvalue(), wait, run_text, save_state
 
 
 class RestoreWaitsForNasTest(unittest.TestCase):
     def test_restore_probes_nas_and_remounts_fstab(self) -> None:
-        rc, output, wait, run_text = _run_restore(readiness={"192.168.0.222": True})
+        rc, output, wait, run_text, save_state = _run_restore(readiness={"192.168.0.222": True})
         self.assertEqual(rc, 0, output)
         self.assertEqual(wait.call_args.kwargs["total_seconds"], 42.0)
         self.assertEqual(wait.call_args.args[0], ["192.168.0.222"])
         self.assertIn("nas_ready host=192.168.0.222 ready=yes", output)
         self.assertIn("cifs_mount_all=ok", output)
         self.assertEqual(run_text.call_args.args[0], ["mount", "-a", "-t", "cifs"])
+        save_state.assert_called_once()
         self.assertIn("view_restore_status=ok", output)
 
     def test_nas_timeout_fails_loudly(self) -> None:
-        rc, output, _, _ = _run_restore(readiness={"192.168.0.222": False})
+        rc, output, _, _, _ = _run_restore(readiness={"192.168.0.222": False})
         self.assertEqual(rc, 1, output)
         self.assertIn("nas_ready host=192.168.0.222 ready=timeout", output)
         self.assertIn("view_restore_status=fail", output)
 
     def test_mount_all_failure_fails_loudly(self) -> None:
-        rc, output, _, _ = _run_restore(readiness={"192.168.0.222": True}, mount_all_rc=32)
+        rc, output, _, _, _ = _run_restore(readiness={"192.168.0.222": True}, mount_all_rc=32)
         self.assertEqual(rc, 1, output)
         self.assertIn("cifs_mount_all=rc=32", output)
         self.assertIn("view_restore_status=fail", output)
