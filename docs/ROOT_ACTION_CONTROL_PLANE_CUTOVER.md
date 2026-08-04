@@ -1,8 +1,9 @@
 # Standalone root-action broker cutover
 
 This source slice separates the root-action broker process from the mutable
-`opsctl`, `current`, `install.sh`, update, and self-update lifecycle. It does not
-install or switch a host.
+`opsctl`, `current`, `install.sh`, update, and self-update lifecycle. The
+standalone installer is one bounded root action; it is not a permanent general
+administration CLI.
 
 ## What is preserved
 
@@ -20,18 +21,30 @@ user-ratified gate.
 
 ## Minimal standalone lifecycle
 
-The root install card must first materialize and attest one reviewed source
-release at the immutable path:
+The installer consumes one reviewed wheel, its SHA-256 digest, and the exact
+40-hex source commit. It builds dependencies from the repository's hash-locked
+requirements and materializes the result at the immutable path:
 
 ```text
 /opt/agent-runtime-root-action-broker/releases/<40-hex-source-commit>
 ```
 
-That release uses the existing `.venv` layout. The install card must bind the
-source commit and complete release-tree digest, reject a dirty or mutable
-source, and render the three unit placeholders. Those privileged materialize,
-unit-publication, cutover, and rollback steps are deliberately not implemented
-as another permanent CLI or recovery state machine in this repository.
+Run the source-native action from a checkout matching the wheel source:
+
+```text
+sudo systemd/install-agent-runtime-root-action-broker-standalone.sh \
+  /absolute/path/agent_runtime_ops.whl \
+  <64-hex-wheel-sha256> \
+  <40-hex-source-commit>
+```
+
+The installer rejects mutable dependency inputs, computes the complete release
+tree digest, renders the three unit placeholders, disables the legacy broker,
+and enables the standalone unit. A failed cutover restores the prior unit and
+legacy active/enabled intent. Once input copies are bound, both failed and
+successful terminal outcomes write a sanitized, root-owned, `svcops`-readable
+durable receipt under
+`/var/lib/agent-runtime-ops/install-receipts/`.
 
 The rendered unit directly executes the commit-pinned release Python with
 `-I -B -m agent_runtime_ops.root_actions.service`. It contains no `opsctl`,
@@ -48,6 +61,6 @@ the existing direct AF_UNIX client. The OPS web repository owns its direct
 broker response validation and passkey UI. Neither seam requires a generic
 replacement CLI.
 
-Source landing, root installation, service cutover, bootstrap delivery,
-credential enrollment, web deployment, and browser-to-terminal-receipt E2E are
-separate gates. This slice grants none of those external actions.
+Source landing, execution of the root installer, bootstrap delivery, credential
+enrollment, web deployment, and browser-to-terminal-receipt E2E remain separate
+gates. The installer performs only release materialization and broker cutover.
