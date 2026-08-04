@@ -192,34 +192,22 @@ def test_rollout_builds_private_attachment_only_for_enabled_p1() -> None:
         "family": "hermes",
         "retrieval_attachment_contract": {"schema": "fixture"},
     }
-    disabled = SimpleNamespace(
-        slot="oc20", route=SimpleNamespace(instance_id="instance-oc20")
-    )
     enabled = SimpleNamespace(slot="oc20")
     profile = SimpleNamespace(name="profile", digest=DIGEST_A)
     prepared = build_hermes_p1_canary_inputs(slot="oc20", instance_id="instance-oc20")
-    with (
-        patch.object(
-            rollout,
-            "_desired_from_direct_images",
-            side_effect=[(disabled, profile), (enabled, profile)],
-        ) as desired_from_images,
-        patch.object(
-            rollout,
-            "build_hermes_p1_canary_inputs",
-            return_value=prepared,
-        ),
-    ):
+    capsule = SimpleNamespace(slot="oc20", family="hermes", attachment_data=prepared.attachment_data)
+    with patch.object(
+        rollout, "_desired_from_direct_images", return_value=(enabled, profile)
+    ) as desired_from_images:
         actual, actual_profile, actual_prepared = (
             rollout._desired_with_hermes_p1_canary(
-                "oc20", image_spec, Path("state"), retrieval_enabled=True
+                "oc20", image_spec, Path("state"), retrieval_enabled=True, capsule=capsule
             )
         )
     assert (
-        actual is enabled and actual_profile is profile and actual_prepared is prepared
+        actual is enabled and actual_profile is profile and actual_prepared is capsule
     )
-    assert desired_from_images.call_args_list[0].kwargs["retrieval_enabled"] is False
-    assert desired_from_images.call_args_list[1].kwargs == {
+    assert desired_from_images.call_args.kwargs == {
         "retrieval_enabled": True,
         "retrieval_attachment_data": prepared.attachment_data,
     }
@@ -232,18 +220,32 @@ def test_rollout_disabled_p1_has_no_product_probe_input() -> None:
     }
     disabled = SimpleNamespace(slot="oc20")
     profile = SimpleNamespace(name="profile", digest=DIGEST_A)
+    prepared_inputs = build_hermes_p1_canary_inputs(slot="oc20", instance_id="instance-oc20")
+    capsule = SimpleNamespace(slot="oc20", family="hermes", attachment_data=prepared_inputs.attachment_data)
     with patch.object(
         rollout,
         "_desired_from_direct_images",
         return_value=(disabled, profile),
     ) as desired_from_images:
         actual, actual_profile, prepared = rollout._desired_with_hermes_p1_canary(
-            "oc20", image_spec, Path("state"), retrieval_enabled=False
+            "oc20", image_spec, Path("state"), retrieval_enabled=False, capsule=capsule
         )
-    assert actual is disabled and actual_profile is profile and prepared is None
+    assert actual is disabled and actual_profile is profile and prepared is capsule
     desired_from_images.assert_called_once_with(
-        "oc20", image_spec, Path("state"), retrieval_enabled=False
+        "oc20", image_spec, Path("state"), retrieval_enabled=False, retrieval_attachment_data=None
     )
+
+
+def test_rollout_disabled_capsule_publishes_authority_without_invocation() -> None:
+    desired = SimpleNamespace(image_spec={"retrieval_enabled": False})
+    capsule = SimpleNamespace(family="openclaw")
+    with (
+        patch.object(rollout, "publish_runtime_capsule_authority") as authority,
+        patch.object(rollout, "run_openclaw_runtime_capsule_probe") as probe,
+    ):
+        rollout._run_direct_image_retrieval_probe("container", desired, capsule)
+    authority.assert_called_once_with(desired, capsule)
+    probe.assert_not_called()
 
 
 def test_runtime_input_publication_creates_missing_managed_state_parent(

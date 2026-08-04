@@ -20,10 +20,15 @@ from ..domain.image_specs import (
     profile_runtime_contract,
 )
 from ..domain.hermes_p1_canary import (
-    HermesP1CanaryInputs,
-    build_hermes_p1_canary_inputs,
-    publish_hermes_p1_runtime_inputs,
     run_hermes_p1_canary_probe,
+)
+from ..domain.kwrag_runtime_capsule import (
+    KwragRuntimeCapsule,
+    hermes_capsule_inputs,
+    load_runtime_capsule,
+    publish_runtime_capsule_authority,
+    publish_runtime_capsule_inputs,
+    run_openclaw_runtime_capsule_probe,
 )
 from ..domain.dev_recipe_runtime import ensure_dev_runtime_dir as _ensure_runtime_dir
 from ..domain.dev_recipe_runtime import upsert_runtime_env_file as _upsert_runtime_env_file
@@ -148,51 +153,53 @@ def _desired_with_hermes_p1_canary(
     state_root,
     *,
     retrieval_enabled: bool,
+    capsule: KwragRuntimeCapsule | None = None,
 ):
-    if image_spec.get("family") != "hermes" or not isinstance(
-        image_spec.get("retrieval_attachment_contract"), dict
-    ):
+    if not isinstance(image_spec.get("retrieval_attachment_contract"), dict):
         desired, profile = _desired_from_direct_images(
             slot,
             image_spec,
             state_root,
             retrieval_enabled=retrieval_enabled,
         )
+        if capsule is not None:
+            raise ValueError("runtime capsule requires a landed attachment contract")
         return desired, profile, None
-    disabled, profile = _desired_from_direct_images(
-        slot, image_spec, state_root, retrieval_enabled=False
-    )
-    if not retrieval_enabled:
-        return disabled, profile, None
-    prepared = build_hermes_p1_canary_inputs(
-        slot=slot, instance_id=disabled.route.instance_id
-    )
-    desired, enabled_profile = _desired_from_direct_images(
+    if capsule is None or capsule.slot != slot or capsule.family != image_spec.get("family"):
+        raise ValueError("exact published runtime capsule is required for attachment images")
+    desired, profile = _desired_from_direct_images(
         slot,
         image_spec,
         state_root,
-        retrieval_enabled=True,
-        retrieval_attachment_data=prepared.attachment_data,
+        retrieval_enabled=retrieval_enabled,
+        retrieval_attachment_data=capsule.attachment_data if retrieval_enabled else None,
     )
-    if enabled_profile != profile:
-        raise ValueError("Hermes P1 runtime profile changed during binding")
-    return desired, profile, prepared
+    return desired, profile, capsule
 
 
 def _prepare_direct_image_runtime(desired, profile, prepared) -> None:
     _prepare_runtime_env_for_direct_image(desired, profile)
     if isinstance(desired.image_spec.get("retrieval_attachment_contract"), dict):
-        publish_hermes_p1_runtime_inputs(desired, prepared)
+        publish_runtime_capsule_inputs(desired, prepared)
 
 
 def _run_direct_image_retrieval_probe(
-    container: str, desired, prepared: HermesP1CanaryInputs
+    container: str, desired, prepared: KwragRuntimeCapsule
 ) -> None:
-    proof = run_hermes_p1_canary_probe(container, desired, prepared)
+    publish_runtime_capsule_authority(desired, prepared)
+    if desired.image_spec.get("retrieval_enabled") is not True:
+        print("retrieval_canary_positive=disabled")
+        return
+    proof = (
+        run_hermes_p1_canary_probe(container, desired, hermes_capsule_inputs(prepared))
+        if prepared.family == "hermes"
+        else run_openclaw_runtime_capsule_probe(container)
+    )
     print(f"retrieval_canary_schema={proof['schema']}")
-    print("retrieval_canary_negative=zero_hits")
     print("retrieval_canary_positive=response_observed")
-    print("retrieval_canary_tamper=rejected")
+    if prepared.family == "hermes":
+        print("retrieval_canary_negative=zero_hits")
+        print("retrieval_canary_tamper=rejected")
 
 
 def cmd_rollout_image_plan(args: argparse.Namespace) -> int:
@@ -206,11 +213,13 @@ def cmd_rollout_image_plan(args: argparse.Namespace) -> int:
             slots = [binding.linux_account for binding in load_runtime_bindings(state_root) if binding.enabled]
         plans = []
         for slot in slots:
+            capsule_digest = str(getattr(args, "retrieval_runtime_capsule_sha256", "") or "")
             desired, profile, _prepared = _desired_with_hermes_p1_canary(
                 slot,
                 image_spec,
                 state_root,
                 retrieval_enabled=bool(getattr(args, "retrieval_enabled", False)),
+                capsule=load_runtime_capsule(slot, capsule_digest) if capsule_digest else None,
             )
             rendered = render_compose(profile, desired)
             checks = [
@@ -268,11 +277,13 @@ def _cmd_rollout_image_apply_slot(args: argparse.Namespace, *, required_runtime_
         return 2
     try:
         image_spec = _direct_image_spec_from_args(args)
+        capsule_digest = str(getattr(args, "retrieval_runtime_capsule_sha256", "") or "")
         desired, profile, prepared = _desired_with_hermes_p1_canary(
             slot,
             image_spec,
             state_root,
             retrieval_enabled=bool(getattr(args, "retrieval_enabled", False)),
+            capsule=load_runtime_capsule(slot, capsule_digest) if capsule_digest else None,
         )
         if desired.runtime_class != required_runtime_class:
             raise ValueError(f"{action_name} requires runtime_class={required_runtime_class}: {slot}")

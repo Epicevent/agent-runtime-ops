@@ -47,6 +47,12 @@ services:
       - "{{ target_home }}/.openclaw:/home/node/.openclaw"
       - "{{ target_home }}/.openclaw/workspace:/home/node/.openclaw/workspace"
       - "{{ target_home }}/.openclaw-auth-profile-secrets:/home/node/.config/openclaw"
+{% if retrieval_attachment_capable %}
+      - type: bind
+        source: "{{ target_home }}/.openclaw/agent-runtime/kwrag-p1-state/{{ retrieval_binding_path_component }}"
+        target: /run/kwrag
+        read_only: true
+{% endif %}
       # corpus (read-only knowledge): single-intent tree. read_only here is a
       # defense-in-depth second lock — the source mount / ro account is the
       # primary authority. Safe to stamp because nothing writable lives under it.

@@ -210,7 +210,7 @@ def _atomic_write_bytes(path: Path, payload: bytes, *, mode: int) -> None:
     temporary = Path(temporary_name)
     try:
         os.fchmod(descriptor, mode)
-        os.fchown(descriptor, 0, 0)
+        os.fchown(descriptor, 0, path.parent.stat().st_gid)
         offset = 0
         while offset < len(payload):
             offset += os.write(descriptor, payload[offset:])
