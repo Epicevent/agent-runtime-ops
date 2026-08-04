@@ -67,36 +67,53 @@ apt-get install -y --no-install-recommends \
   nodejs \
   npm
 
-/usr/bin/python3 -m pip install --no-cache-dir --break-system-packages \
+document_python_packages=(
   python-docx \
+  pandas \
+  openpyxl \
   python-pptx \
+  lxml \
+  beautifulsoup4 \
   pyhwp \
   olefile \
   pypdf \
   pdfplumber \
   pymupdf
+)
+
+debian_python_pip_packages=(
+  python-docx
+  python-pptx
+  pyhwp
+  olefile
+  pypdf
+  pdfplumber
+  pymupdf
+)
+
+/usr/bin/python3 -m pip install --no-cache-dir --break-system-packages \
+  "${debian_python_pip_packages[@]}"
+
+# A product image may put a separately managed Python ahead of Debian's
+# /usr/bin/python3 (the OpenClaw KWRAG image copies python:3.12 into
+# /usr/local).  The wrapper smoke test and product runtime resolve `python3`
+# through PATH, so install the same document modules into that interpreter too.
+# Without this, the apt-managed interpreter passes installation while the
+# actual runtime interpreter fails with ModuleNotFoundError.
+active_python="$(command -v python3)"
+if [[ "$(readlink -f "$active_python")" != "$(readlink -f /usr/bin/python3)" ]]; then
+  "$active_python" -m pip install --no-cache-dir \
+    "${document_python_packages[@]}"
+fi
 
 if [[ -x /opt/hermes/.venv/bin/python ]]; then
   hermes_python="/opt/hermes/.venv/bin/python"
-  hermes_doc_packages=(
-    python-docx
-    pandas
-    openpyxl
-    python-pptx
-    lxml
-    beautifulsoup4
-    pypdf
-    pdfplumber
-    pymupdf
-    pyhwp
-    olefile
-  )
   if command -v uv >/dev/null 2>&1; then
-    uv pip install --python "$hermes_python" --no-cache "${hermes_doc_packages[@]}"
+    uv pip install --python "$hermes_python" --no-cache "${document_python_packages[@]}"
   else
     "$hermes_python" -m pip --version >/dev/null 2>&1 \
       || "$hermes_python" -m ensurepip --upgrade
-    "$hermes_python" -m pip install --no-cache-dir "${hermes_doc_packages[@]}"
+    "$hermes_python" -m pip install --no-cache-dir "${document_python_packages[@]}"
   fi
 fi
 
