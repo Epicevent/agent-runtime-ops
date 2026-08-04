@@ -23,6 +23,7 @@ from agent_runtime_ops.commands.nas_view import (
     cmd_nas_view_status,
 )
 from agent_runtime_ops.domain.nas_views import (
+    Corpus,
     load_views_state,
     put_view_record,
     save_views_state,
@@ -255,6 +256,58 @@ class SharedMasterAssignTest(unittest.TestCase):
         write_fstab.assert_not_called()
         mount_master.assert_not_called()
 
+    def test_groupware_validates_shared_content_but_delivers_from_per_slot_master(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "state"
+            root.mkdir()
+            _write_state(root)
+            shared = Path(tmp) / "collector"
+            hidden = Path(tmp) / "slot-master"
+            (shared / "mails" / "seung23").mkdir(parents=True)
+            (hidden / "mails" / "seung23").mkdir(parents=True)
+            credential = Path(tmp) / "root-credential"
+            credential.write_text("username=x\npassword=x\n", encoding="utf-8")
+            binds: list[Path] = []
+
+            def fake_bind(source: Path, _target: Path, *, recursive: bool = False):
+                if not recursive:
+                    binds.append(source)
+                return True, "ok"
+
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.commands.nas_view._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.nas_view._findmnt_one", return_value=(1, "", [])),
+                patch("agent_runtime_ops.commands.nas_view.shared_master_for_share", return_value=shared),
+                patch("agent_runtime_ops.commands.nas_view._validate_shared_master") as validate_shared,
+                patch("agent_runtime_ops.commands.nas_view.hidden_master", return_value=hidden),
+                patch("agent_runtime_ops.commands.nas_view._ensure_hidden_dirs"),
+                patch("agent_runtime_ops.commands.nas_view.root_credential_path", return_value=credential),
+                patch("agent_runtime_ops.commands.nas_view.migrate_customer_credential_to_root"),
+                patch("agent_runtime_ops.commands.nas_view._write_managed_fstab_entry") as write_fstab,
+                patch("agent_runtime_ops.commands.nas_view._mount_master", return_value=(True, "ok")) as mount,
+                patch("agent_runtime_ops.commands.nas_view.bind_ro", side_effect=fake_bind),
+                patch("agent_runtime_ops.commands.nas_view._append_action_log"),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_nas_view_assign(
+                    argparse.Namespace(
+                        state_root=str(root), slot="oc3", user_id="seung23", share=SHARE,
+                        username=None, password_stdin=False, domain=None,
+                        path=["mails/seung23"],
+                    )
+                )
+            record = load_views_state(root)["corpus_views"]["oc3"]["groupware"]
+
+        self.assertEqual(rc, 0, output.getvalue())
+        validate_shared.assert_called_once_with(shared, SHARE)
+        write_fstab.assert_called_once()
+        mount.assert_called_once_with(hidden, SHARE)
+        self.assertEqual(binds, [hidden / "mails" / "seung23"])
+        self.assertIn("master_mode=per_slot_cifs", output.getvalue())
+        self.assertEqual(record["master_mode"], "per_slot_cifs")
+        self.assertEqual(Path(record["master_path"]), hidden)
+
     def test_stale_registration_migration_rejects_wrong_target_or_live_mount(self) -> None:
         expected = Path("/srv/kw-nas/slots/oc3/groupware/master")
         wrong = [{
@@ -312,6 +365,10 @@ class SharedMasterAssignTest(unittest.TestCase):
                 patch("agent_runtime_ops.commands.nas_view._ensure_hidden_dirs"),
                 patch("agent_runtime_ops.commands.nas_view.hidden_master", return_value=hidden),
                 patch("agent_runtime_ops.commands.nas_view.shared_master_for_share", return_value=shared),
+                patch(
+                    "agent_runtime_ops.commands.nas_view.corpus_for_share",
+                    return_value=Corpus("groupware", "groupware", "granted_paths", "shared_policy_required"),
+                ),
                 patch("agent_runtime_ops.commands.nas_view._validate_shared_master"),
                 patch("agent_runtime_ops.commands.nas_view._read_managed_fstab_entries", return_value=stale),
                 patch("agent_runtime_ops.commands.nas_view._remove_managed_fstab_entry", return_value=True) as remove,
