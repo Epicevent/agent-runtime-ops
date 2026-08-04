@@ -2,8 +2,7 @@
 Description=Standalone root-action WebAuthn approval and execution broker
 After=local-fs.target
 ConditionPathIsDirectory=@@BROKER_RELEASE_DIR@@
-ConditionPathIsFile=@@BROKER_DESCRIPTOR@@
-ConditionPathIsFile=@@BROKER_LAUNCHER@@
+ConditionPathIsFile=@@BROKER_RELEASE_DIR@@/.venv/bin/python
 ConditionPathIsFile=/etc/agent-runtime-ops/root-action-webauthn.env
 
 [Service]
@@ -12,8 +11,11 @@ User=root
 Group=root
 UMask=0027
 WorkingDirectory=/
-ExecStart=/usr/bin/python3 -I -B -S @@BROKER_LAUNCHER@@ run --release-dir @@BROKER_RELEASE_DIR@@ --descriptor @@BROKER_DESCRIPTOR@@ --source-commit @@SOURCE_COMMIT@@ --descriptor-sha256 @@DESCRIPTOR_SHA256@@ --launcher-sha256 @@LAUNCHER_SHA256@@
+ExecStart=@@BROKER_RELEASE_DIR@@/.venv/bin/python -I -B -m agent_runtime_ops.root_actions.service
 EnvironmentFile=/etc/agent-runtime-ops/root-action-webauthn.env
+Environment=AGENT_RUNTIME_ROOT_ACTION_RELEASE=@@BROKER_RELEASE_DIR@@
+Environment=AGENT_RUNTIME_ROOT_ACTION_SOURCE_COMMIT=@@SOURCE_COMMIT@@
+Environment=AGENT_RUNTIME_ROOT_ACTION_TREE_SHA256=@@BROKER_TREE_SHA256@@
 Environment=PYTHONDONTWRITEBYTECODE=1
 Restart=on-failure
 RestartSec=2s
@@ -22,7 +24,7 @@ PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
 ReadWritePaths=/var/lib/agent-runtime-ops/root-actions /run/agent-runtime-ops
-ReadOnlyPaths=/etc/agent-runtime-ops/root-action-webauthn.env @@BROKER_RELEASE_DIR@@ @@BROKER_DESCRIPTOR@@ @@BROKER_LAUNCHER@@
+ReadOnlyPaths=/etc/agent-runtime-ops/root-action-webauthn.env @@BROKER_RELEASE_DIR@@
 RestrictAddressFamilies=AF_UNIX
 RuntimeDirectory=agent-runtime-ops
 RuntimeDirectoryMode=0750
