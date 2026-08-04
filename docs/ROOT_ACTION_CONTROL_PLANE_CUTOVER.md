@@ -33,11 +33,17 @@ The installer consumes one reviewed wheel, its SHA-256 digest, and the exact
 Run the source-native action from a checkout matching the wheel source:
 
 ```text
+systemd/install-agent-runtime-root-action-broker-standalone.sh prepare-wheelhouse
+
 sudo systemd/install-agent-runtime-root-action-broker-standalone.sh \
   /absolute/path/agent_runtime_ops.whl \
   <64-hex-wheel-sha256> \
   <40-hex-source-commit>
 ```
+
+The first command is a fixed, unprivileged materialization step. It creates the
+adjacent wheelhouse from the hash-locked requirements. The second command is
+the only privileged step and has no package-index access.
 
 The installer rejects mutable dependency inputs, computes the complete release
 tree digest, renders the three unit placeholders, disables the legacy broker,

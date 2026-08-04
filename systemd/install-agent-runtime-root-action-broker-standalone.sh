@@ -29,6 +29,78 @@ die() {
     exit 1
 }
 
+SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd -P)
+TEMPLATE=$SCRIPT_DIR/agent-runtime-root-action-broker-standalone.service
+REQUIREMENTS=$SCRIPT_DIR/../requirements.lock
+WHEELHOUSE=$SCRIPT_DIR/wheelhouse
+
+validate_wheelhouse() {
+    local wheelhouse=$1 wheel_count wheelhouse_bytes
+    [[ -d "$wheelhouse" && ! -L "$wheelhouse" ]] || die wheelhouse_identity_invalid
+    wheel_count=$(find "$wheelhouse" -xdev -mindepth 1 -maxdepth 1 \
+        -type f -name '*.whl' -links 1 -printf . | wc -c) \
+        || die wheelhouse_scan_failed
+    [[ "$wheel_count" -ge 1 && "$wheel_count" -le 64 ]] \
+        || die wheelhouse_file_count_invalid
+    if find "$wheelhouse" -xdev -mindepth 1 -maxdepth 1 \
+        ! \( -type f -name '*.whl' -links 1 \) -print -quit | grep -q .; then
+        die wheelhouse_entry_invalid
+    fi
+    wheelhouse_bytes=$(find "$wheelhouse" -xdev -mindepth 1 -maxdepth 1 \
+        -type f -name '*.whl' -links 1 -printf '%s\n' \
+        | awk '{total += $1} END {print total + 0}') || die wheelhouse_scan_failed
+    [[ "$wheelhouse_bytes" -le 67108864 ]] || die wheelhouse_too_large
+}
+
+prepare_wheelhouse() {
+    local prepare_tmp prepare_venv prepare_files
+    [[ "${EUID:-$(id -u)}" -ne 0 ]] || die wheelhouse_prepare_must_be_unprivileged
+    [[ -f "$REQUIREMENTS" && ! -L "$REQUIREMENTS" ]] \
+        || die requirements_lock_invalid
+    [[ "$(sha256sum "$REQUIREMENTS" | awk '{print $1}')" == "$REQUIREMENTS_SHA256" ]] \
+        || die requirements_lock_sha256_mismatch
+    if [[ -e "$WHEELHOUSE" ]]; then
+        validate_wheelhouse "$WHEELHOUSE"
+        printf 'wheelhouse=%s\n' "$WHEELHOUSE"
+        return
+    fi
+    prepare_tmp=$(mktemp -d "$SCRIPT_DIR/.wheelhouse.prepare.XXXXXX") \
+        || die wheelhouse_prepare_temp_failed
+    case "$prepare_tmp" in
+        "$SCRIPT_DIR"/.wheelhouse.prepare.*) ;;
+        *) die wheelhouse_prepare_temp_invalid ;;
+    esac
+    prepare_venv=$prepare_tmp/.venv
+    prepare_files=$prepare_tmp/files
+    cleanup_prepare() {
+        case "$prepare_tmp" in
+            "$SCRIPT_DIR"/.wheelhouse.prepare.*)
+                rm -rf --one-file-system -- "$prepare_tmp"
+                ;;
+        esac
+    }
+    trap cleanup_prepare EXIT
+    /usr/bin/python3 -m venv --copies "$prepare_venv" \
+        || die wheelhouse_prepare_venv_failed
+    install -d -m 0755 "$prepare_files" || die wheelhouse_prepare_directory_failed
+    "$prepare_venv/bin/python" -I -B -m pip download \
+        --require-hashes --only-binary=:all: --no-cache-dir \
+        --dest "$prepare_files" -r "$REQUIREMENTS" >/dev/null \
+        || die wheelhouse_prepare_download_failed
+    validate_wheelhouse "$prepare_files"
+    rm -rf --one-file-system -- "$prepare_venv"
+    mv -- "$prepare_files" "$WHEELHOUSE" || die wheelhouse_prepare_publish_failed
+    sync -f "$SCRIPT_DIR" || die wheelhouse_prepare_parent_fsync_failed
+    rmdir -- "$prepare_tmp" || die wheelhouse_prepare_cleanup_failed
+    trap - EXIT
+    printf 'wheelhouse=%s\n' "$WHEELHOUSE"
+}
+
+if [[ "$#" -eq 1 && "$1" == prepare-wheelhouse ]]; then
+    prepare_wheelhouse
+    exit 0
+fi
+
 [[ "${EUID:-$(id -u)}" -eq 0 ]] || die root_required
 [[ "$#" -eq 3 ]] || die usage_wheel_wheel_sha_source_commit
 WHEEL=$1
@@ -47,10 +119,6 @@ flock -n 9 || die install_lock_busy
 [[ "$(stat -c '%u/%a/%h' "$ENV_FILE")" == 0/600/1 ]] \
     || die webauthn_env_identity_invalid
 
-SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd -P)
-TEMPLATE=$SCRIPT_DIR/agent-runtime-root-action-broker-standalone.service
-REQUIREMENTS=$SCRIPT_DIR/../requirements.lock
-WHEELHOUSE=$SCRIPT_DIR/wheelhouse
 [[ -f "$TEMPLATE" && ! -L "$TEMPLATE" ]] || die unit_template_invalid
 [[ "$(sha256sum "$TEMPLATE" | awk '{print $1}')" == "$TEMPLATE_SHA256" ]] \
     || die unit_template_sha256_mismatch
@@ -177,19 +245,7 @@ install -o root -g root -m 0400 "$REQUIREMENTS" "$REQUIREMENTS_COPY"
     || die copied_requirements_lock_sha256_mismatch
 receipt_enabled=1
 
-[[ -d "$WHEELHOUSE" && ! -L "$WHEELHOUSE" ]] || die wheelhouse_identity_invalid
-wheel_count=$(find "$WHEELHOUSE" -xdev -mindepth 1 -maxdepth 1 \
-    -type f -name '*.whl' -links 1 -printf . | wc -c) \
-    || die wheelhouse_scan_failed
-[[ "$wheel_count" -ge 1 && "$wheel_count" -le 64 ]] || die wheelhouse_file_count_invalid
-if find "$WHEELHOUSE" -xdev -mindepth 1 -maxdepth 1 \
-    ! \( -type f -name '*.whl' -links 1 \) -print -quit | grep -q .; then
-    die wheelhouse_entry_invalid
-fi
-wheelhouse_bytes=$(find "$WHEELHOUSE" -xdev -mindepth 1 -maxdepth 1 \
-    -type f -name '*.whl' -links 1 -printf '%s\n' \
-    | awk '{total += $1} END {print total + 0}') || die wheelhouse_scan_failed
-[[ "$wheelhouse_bytes" -le 67108864 ]] || die wheelhouse_too_large
+validate_wheelhouse "$WHEELHOUSE"
 
 tree_digest() {
     /usr/bin/python3 - "$1" <<'PY'

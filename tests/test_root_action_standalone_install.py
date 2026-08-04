@@ -53,6 +53,19 @@ def test_standalone_installer_is_offline_and_phase_specific() -> None:
     assert "standalone_enable_failed" in source
 
 
+def test_fresh_checkout_can_materialize_the_fixed_wheelhouse() -> None:
+    source = _source()
+    assert 'if [[ "$#" -eq 1 && "$1" == prepare-wheelhouse ]]' in source
+    assert "prepare_wheelhouse" in source
+    assert "wheelhouse_prepare_must_be_unprivileged" in source
+    assert 'validate_wheelhouse "$WHEELHOUSE"' in source
+    assert "--require-hashes --only-binary=:all: --no-cache-dir" in source
+    assert '--dest "$prepare_files" -r "$REQUIREMENTS"' in source
+    assert 'validate_wheelhouse "$prepare_files"' in source
+    assert 'mv -- "$prepare_files" "$WHEELHOUSE"' in source
+    assert "wheelhouse_prepare_parent_fsync_failed" in source
+
+
 def test_standalone_installer_builds_only_from_hash_locked_inputs() -> None:
     source = _source()
     template_digest = re.search(r"^TEMPLATE_SHA256=([0-9a-f]{64})$", source, re.M)
