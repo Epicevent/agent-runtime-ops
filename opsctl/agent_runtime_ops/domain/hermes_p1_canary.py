@@ -131,7 +131,9 @@ def build_hermes_p1_canary_inputs(
     runtime_binding = {
         "schema_version": "kwrag-slot-runtime-binding-v1",
         "mount_root": CONTAINER_NAS_ROOT,
-        "index_manifest_relative": f"{CANARY_DIR_NAME}/manifest.json",
+        "index_manifest_relative": (
+            f"{CANARY_DIR_NAME}/{source_snapshot.removeprefix('sha256:')}/manifest.json"
+        ),
         "index_manifest_digest": manifest_digest,
         "receipt_path": f"{CONTAINER_STATE_ROOT}/operation-receipts.jsonl",
         "pipeline_fingerprint": P1_PIPELINE_FINGERPRINT,
@@ -255,7 +257,12 @@ def publish_hermes_p1_runtime_inputs(
     _write_json(state_root / "binding-v2.json", binding)
     if prepared is None:
         return
-    canary_root = nas_root / CANARY_DIR_NAME
+    source_snapshot = str(prepared.attachment_data["sourceSnapshotDigest"])
+    if not _DIGEST.fullmatch(source_snapshot):
+        raise ValueError("Hermes P1 source snapshot digest is invalid")
+    canary_parent = nas_root / CANARY_DIR_NAME
+    _ensure_directory(canary_parent, mode=0o755)
+    canary_root = canary_parent / source_snapshot.removeprefix("sha256:")
     _ensure_directory(canary_root, mode=0o755)
     _atomic_write_bytes(canary_root / "room.meta.sqlite", prepared.database, mode=0o444)
     _write_json(canary_root / "manifest.json", prepared.index_manifest, mode=0o444)

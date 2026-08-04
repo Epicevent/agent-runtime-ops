@@ -118,6 +118,17 @@ def test_enabled_canary_inputs_get_fresh_rollback_isolated_binding() -> None:
         first.attachment_data["sourceSnapshotDigest"]
         != second.attachment_data["sourceSnapshotDigest"]
     )
+    assert (
+        first.runtime_binding["index_manifest_relative"]
+        != second.runtime_binding["index_manifest_relative"]
+    )
+    for prepared in (first, second):
+        snapshot = prepared.attachment_data["sourceSnapshotDigest"].removeprefix(
+            "sha256:"
+        )
+        assert prepared.runtime_binding["index_manifest_relative"] == (
+            f".jitech-kwrag-canary/{snapshot}/manifest.json"
+        )
 
 
 def test_canary_probe_runs_zero_hit_then_actual_conversation_and_tamper() -> None:
