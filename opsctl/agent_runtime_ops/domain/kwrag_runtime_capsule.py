@@ -180,13 +180,7 @@ def load_runtime_capsule(
         },
         "target or publication state",
     )
-    for field in (
-        "publicationReceiptDigest",
-        "userIdDigest",
-        "packageIdentityDigest",
-        "releaseId",
-        "indexManifestDigest",
-    ):
+    for field in "publicationReceiptDigest userIdDigest packageIdentityDigest releaseId indexManifestDigest".split():
         _digest(value.get(field), field)
     release, manifest = str(value["releaseId"]), str(value["indexManifestDigest"])
     authority = value.get("authorityReceipt")
@@ -246,10 +240,8 @@ def load_runtime_capsule(
         }
     if parsed["positive"] == parsed["negative"]:
         raise ValueError("runtime capsule proof controls are not distinct")
-    runtime, expected_binding_digest = (
-        value.get("productRuntimeBinding"),
-        canonical_digest(enabled),
-    )
+    runtime = value.get("productRuntimeBinding")
+    expected_binding_digest = canonical_digest(enabled)
     if family == "hermes":
         if not isinstance(runtime, dict):
             raise ValueError("runtime capsule product runtime binding is invalid")
@@ -309,11 +301,8 @@ def retrieval_state_host_path(desired) -> Path:
 
 
 def _slot_request(capsule: KwragRuntimeCapsule, positive: bool) -> dict[str, object]:
-    source, kind = (
-        (capsule.positive_request, "positive")
-        if positive
-        else (capsule.negative_request, "negative")
-    )
+    kind = "positive" if positive else "negative"
+    source = capsule.positive_request if positive else capsule.negative_request
     identity = capsule.digest.removeprefix("sha256:")[:20]
     return {
         "schema_version": "kwrag-slot-search-request-v1",
@@ -352,16 +341,18 @@ def publish_runtime_capsule_inputs(desired, capsule: KwragRuntimeCapsule) -> Pat
             mode=0o640,
         )
         if enabled:
-            _write_json(
-                root / "proof-request.json",
-                {
-                    "schema": "kwrag-two-canary-private-proof-request/v1",
-                    **capsule.positive_request,
-                },
-                mode=0o640,
-            )
+            for name, request in (
+                ("proof-request.json", capsule.positive_request),
+                ("negative-proof-request.json", capsule.negative_request),
+            ):
+                _write_json(
+                    root / name,
+                    {"schema": "kwrag-two-canary-private-proof-request/v1", **request},
+                    mode=0o640,
+                )
         else:
-            (root / "proof-request.json").unlink(missing_ok=True)
+            for name in ("proof-request.json", "negative-proof-request.json"):
+                (root / name).unlink(missing_ok=True)
     else:
         if capsule.product_runtime_binding is None:
             raise ValueError("Hermes runtime capsule is missing its product binding")
@@ -410,7 +401,7 @@ def run_openclaw_runtime_capsule_probe(
         raise ValueError("OpenClaw runtime capsule proof failed")
     value = parse_retrieval_status_output(result.stdout)
     keys = frozenset(
-        "schema enabled retrievalCount projectionCount dispatchCount responseObservedCount receipts".split()
+        "schema enabled retrievalCount projectionCount dispatchCount responseObservedCount negativeControl receipts".split()
     )
     if not isinstance(value, dict) or set(value) != keys:
         raise ValueError("OpenClaw runtime capsule proof is incomplete")
@@ -431,6 +422,20 @@ def run_openclaw_runtime_capsule_probe(
         item.get("stage") if isinstance(item, dict) else None for item in receipts
     ] != ["evidence_dispatch_handoff_committed", "response_observed"]:
         raise ValueError("OpenClaw runtime capsule receipt chain is incomplete")
+    negative = _object(
+        value.get("negativeControl"),
+        frozenset(
+            "resultStatus retrievalCount projectionCount dispatchCount responseObservedCount operationReceiptDigest resultReceiptDigest sourceExchangeDigest".split()
+        ),
+        "OpenClaw negative control",
+    )
+    fact_keys = "resultStatus retrievalCount projectionCount dispatchCount responseObservedCount".split()
+    if tuple(negative[key] for key in fact_keys) != ("zero_hits", 1, 0, 0, 0):
+        raise ValueError("OpenClaw negative control is invalid")
+    for (
+        field
+    ) in "operationReceiptDigest resultReceiptDigest sourceExchangeDigest".split():
+        _digest(negative[field], field)
     return value
 
 

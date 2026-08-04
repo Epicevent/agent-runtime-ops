@@ -11,6 +11,7 @@ from agent_runtime_ops.domain import kwrag_runtime_capsule as runtime_capsule
 from agent_runtime_ops.domain.kwrag_runtime_capsule import (
     load_runtime_capsule,
     publish_runtime_capsule_inputs,
+    run_openclaw_runtime_capsule_probe,
 )
 from agent_runtime_ops.domain.retrieval_contract import (
     P1_IDENTITY_FIXED,
@@ -197,7 +198,7 @@ def test_publication_identity_digests_are_required(field: str, tmp_path: Path) -
 @pytest.mark.parametrize(
     ("slot", "private_names"),
     [
-        ("oc14", ("proof-request.json",)),
+        ("oc14", ("proof-request.json", "negative-proof-request.json")),
         ("oc20", ("request.json", "conversation-message.txt")),
     ],
 )
@@ -250,3 +251,84 @@ def test_disabled_publication_removes_private_proof_inputs(
     assert all(not (state_root / name).exists() for name in private_names)
     assert writes and {mode for _, mode in writes} == {0o640}
     assert chowns == [(state_root, 0, 1000)]
+
+
+def test_enabled_openclaw_publication_projects_distinct_private_controls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    capsule_root = tmp_path / "capsule"
+    digest = publish(capsule_root, fixture())
+    capsule = load_runtime_capsule("oc14", digest, nas_root=capsule_root)
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    writes: dict[str, object] = {}
+
+    def write_json(path: Path, value: object, mode: int = 0o600) -> None:
+        assert mode == 0o640
+        writes[Path(path).name] = value
+
+    monkeypatch.setattr(
+        runtime_capsule, "retrieval_state_host_path", lambda desired: state_root
+    )
+    monkeypatch.setattr(
+        runtime_capsule,
+        "_ensure_directory",
+        lambda path, mode: Path(path).mkdir(parents=True, exist_ok=True),
+    )
+    monkeypatch.setattr(runtime_capsule, "_write_json", write_json)
+    monkeypatch.setattr(runtime_capsule, "runtime_ids", lambda slot: (1000, 1000, 1001))
+    monkeypatch.setattr(runtime_capsule.os, "chown", lambda *args: None, raising=False)
+    desired = SimpleNamespace(
+        slot="oc14",
+        family="openclaw",
+        image_spec={
+            "retrieval_binding": {
+                "enabled": True,
+                "attachmentData": capsule.attachment_data,
+            }
+        },
+    )
+    publish_runtime_capsule_inputs(desired, capsule)
+    assert writes["proof-request.json"] != writes["negative-proof-request.json"]
+    assert writes["proof-request.json"]["query"] == capsule.positive_request["query"]
+    assert (
+        writes["negative-proof-request.json"]["query"]
+        == capsule.negative_request["query"]
+    )
+
+
+def test_openclaw_probe_requires_zero_hit_control_and_full_receipt_chain() -> None:
+    digest = "sha256:" + "8" * 64
+    proof = {
+        "schema": "jitech-openclaw-kwrag-user-turn-proof/v1",
+        "enabled": True,
+        "retrievalCount": 1,
+        "projectionCount": 1,
+        "dispatchCount": 1,
+        "responseObservedCount": 1,
+        "negativeControl": {
+            "resultStatus": "zero_hits",
+            "retrievalCount": 1,
+            "projectionCount": 0,
+            "dispatchCount": 0,
+            "responseObservedCount": 0,
+            "operationReceiptDigest": digest,
+            "resultReceiptDigest": digest,
+            "sourceExchangeDigest": digest,
+        },
+        "receipts": [
+            {"stage": "evidence_dispatch_handoff_committed"},
+            {"stage": "response_observed"},
+        ],
+    }
+
+    def runner(argv, timeout):
+        return SimpleNamespace(
+            returncode=0, stdout=canonical(proof).decode(), stderr=""
+        )
+
+    assert run_openclaw_runtime_capsule_probe("oc14-container", runner=runner) == proof
+
+    proof["negativeControl"]["dispatchCount"] = 1
+    with pytest.raises(ValueError, match="negative control"):
+        run_openclaw_runtime_capsule_probe("oc14-container", runner=runner)
