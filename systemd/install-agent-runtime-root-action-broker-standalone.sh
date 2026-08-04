@@ -130,7 +130,7 @@ install -d -o root -g root -m 0755 "$RELEASE_ROOT"
 FINAL=$RELEASE_ROOT/$SOURCE_COMMIT
 TMP=$(mktemp -d "$RELEASE_ROOT/.install-$SOURCE_COMMIT.XXXXXX")
 UNIT_NEXT=$TMP/$UNIT_NAME
-WHEEL_COPY=$TMP/source.whl
+WHEEL_COPY=$TMP/agent_runtime_ops-0.1.0-py3-none-any.whl
 TEMPLATE_COPY=$TMP/unit.template
 REQUIREMENTS_COPY=$TMP/requirements.lock
 PREVIOUS_UNIT=$TMP/previous.service

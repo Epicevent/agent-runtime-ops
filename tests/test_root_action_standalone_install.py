@@ -78,6 +78,8 @@ def test_standalone_installer_builds_only_from_hash_locked_inputs() -> None:
     assert lock_digest.group(1) == hashlib.sha256(LOCK.read_bytes()).hexdigest()
     assert "--require-hashes -r \"$REQUIREMENTS_COPY\"" in source
     assert "--no-index --no-deps --force-reinstall \"$WHEEL_COPY\"" in source
+    assert "WHEEL_COPY=$TMP/agent_runtime_ops-0.1.0-py3-none-any.whl" in source
+    assert "WHEEL_COPY=$TMP/source.whl" not in source
     assert "/usr/bin/python3 -m venv --copies \"$STAGE/.venv\"" in source
     assert "copied_wheel_sha256_mismatch" in source
     assert "unit_template_sha256_mismatch" in source
