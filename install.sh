@@ -1033,6 +1033,9 @@ install_ops_sudoers() {
       printf '%s ALL=(root) NOPASSWD: %s rollout image-dev-apply *\n' "$dev_user" "$BIN_LINK"
       printf '%s ALL=(root) NOPASSWD: %s rollout image-canary *\n' "$dev_user" "$BIN_LINK"
       printf '%s ALL=(root) NOPASSWD: %s rollout verify *\n' "$dev_user" "$BIN_LINK"
+      printf '%s ALL=(root) NOPASSWD: %s observation status *\n' "$dev_user" "$BIN_LINK"
+      printf '%s ALL=(root) NOPASSWD: %s diagnostics logs *\n' "$dev_user" "$BIN_LINK"
+      printf '%s ALL=(root) NOPASSWD: %s diagnostics session-health *\n' "$dev_user" "$BIN_LINK"
     done
   } >"$tmp"
   chmod 0440 "$tmp"

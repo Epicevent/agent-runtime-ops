@@ -144,6 +144,32 @@ class CliDiagnosticsLogsTests(unittest.TestCase):
             )
         self.assertEqual(rc, 2)
 
+    def test_developer_customer_target_is_rejected_before_container_lookup(
+        self,
+    ) -> None:
+        output = io.StringIO()
+        with (
+            patch("agent_runtime_ops.commands.diagnostics._is_root", return_value=True),
+            patch(
+                "agent_runtime_ops.commands.diagnostics._sudo_user",
+                return_value="atelier",
+            ),
+            patch(
+                "agent_runtime_ops.commands.diagnostics.find_gateway_container_by_binding"
+            ) as lookup,
+            patch("agent_runtime_ops.commands.diagnostics.run_text") as run_mock,
+            contextlib.redirect_stdout(output),
+        ):
+            rc = cmd_diagnostics_logs(
+                argparse.Namespace(
+                    slot="oc20", tail=50, since=None, state_root="/nonexistent"
+                )
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("may inspect only dev-* targets", output.getvalue())
+        lookup.assert_not_called()
+        run_mock.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

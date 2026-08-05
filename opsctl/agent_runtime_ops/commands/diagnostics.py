@@ -6,9 +6,12 @@ from pathlib import Path
 import re
 import sys
 
+from ..domain.common import OPERATOR_ACCOUNTS as _OPERATOR_ACCOUNTS
+from ..domain.common import is_dev_slot as _is_dev_slot
 from ..domain.common import is_root as _is_root
 from ..domain.common import run_text
 from ..domain.common import state_root as _state_root
+from ..domain.common import sudo_user as _sudo_user
 from ..domain.runtime_paths import agent_backup_root
 from ..domain.runtime_truth import find_gateway_container_by_binding
 from ..redaction import redact
@@ -37,6 +40,17 @@ _SESSION_WEDGE_SIGNATURES = (
 # container. The bug leaves zero-byte tombstones here; a healthy in-use session
 # is non-empty.
 _CONTAINER_SESSIONS_ROOT = "/home/node/.openclaw/agents"
+
+
+def _authorize_live_diagnostics_target(slot: str) -> str | None:
+    """Keep developer log/exec diagnostics inside the dev environment."""
+    invoker = _sudo_user()
+    if invoker and invoker not in _OPERATOR_ACCOUNTS and not _is_dev_slot(slot):
+        return (
+            f"developer diagnostics account {invoker} may inspect only dev-* targets, "
+            f"not {slot}"
+        )
+    return None
 
 
 def _is_under_path(path: Path, root: Path) -> bool:
@@ -156,6 +170,9 @@ def cmd_diagnostics_logs(args: argparse.Namespace) -> int:
     try:
         slot = str(args.slot)
         validate_linux_account(slot)
+        denial = _authorize_live_diagnostics_target(slot)
+        if denial:
+            raise ValueError(denial)
         tail_lines = max(1, min(int(getattr(args, "tail", 200)), 2000))
         since = getattr(args, "since", None) or None
         if since is not None:
@@ -210,6 +227,9 @@ def cmd_diagnostics_session_health(args: argparse.Namespace) -> int:
     try:
         slot = str(args.slot)
         validate_linux_account(slot)
+        denial = _authorize_live_diagnostics_target(slot)
+        if denial:
+            raise ValueError(denial)
         since = str(getattr(args, "since", None) or "6h")
         if not _SINCE_RE.match(since):
             raise ValueError("--since must be a relative age like 10m, 2h, 1d")

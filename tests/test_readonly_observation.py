@@ -797,6 +797,8 @@ def test_command_and_installer_expose_no_generic_execution_or_write_surface() ->
     ):
         assert forbidden not in source
     install = (Path(__file__).parents[1] / "install.sh").read_text(encoding="utf-8")
-    exact = "NOPASSWD: %s observation status *"
-    assert install.count(exact) == 1
+    assert install.count("NOPASSWD: %s observation status *") == 2
+    assert install.count("NOPASSWD: %s diagnostics logs *") == 2
+    assert install.count("NOPASSWD: %s diagnostics session-health *") == 2
     assert "observation *" not in install
+    assert "diagnostics *" not in install
