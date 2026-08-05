@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 
 from ..apache import parse_apache_route
 from ..canonical_recipes import load_canonical_recipe
@@ -290,7 +291,20 @@ def live_runtime_truth(
     binding = get_runtime_binding(slot, state_root)
     apache_route = parse_apache_route(binding.linux_account)
     checks.extend(apache_route_checks(binding, apache_route))
-    container, lookup = find_gateway_container_by_binding(binding)
+    rootless_info = None
+    if binding.upstream_kind == "developer-rootless":
+        uid_proc = subprocess.run(["id", "-u", binding.upstream_owner], text=True, capture_output=True, check=False)
+        inspect = subprocess.run(
+            ["runuser", "-u", binding.upstream_owner, "--", "env", f"XDG_RUNTIME_DIR=/run/user/{uid_proc.stdout.strip()}", "docker", "inspect", binding.upstream_container],
+            text=True, capture_output=True, check=False,
+        ) if uid_proc.returncode == 0 else uid_proc
+        try:
+            rootless_info = json.loads(inspect.stdout)[0] if inspect.returncode == 0 else None
+        except Exception:
+            rootless_info = None
+        container, lookup = (binding.upstream_container if rootless_info else None), "binding_rootless_upstream"
+    else:
+        container, lookup = find_gateway_container_by_binding(binding)
     checks.append((bool(container), "truth_container_lookup", lookup))
     if not container:
         return (
@@ -310,9 +324,9 @@ def live_runtime_truth(
             },
             checks,
         )
-    inspect = run_text(["docker", "inspect", container])
-    checks.append((inspect.returncode == 0, "truth_container_inspect_ok", container))
-    if inspect.returncode != 0:
+    inspect = None if rootless_info is not None else run_text(["docker", "inspect", container])
+    checks.append((rootless_info is not None or inspect.returncode == 0, "truth_container_inspect_ok", container))
+    if rootless_info is None and inspect.returncode != 0:
         detail = (inspect.stderr or inspect.stdout).strip()
         return (
             {
@@ -324,7 +338,7 @@ def live_runtime_truth(
             checks,
         )
     try:
-        info = json.loads(inspect.stdout)[0]
+        info = rootless_info if rootless_info is not None else json.loads(inspect.stdout)[0]
     except Exception as exc:
         checks.append((False, "truth_container_inspect_parse_ok", str(exc)))
         return ({"linux_account": binding.linux_account, "truth_source": "live_image", "truth_status": "parse_failed", "reason": str(exc)}, checks)
