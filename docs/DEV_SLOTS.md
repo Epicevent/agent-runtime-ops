@@ -64,6 +64,9 @@ sudo /usr/local/bin/opsctl rollout image-canary \
   --retrieval-enabled
 ```
 
+The same capsule staging contract applies to `dev-hermes-img`; its capsule must declare
+`family=hermes`, bind the Hermes product runtime projection, and use the Hermes NAS root.
+
 Staging is accepted only for a `dev-*` target. The command rejects links, non-private archives,
 unexpected members, digest drift, and existing content-addressed collisions before applying the
 image. It publishes the verified release first and the capsule commit marker last; customer

@@ -156,9 +156,13 @@ def publish(root: Path, value: dict[str, object]) -> str:
 
 
 def dev_archive(
-    root: Path, *, extra: bool = False, tamper: bool = False
+    root: Path,
+    *,
+    slot: str = "dev-oc-img",
+    extra: bool = False,
+    tamper: bool = False,
 ) -> tuple[Path, str]:
-    value = fixture("dev-oc-img")
+    value = fixture(slot)
     release = str(value["releaseId"]).replace(":", "-")
     prefix = f"kw/package/.kwrag/releases/{release}"
     database = b"SQLite format 3\x00synthetic"
@@ -207,9 +211,14 @@ def dev_archive(
                 "source_snapshot_digest": source_digest,
             }
         )
-    value["attachmentData"]["slotRuntimeBindingDigest"] = canonical_digest(
-        value["fixedProducerBindings"]["enabled"]
-    )
+    runtime_binding = value["productRuntimeBinding"]
+    if runtime_binding is None:
+        binding_digest = canonical_digest(value["fixedProducerBindings"]["enabled"])
+    else:
+        runtime_binding["index_manifest_digest"] = manifest_digest
+        runtime_binding["index_manifest_relative"] = f"{prefix}/index-manifest.json"
+        binding_digest = canonical_digest(runtime_binding)
+    value["attachmentData"]["slotRuntimeBindingDigest"] = binding_digest
     capsule = canonical(value)
     digest = sha(capsule)
     files = {
@@ -239,7 +248,9 @@ def dev_archive(
     return archive_path, digest
 
 
-@pytest.mark.parametrize("slot", ["oc14", "oc20", "dev-oc-img"])
+@pytest.mark.parametrize(
+    "slot", ["oc14", "oc20", "dev-oc-img", "dev-hermes-img"]
+)
 def test_loads_exact_published_capsule(slot: str, tmp_path: Path) -> None:
     value = fixture(slot)
     digest = publish(tmp_path, value)
@@ -288,6 +299,7 @@ def test_publication_identity_digests_are_required(field: str, tmp_path: Path) -
         ("oc14", ("proof-request.json", "negative-proof-request.json")),
         ("dev-oc-img", ("proof-request.json", "negative-proof-request.json")),
         ("oc20", ("request.json", "conversation-message.txt")),
+        ("dev-hermes-img", ("request.json", "conversation-message.txt")),
     ],
 )
 def test_disabled_publication_removes_private_proof_inputs(
@@ -389,10 +401,11 @@ def test_enabled_openclaw_publication_projects_distinct_private_controls(
     )
 
 
+@pytest.mark.parametrize("slot", ["dev-oc-img", "dev-hermes-img"])
 def test_dev_capsule_archive_is_validated_and_published_without_overwrite(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    slot: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    archive, digest = dev_archive(tmp_path)
+    archive, digest = dev_archive(tmp_path, slot=slot)
     nas_root = tmp_path / "nas"
     nas_root.mkdir()
     monkeypatch.setattr(runtime_capsule, "runtime_ids", lambda slot: (1000, 1000, 0))
@@ -401,10 +414,10 @@ def test_dev_capsule_archive_is_validated_and_published_without_overwrite(
     monkeypatch.setattr(runtime_capsule.os, "fchmod", lambda *args: None, raising=False)
 
     loaded = stage_dev_runtime_capsule(
-        "dev-oc-img", digest, archive_path=archive, nas_root=nas_root
+        slot, digest, archive_path=archive, nas_root=nas_root
     )
-    assert loaded.slot == "dev-oc-img"
-    assert load_runtime_capsule("dev-oc-img", digest, nas_root=nas_root) == loaded
+    assert loaded.slot == slot
+    assert load_runtime_capsule(slot, digest, nas_root=nas_root) == loaded
 
     # Exact replay is idempotent; an existing content-addressed file is not rewritten.
     capsule_path = (
@@ -415,7 +428,7 @@ def test_dev_capsule_archive_is_validated_and_published_without_overwrite(
     before = capsule_path.stat().st_mtime_ns
     assert (
         stage_dev_runtime_capsule(
-            "dev-oc-img", digest, archive_path=archive, nas_root=nas_root
+            slot, digest, archive_path=archive, nas_root=nas_root
         )
         == loaded
     )

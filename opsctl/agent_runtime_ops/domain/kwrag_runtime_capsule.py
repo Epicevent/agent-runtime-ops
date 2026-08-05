@@ -38,6 +38,7 @@ _FAMILIES = {
     "oc14": "openclaw",
     "oc20": "hermes",
     "dev-oc-img": "openclaw",
+    "dev-hermes-img": "hermes",
 }
 _ENGINE = {
     "status": "research_selected_p1_attachment_probe_candidate",
