@@ -436,6 +436,11 @@ def build_parser() -> argparse.ArgumentParser:
     rollout_image_canary.add_argument("--product-image", required=True)
     rollout_image_canary.add_argument("--allow-first-apply", action="store_true")
     rollout_image_canary.add_argument("--retrieval-enabled", action="store_true")
+    rollout_image_canary.add_argument(
+        "--stage-retrieval-runtime-capsule",
+        action="store_true",
+        help="stage the fixed digest-named retrieval capsule archive for a dev-* canary target",
+    )
     for capsule_parser in (rollout_image_plan, rollout_image_dev_apply, rollout_image_canary):
         capsule_parser.add_argument("--retrieval-runtime-capsule-sha256", default="")
     rollout_image_canary.set_defaults(func=cmd_rollout_image_canary)

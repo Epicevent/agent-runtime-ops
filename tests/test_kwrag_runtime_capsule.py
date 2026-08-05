@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 from pathlib import Path
+import tarfile
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +14,7 @@ from agent_runtime_ops.domain.kwrag_runtime_capsule import (
     load_runtime_capsule,
     publish_runtime_capsule_inputs,
     run_openclaw_runtime_capsule_probe,
+    stage_dev_runtime_capsule,
 )
 from agent_runtime_ops.domain.retrieval_contract import (
     P1_IDENTITY_FIXED,
@@ -150,6 +153,74 @@ def publish(root: Path, value: dict[str, object]) -> str:
     path.write_bytes(payload)
     path.chmod(0o444)
     return digest
+
+
+def dev_archive(
+    root: Path, *, extra: bool = False, tamper: bool = False
+) -> tuple[Path, str]:
+    value = fixture("dev-oc-img")
+    release = str(value["releaseId"]).replace(":", "-")
+    prefix = f"kw/package/.kwrag/releases/{release}"
+    manifest = b'{"schema":"synthetic-index/v1"}'
+    database = b"SQLite format 3\x00synthetic"
+    source = b'{"schema":"synthetic-source/v1"}'
+    manifest_digest = sha(manifest)
+    database_digest = sha(database)
+    source_digest = sha(source)
+    value["indexManifestDigest"] = manifest_digest
+    value["authorityReceipt"]["indexManifestDigest"] = manifest_digest
+    authority_digest = canonical_digest(value["authorityReceipt"])
+    value["attachmentData"].update(
+        {
+            "databaseSha256": database_digest,
+            "indexManifestDigest": manifest_digest,
+            "sourceSnapshotDigest": source_digest,
+            "readOnlyAuthorityReceiptDigest": authority_digest,
+        }
+    )
+    for binding in value["fixedProducerBindings"].values():
+        binding["index_manifest_digest"] = manifest_digest
+        binding["index_manifest_relative"] = f"{prefix}/index-manifest.json"
+        corpus = binding["corpora"]["room"]
+        corpus.update(
+            {
+                "authority_receipt_digest": authority_digest,
+                "database_relative": f"{prefix}/room.sqlite3",
+                "database_sha256": database_digest,
+                "source_snapshot_relative": f"{prefix}/room-source.json",
+                "source_snapshot_digest": source_digest,
+            }
+        )
+    value["attachmentData"]["slotRuntimeBindingDigest"] = canonical_digest(
+        value["fixedProducerBindings"]["enabled"]
+    )
+    capsule = canonical(value)
+    digest = sha(capsule)
+    files = {
+        f"kw/package/.kwrag/runtime-capsules/{digest.replace(':', '-')}.json": capsule,
+        f"{prefix}/index-manifest.json": manifest,
+        f"{prefix}/room.sqlite3": database + (b"tamper" if tamper else b""),
+        f"{prefix}/room-source.json": source,
+    }
+    if extra:
+        files[f"{prefix}/unexpected.txt"] = b"unexpected"
+    directories = runtime_capsule._expected_directories(
+        {name: sha(payload) for name, payload in files.items()}
+    )
+    archive_path = root / "capsule.tar"
+    with tarfile.open(archive_path, "w") as archive:
+        for name in sorted(directories, key=lambda item: (item.count("/"), item)):
+            member = tarfile.TarInfo(name + "/")
+            member.type = tarfile.DIRTYPE
+            member.mode = 0o750
+            archive.addfile(member)
+        for name, payload in files.items():
+            member = tarfile.TarInfo(name)
+            member.size = len(payload)
+            member.mode = 0o440
+            archive.addfile(member, io.BytesIO(payload))
+    archive_path.chmod(0o400)
+    return archive_path, digest
 
 
 @pytest.mark.parametrize("slot", ["oc14", "oc20", "dev-oc-img"])
@@ -296,6 +367,76 @@ def test_enabled_openclaw_publication_projects_distinct_private_controls(
         writes["negative-proof-request.json"]["query"]
         == capsule.negative_request["query"]
     )
+
+
+def test_dev_capsule_archive_is_validated_and_published_without_overwrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive, digest = dev_archive(tmp_path)
+    nas_root = tmp_path / "nas"
+    nas_root.mkdir()
+    monkeypatch.setattr(runtime_capsule, "runtime_ids", lambda slot: (1000, 1000, 0))
+    monkeypatch.setattr(runtime_capsule.os, "chown", lambda *args: None, raising=False)
+    monkeypatch.setattr(runtime_capsule.os, "fchown", lambda *args: None, raising=False)
+    monkeypatch.setattr(runtime_capsule.os, "fchmod", lambda *args: None, raising=False)
+
+    loaded = stage_dev_runtime_capsule(
+        "dev-oc-img", digest, archive_path=archive, nas_root=nas_root
+    )
+    assert loaded.slot == "dev-oc-img"
+    assert load_runtime_capsule("dev-oc-img", digest, nas_root=nas_root) == loaded
+
+    # Exact replay is idempotent; an existing content-addressed file is not rewritten.
+    capsule_path = (
+        nas_root
+        / "kw/package/.kwrag/runtime-capsules"
+        / f"{digest.replace(':', '-')}.json"
+    )
+    before = capsule_path.stat().st_mtime_ns
+    assert (
+        stage_dev_runtime_capsule(
+            "dev-oc-img", digest, archive_path=archive, nas_root=nas_root
+        )
+        == loaded
+    )
+    assert capsule_path.stat().st_mtime_ns == before
+
+
+@pytest.mark.parametrize(
+    ("extra", "tamper", "message"),
+    [
+        (True, False, "member set"),
+        (False, True, "digest mismatch"),
+    ],
+)
+def test_dev_capsule_archive_fails_before_publication(
+    extra: bool,
+    tamper: bool,
+    message: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive, digest = dev_archive(tmp_path, extra=extra, tamper=tamper)
+    nas_root = tmp_path / "nas"
+    nas_root.mkdir()
+    monkeypatch.setattr(runtime_capsule, "runtime_ids", lambda slot: (1000, 1000, 0))
+    monkeypatch.setattr(runtime_capsule.os, "chown", lambda *args: None, raising=False)
+    monkeypatch.setattr(runtime_capsule.os, "fchown", lambda *args: None, raising=False)
+    monkeypatch.setattr(runtime_capsule.os, "fchmod", lambda *args: None, raising=False)
+    with pytest.raises(ValueError, match=message):
+        stage_dev_runtime_capsule(
+            "dev-oc-img", digest, archive_path=archive, nas_root=nas_root
+        )
+    assert list(nas_root.iterdir()) == []
+
+
+def test_capsule_staging_rejects_customer_target_before_archive_read() -> None:
+    with pytest.raises(ValueError, match="dev-target-only"):
+        stage_dev_runtime_capsule(
+            "oc14",
+            "sha256:" + "1" * 64,
+            archive_path=Path("/does/not/exist"),
+        )
 
 
 def test_openclaw_probe_requires_zero_hit_control_and_full_receipt_chain() -> None:
