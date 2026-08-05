@@ -422,6 +422,89 @@ def test_live_runtime_truth_rejects_attachment_contract_drift() -> None:
     assert failure == "retrieval binding v2 manifest does not match live tuple"
 
 
+def test_live_runtime_truth_accepts_exact_precommit_candidate_binding() -> None:
+    route = SimpleNamespace(
+        linux_account="oc20",
+        instance_id="instance-oc20",
+        family="hermes",
+        runtime_class="customer",
+        public_host="oc20.ji-tech.co.kr",
+        gateway_port=30689,
+        bridge_port=30690,
+    )
+    live_contract = {"status_schema": "live"}
+    candidate = {
+        "wrapper_image": "wrapper",
+        "product_image": "product",
+        "retrieval_enabled": True,
+        "retrieval_binding": {"schema": "agent-runtime-retrieval-binding/v2"},
+        "retrieval_binding_digest": DIGEST_A,
+        "retrieval_attachment_contract": live_contract,
+    }
+    truth = {
+        "truth_status": "ok",
+        "wrapper_image": "wrapper",
+        "product_image": "product",
+        "retrieval_enabled": "true",
+        "runtime_profile": "hermes-runtime-customer",
+        "image_family": "hermes",
+        "retrieval_labels_present": "true",
+        "retrieval_contract_complete": "true",
+        "retrieval_projection_complete": "true",
+        "retrieval_projection_consistent": "true",
+        "retrieval_binding_digest": DIGEST_A,
+        "retrieval_schema": "jitech-embedded-retrieval/v1",
+        "retrieval_transport": "in_process",
+    }
+    inspect = SimpleNamespace(returncode=0, stdout="[{}]", stderr="")
+    with (
+        patch.object(runtime_truth, "get_runtime_binding", return_value=route),
+        patch.object(runtime_truth, "parse_apache_route", return_value=route),
+        patch.object(runtime_truth, "apache_route_checks", return_value=[]),
+        patch.object(
+            runtime_truth,
+            "find_gateway_container_by_binding",
+            return_value=("container-1", "instance_label"),
+        ),
+        patch.object(runtime_truth, "run_text", return_value=inspect),
+        patch.object(runtime_truth, "live_image_truth_from_info", return_value=truth),
+        patch.object(
+            runtime_truth,
+            "retrieval_attachment_contract_from_labels",
+            return_value=live_contract,
+        ),
+        patch.object(
+            runtime_truth,
+            "load_profile",
+            return_value=SimpleNamespace(
+                digest=DIGEST_B,
+                metadata={"container_nas_root": "/workspace/nas_docs"},
+            ),
+        ),
+        patch.object(
+            runtime_truth,
+            "load_runtime_target",
+            side_effect=AssertionError("precommit checks must not read the old manifest"),
+        ),
+        patch.object(runtime_truth, "validate_retrieval_target_binding"),
+        patch.object(
+            runtime_truth,
+            "local_canonical_recipe_check_from_truth",
+            return_value=(True, "truth_canonical_recipe_digest_matches_local", "ok"),
+        ),
+    ):
+        result, checks = runtime_truth.live_runtime_truth(
+            "oc20",
+            Path("state"),
+            expected_image_spec=candidate,
+        )
+    assert result["retrieval_expected_binding_digest"] == DIGEST_A
+    assert any(
+        ok and name == "truth_retrieval_binding_matches_expected"
+        for ok, name, _ in checks
+    )
+
+
 def test_compose_mounts_only_attachment_capable_binding_state() -> None:
     route = RuntimeBinding(
         instance_id="instance-oc20",

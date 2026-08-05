@@ -711,7 +711,11 @@ def run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool,
         checks.append((False, "live_container_inspect_parse_ok", str(exc)))
         return checks
     try:
-        truth, truth_checks = live_runtime_truth(desired.slot, state_root)
+        truth, truth_checks = live_runtime_truth(
+            desired.slot,
+            state_root,
+            expected_image_spec=desired.image_spec,
+        )
         checks.extend(truth_checks)
         checks.append(
             (
