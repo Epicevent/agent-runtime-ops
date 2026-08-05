@@ -512,6 +512,91 @@ def test_live_runtime_truth_accepts_exact_precommit_candidate_binding() -> None:
     assert validate_binding.call_args.kwargs["runtime_profile_digest"] == DIGEST_C
 
 
+def test_live_runtime_truth_uses_historical_digest_for_legacy_rollback() -> None:
+    route = SimpleNamespace(
+        linux_account="dev-oc-img",
+        instance_id="instance-dev-oc-img",
+        family="openclaw",
+        runtime_class="customer",
+        public_host="dev-oc-img.ji-tech.co.kr",
+        gateway_port=31089,
+        bridge_port=31090,
+    )
+    candidate = {
+        "wrapper_image": "legacy-wrapper",
+        "product_image": "legacy-product",
+        "retrieval_enabled": False,
+    }
+    truth = {
+        "truth_status": "ok",
+        "wrapper_image": "legacy-wrapper",
+        "product_image": "legacy-product",
+        "retrieval_enabled": "false",
+        "runtime_profile": "openclaw-customer",
+        "image_family": "openclaw",
+        "retrieval_labels_present": "true",
+        "retrieval_contract_complete": "true",
+        "retrieval_projection_complete": "true",
+        "retrieval_projection_consistent": "true",
+        "retrieval_binding_digest": DIGEST_A,
+        "retrieval_schema": "jitech-embedded-retrieval/v1",
+        "retrieval_transport": "in_process",
+    }
+    inspect = SimpleNamespace(returncode=0, stdout="[{}]", stderr="")
+    with (
+        patch.object(runtime_truth, "get_runtime_binding", return_value=route),
+        patch.object(runtime_truth, "parse_apache_route", return_value=route),
+        patch.object(runtime_truth, "apache_route_checks", return_value=[]),
+        patch.object(
+            runtime_truth,
+            "find_gateway_container_by_binding",
+            return_value=("container-1", "instance_label"),
+        ),
+        patch.object(runtime_truth, "run_text", return_value=inspect),
+        patch.object(runtime_truth, "live_image_truth_from_info", return_value=truth),
+        patch.object(
+            runtime_truth,
+            "retrieval_attachment_contract_from_labels",
+            return_value=None,
+        ),
+        patch.object(
+            runtime_truth,
+            "retrieval_contract_from_labels",
+            return_value={"schema": "jitech-embedded-retrieval/v1"},
+        ),
+        patch.object(
+            runtime_truth,
+            "load_profile",
+            return_value=SimpleNamespace(
+                digest=DIGEST_B,
+                metadata={"container_nas_root": "/home/node/nas_docs"},
+            ),
+        ),
+        patch.object(
+            runtime_truth,
+            "bind_retrieval_intent",
+            return_value={"retrieval_binding_digest": DIGEST_A},
+        ) as bind_intent,
+        patch.object(
+            runtime_truth,
+            "local_canonical_recipe_check_from_truth",
+            return_value=(True, "truth_canonical_recipe_digest_matches_local", "ok"),
+        ),
+    ):
+        _, checks = runtime_truth.live_runtime_truth(
+            "dev-oc-img",
+            Path("state"),
+            expected_image_spec=candidate,
+            expected_runtime_profile_digest=DIGEST_C,
+        )
+
+    assert bind_intent.call_args.kwargs["runtime_profile_digest"] == DIGEST_C
+    assert any(
+        ok and name == "truth_retrieval_binding_matches_expected"
+        for ok, name, _ in checks
+    )
+
+
 def test_compose_mounts_only_attachment_capable_binding_state() -> None:
     route = RuntimeBinding(
         instance_id="instance-oc20",

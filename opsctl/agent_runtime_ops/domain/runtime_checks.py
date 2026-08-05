@@ -715,6 +715,7 @@ def run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool,
             desired.slot,
             state_root,
             expected_image_spec=desired.image_spec,
+            expected_runtime_profile_digest=profile.digest,
         )
         checks.extend(truth_checks)
         checks.append(

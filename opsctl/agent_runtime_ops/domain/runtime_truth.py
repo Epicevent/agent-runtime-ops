@@ -284,6 +284,7 @@ def live_runtime_truth(
     state_root: Path,
     *,
     expected_image_spec: dict[str, object] | None = None,
+    expected_runtime_profile_digest: str | None = None,
 ) -> tuple[dict[str, str], list[tuple[bool, str, str | None]]]:
     checks: list[tuple[bool, str, str | None]] = []
     binding = get_runtime_binding(slot, state_root)
@@ -380,7 +381,12 @@ def live_runtime_truth(
                 {"retrieval_contract": retrieval_contract},
                 instance_id=binding.instance_id,
                 family=binding.family,
-                runtime_profile_digest=profile.digest,
+                runtime_profile_digest=(
+                    expected_runtime_profile_digest
+                    if expected_image_spec is not None
+                    and expected_runtime_profile_digest is not None
+                    else profile.digest
+                ),
                 container_nas_root=str(
                     profile.metadata.get("container_nas_root") or ""
                 ),
