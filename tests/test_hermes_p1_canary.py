@@ -437,7 +437,10 @@ def test_live_runtime_truth_accepts_exact_precommit_candidate_binding() -> None:
         "wrapper_image": "wrapper",
         "product_image": "product",
         "retrieval_enabled": True,
-        "retrieval_binding": {"schema": "agent-runtime-retrieval-binding/v2"},
+        "retrieval_binding": {
+            "runtimeProfileDigest": DIGEST_C,
+            "schema": "agent-runtime-retrieval-binding/v2",
+        },
         "retrieval_binding_digest": DIGEST_A,
         "retrieval_attachment_contract": live_contract,
     }
@@ -486,7 +489,10 @@ def test_live_runtime_truth_accepts_exact_precommit_candidate_binding() -> None:
             "load_runtime_target",
             side_effect=AssertionError("precommit checks must not read the old manifest"),
         ),
-        patch.object(runtime_truth, "validate_retrieval_target_binding"),
+        patch.object(
+            runtime_truth,
+            "validate_retrieval_target_binding",
+        ) as validate_binding,
         patch.object(
             runtime_truth,
             "local_canonical_recipe_check_from_truth",
@@ -503,6 +509,7 @@ def test_live_runtime_truth_accepts_exact_precommit_candidate_binding() -> None:
         ok and name == "truth_retrieval_binding_matches_expected"
         for ok, name, _ in checks
     )
+    assert validate_binding.call_args.kwargs["runtime_profile_digest"] == DIGEST_C
 
 
 def test_compose_mounts_only_attachment_capable_binding_state() -> None:

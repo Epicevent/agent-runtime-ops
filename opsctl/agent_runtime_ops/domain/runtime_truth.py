@@ -366,7 +366,11 @@ def live_runtime_truth(
                 candidate_spec,
                 instance_id=binding.instance_id,
                 family=binding.family,
-                runtime_profile_digest=profile.digest,
+                runtime_profile_digest=(
+                    str(candidate_binding.get("runtimeProfileDigest") or "")
+                    if expected_image_spec is not None
+                    else profile.digest
+                ),
                 container_nas_root=str(profile.metadata.get("container_nas_root") or ""),
             )
             expected_spec = candidate_spec

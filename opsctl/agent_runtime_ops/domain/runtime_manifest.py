@@ -263,7 +263,9 @@ def desired_from_manifest(slot: str, manifest: dict, state_root: Path):
             image_spec,
             instance_id=route.instance_id,
             family=family,
-            runtime_profile_digest=profile.digest,
+            runtime_profile_digest=str(
+                manifest.get("runtime_profile_digest") or profile.digest
+            ),
             container_nas_root=str(profile.metadata.get("container_nas_root") or ""),
         )
     return RuntimeTarget(
