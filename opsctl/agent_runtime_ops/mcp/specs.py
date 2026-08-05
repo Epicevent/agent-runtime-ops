@@ -64,6 +64,60 @@ def list_tool_specs() -> list[dict[str, Any]]:
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         },
         {
+            "name": "runtime_observation",
+            "title": "Observe Runtime Safely",
+            "description": (
+                "Emit the bounded sanitized read-only runtime observation for one dev or customer target. "
+                "This never opens a customer shell or mutates the runtime."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {"target": {"type": "string"}},
+                "required": ["target"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "dev_runtime_logs",
+            "title": "Inspect Dev Runtime Logs",
+            "description": "Tail and redact live logs for a dev-* target only.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string"},
+                    "tail": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 2000,
+                        "default": 200,
+                    },
+                    "since": {
+                        "type": "string",
+                        "description": "Relative age such as 10m, 2h or 1d.",
+                    },
+                },
+                "required": ["target"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "dev_session_health",
+            "title": "Inspect Dev Session Health",
+            "description": "Run the content-free embedded-session wedge detector for a dev-* target only.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string"},
+                    "since": {
+                        "type": "string",
+                        "description": "Relative age such as 10m, 2h or 1d.",
+                    },
+                },
+                "required": ["target"],
+                "additionalProperties": False,
+            },
+        },
+        {
             "name": "binding_list",
             "title": "List Runtime Bindings",
             "description": "List intended runtime bindings: instance id, linux account, public host, family, runtime class, and ports.",

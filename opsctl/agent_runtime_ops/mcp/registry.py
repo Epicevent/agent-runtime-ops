@@ -8,6 +8,7 @@ from .handlers import handoff as handoff_handlers
 from .handlers import heartbeat as heartbeat_handlers
 from .handlers import image as image_handlers
 from .handlers import nas as nas_handlers
+from .handlers import observation as observation_handlers
 from .handlers import recipe as recipe_handlers
 from .handlers import rollout as rollout_handlers
 from .handlers import root_action as root_action_handlers
@@ -24,6 +25,9 @@ def _bind(handler: Callable[[Any, dict[str, Any]], dict[str, Any]]) -> ToolHandl
 
 HANDLERS: dict[str, ToolHandler] = {
     "ops_orientation": _bind(routing_handlers.ops_orientation),
+    "runtime_observation": _bind(observation_handlers.runtime_status),
+    "dev_runtime_logs": _bind(observation_handlers.dev_logs),
+    "dev_session_health": _bind(observation_handlers.dev_session_health),
     "binding_list": _bind(routing_handlers.binding_list),
     "binding_status": _bind(routing_handlers.binding_status),
     "binding_set_public_host": _bind(routing_handlers.binding_set_public_host),

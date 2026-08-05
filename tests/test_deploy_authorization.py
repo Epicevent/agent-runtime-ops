@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agent_runtime_ops.commands import rollout
+from agent_runtime_ops.commands import diagnostics, rollout
 from agent_runtime_ops.domain import common
 
 
@@ -57,6 +57,25 @@ def test_developer_scoped_to_dev_slots(monkeypatch):
     denial = rollout._authorize_deploy_target("image-canary", "oc14")
     assert denial is not None
     assert "openclawdev" in denial and "oc14" in denial
+
+
+@pytest.mark.parametrize("operator", sorted(common.OPERATOR_ACCOUNTS))
+def test_operator_may_run_live_diagnostics_on_customer(monkeypatch, operator):
+    monkeypatch.setenv("SUDO_USER", operator)
+    assert diagnostics._authorize_live_diagnostics_target("oc20") is None
+
+
+def test_direct_root_may_run_live_diagnostics_on_customer(monkeypatch):
+    monkeypatch.delenv("SUDO_USER", raising=False)
+    assert diagnostics._authorize_live_diagnostics_target("oc20") is None
+
+
+def test_developer_live_diagnostics_are_dev_only(monkeypatch):
+    monkeypatch.setenv("SUDO_USER", "atelier")
+    assert diagnostics._authorize_live_diagnostics_target("dev-hermes-img") is None
+    denial = diagnostics._authorize_live_diagnostics_target("oc20")
+    assert denial is not None
+    assert "atelier" in denial and "oc20" in denial
 
 
 def test_capsule_staging_flag_is_dev_only(monkeypatch, capsys):
