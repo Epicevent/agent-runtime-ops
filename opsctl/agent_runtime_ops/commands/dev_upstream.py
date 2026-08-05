@@ -98,6 +98,17 @@ def cmd_dev_upstream(args: argparse.Namespace) -> int:
         desired = _target(target, root)
         route = parse_apache_route(desired.route.linux_account)
         state = json.loads(path.read_text()) if path.exists() else None
+        if action == "apply" and state and state.get("status") == "prepared":
+            if (
+                state.get("target") != target
+                or state.get("instance_id") != desired.route.instance_id
+                or state.get("rollback_binding") != desired.route.to_json()
+                or desired.route.upstream_kind != "managed-rootful"
+                or route.gateway_port != desired.route.gateway_port
+            ):
+                raise ValueError("prepared intent does not match the restored managed baseline")
+            path.unlink()
+            state = None
         if action == "status":
             active = desired.route.upstream_kind == "developer-rootless"
             agreement = bool(active and state and route.gateway_port == desired.route.gateway_port == state["rootless_port"])
@@ -122,11 +133,18 @@ def cmd_dev_upstream(args: argparse.Namespace) -> int:
                 set_apache_proxy_port(target, port, backup_suffix="dev-upstream")
                 payload["status"] = "active"
                 _write_state(path, payload)
-            except Exception:
-                _write_runtime_bindings_file(root, bindings)
-                if parse_apache_route(target).gateway_port != route.gateway_port:
-                    set_apache_proxy_port(target, route.gateway_port, backup_suffix="dev-upstream-abort")
-                raise
+            except Exception as apply_exc:
+                try:
+                    _write_runtime_bindings_file(root, bindings)
+                    if parse_apache_route(target).gateway_port != route.gateway_port:
+                        set_apache_proxy_port(target, route.gateway_port, backup_suffix="dev-upstream-abort")
+                    restored = _target(target, root)
+                    if restored.route != desired.route or parse_apache_route(target).gateway_port != route.gateway_port:
+                        raise RuntimeError("abort rollback truth does not match the pre-apply baseline")
+                    path.unlink()
+                except Exception as rollback_exc:
+                    raise RuntimeError(f"{apply_exc}; abort rollback failed: {rollback_exc}") from rollback_exc
+                raise apply_exc
             print(f"target={target}\ninstance_id={replacement.instance_id}\nrootless_port={port}\nsource_revision={revision}\ndev_upstream_apply_status=ok")
             return 0
         if not state or state.get("status") != "active" or desired.route.upstream_kind != "developer-rootless":
