@@ -162,7 +162,7 @@ def _validate_unique_bindings(bindings: list[RuntimeBinding]) -> None:
 
 
 def load_runtime_bindings(
-    state_root: Path = DEFAULT_STATE_ROOT, *, allow_legacy_fields: bool = False
+    state_root: Path = DEFAULT_STATE_ROOT, *, allow_legacy_fields: bool = True
 ) -> list[RuntimeBinding]:
     path = runtime_bindings_path(state_root)
     with path.open("r", encoding="utf-8") as fh:
