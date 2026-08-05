@@ -13,6 +13,7 @@ import tempfile
 from typing import Any
 
 from ..host.account_files import runtime_ids
+from ..redaction import redact
 from ..routing import validate_linux_account
 from .common import run_text
 from .hermes_p1_canary import (
@@ -729,7 +730,17 @@ def run_openclaw_runtime_capsule_probe(
         timeout=300,
     )
     if result.returncode != 0:
-        raise ValueError("OpenClaw runtime capsule proof failed")
+        receipt = json.dumps(
+            {
+                "returncode": result.returncode,
+                "stderr": redact(result.stderr or ""),
+                "stdout": redact(result.stdout or ""),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        raise ValueError(f"OpenClaw runtime capsule proof failed: {receipt}")
     value = parse_retrieval_status_output(result.stdout)
     keys = frozenset(
         "schema enabled retrievalCount projectionCount dispatchCount responseObservedCount negativeControl receipts".split()
