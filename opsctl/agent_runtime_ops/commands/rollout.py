@@ -26,6 +26,8 @@ from ..domain.kwrag_runtime_capsule import (
     KwragRuntimeCapsule,
     hermes_capsule_inputs,
     load_runtime_capsule,
+    prepare_dev_runtime_capsule,
+    publish_prepared_dev_runtime_capsule,
     publish_runtime_capsule_authority,
     publish_runtime_capsule_inputs,
     run_openclaw_runtime_capsule_probe,
@@ -278,12 +280,28 @@ def _cmd_rollout_image_apply_slot(args: argparse.Namespace, *, required_runtime_
     try:
         image_spec = _direct_image_spec_from_args(args)
         capsule_digest = str(getattr(args, "retrieval_runtime_capsule_sha256", "") or "")
+        stage_capsule = bool(getattr(args, "stage_retrieval_runtime_capsule", False))
+        if stage_capsule and (not _is_dev_named_target(slot) or not capsule_digest):
+            raise ValueError(
+                "runtime capsule staging requires a dev-* target and an exact capsule digest"
+            )
+        dev_capsule = (
+            prepare_dev_runtime_capsule(slot, capsule_digest)
+            if stage_capsule
+            else None
+        )
         desired, profile, prepared = _desired_with_hermes_p1_canary(
             slot,
             image_spec,
             state_root,
             retrieval_enabled=bool(getattr(args, "retrieval_enabled", False)),
-            capsule=load_runtime_capsule(slot, capsule_digest) if capsule_digest else None,
+            capsule=(
+                dev_capsule.capsule
+                if dev_capsule is not None
+                else load_runtime_capsule(slot, capsule_digest)
+                if capsule_digest
+                else None
+            ),
         )
         if desired.runtime_class != required_runtime_class:
             raise ValueError(f"{action_name} requires runtime_class={required_runtime_class}: {slot}")
@@ -312,7 +330,11 @@ def _cmd_rollout_image_apply_slot(args: argparse.Namespace, *, required_runtime_
         allow_first_apply=bool(getattr(args, "allow_first_apply", False)),
         action_name=f"rollout_{action_name}",
         prepare_runtime_env=lambda: _prepare_direct_image_runtime(
-            desired, profile, prepared
+            desired,
+            profile,
+            publish_prepared_dev_runtime_capsule(slot, dev_capsule)
+            if dev_capsule is not None
+            else prepared,
         ),
         post_live_retrieval_probe=(
             (lambda container: _run_direct_image_retrieval_probe(
@@ -323,6 +345,8 @@ def _cmd_rollout_image_apply_slot(args: argparse.Namespace, *, required_runtime_
         ),
     )
     if rc == 0:
+        if dev_capsule is not None:
+            print(f"retrieval_capsule_staged={capsule_digest}")
         print(f"rollout_{action_name.replace('-', '_')}_status=ok")
     return rc
 

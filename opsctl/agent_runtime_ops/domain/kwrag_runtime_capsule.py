@@ -5,7 +5,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from pathlib import PurePosixPath
+import shutil
 import stat
+import tarfile
+import tempfile
 from typing import Any
 
 from ..host.account_files import runtime_ids
@@ -50,6 +54,9 @@ _TOP = frozenset(
 _ATTACHMENT = frozenset(
     "databaseSha256 indexManifestDigest sourceSnapshotDigest readOnlyAuthorityReceiptDigest slotRuntimeBindingDigest".split()
 )
+_DEV_ARCHIVE_MAX_BYTES = 64 * 1024 * 1024
+_DEV_ARCHIVE_MAX_MEMBERS = 32
+_DEV_ARCHIVE_MAX_FILE_BYTES = 32 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -64,6 +71,13 @@ class KwragRuntimeCapsule:
     product_runtime_binding: dict[str, object] | None
     positive_request: dict[str, str]
     negative_request: dict[str, str]
+
+
+@dataclass(frozen=True)
+class PreparedDevRuntimeCapsule:
+    capsule: KwragRuntimeCapsule
+    files: dict[str, bytes]
+    expected: dict[str, str]
 
 
 def _object(
@@ -286,6 +300,319 @@ def load_runtime_capsule(
         parsed["positive"],
         parsed["negative"],
     )
+
+
+def dev_runtime_capsule_archive_path(digest: str) -> Path:
+    component = _digest(digest, "digest").replace(":", "-")
+    return Path("/tmp") / f"kwrag-runtime-capsule-{component}.tar"
+
+
+def _safe_archive_member(name: str) -> str:
+    if not name or "\\" in name or name.startswith("/"):
+        raise ValueError("runtime capsule archive member path is unsafe")
+    normalized = name.removesuffix("/")
+    parts = PurePosixPath(normalized).parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise ValueError("runtime capsule archive member path is unsafe")
+    return normalized
+
+
+def _read_dev_capsule_archive(path: Path) -> tuple[dict[str, bytes], set[str]]:
+    descriptor = os.open(
+        path,
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_BINARY", 0),
+    )
+    try:
+        identity = os.fstat(descriptor)
+        sudo_uid = int(os.environ.get("SUDO_UID", "0") or "0")
+        if (
+            not stat.S_ISREG(identity.st_mode)
+            or identity.st_nlink != 1
+            or identity.st_uid not in {0, sudo_uid}
+            or identity.st_size <= 0
+            or identity.st_size > _DEV_ARCHIVE_MAX_BYTES
+            or (os.name != "nt" and stat.S_IMODE(identity.st_mode) & 0o077)
+        ):
+            raise ValueError("runtime capsule archive identity is unsafe")
+        files: dict[str, bytes] = {}
+        directories: set[str] = set()
+        total = 0
+        with (
+            os.fdopen(os.dup(descriptor), "rb") as source,
+            tarfile.open(fileobj=source, mode="r:") as archive,
+        ):
+            for index, member in enumerate(archive, start=1):
+                if index > _DEV_ARCHIVE_MAX_MEMBERS:
+                    raise ValueError("runtime capsule archive has too many members")
+                name = _safe_archive_member(member.name)
+                if name in files or name in directories:
+                    raise ValueError("runtime capsule archive has duplicate members")
+                if member.isdir():
+                    directories.add(name)
+                    continue
+                if (
+                    not member.isreg()
+                    or member.size < 0
+                    or member.size > _DEV_ARCHIVE_MAX_FILE_BYTES
+                ):
+                    raise ValueError(
+                        "runtime capsule archive member type or size is unsafe"
+                    )
+                total += member.size
+                if total > _DEV_ARCHIVE_MAX_BYTES:
+                    raise ValueError("runtime capsule archive payload is too large")
+                stream = archive.extractfile(member)
+                if stream is None:
+                    raise ValueError("runtime capsule archive member is unreadable")
+                payload = stream.read(member.size + 1)
+                if len(payload) != member.size:
+                    raise ValueError(
+                        "runtime capsule archive member changed while reading"
+                    )
+                files[name] = payload
+        after = os.fstat(descriptor)
+        if (
+            identity.st_dev,
+            identity.st_ino,
+            identity.st_size,
+            identity.st_mtime_ns,
+        ) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+            raise ValueError("runtime capsule archive changed while reading")
+        return files, directories
+    finally:
+        os.close(descriptor)
+
+
+def _archive_expected_files(
+    capsule: KwragRuntimeCapsule,
+) -> dict[str, str]:
+    capsule_path = (
+        f"kw/package/.kwrag/runtime-capsules/{capsule.digest.replace(':', '-')}.json"
+    )
+    release_root = str(capsule.authority_receipt["releaseRelativeRoot"])
+    binding = capsule.enabled_binding
+    expected = {
+        capsule_path: capsule.digest,
+        str(binding["index_manifest_relative"]): str(binding["index_manifest_digest"]),
+    }
+    corpora = binding["corpora"]
+    assert isinstance(corpora, dict)
+    for corpus in corpora.values():
+        assert isinstance(corpus, dict)
+        expected[str(corpus["database_relative"])] = str(corpus["database_sha256"])
+        expected[str(corpus["source_snapshot_relative"])] = str(
+            corpus["source_snapshot_digest"]
+        )
+    for name in expected:
+        if name != capsule_path and not name.startswith(release_root + "/"):
+            raise ValueError("runtime capsule archive file escaped its release root")
+        _safe_archive_member(name)
+    return expected
+
+
+def _expected_directories(files: dict[str, str]) -> set[str]:
+    result: set[str] = set()
+    for name in files:
+        parent = PurePosixPath(name).parent
+        while str(parent) != ".":
+            result.add(parent.as_posix())
+            parent = parent.parent
+    return result
+
+
+def _write_archive_fixture_root(
+    root: Path, files: dict[str, bytes], directories: set[str]
+) -> None:
+    for name in sorted(directories, key=lambda item: (item.count("/"), item)):
+        path = root.joinpath(*PurePosixPath(name).parts)
+        path.mkdir(mode=0o750)
+    for name, payload in files.items():
+        path = root.joinpath(*PurePosixPath(name).parts)
+        path.write_bytes(payload)
+        path.chmod(0o440)
+
+
+def _verify_file_set(root: Path, expected: dict[str, str]) -> None:
+    for name, digest in expected.items():
+        _read_exact(root.joinpath(*PurePosixPath(name).parts), digest)
+
+
+def _publish_dev_capsule_files(
+    slot: str,
+    files: dict[str, bytes],
+    expected: dict[str, str],
+    *,
+    nas_root: Path | None = None,
+) -> None:
+    root = nas_root or Path("/home") / validate_linux_account(slot) / "nas_docs"
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("runtime capsule NAS root is unsafe")
+    _, _, data_gid = runtime_ids(slot)
+    capsule_name = next(name for name in expected if "/runtime-capsules/" in name)
+    release_name = str(
+        PurePosixPath(next(name for name in expected if name != capsule_name)).parts[4]
+    )
+    release_parent = root / "kw/package/.kwrag/releases"
+    release_target = release_parent / release_name
+    capsule_parent = root / "kw/package/.kwrag/runtime-capsules"
+    capsule_target = root.joinpath(*PurePosixPath(capsule_name).parts)
+
+    for directory in (
+        root / "kw",
+        root / "kw/package",
+        root / "kw/package/.kwrag",
+        release_parent,
+        capsule_parent,
+    ):
+        if directory.exists():
+            if directory.is_symlink() or not directory.is_dir():
+                raise ValueError("runtime capsule publication path is unsafe")
+            identity = directory.stat()
+            if (
+                identity.st_uid != 0
+                or identity.st_gid != data_gid
+                or (os.name != "nt" and stat.S_IMODE(identity.st_mode) != 0o750)
+            ):
+                raise ValueError("runtime capsule publication ownership drifted")
+        else:
+            directory.mkdir(mode=0o750)
+            os.chown(directory, 0, data_gid)
+            directory.chmod(0o750)
+
+    release_expected = {
+        name: digest
+        for name, digest in expected.items()
+        if name.startswith(f"kw/package/.kwrag/releases/{release_name}/")
+    }
+    if release_target.exists():
+        if release_target.is_symlink() or not release_target.is_dir():
+            raise ValueError("runtime capsule release target is unsafe")
+        _verify_file_set(root, release_expected)
+        names = []
+        with os.scandir(release_target) as entries:
+            for entry in entries:
+                names.append(entry.name)
+                if len(names) > len(release_expected):
+                    raise ValueError("runtime capsule release has unexpected files")
+                if not entry.is_file(follow_symlinks=False):
+                    raise ValueError("runtime capsule release member is unsafe")
+        if set(names) != {PurePosixPath(name).name for name in release_expected}:
+            raise ValueError("runtime capsule release member set drifted")
+    else:
+        stage = Path(
+            tempfile.mkdtemp(prefix=f".staging-{release_name}-", dir=release_parent)
+        )
+        created_release = False
+        try:
+            os.chown(stage, 0, data_gid)
+            stage.chmod(0o750)
+            prefix = f"kw/package/.kwrag/releases/{release_name}/"
+            for name in sorted(release_expected):
+                relative = name.removeprefix(prefix)
+                if "/" in relative:
+                    raise ValueError("runtime capsule release nesting is unsupported")
+                target = stage / relative
+                target.write_bytes(files[name])
+                os.chown(target, 0, data_gid)
+                target.chmod(0o440)
+            os.rename(stage, release_target)
+            created_release = True
+            _verify_file_set(root, release_expected)
+        except Exception:
+            if stage.exists():
+                shutil.rmtree(stage)
+            if (
+                created_release
+                and release_target.exists()
+                and not capsule_target.exists()
+            ):
+                shutil.rmtree(release_target)
+            raise
+
+    if capsule_target.exists():
+        _verify_file_set(root, {capsule_name: expected[capsule_name]})
+        return
+    temporary = capsule_parent / f".{capsule_target.name}.{os.getpid()}.tmp"
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+            0o640,
+        )
+        try:
+            payload = memoryview(files[capsule_name])
+            while payload:
+                written = os.write(descriptor, payload)
+                if written <= 0:
+                    raise ValueError("runtime capsule publication write failed")
+                payload = payload[written:]
+            os.fsync(descriptor)
+            os.fchown(descriptor, 0, data_gid)
+            if hasattr(os, "fchmod"):
+                os.fchmod(descriptor, 0o440)
+        finally:
+            os.close(descriptor)
+        temporary.chmod(0o440)
+        if os.name == "nt":
+            os.rename(temporary, capsule_target)
+        else:
+            os.link(temporary, capsule_target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    _verify_file_set(root, expected)
+
+
+def prepare_dev_runtime_capsule(
+    slot: str,
+    digest: str,
+    *,
+    archive_path: Path | None = None,
+) -> PreparedDevRuntimeCapsule:
+    if not slot.startswith("dev-"):
+        raise ValueError("runtime capsule staging is dev-target-only")
+    archive = archive_path or dev_runtime_capsule_archive_path(digest)
+    files, directories = _read_dev_capsule_archive(archive)
+    with tempfile.TemporaryDirectory(
+        prefix="agent-runtime-kwrag-capsule-"
+    ) as temporary:
+        root = Path(temporary)
+        _write_archive_fixture_root(root, files, directories)
+        capsule = load_runtime_capsule(slot, digest, nas_root=root)
+        expected = _archive_expected_files(capsule)
+        if set(files) != set(expected) or directories != _expected_directories(
+            expected
+        ):
+            raise ValueError("runtime capsule archive member set is invalid")
+        _verify_file_set(root, expected)
+    return PreparedDevRuntimeCapsule(capsule, files, expected)
+
+
+def publish_prepared_dev_runtime_capsule(
+    slot: str,
+    prepared: PreparedDevRuntimeCapsule,
+    *,
+    nas_root: Path | None = None,
+) -> KwragRuntimeCapsule:
+    if prepared.capsule.slot != slot or not slot.startswith("dev-"):
+        raise ValueError("prepared runtime capsule target drifted")
+    _publish_dev_capsule_files(
+        slot, prepared.files, prepared.expected, nas_root=nas_root
+    )
+    return load_runtime_capsule(slot, prepared.capsule.digest, nas_root=nas_root)
+
+
+def stage_dev_runtime_capsule(
+    slot: str,
+    digest: str,
+    *,
+    archive_path: Path | None = None,
+    nas_root: Path | None = None,
+) -> KwragRuntimeCapsule:
+    prepared = prepare_dev_runtime_capsule(slot, digest, archive_path=archive_path)
+    return publish_prepared_dev_runtime_capsule(slot, prepared, nas_root=nas_root)
 
 
 def retrieval_state_host_path(desired) -> Path:
