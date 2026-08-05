@@ -34,6 +34,19 @@ class ApacheRouteTests(unittest.TestCase):
         self.assertIn("http://127.0.0.1:31889/", updated)
         self.assertIn("ws://127.0.0.1:31889/", updated)
 
+    def test_replace_proxy_port_handles_full_virtualhost_before_proxy_lines(self) -> None:
+        text = """<VirtualHost *:443>
+ServerName dev-hermess.ji-tech.co.kr
+RewriteRule ^/(.*)$ ws://127.0.0.1:30889/$1 [P,L]
+ProxyPass / http://127.0.0.1:30889/ retry=0
+ProxyPassReverse / http://127.0.0.1:30889/
+</VirtualHost>
+"""
+        updated, old = replace_proxy_port(text, 31889)
+        self.assertEqual(old, 30889)
+        self.assertIn("ws://127.0.0.1:31889/", updated)
+        self.assertIn("ProxyPass / http://127.0.0.1:31889/", updated)
+
     def test_replace_proxy_port_rejects_public_port(self) -> None:
         with self.assertRaisesRegex(ValueError, "between 1024"):
             replace_proxy_port("ProxyPass / http://127.0.0.1:30001/\n", 80)

@@ -12,8 +12,8 @@ from .routing import validate_linux_account
 DEFAULT_APACHE_OPENCLAW_DIR = Path(os.environ.get("AGENT_RUNTIME_APACHE_OPENCLAW_DIR", "/etc/apache2/openclaw"))
 HOST_RE = re.compile(r"^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$")
 SERVER_NAME_RE = re.compile(r"^(\s*ServerName\s+)(\S+)(\s*(?:#.*)?)$")
-HTTP_PROXY_RE = re.compile(r"^\s*ProxyPass\s+/\s+http://127\.0\.0\.1:(\d+)/")
-WS_PROXY_RE = re.compile(r"ws://127\.0\.0\.1:(\d+)/")
+HTTP_PROXY_RE = re.compile(r"^\s*ProxyPass\s+/\s+http://127\.0\.0\.1:(\d+)/", re.MULTILINE)
+WS_PROXY_RE = re.compile(r"ws://127\.0\.0\.1:(\d+)/", re.MULTILINE)
 
 
 @dataclass(frozen=True)
