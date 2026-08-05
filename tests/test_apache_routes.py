@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from agent_runtime_ops.apache import parse_apache_route, replace_server_name, set_apache_host
+from agent_runtime_ops.apache import parse_apache_route, replace_proxy_port, replace_server_name, set_apache_host
 
 
 def write_route(root: Path, slot: str = "oc3", host: str = "oc3.ji-tech.co.kr", port: int = 28989) -> Path:
@@ -27,6 +27,17 @@ def write_route(root: Path, slot: str = "oc3", host: str = "oc3.ji-tech.co.kr", 
 
 
 class ApacheRouteTests(unittest.TestCase):
+    def test_replace_proxy_port_updates_http_and_websocket(self) -> None:
+        text = "ProxyPass / http://127.0.0.1:30001/\nRewriteRule ^/(.*) ws://127.0.0.1:30001/$1 [P,L]\n"
+        updated, old = replace_proxy_port(text, 31889)
+        self.assertEqual(old, 30001)
+        self.assertIn("http://127.0.0.1:31889/", updated)
+        self.assertIn("ws://127.0.0.1:31889/", updated)
+
+    def test_replace_proxy_port_rejects_public_port(self) -> None:
+        with self.assertRaisesRegex(ValueError, "between 1024"):
+            replace_proxy_port("ProxyPass / http://127.0.0.1:30001/\n", 80)
+
     def test_parse_apache_route_extracts_host_and_port(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
