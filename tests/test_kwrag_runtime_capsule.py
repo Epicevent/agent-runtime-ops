@@ -333,6 +333,7 @@ def test_enabled_openclaw_publication_projects_distinct_private_controls(
     capsule = load_runtime_capsule("oc14", digest, nas_root=capsule_root)
     state_root = tmp_path / "state"
     state_root.mkdir()
+    (state_root / "binding-v2.json").write_text("stale", encoding="utf-8")
     writes: dict[str, object] = {}
 
     def write_json(path: Path, value: object, mode: int = 0o600) -> None:
@@ -361,6 +362,9 @@ def test_enabled_openclaw_publication_projects_distinct_private_controls(
         },
     )
     publish_runtime_capsule_inputs(desired, capsule)
+    assert "attachment-binding-v2.json" in writes
+    assert "binding-v2.json" not in writes
+    assert not (state_root / "binding-v2.json").exists()
     assert writes["proof-request.json"] != writes["negative-proof-request.json"]
     assert writes["proof-request.json"]["query"] == capsule.positive_request["query"]
     assert (

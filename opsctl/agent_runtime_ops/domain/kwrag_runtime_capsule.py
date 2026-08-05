@@ -665,8 +665,14 @@ def publish_runtime_capsule_inputs(desired, capsule: KwragRuntimeCapsule) -> Pat
     _, runtime_gid, _ = runtime_ids(desired.slot)
     os.chown(root, 0, runtime_gid)
     os.chmod(root, 0o750)
-    _write_json(root / "binding-v2.json", binding, mode=0o640)
+    binding_name = (
+        "attachment-binding-v2.json"
+        if capsule.family == "openclaw"
+        else "binding-v2.json"
+    )
+    _write_json(root / binding_name, binding, mode=0o640)
     if capsule.family == "openclaw":
+        (root / "binding-v2.json").unlink(missing_ok=True)
         _write_json(
             root / "fixed-producer-binding.json",
             capsule.enabled_binding if enabled else capsule.disabled_binding,
