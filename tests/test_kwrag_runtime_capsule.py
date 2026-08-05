@@ -478,6 +478,12 @@ def test_openclaw_probe_requires_zero_hit_control_and_full_receipt_chain() -> No
 
 def test_openclaw_probe_failure_preserves_redacted_machine_receipt() -> None:
     def runner(argv, timeout):
+        if argv[3] == "stat":
+            return SimpleNamespace(
+                returncode=0,
+                stdout="/run/kwrag/attachment-binding-v2.json|regular file|0|959|640|1|42\n",
+                stderr="",
+            )
         return SimpleNamespace(
             returncode=17,
             stdout="proof_status=failed\nrequest_id=req-1\n",
@@ -489,6 +495,8 @@ def test_openclaw_probe_failure_preserves_redacted_machine_receipt() -> None:
 
     message = str(error.value)
     assert '"returncode":17' in message
+    assert '"bindingMetadata":{"returncode":0' in message
+    assert "attachment-binding-v2.json|regular file|0|959|640|1|42\\n" in message
     assert "proof_status=failed\\nrequest_id=req-1\\n" in message
     assert "password=<redacted>\\nexact failure detail\\n" in message
     assert "do-not-print" not in message

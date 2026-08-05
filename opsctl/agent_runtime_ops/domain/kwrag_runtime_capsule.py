@@ -730,8 +730,29 @@ def run_openclaw_runtime_capsule_probe(
         timeout=300,
     )
     if result.returncode != 0:
+        metadata = runner(
+            [
+                "docker",
+                "exec",
+                container,
+                "stat",
+                "--dereference",
+                "--printf=%n|%F|%u|%g|%a|%h|%s\\n",
+                "/run/kwrag",
+                "/run/kwrag/attachment-binding-v2.json",
+                "/run/kwrag/fixed-producer-binding.json",
+                "/run/kwrag/proof-request.json",
+                "/run/kwrag/read-only-authority.json",
+            ],
+            timeout=20,
+        )
         receipt = json.dumps(
             {
+                "bindingMetadata": {
+                    "returncode": metadata.returncode,
+                    "stderr": redact(metadata.stderr or ""),
+                    "stdout": redact(metadata.stdout or ""),
+                },
                 "returncode": result.returncode,
                 "stderr": redact(result.stderr or ""),
                 "stdout": redact(result.stdout or ""),
