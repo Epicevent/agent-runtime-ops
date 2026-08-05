@@ -403,10 +403,10 @@ def _archive_expected_files(
     assert isinstance(corpora, dict)
     for corpus in corpora.values():
         assert isinstance(corpus, dict)
-        expected[str(corpus["database_relative"])] = str(corpus["database_sha256"])
-        expected[str(corpus["source_snapshot_relative"])] = str(
-            corpus["source_snapshot_digest"]
-        )
+        database = _safe_archive_member(str(corpus["database_relative"]))
+        source = _safe_archive_member(str(corpus["source_snapshot_relative"]))
+        expected[f"{release_root}/{database}"] = str(corpus["database_sha256"])
+        expected[f"{release_root}/{source}"] = str(corpus["source_snapshot_digest"])
     for name in expected:
         if name != capsule_path and not name.startswith(release_root + "/"):
             raise ValueError("runtime capsule archive file escaped its release root")
@@ -439,6 +439,52 @@ def _write_archive_fixture_root(
 def _verify_file_set(root: Path, expected: dict[str, str]) -> None:
     for name, digest in expected.items():
         _read_exact(root.joinpath(*PurePosixPath(name).parts), digest)
+
+
+def _verify_fixed_producer_manifest(root: Path, capsule: KwragRuntimeCapsule) -> None:
+    binding = capsule.enabled_binding
+    manifest_name = str(binding["index_manifest_relative"])
+    payload = _read_exact(
+        root.joinpath(*PurePosixPath(manifest_name).parts),
+        str(binding["index_manifest_digest"]),
+    )
+    try:
+        manifest = json.loads(payload.decode())
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("runtime capsule index manifest is invalid") from exc
+    if _canonical_bytes(manifest) != payload or not isinstance(manifest, dict):
+        raise ValueError("runtime capsule index manifest is not canonical")
+    rooms = manifest.get("rooms")
+    corpora = binding.get("corpora")
+    if (
+        not isinstance(rooms, dict)
+        or not isinstance(corpora, dict)
+        or set(rooms) != set(corpora)
+    ):
+        raise ValueError("runtime capsule manifest corpus set is invalid")
+    for corpus_name, corpus in corpora.items():
+        room = rooms.get(corpus_name)
+        if not isinstance(corpus, dict) or not isinstance(room, dict):
+            raise ValueError("runtime capsule manifest corpus is invalid")
+        files = room.get("files")
+        if not isinstance(files, list):
+            raise ValueError("runtime capsule manifest file set is invalid")
+        observed: dict[str, str] = {}
+        for item in files:
+            if not isinstance(item, dict) or set(item) != {"path", "sha256"}:
+                raise ValueError("runtime capsule manifest file entry is invalid")
+            name = _safe_archive_member(str(item["path"]))
+            if name in observed:
+                raise ValueError("runtime capsule manifest has duplicate files")
+            observed[name] = str(item["sha256"])
+        expected = {
+            str(corpus["database_relative"]): str(corpus["database_sha256"]),
+            str(corpus["source_snapshot_relative"]): str(
+                corpus["source_snapshot_digest"]
+            ),
+        }
+        if observed != expected:
+            raise ValueError("runtime capsule manifest file binding is invalid")
 
 
 def _publish_dev_capsule_files(
@@ -588,6 +634,7 @@ def prepare_dev_runtime_capsule(
         ):
             raise ValueError("runtime capsule archive member set is invalid")
         _verify_file_set(root, expected)
+        _verify_fixed_producer_manifest(root, capsule)
     return PreparedDevRuntimeCapsule(capsule, files, expected)
 
 

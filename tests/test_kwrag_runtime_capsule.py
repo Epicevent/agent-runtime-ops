@@ -78,9 +78,9 @@ def fixture(
             "selected_engine": engine,
             "corpora": {
                 "room": {
-                    "database_relative": f"{prefix}/room.sqlite3",
+                    "database_relative": "room.sqlite3",
                     "database_sha256": "sha256:" + "3" * 64,
-                    "source_snapshot_relative": f"{prefix}/room-source.json",
+                    "source_snapshot_relative": "room-source.json",
                     "source_snapshot_digest": "sha256:" + "4" * 64,
                     "authority_receipt_digest": canonical_digest(authority),
                 }
@@ -161,12 +161,28 @@ def dev_archive(
     value = fixture("dev-oc-img")
     release = str(value["releaseId"]).replace(":", "-")
     prefix = f"kw/package/.kwrag/releases/{release}"
-    manifest = b'{"schema":"synthetic-index/v1"}'
     database = b"SQLite format 3\x00synthetic"
     source = b'{"schema":"synthetic-source/v1"}'
-    manifest_digest = sha(manifest)
     database_digest = sha(database)
     source_digest = sha(source)
+    manifest = canonical(
+        {
+            "version": 1,
+            "release_id": str(value["releaseId"]),
+            "corpus_snapshot": sha(canonical({"room": source_digest})),
+            "embedding_fingerprint": P1_IDENTITY_FIXED["pipelineFingerprint"],
+            "rooms": {
+                "room": {
+                    "conversation_id": "synthetic-dev-conversation",
+                    "files": [
+                        {"path": "room.sqlite3", "sha256": database_digest},
+                        {"path": "room-source.json", "sha256": source_digest},
+                    ],
+                }
+            },
+        }
+    )
+    manifest_digest = sha(manifest)
     value["indexManifestDigest"] = manifest_digest
     value["authorityReceipt"]["indexManifestDigest"] = manifest_digest
     authority_digest = canonical_digest(value["authorityReceipt"])
@@ -185,9 +201,9 @@ def dev_archive(
         corpus.update(
             {
                 "authority_receipt_digest": authority_digest,
-                "database_relative": f"{prefix}/room.sqlite3",
+                "database_relative": "room.sqlite3",
                 "database_sha256": database_digest,
-                "source_snapshot_relative": f"{prefix}/room-source.json",
+                "source_snapshot_relative": "room-source.json",
                 "source_snapshot_digest": source_digest,
             }
         )
@@ -432,6 +448,54 @@ def test_dev_capsule_archive_fails_before_publication(
             "dev-oc-img", digest, archive_path=archive, nas_root=nas_root
         )
     assert list(nas_root.iterdir()) == []
+
+
+def test_dev_capsule_archive_rejects_manifest_paths_that_are_not_index_relative(
+    tmp_path: Path,
+) -> None:
+    archive, digest = dev_archive(tmp_path)
+    with tarfile.open(archive, "r") as source:
+        directories = {
+            member.name.rstrip("/") for member in source.getmembers() if member.isdir()
+        }
+        members = {
+            member.name: source.extractfile(member).read()
+            for member in source.getmembers()
+            if member.isfile()
+        }
+    capsule_name = next(name for name in members if "/runtime-capsules/" in name)
+    capsule = json.loads(members[capsule_name])
+    release_root = capsule["authorityReceipt"]["releaseRelativeRoot"]
+    for binding in capsule["fixedProducerBindings"].values():
+        corpus = binding["corpora"]["room"]
+        corpus["database_relative"] = f"{release_root}/room.sqlite3"
+        corpus["source_snapshot_relative"] = f"{release_root}/room-source.json"
+    capsule["attachmentData"]["slotRuntimeBindingDigest"] = canonical_digest(
+        capsule["fixedProducerBindings"]["enabled"]
+    )
+    rewritten = canonical(capsule)
+    rewritten_digest = sha(rewritten)
+    members.pop(capsule_name)
+    members[
+        f"kw/package/.kwrag/runtime-capsules/{rewritten_digest.replace(':', '-')}.json"
+    ] = rewritten
+    legacy = tmp_path / "legacy-paths.tar"
+    with tarfile.open(legacy, "w") as target:
+        for name in sorted(directories, key=lambda item: (item.count("/"), item)):
+            member = tarfile.TarInfo(name + "/")
+            member.type = tarfile.DIRTYPE
+            member.mode = 0o750
+            target.addfile(member)
+        for name, payload in members.items():
+            member = tarfile.TarInfo(name)
+            member.size = len(payload)
+            member.mode = 0o440
+            target.addfile(member, io.BytesIO(payload))
+    legacy.chmod(0o400)
+    with pytest.raises(ValueError, match="member set|manifest file binding"):
+        runtime_capsule.prepare_dev_runtime_capsule(
+            "dev-oc-img", rewritten_digest, archive_path=legacy
+        )
 
 
 def test_capsule_staging_rejects_customer_target_before_archive_read() -> None:
