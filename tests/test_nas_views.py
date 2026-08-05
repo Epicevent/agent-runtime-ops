@@ -287,11 +287,13 @@ class NasViewCliTests(unittest.TestCase):
             self.assertIn("rooms_missing_media=1", out)
             state = load_views_state(root)
             self.assertEqual(state["views"]["oc3"]["user_id"], "7521796")
-            # binds: package + 1 room + entry
-            self.assertEqual(len(binds), 3)
-            self.assertEqual(binds[-1][1], Path("/home/oc3/nas_docs/kw"))
-            # only the entry bind is recursive (--rbind pulls the submounts along)
-            self.assertEqual([recursive for _, _, recursive in binds], [False, False, True])
+            # package + room are bound at the hidden view and explicitly at the
+            # runtime entry; the entry itself is still recursive.
+            self.assertEqual(len(binds), 5)
+            self.assertEqual(binds[2][1], Path("/home/oc3/nas_docs/kw"))
+            self.assertEqual(binds[3][1], Path("/home/oc3/nas_docs/kw/package"))
+            self.assertEqual(binds[4][1], Path("/home/oc3/nas_docs/kw/media/r1"))
+            self.assertEqual([recursive for _, _, recursive in binds], [False, False, True, False, False])
 
     def test_assign_refuses_double_assign(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

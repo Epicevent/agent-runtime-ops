@@ -416,6 +416,26 @@ def _apply_binds(plan: ViewPlan) -> tuple[bool, str, int]:
     ok, reason = bind_ro(plan.view, plan.entry, recursive=True)
     if not ok:
         return fail(f"entry_bind:{reason}", bound_rooms)
+    # Some deployed kernels/filesystems do not propagate nested bind mounts
+    # through an --rbind of a directory that is itself a bind mount. Keep the
+    # recursive bind as the normal path, then explicitly bind corpus children
+    # at the runtime entry so the agent path cannot be an empty shell.
+    if plan.package_dir is not None and plan.package_bind is not None:
+        try:
+            package_rel = plan.package_bind.relative_to(plan.view)
+        except ValueError:
+            return fail("entry_package_target_outside_view", bound_rooms)
+        ok, reason = bind_ro(plan.package_dir, plan.entry / package_rel)
+        if not ok:
+            return fail(f"entry_package_bind:{reason}", bound_rooms)
+    for source, target in plan.room_binds:
+        try:
+            room_rel = target.relative_to(plan.view)
+        except ValueError:
+            return fail("entry_room_target_outside_view", bound_rooms)
+        ok, reason = bind_ro(source, plan.entry / room_rel)
+        if not ok:
+            return fail(f"entry_room_bind:{target.name}:{reason}", bound_rooms)
     return True, "ok", bound_rooms
 
 
