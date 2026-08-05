@@ -429,6 +429,11 @@ def _apply_binds(plan: ViewPlan) -> tuple[bool, str, int]:
         if not ok:
             return fail(f"entry_package_bind:{reason}", bound_rooms)
     for source, target in plan.room_binds:
+        # Regular-file binds (WhatsApp message JSON) already propagate through
+        # the recursive entry bind. Rebinding them afterwards would need to
+        # create a file below the now read-only entry and fails with EROFS.
+        if not source.is_dir():
+            continue
         try:
             room_rel = target.relative_to(plan.view)
         except ValueError:
