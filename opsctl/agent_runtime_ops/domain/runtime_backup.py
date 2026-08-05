@@ -15,7 +15,7 @@ import tempfile
 import threading
 from typing import Callable, Iterator
 
-from ..profiles import load_profile
+from ..profiles import RuntimeProfile, load_profile
 from ..yamlio import load_yaml
 from ..host.files import atomic_write_text, fsync_parent
 from .common import now_iso, run_text, run_text_cwd
@@ -2269,4 +2269,13 @@ def load_backup_runtime_contract(slot: str, backup_dir: Path, state_root: Path):
     desired = desired_from_manifest(slot, manifest, state_root)
     if not desired.runtime_profile:
         raise ValueError("backup manifest is missing runtime_profile")
-    return desired, load_profile(desired.runtime_profile)
+    profile = load_profile(desired.runtime_profile)
+    historical_digest = str(manifest.get("runtime_profile_digest") or profile.digest)
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", historical_digest):
+        raise ValueError("backup manifest has invalid runtime_profile_digest")
+    return desired, RuntimeProfile(
+        name=profile.name,
+        path=profile.path,
+        metadata=profile.metadata,
+        digest=historical_digest,
+    )

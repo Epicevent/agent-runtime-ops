@@ -32,6 +32,7 @@ from agent_runtime_ops.domain.runtime_backup import (
     finish_rollback_transaction,
     legacy_retrieval_projection_failures_may_be_expected,
     latest_backup,
+    load_backup_runtime_contract,
     pending_rollback_backup,
     pending_rollback_identity,
     restore_backup,
@@ -39,6 +40,7 @@ from agent_runtime_ops.domain.runtime_backup import (
     runtime_host_mutation_lock,
     runtime_transaction_lock,
 )
+from agent_runtime_ops.profiles import RuntimeProfile
 from agent_runtime_ops.domain.runtime_paths import (
     agent_compose_path,
     agent_manifest_path,
@@ -99,6 +101,40 @@ def test_backup_manifest_uses_its_integrity_bound_profile_digest() -> None:
         validate_binding.call_args.kwargs["runtime_profile_digest"]
         == historical_digest
     )
+
+
+def test_backup_runtime_contract_preserves_historical_profile_digest() -> None:
+    historical_digest = "sha256:" + "a" * 64
+    current_profile = RuntimeProfile(
+        name="openclaw-customer",
+        path=Path("profile"),
+        metadata={"container_nas_root": "/home/node/nas_docs"},
+        digest="sha256:" + "b" * 64,
+    )
+    desired = SimpleNamespace(runtime_profile="openclaw-customer")
+    manifest = {"runtime_profile_digest": historical_digest}
+    with (
+        patch(
+            "agent_runtime_ops.domain.runtime_backup.backup_manifest_data",
+            return_value=manifest,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_backup.desired_from_manifest",
+            return_value=desired,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_backup.load_profile",
+            return_value=current_profile,
+        ),
+    ):
+        loaded_desired, loaded_profile = load_backup_runtime_contract(
+            "dev-oc-img", Path("backup"), Path("state")
+        )
+
+    assert loaded_desired is desired
+    assert loaded_profile.digest == historical_digest
+    assert loaded_profile.name == current_profile.name
+    assert loaded_profile.metadata == current_profile.metadata
 
 
 def runtime_transaction_lock_path(state_root: Path, slot: str = "oc20") -> Path:
