@@ -292,7 +292,7 @@ def live_runtime_truth(
     apache_route = parse_apache_route(binding.linux_account)
     checks.extend(apache_route_checks(binding, apache_route))
     rootless_info = None
-    if binding.upstream_kind == "developer-rootless":
+    if getattr(binding, "upstream_kind", "managed-rootful") == "developer-rootless":
         uid_proc = subprocess.run(["id", "-u", binding.upstream_owner], text=True, capture_output=True, check=False)
         inspect = subprocess.run(
             ["runuser", "-u", binding.upstream_owner, "--", "env", f"XDG_RUNTIME_DIR=/run/user/{uid_proc.stdout.strip()}", "docker", "inspect", binding.upstream_container],
