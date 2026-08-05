@@ -38,6 +38,15 @@ class ApacheHostChange:
     reload_stderr: str
 
 
+@dataclass(frozen=True)
+class ApachePortChange:
+    linux_account: str
+    old_port: int
+    new_port: int
+    path: Path
+    backup_path: Path
+
+
 def validate_public_host(host: str) -> str:
     value = str(host or "").strip().lower().rstrip(".")
     if not HOST_RE.match(value):
@@ -117,6 +126,44 @@ def replace_server_name(text: str, host: str) -> tuple[str, str]:
     if replaced != 1:
         raise ValueError(f"expected exactly one active ServerName directive, found {replaced}")
     return "".join(lines), old_host
+
+
+def replace_proxy_port(text: str, port: int) -> tuple[str, int]:
+    if not 1024 <= int(port) <= 65535:
+        raise ValueError("proxy port must be between 1024 and 65535")
+    active = "\n".join(_active_lines(text))
+    old_http = {int(value) for value in HTTP_PROXY_RE.findall(active)}
+    old_ws = {int(value) for value in WS_PROXY_RE.findall(active)}
+    if len(old_http) != 1 or (old_ws and old_ws != old_http):
+        raise ValueError("apache route has inconsistent proxy ports")
+    old_port = next(iter(old_http))
+    updated = re.sub(r"(http://127\.0\.0\.1:)\d+(/)", rf"\g<1>{int(port)}\2", text)
+    updated = re.sub(r"(ws://127\.0\.0\.1:)\d+(/)", rf"\g<1>{int(port)}\2", updated)
+    return updated, old_port
+
+
+def set_apache_proxy_port(linux_account: str, port: int, *, backup_suffix: str) -> ApachePortChange:
+    account = validate_linux_account(linux_account)
+    path = apache_route_path(account)
+    if path.is_symlink():
+        raise ValueError(f"apache route file must not be symlink: {path}")
+    original = path.read_text(encoding="utf-8")
+    updated, old_port = replace_proxy_port(original, port)
+    backup_path = path.with_name(f"{path.name}.{backup_suffix}.bak")
+    if old_port == int(port):
+        return ApachePortChange(account, old_port, int(port), path, backup_path)
+    shutil.copy2(path, backup_path)
+    path.write_text(updated, encoding="utf-8")
+    configtest = subprocess.run(["apache2ctl", "configtest"], text=True, capture_output=True, check=False)
+    if configtest.returncode != 0:
+        shutil.copy2(backup_path, path)
+        raise RuntimeError((configtest.stderr or configtest.stdout).strip() or "apache configtest failed")
+    reload_proc = subprocess.run(["systemctl", "reload", "apache2"], text=True, capture_output=True, check=False)
+    if reload_proc.returncode != 0:
+        shutil.copy2(backup_path, path)
+        subprocess.run(["systemctl", "reload", "apache2"], check=False)
+        raise RuntimeError((reload_proc.stderr or reload_proc.stdout).strip() or "apache reload failed")
+    return ApachePortChange(account, old_port, int(port), path, backup_path)
 
 
 def set_apache_host(

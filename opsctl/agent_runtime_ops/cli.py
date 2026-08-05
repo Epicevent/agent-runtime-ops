@@ -5,6 +5,7 @@ import argparse
 from .commands.admin import cmd_admin_create_image_dev, cmd_admin_serve
 from .commands.artifact import cmd_artifact_probe
 from .commands.apache import cmd_apache_set_host, cmd_apache_status
+from .commands.dev_upstream import cmd_dev_upstream
 from .commands.apply import cmd_apply, cmd_rollback
 from .commands.binding import (
     cmd_binding_list,
@@ -306,6 +307,15 @@ def build_parser() -> argparse.ArgumentParser:
     apache_set_host.add_argument("linux_account")
     apache_set_host.add_argument("host")
     apache_set_host.set_defaults(func=cmd_apache_set_host)
+
+    dev_upstream = sub.add_parser("dev-upstream")
+    dev_upstream_sub = dev_upstream.add_subparsers(dest="dev_upstream_command", required=True)
+    for action in ("status", "apply", "rollback"):
+        dev_upstream_action = dev_upstream_sub.add_parser(action)
+        dev_upstream_action.add_argument("target")
+        if action == "apply":
+            dev_upstream_action.add_argument("--container", required=True)
+        dev_upstream_action.set_defaults(func=cmd_dev_upstream)
 
     runtime = sub.add_parser("runtime")
     runtime_sub = runtime.add_subparsers(dest="runtime_command", required=True)
