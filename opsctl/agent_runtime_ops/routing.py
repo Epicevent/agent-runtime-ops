@@ -13,6 +13,7 @@ RUNTIME_BINDINGS_NAME = "runtime-bindings.json"
 LINUX_ACCOUNT_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 HOST_RE = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 FAMILY_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+UPSTREAM_KINDS = {"managed-rootful", "developer-rootless"}
 
 ALLOWED_BINDING_KEYS = {
     "instance_id",
@@ -23,6 +24,9 @@ ALLOWED_BINDING_KEYS = {
     "gateway_port",
     "bridge_port",
     "enabled",
+    "upstream_kind",
+    "upstream_owner",
+    "upstream_container",
 }
 FORBIDDEN_BINDING_KEYS = {
     "lane",
@@ -45,6 +49,9 @@ class RuntimeBinding:
     gateway_port: int
     bridge_port: int
     enabled: bool = True
+    upstream_kind: str = "managed-rootful"
+    upstream_owner: str = ""
+    upstream_container: str = ""
 
     def to_json(self) -> dict[str, object]:
         return {
@@ -56,6 +63,9 @@ class RuntimeBinding:
             "gateway_port": self.gateway_port,
             "bridge_port": self.bridge_port,
             "enabled": self.enabled,
+            "upstream_kind": self.upstream_kind,
+            "upstream_owner": self.upstream_owner,
+            "upstream_container": self.upstream_container,
         }
 
 
@@ -119,6 +129,15 @@ def _binding_from_item(item: dict[str, Any]) -> RuntimeBinding:
     unknown = sorted(keys - ALLOWED_BINDING_KEYS)
     if unknown:
         raise ValueError("runtime binding has unknown fields: " + ",".join(unknown))
+    upstream_kind = str(item.get("upstream_kind") or "managed-rootful")
+    if upstream_kind not in UPSTREAM_KINDS:
+        raise ValueError("upstream_kind must be managed-rootful or developer-rootless")
+    upstream_owner = validate_linux_account(item.get("upstream_owner")) if item.get("upstream_owner") else ""
+    upstream_container = validate_linux_account(item.get("upstream_container")) if item.get("upstream_container") else ""
+    if upstream_kind == "developer-rootless" and (not upstream_owner or not upstream_container):
+        raise ValueError("developer-rootless binding requires upstream owner and container")
+    if upstream_kind == "managed-rootful" and (upstream_owner or upstream_container):
+        raise ValueError("managed-rootful binding must not name a rootless upstream")
     return RuntimeBinding(
         instance_id=validate_instance_id(item.get("instance_id")),
         linux_account=validate_linux_account(item.get("linux_account")),
@@ -128,6 +147,9 @@ def _binding_from_item(item: dict[str, Any]) -> RuntimeBinding:
         gateway_port=_port(item.get("gateway_port"), "gateway_port"),
         bridge_port=_port(item.get("bridge_port"), "bridge_port"),
         enabled=bool(item.get("enabled", True)),
+        upstream_kind=upstream_kind,
+        upstream_owner=upstream_owner,
+        upstream_container=upstream_container,
     )
 
 
