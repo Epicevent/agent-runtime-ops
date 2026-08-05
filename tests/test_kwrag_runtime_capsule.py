@@ -474,3 +474,21 @@ def test_openclaw_probe_requires_zero_hit_control_and_full_receipt_chain() -> No
     proof["negativeControl"]["dispatchCount"] = 1
     with pytest.raises(ValueError, match="negative control"):
         run_openclaw_runtime_capsule_probe("oc14-container", runner=runner)
+
+
+def test_openclaw_probe_failure_preserves_redacted_machine_receipt() -> None:
+    def runner(argv, timeout):
+        return SimpleNamespace(
+            returncode=17,
+            stdout="proof_status=failed\nrequest_id=req-1\n",
+            stderr="password=do-not-print\nexact failure detail\n",
+        )
+
+    with pytest.raises(ValueError) as error:
+        run_openclaw_runtime_capsule_probe("oc14-container", runner=runner)
+
+    message = str(error.value)
+    assert '"returncode":17' in message
+    assert "proof_status=failed\\nrequest_id=req-1\\n" in message
+    assert "password=<redacted>\\nexact failure detail\\n" in message
+    assert "do-not-print" not in message
