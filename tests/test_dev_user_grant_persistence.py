@@ -40,10 +40,10 @@ def test_dev_users_are_persisted_before_sudoers_and_effective_grants_are_atteste
     assert 'mv -f "$tmp" "$DEV_USERS_FILE"' in persistence
 
     attestation = _function("attest_dev_user_sudoers")
-    assert attestation.count("sudo -n -l -U") == 3
-    assert "dev-upstream status dev-attest" in attestation
-    assert "dev-upstream apply dev-attest --container attest" in attestation
-    assert "dev-upstream rollback dev-attest" in attestation
+    assert attestation.count("runuser -u") == 3
+    assert "dev-upstream status dev-attest --authorization-check" in attestation
+    assert "dev-upstream apply dev-attest --container attest --authorization-check" in attestation
+    assert "dev-upstream rollback dev-attest --authorization-check" in attestation
 
 
 def test_persisted_dev_users_survive_without_environment_override(tmp_path: Path) -> None:
@@ -72,7 +72,7 @@ def test_attestation_rejects_one_missing_effective_grant_and_accepts_all(tmp_pat
 DEV_USERS='atelier'
 BIN_LINK=/usr/local/bin/opsctl
 die() {{ printf '%s\\n' "$*" >&2; exit 9; }}
-sudo() {{ [[ "${{DENY_APPLY:-no}}" != yes || "$*" != *' dev-upstream apply '* ]]; }}
+runuser() {{ [[ "${{DENY_APPLY:-no}}" != yes || "$*" != *' dev-upstream apply '* ]]; }}
 {_function('attest_dev_user_sudoers')}
 attest_dev_user_sudoers
 """
