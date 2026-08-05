@@ -994,6 +994,12 @@ def cmd_nas_view_restore(args: argparse.Namespace) -> int:
             if proc.returncode != 0:
                 boot_failed += 1
             print(f"cifs_mount_all={'ok' if proc.returncode == 0 else 'rc=' + str(proc.returncode)}")
+        # A child view must never be rebuilt on an incomplete CIFS base. The
+        # old flow could replace a healthy package bind with an empty directory
+        # while still printing per-slot "restored" lines.
+        if boot_failed:
+            print("view_restore_status=fail")
+            return 1
         failed = _restore_views(state_root, records)
     ok = failed == 0 and boot_failed == 0
     print(f"view_restore_status={'ok' if ok else 'fail'}")
@@ -1028,6 +1034,18 @@ def _restore_views(state_root: Path, records: list) -> int:
             ok, reason, bound_rooms = _apply_binds(plan)
             if not ok:
                 raise ValueError(f"bind_failed: {reason}")
+            if getattr(plan, "corpus", None) == PRIMARY_CORPUS:
+                entry = Path(plan.entry)
+                required = (
+                    entry / "package" / "membership.json",
+                    entry / "package" / "messages.sqlite",
+                    entry / "media",
+                )
+                missing = [path.as_posix() for path in required if not path.exists()]
+                if missing:
+                    unmount_tree(plan.entry)
+                    unmount_tree(plan.view)
+                    raise ValueError("view_content_missing:" + ",".join(missing))
             print(
                 f"restored target={slot} corpus={corpus} user_id={user_id} "
                 f"master_mode={master_mode} rooms_bound={bound_rooms}"

@@ -145,6 +145,14 @@ class RestoreWaitsForNasTest(unittest.TestCase):
         self.assertIn("cifs_mount_all=rc=32", output)
         self.assertIn("view_restore_status=fail", output)
 
+    def test_mount_all_failure_does_not_rebuild_views(self) -> None:
+        with patch("agent_runtime_ops.commands.nas_view._restore_views") as restore:
+            rc, output, _, _ = _run_restore(
+                readiness={"192.168.0.222": True}, mount_all_rc=32
+            )
+        self.assertEqual(rc, 1, output)
+        restore.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
