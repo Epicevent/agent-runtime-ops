@@ -17,6 +17,7 @@ from agent_runtime_ops.domain.runtime_apply import (
     _restore_and_verify_backup,
     apply_desired_slot,
 )
+from agent_runtime_ops.domain import runtime_manifest
 from agent_runtime_ops.domain.retrieval_contract import (
     P1_IDENTITY_FIXED,
     RETRIEVAL_SCHEMA,
@@ -55,6 +56,48 @@ def rollback_transaction_path(state_root: Path, slot: str = "oc20") -> Path:
         / "runtime-recovery"
         / slot
         / ".agent-runtime-rollback-transaction.json"
+    )
+
+
+def test_backup_manifest_uses_its_integrity_bound_profile_digest() -> None:
+    historical_digest = "sha256:" + "a" * 64
+    current_digest = "sha256:" + "b" * 64
+    route = SimpleNamespace(instance_id="instance-oc20")
+    profile = SimpleNamespace(
+        digest=current_digest,
+        metadata={"container_nas_root": "/workspace/nas_docs"},
+    )
+    manifest = {
+        "family": "hermes",
+        "image_name": "agent-runtime-image",
+        "product_image": "product@sha256:" + "c" * 64,
+        "product_image_digest": "sha256:" + "c" * 64,
+        "recipe": {
+            "retrieval_binding": {"schema": "agent-runtime-retrieval-binding/v2"}
+        },
+        "retrieval_binding_digest": "sha256:" + "d" * 64,
+        "retrieval_enabled": False,
+        "runtime_class": "customer",
+        "runtime_profile": "hermes-runtime-customer",
+        "runtime_profile_digest": historical_digest,
+        "target": "oc20",
+        "wrapper_image": "wrapper@sha256:" + "e" * 64,
+        "wrapper_image_digest": "sha256:" + "e" * 64,
+    }
+    with (
+        patch.object(runtime_manifest, "get_runtime_binding", return_value=route),
+        patch.object(runtime_manifest, "load_profile", return_value=profile),
+        patch(
+            "agent_runtime_ops.domain.retrieval_contract.validate_bound_retrieval_spec"
+        ),
+        patch(
+            "agent_runtime_ops.domain.retrieval_contract.validate_retrieval_target_binding"
+        ) as validate_binding,
+    ):
+        runtime_manifest.desired_from_manifest("oc20", manifest, Path("state"))
+    assert (
+        validate_binding.call_args.kwargs["runtime_profile_digest"]
+        == historical_digest
     )
 
 
