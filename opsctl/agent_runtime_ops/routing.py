@@ -33,6 +33,11 @@ FORBIDDEN_BINDING_KEYS = {
     "canonical_recipe_name",
     "canonical_recipe_digest",
 }
+LEGACY_BINDING_KEYS = {
+    "upstream_container",
+    "upstream_kind",
+    "upstream_owner",
+}
 
 
 @dataclass(frozen=True)
@@ -111,12 +116,15 @@ def _port(value: object, name: str) -> int:
     return port
 
 
-def _binding_from_item(item: dict[str, Any]) -> RuntimeBinding:
+def _binding_from_item(
+    item: dict[str, Any], *, allow_legacy_fields: bool = False
+) -> RuntimeBinding:
     keys = set(item)
     forbidden = sorted(keys & FORBIDDEN_BINDING_KEYS)
     if forbidden:
         raise ValueError("runtime binding must not contain runtime result fields: " + ",".join(forbidden))
-    unknown = sorted(keys - ALLOWED_BINDING_KEYS)
+    tolerated = LEGACY_BINDING_KEYS if allow_legacy_fields else set()
+    unknown = sorted(keys - ALLOWED_BINDING_KEYS - tolerated)
     if unknown:
         raise ValueError("runtime binding has unknown fields: " + ",".join(unknown))
     return RuntimeBinding(
@@ -153,14 +161,20 @@ def _validate_unique_bindings(bindings: list[RuntimeBinding]) -> None:
             seen[name].add(value)
 
 
-def load_runtime_bindings(state_root: Path = DEFAULT_STATE_ROOT) -> list[RuntimeBinding]:
+def load_runtime_bindings(
+    state_root: Path = DEFAULT_STATE_ROOT, *, allow_legacy_fields: bool = False
+) -> list[RuntimeBinding]:
     path = runtime_bindings_path(state_root)
     with path.open("r", encoding="utf-8") as fh:
         data = json.load(fh)
     raw_bindings = data.get("bindings") if isinstance(data, dict) else None
     if not isinstance(raw_bindings, list):
         raise ValueError("runtime-bindings.json must contain a bindings list")
-    bindings = [_binding_from_item(item) for item in raw_bindings if isinstance(item, dict)]
+    bindings = [
+        _binding_from_item(item, allow_legacy_fields=allow_legacy_fields)
+        for item in raw_bindings
+        if isinstance(item, dict)
+    ]
     if len(bindings) != len(raw_bindings):
         raise ValueError("runtime-bindings.json bindings must be objects")
     _validate_unique_bindings(bindings)

@@ -914,6 +914,33 @@ def test_install_migration_uses_binding_account_and_reports_import_count(
     assert "targets_observed=1 backups_imported=1" in output
 
 
+def test_install_migration_accepts_legacy_binding_observation_fields(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir()
+    payload = {
+        "bindings": [{
+            "instance_id": "00000000-0000-0000-0000-000000000001",
+            "linux_account": "oc1",
+            "public_host": "oc1.example.com",
+            "family": "openclaw",
+            "runtime_class": "customer",
+            "gateway_port": 28989,
+            "bridge_port": 28990,
+            "enabled": True,
+            "upstream_container": "legacy-container",
+            "upstream_kind": "legacy-kind",
+            "upstream_owner": "legacy-owner",
+        }],
+    }
+    (state_root / "runtime-bindings.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    with patch(
+        "agent_runtime_ops.install_migrations.legacy_agent_backup_root",
+        return_value=tmp_path / "missing-backups",
+    ):
+        assert migrate_legacy_runtime_backups(state_root) == (0, 0)
+
+
 def test_install_runs_legacy_backup_migration_before_release_activation() -> None:
     text = Path("install.sh").read_text(encoding="utf-8")
     call = 'migrate_legacy_runtime_backups "$release_dir"'

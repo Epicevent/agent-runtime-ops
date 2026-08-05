@@ -17,7 +17,10 @@ def migrate_legacy_runtime_backups(state_root: Path) -> tuple[int, int]:
     if not bindings_path.exists() and not bindings_path.is_symlink():
         print("legacy_runtime_backup_migration=skipped reason=runtime_bindings_absent")
         return 0, 0
-    bindings = load_runtime_bindings(state_root)
+    # Older server state included observed upstream fields in declarations.
+    # They are ignored only during this one-way install migration; normal
+    # callers retain strict schema validation.
+    bindings = load_runtime_bindings(state_root, allow_legacy_fields=True)
     observed = 0
     imported = 0
     for binding in bindings:
