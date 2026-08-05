@@ -30,7 +30,7 @@ def sha(value: bytes) -> str:
 def fixture(
     slot: str = "oc14", *, status: str = "published_ready"
 ) -> dict[str, object]:
-    family = "openclaw" if slot == "oc14" else "hermes"
+    family = "openclaw" if slot in {"oc14", "dev-oc-img"} else "hermes"
     root = "/home/node/nas_docs" if family == "openclaw" else "/workspace/nas_docs"
     release = "sha256:" + "1" * 64
     manifest = "sha256:" + "2" * 64
@@ -152,7 +152,7 @@ def publish(root: Path, value: dict[str, object]) -> str:
     return digest
 
 
-@pytest.mark.parametrize("slot", ["oc14", "oc20"])
+@pytest.mark.parametrize("slot", ["oc14", "oc20", "dev-oc-img"])
 def test_loads_exact_published_capsule(slot: str, tmp_path: Path) -> None:
     value = fixture(slot)
     digest = publish(tmp_path, value)
@@ -199,6 +199,7 @@ def test_publication_identity_digests_are_required(field: str, tmp_path: Path) -
     ("slot", "private_names"),
     [
         ("oc14", ("proof-request.json", "negative-proof-request.json")),
+        ("dev-oc-img", ("proof-request.json", "negative-proof-request.json")),
         ("oc20", ("request.json", "conversation-message.txt")),
     ],
 )

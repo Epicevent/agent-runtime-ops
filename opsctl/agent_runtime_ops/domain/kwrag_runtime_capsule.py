@@ -29,7 +29,11 @@ from .retrieval_contract import (
 
 CAPSULE_SCHEMA = "kwrag-two-canary-runtime-capsule/v1"
 _ROOTS = {"openclaw": "/home/node/nas_docs", "hermes": "/workspace/nas_docs"}
-_FAMILIES = {"oc14": "openclaw", "oc20": "hermes"}
+_FAMILIES = {
+    "oc14": "openclaw",
+    "oc20": "hermes",
+    "dev-oc-img": "openclaw",
+}
 _ENGINE = {
     "status": "research_selected_p1_attachment_probe_candidate",
     "backend_id": "slot-local-fts5-trigram-or-attachment-v1",
