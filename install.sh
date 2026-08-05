@@ -9,9 +9,16 @@ STATE_ROOT="${AGENT_RUNTIME_STATE_ROOT:-/srv/openclaw-ops}"
 OPS_USER="${AGENT_RUNTIME_OPS_USER:-svcops}"
 OPS_GROUP="${AGENT_RUNTIME_OPS_GROUP:-svcops}"
 # Developer accounts that may self-deploy to their OWN dev-* slots (space-separated).
-# They get a least-privilege sudoers grant (image-dev-apply / image-canary only); opsctl
-# further refuses any non-dev-* target for these accounts. Inert if the account is absent.
-DEV_USERS="${AGENT_RUNTIME_DEV_USERS:-openclawdev}"
+# An explicit environment value updates the durable root-owned setting; later
+# self-updates reuse that setting instead of silently reverting the grants.
+DEV_USERS_FILE="${AGENT_RUNTIME_DEV_USERS_FILE:-/etc/agent-runtime-ops/developer-users}"
+if [[ ${AGENT_RUNTIME_DEV_USERS+x} ]]; then
+  DEV_USERS="$AGENT_RUNTIME_DEV_USERS"
+elif [[ -r "$DEV_USERS_FILE" ]]; then
+  DEV_USERS="$(tr '\n' ' ' <"$DEV_USERS_FILE")"
+else
+  DEV_USERS="openclawdev"
+fi
 OPS_HOME="${AGENT_RUNTIME_OPS_HOME:-/home/$OPS_USER}"
 CODEX_HOME="${AGENT_RUNTIME_CODEX_HOME:-$OPS_HOME/.codex}"
 CODEX_SKILL_NAME="agent-runtime-ops"
@@ -1050,6 +1057,36 @@ install_ops_sudoers() {
   fi
 }
 
+persist_dev_users() {
+  local dev_user parent tmp
+  parent="$(dirname "$DEV_USERS_FILE")"
+  install -d -o root -g root -m 0755 "$parent"
+  tmp="$(mktemp "$parent/.developer-users.XXXXXX")"
+  for dev_user in $DEV_USERS; do
+    [[ "$dev_user" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]] \
+      || { rm -f "$tmp"; die "invalid developer account: $dev_user"; }
+    printf '%s\n' "$dev_user" >>"$tmp"
+  done
+  [[ -s "$tmp" ]] || { rm -f "$tmp"; die "developer account list must not be empty"; }
+  chmod 0644 "$tmp"
+  chown root:root "$tmp"
+  mv -f "$tmp" "$DEV_USERS_FILE"
+}
+
+attest_dev_user_sudoers() {
+  local dev_user
+  command -v sudo >/dev/null || die "missing command: sudo"
+  for dev_user in $DEV_USERS; do
+    [ -n "$dev_user" ] || continue
+    sudo -n -l -U "$dev_user" "$BIN_LINK" dev-upstream status dev-attest >/dev/null \
+      || die "developer grant is not effective: $dev_user dev-upstream status"
+    sudo -n -l -U "$dev_user" "$BIN_LINK" dev-upstream apply dev-attest --container attest >/dev/null \
+      || die "developer grant is not effective: $dev_user dev-upstream apply"
+    sudo -n -l -U "$dev_user" "$BIN_LINK" dev-upstream rollback dev-attest >/dev/null \
+      || die "developer grant is not effective: $dev_user dev-upstream rollback"
+  done
+}
+
 repair_private_state_permissions() {
   [[ -d "$STATE_ROOT" ]] || return 0
   chgrp "$OPS_GROUP" "$STATE_ROOT" 2>/dev/null || true
@@ -1984,7 +2021,9 @@ install_package() {
   install_root_action_broker_or_restore \
     "$release_dir" "$commit" "$previous_active_release" \
     "$previous_broker_state" "$activation_helper"
+  persist_dev_users
   install_ops_sudoers
+  attest_dev_user_sudoers
   install_boot_restore_unit
   install_usage_collect_timer
   install_usage_pricing_timers "$release_dir"
