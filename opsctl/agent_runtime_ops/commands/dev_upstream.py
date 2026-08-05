@@ -89,6 +89,12 @@ def cmd_dev_upstream(args: argparse.Namespace) -> int:
     target, action, root = str(args.target), str(args.dev_upstream_command), Path(args.state_root or "/srv/openclaw-ops")
     path = _state_path(root, target)
     try:
+        if bool(getattr(args, "authorization_check", False)):
+            owner = sudo_user()
+            if not is_root() or not owner or owner in {"root", "svcops"}:
+                raise ValueError("authorization check requires a developer managed grant")
+            print(f"target={target}\ndev_upstream_{action}_authorization=ok")
+            return 0
         desired = _target(target, root)
         route = parse_apache_route(desired.route.linux_account)
         state = json.loads(path.read_text()) if path.exists() else None

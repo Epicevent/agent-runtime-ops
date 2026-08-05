@@ -69,3 +69,24 @@ def test_state_persistence_failure_precedes_binding_and_apache_mutation(tmp_path
         assert cmd_dev_upstream(args) == 1
     write_bindings.assert_not_called()
     set_port.assert_not_called()
+def test_authorization_check_is_mutation_free() -> None:
+    args = SimpleNamespace(
+        target="dev-attest",
+        dev_upstream_command="apply",
+        state_root=None,
+        container="attest",
+        authorization_check=True,
+    )
+    with (
+        patch("agent_runtime_ops.commands.dev_upstream.is_root", return_value=True),
+        patch("agent_runtime_ops.commands.dev_upstream.sudo_user", return_value="atelier"),
+        patch("agent_runtime_ops.commands.dev_upstream._target") as target,
+        patch("agent_runtime_ops.commands.dev_upstream._write_state") as write_state,
+        patch("agent_runtime_ops.commands.dev_upstream._write_runtime_bindings_file") as write_bindings,
+        patch("agent_runtime_ops.commands.dev_upstream.set_apache_proxy_port") as set_port,
+    ):
+        assert cmd_dev_upstream(args) == 0
+    target.assert_not_called()
+    write_state.assert_not_called()
+    write_bindings.assert_not_called()
+    set_port.assert_not_called()

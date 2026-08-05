@@ -315,6 +315,7 @@ def build_parser() -> argparse.ArgumentParser:
         dev_upstream_action.add_argument("target")
         if action == "apply":
             dev_upstream_action.add_argument("--container", required=True)
+        dev_upstream_action.add_argument("--authorization-check", action="store_true", help=argparse.SUPPRESS)
         dev_upstream_action.set_defaults(func=cmd_dev_upstream)
 
     runtime = sub.add_parser("runtime")

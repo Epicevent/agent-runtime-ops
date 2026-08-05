@@ -1039,9 +1039,9 @@ install_ops_sudoers() {
       printf 'Defaults:%s env_reset, !setenv, use_pty\n' "$dev_user"
       printf '%s ALL=(root) NOPASSWD: %s rollout image-dev-apply *\n' "$dev_user" "$BIN_LINK"
       printf '%s ALL=(root) NOPASSWD: %s rollout image-canary *\n' "$dev_user" "$BIN_LINK"
-      printf '%s ALL=(root) NOPASSWD: %s dev-upstream status dev-*\n' "$dev_user" "$BIN_LINK"
-      printf '%s ALL=(root) NOPASSWD: %s dev-upstream apply dev-* --container *\n' "$dev_user" "$BIN_LINK"
-      printf '%s ALL=(root) NOPASSWD: %s dev-upstream rollback dev-*\n' "$dev_user" "$BIN_LINK"
+      printf '%s ALL=(root) NOPASSWD: %s ^dev-upstream status dev-[a-z0-9-]+( --authorization-check)?$\n' "$dev_user" "$BIN_LINK"
+      printf '%s ALL=(root) NOPASSWD: %s ^dev-upstream apply dev-[a-z0-9-]+ --container [a-zA-Z0-9_.-]+( --authorization-check)?$\n' "$dev_user" "$BIN_LINK"
+      printf '%s ALL=(root) NOPASSWD: %s ^dev-upstream rollback dev-[a-z0-9-]+( --authorization-check)?$\n' "$dev_user" "$BIN_LINK"
       printf '%s ALL=(root) NOPASSWD: %s rollout verify *\n' "$dev_user" "$BIN_LINK"
       printf '%s ALL=(root) NOPASSWD: %s observation status *\n' "$dev_user" "$BIN_LINK"
       printf '%s ALL=(root) NOPASSWD: %s diagnostics logs *\n' "$dev_user" "$BIN_LINK"
@@ -1075,14 +1075,15 @@ persist_dev_users() {
 
 attest_dev_user_sudoers() {
   local dev_user
+  command -v runuser >/dev/null || die "missing command: runuser"
   command -v sudo >/dev/null || die "missing command: sudo"
   for dev_user in $DEV_USERS; do
     [ -n "$dev_user" ] || continue
-    sudo -n -l -U "$dev_user" "$BIN_LINK" dev-upstream status dev-attest >/dev/null \
+    runuser -u "$dev_user" -- sudo -n "$BIN_LINK" dev-upstream status dev-attest --authorization-check >/dev/null \
       || die "developer grant is not effective: $dev_user dev-upstream status"
-    sudo -n -l -U "$dev_user" "$BIN_LINK" dev-upstream apply dev-attest --container attest >/dev/null \
+    runuser -u "$dev_user" -- sudo -n "$BIN_LINK" dev-upstream apply dev-attest --container attest --authorization-check >/dev/null \
       || die "developer grant is not effective: $dev_user dev-upstream apply"
-    sudo -n -l -U "$dev_user" "$BIN_LINK" dev-upstream rollback dev-attest >/dev/null \
+    runuser -u "$dev_user" -- sudo -n "$BIN_LINK" dev-upstream rollback dev-attest --authorization-check >/dev/null \
       || die "developer grant is not effective: $dev_user dev-upstream rollback"
   done
 }
