@@ -140,6 +140,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     self_update = sub.add_parser("self-update")
+    self_update.add_argument(
+        "--dev-users",
+        help="root-only bootstrap of the durable comma-separated developer grant principals",
+    )
     self_update.set_defaults(func=cmd_self_update)
 
     update = sub.add_parser("update")

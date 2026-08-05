@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import re
 
 from ..domain.common import is_root as _is_root
 from ..domain.common import state_root as _state_root
@@ -17,6 +18,18 @@ from ..domain.update_policy import (
     validate_update_target,
     write_update_policy,
 )
+
+
+_DEV_USER_RE = re.compile(r"^[a-z_][a-z0-9_-]*[$]?$")
+
+
+def _normalize_dev_users_arg(value: str | None) -> str | None:
+    if value is None:
+        return None
+    users = [item.strip() for item in value.split(",") if item.strip()]
+    if not users or len(users) != len(set(users)) or any(not _DEV_USER_RE.fullmatch(item) for item in users):
+        raise ValueError("--dev-users requires unique comma-separated Unix account names")
+    return " ".join(users)
 
 
 def cmd_self_update(args: argparse.Namespace) -> int:
@@ -31,6 +44,7 @@ def cmd_self_update(args: argparse.Namespace) -> int:
         return 2
 
     try:
+        dev_users = _normalize_dev_users_arg(getattr(args, "dev_users", None))
         repo_url, ref = approved_update_from_policy(_state_root(args))
         policy_source = str(_state_root(args) / UPDATE_POLICY_NAME)
         validate_update_target(repo_url, ref)
@@ -57,6 +71,8 @@ def cmd_self_update(args: argparse.Namespace) -> int:
                 return 1
             env = os.environ.copy()
             env["AGENT_RUNTIME_OPS_REF"] = ref
+            if dev_users is not None:
+                env["AGENT_RUNTIME_DEV_USERS"] = dev_users
             subprocess.run(["bash", str(repo / "install.sh"), "install"], check=True, env=env)
         except subprocess.CalledProcessError as exc:
             return exc.returncode or 1
