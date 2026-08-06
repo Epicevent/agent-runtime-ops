@@ -175,6 +175,13 @@ def _desired_with_hermes_p1_canary(
         state_root,
         retrieval_enabled=retrieval_enabled,
         retrieval_attachment_data=capsule.attachment_data if retrieval_enabled else None,
+        retrieval_source_generation=(
+            str(
+                (capsule.enabled_binding if retrieval_enabled else capsule.disabled_binding)[
+                    "expected_source_generation"
+                ]
+            )
+        ),
     )
     return desired, profile, capsule
 

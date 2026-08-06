@@ -21,6 +21,7 @@ def desired_from_direct_images(
     *,
     retrieval_enabled: bool = False,
     retrieval_attachment_data: dict[str, object] | None = None,
+    retrieval_source_generation: str | None = None,
 ):
     binding = get_runtime_binding(slot, state_root)
     runtime_class = binding.runtime_class
@@ -52,6 +53,7 @@ def desired_from_direct_images(
             **binding_args,
             p1_identity=P1_IDENTITY_FIXED,
             attachment_data=retrieval_attachment_data,
+            expected_source_generation=retrieval_source_generation or "",
         )
     else:
         if retrieval_attachment_data is not None:
