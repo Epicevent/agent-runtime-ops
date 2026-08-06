@@ -195,7 +195,17 @@ def test_rollout_builds_private_attachment_only_for_enabled_p1() -> None:
     enabled = SimpleNamespace(slot="oc20")
     profile = SimpleNamespace(name="profile", digest=DIGEST_A)
     prepared = build_hermes_p1_canary_inputs(slot="oc20", instance_id="instance-oc20")
-    capsule = SimpleNamespace(slot="oc20", family="hermes", attachment_data=prepared.attachment_data)
+    capsule = SimpleNamespace(
+        slot="oc20",
+        family="hermes",
+        attachment_data=prepared.attachment_data,
+        enabled_binding={
+            "expected_source_generation": prepared.attachment_data["sourceSnapshotDigest"]
+        },
+        disabled_binding={
+            "expected_source_generation": prepared.attachment_data["sourceSnapshotDigest"]
+        },
+    )
     with patch.object(
         rollout, "_desired_from_direct_images", return_value=(enabled, profile)
     ) as desired_from_images:
@@ -210,6 +220,7 @@ def test_rollout_builds_private_attachment_only_for_enabled_p1() -> None:
     assert desired_from_images.call_args.kwargs == {
         "retrieval_enabled": True,
         "retrieval_attachment_data": prepared.attachment_data,
+        "retrieval_source_generation": prepared.attachment_data["sourceSnapshotDigest"],
     }
 
 
@@ -221,7 +232,17 @@ def test_rollout_disabled_p1_has_no_product_probe_input() -> None:
     disabled = SimpleNamespace(slot="oc20")
     profile = SimpleNamespace(name="profile", digest=DIGEST_A)
     prepared_inputs = build_hermes_p1_canary_inputs(slot="oc20", instance_id="instance-oc20")
-    capsule = SimpleNamespace(slot="oc20", family="hermes", attachment_data=prepared_inputs.attachment_data)
+    capsule = SimpleNamespace(
+        slot="oc20",
+        family="hermes",
+        attachment_data=prepared_inputs.attachment_data,
+        enabled_binding={
+            "expected_source_generation": prepared_inputs.attachment_data["sourceSnapshotDigest"]
+        },
+        disabled_binding={
+            "expected_source_generation": prepared_inputs.attachment_data["sourceSnapshotDigest"]
+        },
+    )
     with patch.object(
         rollout,
         "_desired_from_direct_images",
@@ -232,7 +253,12 @@ def test_rollout_disabled_p1_has_no_product_probe_input() -> None:
         )
     assert actual is disabled and actual_profile is profile and prepared is capsule
     desired_from_images.assert_called_once_with(
-        "oc20", image_spec, Path("state"), retrieval_enabled=False, retrieval_attachment_data=None
+        "oc20",
+        image_spec,
+        Path("state"),
+        retrieval_enabled=False,
+        retrieval_attachment_data=None,
+        retrieval_source_generation=prepared_inputs.attachment_data["sourceSnapshotDigest"],
     )
 
 
