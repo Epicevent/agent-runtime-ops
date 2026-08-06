@@ -213,6 +213,7 @@ def attachment_spec(*, enabled: bool) -> dict[str, object]:
         enabled=enabled,
         p1_identity=p1_identity(),
         attachment_data=attachment_data() if enabled else None,
+        expected_source_generation=DIGEST_C,
     )
 
 
@@ -531,10 +532,32 @@ def test_attachment_binding_v2_is_exact_private_and_canonical(enabled: bool) -> 
     assert isinstance(binding, dict)
     assert binding["schema"] == BINDING_V2_SCHEMA
     assert binding["proofMode"] == ATTACHMENT_PROOF_MODE
+    assert binding["expected_source_generation"] == DIGEST_C
     assert binding["p1Identity"] == p1_identity()
     assert binding["attachmentData"] == (attachment_data() if enabled else None)
     assert spec["retrieval_binding_digest"] == canonical_digest(binding)
     validate_bound_retrieval_spec(spec)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_attachment_binding_v2_requires_generation_pin(enabled: bool) -> None:
+    spec = attachment_spec(enabled=enabled)
+    binding = dict(spec["retrieval_binding"])
+    binding.pop("expected_source_generation")
+    spec["retrieval_binding"] = binding
+    spec["retrieval_binding_digest"] = canonical_digest(binding)
+    with pytest.raises(ValueError, match="unexpected fields"):
+        validate_bound_retrieval_spec(spec)
+
+
+def test_attachment_binding_v2_rejects_generation_mismatch() -> None:
+    spec = attachment_spec(enabled=True)
+    binding = dict(spec["retrieval_binding"])
+    binding["expected_source_generation"] = DIGEST_D
+    spec["retrieval_binding"] = binding
+    spec["retrieval_binding_digest"] = canonical_digest(binding)
+    with pytest.raises(ValueError, match="does not match attachment"):
+        validate_bound_retrieval_spec(spec)
 
 
 @pytest.mark.parametrize(
@@ -862,12 +885,18 @@ def test_direct_hermes_target_projects_disabled_v2_and_requires_enabled_data(
         patch.object(runtime_targets, "get_runtime_binding", return_value=route),
         patch.object(runtime_targets, "load_profile", return_value=profile),
     ):
-        disabled, _ = runtime_targets.desired_from_direct_images("oc20", spec, tmp_path)
+        disabled, _ = runtime_targets.desired_from_direct_images(
+            "oc20", spec, tmp_path, retrieval_source_generation=DIGEST_C
+        )
         assert disabled.image_spec["retrieval_binding"]["schema"] == BINDING_V2_SCHEMA
         assert disabled.image_spec["retrieval_binding"]["attachmentData"] is None
         with pytest.raises(ValueError, match="unexpected fields"):
             runtime_targets.desired_from_direct_images(
-                "oc20", spec, tmp_path, retrieval_enabled=True
+                "oc20",
+                spec,
+                tmp_path,
+                retrieval_enabled=True,
+                retrieval_source_generation=DIGEST_C,
             )
         enabled, _ = runtime_targets.desired_from_direct_images(
             "oc20",
@@ -875,6 +904,7 @@ def test_direct_hermes_target_projects_disabled_v2_and_requires_enabled_data(
             tmp_path,
             retrieval_enabled=True,
             retrieval_attachment_data=attachment_data(),
+            retrieval_source_generation=DIGEST_C,
         )
     assert enabled.image_spec["retrieval_binding"]["attachmentData"] == attachment_data()
 

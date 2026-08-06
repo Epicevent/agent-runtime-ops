@@ -133,6 +133,7 @@ BINDING_V2_KEYS = {
     "containerNasRoot",
     "contractDigest",
     "enabled",
+    "expected_source_generation",
     "family",
     "hostPortCount",
     "instanceId",
@@ -624,12 +625,18 @@ def _validate_binding_v2(binding: object, enabled: bool) -> dict[str, object]:
     if binding.get("proofMode") != ATTACHMENT_PROOF_MODE:
         raise ValueError("retrieval binding v2 proof mode mismatch")
     _validate_binding_common(binding, enabled)
+    expected_source_generation = _digest(
+        binding.get("expected_source_generation"),
+        "retrieval source generation",
+    )
     family = str(binding["family"])
     if binding.get("containerNasRoot") != CONTAINER_NAS_ROOT_BY_FAMILY[family]:
         raise ValueError("retrieval binding v2 container NAS root mismatch")
     _validate_p1_identity(binding.get("p1Identity"))
     if enabled:
-        _validate_attachment_data(binding.get("attachmentData"))
+        attachment = _validate_attachment_data(binding.get("attachmentData"))
+        if attachment["sourceSnapshotDigest"] != expected_source_generation:
+            raise ValueError("retrieval source generation does not match attachment")
     elif binding.get("attachmentData") is not None:
         raise ValueError(
             "disabled retrieval binding v2 must not contain attachment data"
@@ -782,6 +789,7 @@ def bind_retrieval_attachment_intent(
     enabled: bool,
     p1_identity: dict[str, object],
     attachment_data: dict[str, object] | None,
+    expected_source_generation: str,
 ) -> dict[str, Any]:
     """Bind the private attachment-only v2 tuple without making it executable.
 
@@ -799,6 +807,12 @@ def bind_retrieval_attachment_intent(
     assert isinstance(resource, dict)
     identity = _validate_p1_identity(p1_identity)
     data = _validate_attachment_data(attachment_data) if enabled else None
+    source_generation = _digest(
+        expected_source_generation,
+        "retrieval source generation",
+    )
+    if enabled and data is not None and data["sourceSnapshotDigest"] != source_generation:
+        raise ValueError("retrieval source generation does not match attachment")
     if not enabled and attachment_data is not None:
         raise ValueError(
             "disabled retrieval binding v2 must not contain attachment data"
@@ -816,6 +830,7 @@ def bind_retrieval_attachment_intent(
         "mountReadOnly": True,
         "componentDigest": contract["component_digest"],
         "contractDigest": contract["contract_digest"],
+        "expected_source_generation": source_generation,
         "resourceProfileDigest": resource["profileDigest"],
         "p1Identity": identity,
         "attachmentData": data,

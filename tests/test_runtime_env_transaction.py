@@ -724,6 +724,7 @@ def test_restore_binding_v2_finishes_only_after_landed_product_verifier_passes(
         enabled=False,
         p1_identity=dict(P1_IDENTITY_FIXED),
         attachment_data=None,
+        expected_source_generation="sha256:" + "7" * 64,
     )
     previous_desired = SimpleNamespace(
         image_spec=spec,
