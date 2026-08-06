@@ -7,10 +7,12 @@ from agent_runtime_ops.root_actions import (
     DEFAULT_EXECUTION_POLICIES,
     DEFAULT_OPERATION_HANDLERS,
     KwragProductArtifactProbeHandler,
+    NasObserveOcSlotsHandler,
     OperationAvailability,
     OperationHandlerRegistry,
     seal_typed_manifest,
 )
+from agent_runtime_ops.root_actions.execution import HandlerResult
 from tests.test_root_action_contracts import encoded, valid_manifest
 
 
@@ -22,6 +24,45 @@ def artifact_job():
 
 
 class RootActionExecutionRegistryTests(unittest.TestCase):
+    def test_nas_observation_handler_redacts_and_preserves_projection_verdict(self) -> None:
+        from tests.test_root_action_nas_observe_oc_slots import valid_projection
+
+        value = valid_manifest()
+        value["operation_id"] = "nas.observe_oc_slots"
+        value["parameters"] = {}
+        result = NasObserveOcSlotsHandler(probe=valid_projection).run(
+            seal_typed_manifest(encoded(value))
+        )
+        self.assertEqual(result.public_status, "red")
+        self.assertEqual(result.terminal_outcome, "succeeded")
+        self.assertEqual(result.public_facts[0][0], "nas_observation_header")
+
+    def test_nas_observation_timeout_is_durable_terminal(self) -> None:
+        value = valid_manifest()
+        value["operation_id"] = "nas.observe_oc_slots"
+        value["parameters"] = {}
+
+        def timeout():
+            raise TimeoutError
+
+        result = NasObserveOcSlotsHandler(probe=timeout).run(
+            seal_typed_manifest(encoded(value))
+        )
+        self.assertEqual(result.terminal_outcome, "timed_out")
+        self.assertEqual(result.exit_code, 124)
+
+    def test_handler_result_admits_bounded_terminal_timeout(self) -> None:
+        result = HandlerResult(
+            raw_bytes=b'{"deadline":"operation"}\n',
+            public_status="timed_out",
+            public_facts=(("writes", "0"),),
+            terminal_outcome="timed_out",
+            reason_code="operation_deadline_exceeded",
+            exit_code=124,
+        )
+        self.assertEqual(result.terminal_outcome, "timed_out")
+        self.assertEqual(result.exit_code, 124)
+
     def test_historical_coverage_and_executable_handlers_are_separate(self) -> None:
         self.assertEqual(
             DEFAULT_EXECUTION_POLICIES.enabled_operation_ids,

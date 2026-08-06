@@ -34,6 +34,7 @@ class TransitionKind(str, Enum):
 class TerminalOutcome(str, Enum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+    TIMED_OUT = "timed_out"
     REJECTED = "rejected"
     EXPIRED = "expired"
     CANCELED = "canceled"
@@ -189,6 +190,7 @@ def validate_record(record: JobRecord) -> None:
         if record.terminal_outcome in {
             TerminalOutcome.SUCCEEDED,
             TerminalOutcome.FAILED,
+            TerminalOutcome.TIMED_OUT,
         }:
             expected_execution_count = 1
         else:
@@ -271,7 +273,11 @@ def apply_transition(record: JobRecord, event: TransitionEvent) -> JobRecord:
     if event.kind is TransitionKind.COMPLETE_EXECUTION:
         if record.state is not JobState.RUNNING or record.execution_count != 1:
             raise StateTransitionError("only a running claimed job can complete")
-        if event.outcome not in {TerminalOutcome.SUCCEEDED, TerminalOutcome.FAILED}:
+        if event.outcome not in {
+            TerminalOutcome.SUCCEEDED,
+            TerminalOutcome.FAILED,
+            TerminalOutcome.TIMED_OUT,
+        }:
             raise StateTransitionError("execution completion has an invalid outcome")
         return _next(
             record,
@@ -299,7 +305,11 @@ def apply_transition(record: JobRecord, event: TransitionEvent) -> JobRecord:
     if event.kind is TransitionKind.RECONCILE_UNKNOWN:
         if record.state is not JobState.UNKNOWN or record.execution_count != 1:
             raise StateTransitionError("only an unknown claimed job can be reconciled")
-        if event.outcome not in {TerminalOutcome.SUCCEEDED, TerminalOutcome.FAILED}:
+        if event.outcome not in {
+            TerminalOutcome.SUCCEEDED,
+            TerminalOutcome.FAILED,
+            TerminalOutcome.TIMED_OUT,
+        }:
             raise StateTransitionError("unknown reconciliation has an invalid outcome")
         return _next(
             record,

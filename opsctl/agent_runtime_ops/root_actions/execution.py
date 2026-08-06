@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Mapping, Protocol
+import json
+from typing import Any, Callable, Mapping, Protocol
 
 from ..domain.artifact_probe import (
     probe_kwrag_product_artifact,
@@ -10,6 +11,11 @@ from ..domain.artifact_probe import (
 )
 from .contracts import SealedJob
 from .registry import DEFAULT_REGISTRY
+from .nas_observe_oc_slots import (
+    NasObservationValidationError,
+    public_facts as nas_public_facts,
+    validate_public_projection as validate_nas_projection,
+)
 
 
 class OperationAvailability(str, Enum):
@@ -82,6 +88,12 @@ class ExecutionPolicyRegistry:
 DEFAULT_EXECUTION_POLICIES = ExecutionPolicyRegistry(
     (
         ExecutionPolicy(
+            "nas.observe_oc_slots",
+            1,
+            OperationAvailability.DISABLED_UNVERIFIED_AUTHORITY,
+            "disabled_unverified_authority",
+        ),
+        ExecutionPolicy(
             "artifact.probe_kwrag_product",
             1,
             OperationAvailability.ENABLED,
@@ -145,7 +157,7 @@ class HandlerResult:
     def __post_init__(self) -> None:
         if not isinstance(self.raw_bytes, bytes) or not self.raw_bytes:
             raise ValueError("handler raw receipt must be non-empty bytes")
-        if self.terminal_outcome not in {"succeeded", "failed"}:
+        if self.terminal_outcome not in {"succeeded", "failed", "timed_out"}:
             raise ValueError("handler terminal outcome is invalid")
         if not isinstance(self.reason_code, str) or not self.reason_code:
             raise ValueError("handler reason code is invalid")
@@ -163,6 +175,58 @@ class OperationHandler(Protocol):
 
 
 ArtifactProbe = Callable[..., dict[str, object]]
+NasObservationProbe = Callable[[], dict[str, Any]]
+
+
+class NasObserveOcSlotsHandler:
+    """Adapt the fixed NAS observation projection to the receipt core."""
+
+    operation_id = "nas.observe_oc_slots"
+    operation_version = 1
+
+    def __init__(self, *, probe: NasObservationProbe) -> None:
+        self._probe = probe
+
+    def run(self, job: SealedJob) -> HandlerResult:
+        if (
+            job.operation_id != self.operation_id
+            or job.operation_version != self.operation_version
+        ):
+            raise ValueError("nas observation handler received the wrong operation")
+        try:
+            projection = validate_nas_projection(self._probe())
+            raw = (
+                json.dumps(
+                    projection,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode("utf-8")
+            return HandlerResult(
+                raw_bytes=raw,
+                public_status=str(projection["operational_verdict"]),
+                public_facts=nas_public_facts(projection),
+            )
+        except TimeoutError:
+            return HandlerResult(
+                raw_bytes=b'{"status":"timed_out","writes":0}\n',
+                public_status="timed_out",
+                public_facts=(),
+                terminal_outcome="timed_out",
+                reason_code="observation_timeout",
+                exit_code=124,
+            )
+        except (NasObservationValidationError, ValueError, TypeError):
+            return HandlerResult(
+                raw_bytes=b'{"status":"observation_failed","writes":0}\n',
+                public_status="observation_failed",
+                public_facts=(),
+                terminal_outcome="failed",
+                reason_code="observation_contract_invalid",
+                exit_code=1,
+            )
 
 
 class KwragProductArtifactProbeHandler:

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
@@ -89,11 +88,11 @@ def test_committed_catalog_fixtures_are_exact_producer_output() -> None:
     assert len(artifact.pages) == 1
     page_path, page_digest, page_bytes = artifact.pages[0]
     assert page_path == (
-        "catalog-generations/generation-0d2a4dab8728b6aa093787636cdfd0ef/"
+        "catalog-generations/generation-fe69c5c317d2a4d0a8624fc606f5dc6f/"
         "page-00000001.json"
     )
     assert page_digest == (
-        "sha256:3fe27051e1ab04dcb9d5b544400de4dd43e1ba07000e3c517528c646ef5fb9df"
+        "sha256:68a79ed6b465086133ae4346ff0d70bd5c617b066bdfaa60333ecea6331b88a7"
     )
     assert page_bytes == expected_page
     validated = validate_public_catalog(expected_catalog, {page_path: expected_page})

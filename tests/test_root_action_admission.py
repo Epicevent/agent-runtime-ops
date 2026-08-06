@@ -261,9 +261,10 @@ def test_public_lineage_snapshot_is_immutable_without_state_transition() -> None
             "expired": 0,
             "failed": 2,
             "prestart_failed": 1,
-            "rejected": 0,
-            "succeeded": 0,
-        },
+                "rejected": 0,
+                "succeeded": 0,
+                "timed_out": 0,
+            },
         "window_seconds": 86400,
     }
 

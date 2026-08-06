@@ -80,6 +80,21 @@ class SecretFailureHandler:
         raise RuntimeError("DO-NOT-EXPOSE root secret value")
 
 
+class TimedOutHandler:
+    operation_id = "artifact.probe_kwrag_product"
+    operation_version = 1
+
+    def run(self, _job):
+        return HandlerResult(
+            raw_bytes=b'{"deadline":"component"}\n',
+            public_status="timed_out",
+            public_facts=(("writes", "0"),),
+            terminal_outcome="timed_out",
+            reason_code="component_timeout",
+            exit_code=124,
+        )
+
+
 def make_store(root: Path) -> PosixRootActionStore:
     return PosixRootActionStore(
         root,
@@ -147,6 +162,38 @@ def test_handler_exception_becomes_unknown_without_exception_message_leak() -> N
         assert "DO-NOT-EXPOSE" not in raw_text
         notice = store.retrieve(job.job_id, job.job_digest).receipt_copy()
         assert notice["reason_code"] == "worker_outcome_uncertain"
+
+
+def test_handler_timeout_is_durable_terminal_and_never_unknown_or_redispatched() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary) / "root-actions"
+        store = make_store(root)
+        job = claimed(store)
+        repaired = threading.Event()
+        worker = RootActionExecutionWorker(
+            store,
+            handlers=OperationHandlerRegistry((TimedOutHandler(),)),
+            events=Events([("event-worker-timeout", "2026-07-28T02:00:02Z")]),
+            repair_public=lambda _job_id: repaired.set(),
+        )
+        worker.start()
+        try:
+            worker.enqueue(job.job_id, job.job_digest)
+            assert repaired.wait(2)
+        finally:
+            worker.close()
+
+        record = store.read_record(job.job_id)
+        assert record.state is JobState.TERMINAL
+        assert record.execution_count == 1
+        assert record.terminal_outcome is TerminalOutcome.TIMED_OUT
+        assert record.reason_code == "component_timeout"
+        receipt = store.retrieve(job.job_id, job.job_digest).receipt_copy()
+        assert receipt["terminal_outcome"] == "timed_out"
+        assert receipt["exit_code"] == 124
+        reopened = make_store(root)
+        assert reopened.read_record(job.job_id).terminal_outcome is TerminalOutcome.TIMED_OUT
+        assert reopened.retrieve(job.job_id, job.job_digest).receipt_copy() == receipt
 
 
 def test_startup_recovery_marks_running_claim_unknown_and_never_reruns() -> None:

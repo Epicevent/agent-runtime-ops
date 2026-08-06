@@ -181,6 +181,11 @@ def _rule(kind: str, **kwargs: Any) -> ParameterRule:
 DEFAULT_REGISTRY = OperationRegistry(
     (
         OperationSpec(
+            "nas.observe_oc_slots",
+            1,
+            (),
+        ),
+        OperationSpec(
             "artifact.probe_kwrag_product",
             1,
             (("revision", _rule("revision")),),

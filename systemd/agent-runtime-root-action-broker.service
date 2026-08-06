@@ -12,6 +12,7 @@ UMask=0027
 ExecStart=@@CURRENT_LINK@@/.venv/bin/python -m agent_runtime_ops.root_actions.service
 EnvironmentFile=/etc/agent-runtime-ops/root-action-webauthn.env
 Environment=AGENT_RUNTIME_OPS_RELEASE=@@RELEASE_DIR@@
+Environment=AGENT_RUNTIME_OPS_TRUSTED_ACCOUNT=@@TRUSTED_ACCOUNT@@
 Restart=on-failure
 RestartSec=2s
 NoNewPrivileges=yes

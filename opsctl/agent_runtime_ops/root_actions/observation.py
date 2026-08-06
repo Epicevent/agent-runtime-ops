@@ -18,9 +18,7 @@ EXECUTION_OBSERVATION_FACT_ORDER = (
     "staging_path",
 )
 EXECUTION_OBSERVATION_FACT_NAMES = frozenset(EXECUTION_OBSERVATION_FACT_ORDER)
-FORBIDDEN_OBSERVATION_FACT_NAMES = frozenset(
-    {"terminal_outcome", "terminal_status"}
-)
+FORBIDDEN_OBSERVATION_FACT_NAMES = frozenset({"terminal_outcome", "terminal_status"})
 _BOOLEAN_FACT_NAMES = ("dispatch_started", "dispatch_completed")
 _COUNT_FACT_NAMES = ("provider_request_count", "provider_reservation_count")
 _PATH_FACT_NAMES = ("preserved_snapshot_path", "staging_path")
@@ -120,9 +118,18 @@ def validate_public_observation_facts(
         raise ObservationValidationError(
             "terminal status must come from the receipt envelope"
         )
-    observed = tuple(
-        name for name in names if name in EXECUTION_OBSERVATION_FACT_NAMES
-    )
+    nas_names = tuple(name for name in names if name.startswith("nas_observation_"))
+    if nas_names:
+        from .nas_observe_oc_slots import validate_public_facts
+
+        try:
+            validate_public_facts(facts)
+        except ValueError as exc:
+            raise ObservationValidationError(
+                "nas observation facts violate their fixed public contract"
+            ) from exc
+        return
+    observed = tuple(name for name in names if name in EXECUTION_OBSERVATION_FACT_NAMES)
     if not observed:
         return
     if observed != EXECUTION_OBSERVATION_FACT_ORDER:
@@ -135,10 +142,7 @@ def validate_public_observation_facts(
             raise ObservationValidationError(
                 f"{name} is not a public boolean observation"
             )
-    if (
-        values["dispatch_completed"] == "true"
-        and values["dispatch_started"] != "true"
-    ):
+    if values["dispatch_completed"] == "true" and values["dispatch_started"] != "true":
         raise ObservationValidationError(
             "dispatch_completed=true requires dispatch_started=true"
         )
@@ -184,9 +188,7 @@ class SanitizedExecutionObservation:
                 "dispatch_completed=true requires dispatch_started=true"
             )
         _optional_count(self.provider_request_count, "provider_request_count")
-        _optional_count(
-            self.provider_reservation_count, "provider_reservation_count"
-        )
+        _optional_count(self.provider_reservation_count, "provider_reservation_count")
         for value, field in (
             (self.preserved_snapshot_path, "preserved_snapshot_path"),
             (self.staging_path, "staging_path"),

@@ -323,6 +323,7 @@ class PosixRootActionStore:
         terminal_counts = {
             "succeeded": 0,
             "failed": 0,
+            "timed_out": 0,
             "rejected": 0,
             "expired": 0,
             "canceled": 0,

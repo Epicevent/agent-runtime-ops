@@ -37,6 +37,7 @@ _STATE_VALUES = {"pending", "running", "terminal", "unknown"}
 _TERMINAL_OUTCOMES = {
     "succeeded",
     "failed",
+    "timed_out",
     "rejected",
     "expired",
     "canceled",

@@ -19,14 +19,23 @@ from .worker import RootActionExecutionWorker
 STATE_ROOT = Path("/var/lib/agent-runtime-ops/root-actions")
 STORE_ROOT = STATE_ROOT / "private"
 PUBLIC_ROOT = STATE_ROOT / "public"
-TRUSTED_READER_ACCOUNT = "svcops"
+TRUSTED_READER_ACCOUNT_ENV = "AGENT_RUNTIME_OPS_TRUSTED_ACCOUNT"
+TRUSTED_READER_ACCOUNT_FALLBACK = "svcops"
+
+
+def trusted_reader_account() -> str:
+    account = os.environ.get(TRUSTED_READER_ACCOUNT_ENV, TRUSTED_READER_ACCOUNT_FALLBACK)
+    if not account or not account.isidentifier() or len(account) > 32:
+        raise SystemExit("trusted reader account configuration is invalid")
+    return account
 
 
 def main() -> int:
     if os.geteuid() != 0:
         raise SystemExit("root-action broker service must run as root")
-    account = pwd.getpwnam(TRUSTED_READER_ACCOUNT)
-    group = grp.getgrnam(TRUSTED_READER_ACCOUNT)
+    trusted_account = trusted_reader_account()
+    account = pwd.getpwnam(trusted_account)
+    group = grp.getgrnam(trusted_account)
     if account.pw_gid != group.gr_gid:
         raise SystemExit("trusted reader primary group mismatch")
     runtime_root = DEFAULT_RUNTIME_ROOT
