@@ -6,7 +6,7 @@ import re
 import shlex
 from typing import Any
 
-LINUX_ACCOUNT_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+LINUX_ACCOUNT_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 TARGET_RE = re.compile(
     r"^(?:[a-z][a-z0-9-]{0,31}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|"
     r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63})$"

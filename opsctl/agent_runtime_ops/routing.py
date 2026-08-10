@@ -10,7 +10,7 @@ from typing import Any
 from .paths import DEFAULT_STATE_ROOT
 RUNTIME_BINDINGS_NAME = "runtime-bindings.json"
 
-LINUX_ACCOUNT_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+LINUX_ACCOUNT_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 HOST_RE = re.compile(r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 FAMILY_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 UPSTREAM_KINDS = {"managed-rootful", "developer-rootless"}
