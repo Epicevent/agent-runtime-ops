@@ -153,17 +153,6 @@ class OperationRegistry:
                 f"operation version mismatch expected={spec.version} actual={version}"
             )
         spec.validate_parameters(parameters)
-        if operation_id == "kwrag.network_ensure":
-            expected_state = parameters["expected_state"]
-            expected_identity = parameters["expected_identity_digest"]
-            if expected_state == "absent" and expected_identity is not None:
-                raise RegistryValidationError(
-                    "expected_identity_digest must be null when expected_state is absent"
-                )
-            if expected_state == "owned" and expected_identity is None:
-                raise RegistryValidationError(
-                    "expected_identity_digest is required when expected_state is owned"
-                )
 
     def projection(self) -> dict[str, Any]:
         return {
@@ -180,11 +169,6 @@ def _rule(kind: str, **kwargs: Any) -> ParameterRule:
 
 DEFAULT_REGISTRY = OperationRegistry(
     (
-        OperationSpec(
-            "artifact.probe_kwrag_product",
-            1,
-            (("revision", _rule("revision")),),
-        ),
         OperationSpec(
             "audit.verify",
             1,
@@ -212,45 +196,6 @@ DEFAULT_REGISTRY = OperationRegistry(
                 ("input_digest", _rule("digest")),
                 ("runtime_seconds", _rule("integer", minimum=1, maximum=21_600)),
                 ("memory_mib", _rule("integer", minimum=128, maximum=262_144)),
-            ),
-        ),
-        OperationSpec(
-            "kwrag.candidate_build",
-            1,
-            (
-                ("source_revision", _rule("revision")),
-                ("build_input_digest", _rule("digest")),
-                ("base_image_digest", _rule("digest")),
-                ("runtime_seconds", _rule("integer", minimum=1, maximum=21_600)),
-                ("memory_mib", _rule("integer", minimum=128, maximum=262_144)),
-            ),
-        ),
-        OperationSpec(
-            "kwrag.artifact_finalize",
-            1,
-            (
-                ("source_revision", _rule("revision")),
-                ("artifact_digests", _rule("digest_list", max_items=32)),
-                ("expected_image_id", _rule("digest")),
-            ),
-        ),
-        OperationSpec(
-            "kwrag.runtime_verify",
-            1,
-            (
-                ("candidate_digest", _rule("digest")),
-                ("fixture_id", _rule("identifier")),
-                ("projection_digest", _rule("digest")),
-                ("runtime_seconds", _rule("integer", minimum=1, maximum=7_200)),
-            ),
-        ),
-        OperationSpec(
-            "kwrag.network_ensure",
-            1,
-            (
-                ("network_plan_digest", _rule("digest")),
-                ("expected_state", _rule("enum", choices=("absent", "owned"))),
-                ("expected_identity_digest", _rule("nullable_digest")),
             ),
         ),
     )

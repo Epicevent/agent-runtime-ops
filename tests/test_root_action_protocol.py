@@ -32,6 +32,7 @@ from agent_runtime_ops.root_actions.state import (
     TransitionKind,
 )
 from tests.test_root_action_admission import Events, manifest
+from tests.root_action_support import TEST_EXECUTION_POLICIES
 
 
 PEER = BrokerPeerIdentity(uid=1027, gid=1048, pid=301)
@@ -47,6 +48,7 @@ def make_broker(store, *, sink=None) -> TypedRootActionBroker:
             ]
         ),
         public_sink=sink,
+        policies=TEST_EXECUTION_POLICIES,
         submission_policy=SubmissionPolicy(
             allowed_uids=frozenset({PEER.uid}),
             allowed_gids=frozenset({PEER.gid}),
@@ -93,7 +95,9 @@ def transition_terminal(store, job_id: str, *, outcome: TerminalOutcome) -> None
             kind=kind,
             occurred_at="2026-07-27T12:00:04Z",
             outcome=outcome,
-            reason_code="completed" if outcome is TerminalOutcome.SUCCEEDED else "handler_failed",
+            reason_code="completed"
+            if outcome is TerminalOutcome.SUCCEEDED
+            else "handler_failed",
         )
     )
 
@@ -283,9 +287,7 @@ def test_retrieve_protocol_rejects_untyped_or_unsafe_identity(
         "reply_target": "reply-safe",
     }
     request[field] = value
-    frame = encode_frame(
-        canonical_json(request), maximum=MAX_BROKER_REQUEST_BYTES
-    )
+    frame = encode_frame(canonical_json(request), maximum=MAX_BROKER_REQUEST_BYTES)
     with pytest.raises(BrokerProtocolError, match="identity"):
         parse_request_frame(frame)
 
@@ -355,7 +357,9 @@ def test_authorization_protocol_rejects_ambiguous_or_unbounded_fields(
         parse_request_frame(frame)
 
 
-def test_unknown_notice_returns_immediately_without_polling_for_reconciliation() -> None:
+def test_unknown_notice_returns_immediately_without_polling_for_reconciliation() -> (
+    None
+):
     from agent_runtime_ops.root_actions.local_fixture import LocalRootActionFixture
 
     store = LocalRootActionFixture()

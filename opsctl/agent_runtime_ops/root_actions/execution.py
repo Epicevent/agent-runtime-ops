@@ -2,19 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Mapping, Protocol
-
-from ..domain.artifact_probe import (
-    probe_kwrag_product_artifact,
-    serialize_probe_payload,
-)
+from typing import Mapping, Protocol
 from .contracts import SealedJob
 from .registry import DEFAULT_REGISTRY
 
 
 class OperationAvailability(str, Enum):
     ENABLED = "enabled"
-    DISABLED_BY_PRODUCT_BOUNDARY = "disabled_by_product_boundary"
     DISABLED_UNVERIFIED_AUTHORITY = "disabled_unverified_authority"
 
 
@@ -82,12 +76,6 @@ class ExecutionPolicyRegistry:
 DEFAULT_EXECUTION_POLICIES = ExecutionPolicyRegistry(
     (
         ExecutionPolicy(
-            "artifact.probe_kwrag_product",
-            1,
-            OperationAvailability.ENABLED,
-            None,
-        ),
-        ExecutionPolicy(
             "audit.verify",
             1,
             OperationAvailability.DISABLED_UNVERIFIED_AUTHORITY,
@@ -104,30 +92,6 @@ DEFAULT_EXECUTION_POLICIES = ExecutionPolicyRegistry(
             1,
             OperationAvailability.DISABLED_UNVERIFIED_AUTHORITY,
             "disabled_unverified_authority",
-        ),
-        ExecutionPolicy(
-            "kwrag.candidate_build",
-            1,
-            OperationAvailability.DISABLED_UNVERIFIED_AUTHORITY,
-            "disabled_unverified_authority",
-        ),
-        ExecutionPolicy(
-            "kwrag.artifact_finalize",
-            1,
-            OperationAvailability.DISABLED_UNVERIFIED_AUTHORITY,
-            "disabled_unverified_authority",
-        ),
-        ExecutionPolicy(
-            "kwrag.runtime_verify",
-            1,
-            OperationAvailability.DISABLED_UNVERIFIED_AUTHORITY,
-            "disabled_unverified_authority",
-        ),
-        ExecutionPolicy(
-            "kwrag.network_ensure",
-            1,
-            OperationAvailability.DISABLED_BY_PRODUCT_BOUNDARY,
-            "disabled_by_product_boundary",
         ),
     )
 )
@@ -162,54 +126,6 @@ class OperationHandler(Protocol):
     def run(self, job: SealedJob) -> HandlerResult: ...
 
 
-ArtifactProbe = Callable[..., dict[str, object]]
-
-
-class KwragProductArtifactProbeHandler:
-    operation_id = "artifact.probe_kwrag_product"
-    operation_version = 1
-
-    def __init__(self, *, probe: ArtifactProbe = probe_kwrag_product_artifact) -> None:
-        self._probe = probe
-
-    def run(self, job: SealedJob) -> HandlerResult:
-        if (
-            job.operation_id != self.operation_id
-            or job.operation_version != self.operation_version
-        ):
-            raise ValueError("artifact probe handler received the wrong operation")
-        manifest = job.manifest_copy()
-        revision = manifest["parameters"]["revision"]
-        payload = self._probe(revision)
-        raw = serialize_probe_payload(payload).encode("utf-8")
-        derived = payload.get("derived")
-        directory = payload.get("directoryObservation")
-        docker = payload.get("dockerObservation")
-        if (
-            not isinstance(derived, dict)
-            or not isinstance(directory, dict)
-            or not isinstance(docker, dict)
-        ):
-            raise ValueError("artifact probe output is missing its typed observations")
-        image = docker.get("image")
-        if not isinstance(image, dict):
-            raise ValueError(
-                "artifact probe output is missing docker image observation"
-            )
-        facts = (
-            ("revision", str(payload.get("revision"))),
-            ("candidate_tag", str(derived.get("candidateTag"))),
-            ("matching_directory_count", str(directory.get("matchingCount"))),
-            ("image_exists", str(image.get("exists")).lower()),
-            ("image_id", str(image.get("id"))),
-            ("ancestor_container_count", str(docker.get("ancestorContainerCount"))),
-            ("writes", str(payload.get("writes"))),
-        )
-        if any(value in {"None", "none"} for _, value in facts):
-            raise ValueError("artifact probe output cannot form complete public facts")
-        return HandlerResult(raw_bytes=raw, public_status="pass", public_facts=facts)
-
-
 class OperationHandlerRegistry:
     def __init__(
         self,
@@ -237,6 +153,4 @@ class OperationHandlerRegistry:
         return self._handlers[operation_id]
 
 
-DEFAULT_OPERATION_HANDLERS = OperationHandlerRegistry(
-    (KwragProductArtifactProbeHandler(),)
-)
+DEFAULT_OPERATION_HANDLERS = OperationHandlerRegistry(())

@@ -20,9 +20,12 @@ from agent_runtime_ops.root_actions import (
     TypedRootActionBroker,
 )
 from agent_runtime_ops.root_actions.protocol import BrokerProtocolError, submit_request
-from agent_runtime_ops.root_actions.public_projection import AtomicPublicProjectionPublisher
+from agent_runtime_ops.root_actions.public_projection import (
+    AtomicPublicProjectionPublisher,
+)
 from agent_runtime_ops.root_actions.local_fixture import LocalRootActionFixture
 from tests.test_root_action_admission import Events, manifest
+from tests.root_action_support import TEST_EXECUTION_POLICIES
 
 
 pytestmark = pytest.mark.skipif(
@@ -40,6 +43,7 @@ def root_broker() -> TypedRootActionBroker:
                 ("event-listener-circuit", "2026-07-27T12:00:01Z"),
             ]
         ),
+        policies=TEST_EXECUTION_POLICIES,
         submission_policy=SubmissionPolicy(
             allowed_uids=frozenset({os.getuid()}),
             allowed_gids=frozenset({os.getgid()}),
@@ -47,7 +51,9 @@ def root_broker() -> TypedRootActionBroker:
     )
 
 
-def serve_one(listener: RootActionUnixListener, errors: list[BaseException]) -> threading.Thread:
+def serve_one(
+    listener: RootActionUnixListener, errors: list[BaseException]
+) -> threading.Thread:
     def target() -> None:
         try:
             listener.serve_once()
@@ -170,7 +176,9 @@ def test_client_reset_during_response_does_not_escape_listener(tmp_path: Path) -
     assert errors == []
 
 
-def test_client_reset_during_request_read_does_not_escape_listener(tmp_path: Path) -> None:
+def test_client_reset_during_request_read_does_not_escape_listener(
+    tmp_path: Path,
+) -> None:
     socket_path = tmp_path / "runtime" / "broker.sock"
     listener = RootActionUnixListener(
         RootActionBrokerEndpoint(root_broker()),
@@ -209,7 +217,9 @@ def test_client_reset_during_request_read_does_not_escape_listener(tmp_path: Pat
     assert projection["status"]["state"]["name"] == "pending"
 
 
-def test_endpoint_oserror_is_not_misclassified_as_a_client_reset(tmp_path: Path) -> None:
+def test_endpoint_oserror_is_not_misclassified_as_a_client_reset(
+    tmp_path: Path,
+) -> None:
     class FailingEndpoint:
         def handle(self, _frame: bytes, *, peer: BrokerPeerIdentity) -> bytes:
             assert peer.uid == os.getuid()
@@ -244,7 +254,9 @@ def test_production_projection_permissions_are_root_trusted_group_only(
     tmp_path: Path,
 ) -> None:
     if os.geteuid() != 0:
-        pytest.skip("root ownership observation requires a disposable root test runtime")
+        pytest.skip(
+            "root ownership observation requires a disposable root test runtime"
+        )
     public = tmp_path / "public"
     publisher = AtomicPublicProjectionPublisher(
         public,
@@ -253,7 +265,9 @@ def test_production_projection_permissions_are_root_trusted_group_only(
         required_gid=os.getgid(),
     )
     broker = root_broker()
-    submitted = broker.submit(manifest("job-posix-mode"), peer=BrokerPeerIdentity(0, os.getgid(), os.getpid()))
+    submitted = broker.submit(
+        manifest("job-posix-mode"), peer=BrokerPeerIdentity(0, os.getgid(), os.getpid())
+    )
     publisher.publish(broker.public_projection(submitted.job_id))
     job_dir = public / submitted.job_id
     projection = job_dir / "projection.json"

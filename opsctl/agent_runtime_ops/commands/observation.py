@@ -16,7 +16,6 @@ from ..domain.image_approval_policy import (
     policy_key,
     validate_image_approval_target,
 )
-from ..domain.retrieval_contract import RETRIEVAL_SCHEMA, SHA256_RE
 from ..domain.runtime_backup import pending_rollback_identity
 from ..domain.runtime_truth import live_runtime_truth
 from ..domain.update_policy import (
@@ -67,19 +66,6 @@ _RUNTIME_FIELDS = (
     "ops_repo_commit",
     "container_nas_root",
     "nas_read_only",
-    "retrieval_labels_present",
-    "retrieval_contract_complete",
-    "retrieval_projection_labels_present",
-    "retrieval_projection_complete",
-    "retrieval_projection_consistent",
-    "retrieval_schema",
-    "retrieval_transport",
-    "retrieval_default_enabled",
-    "retrieval_enabled",
-    "retrieval_component_digest",
-    "retrieval_binding_digest",
-    "retrieval_expected_binding_digest",
-    "retrieval_resource_profile_digest",
 )
 
 
@@ -268,20 +254,6 @@ def _rollout_observation(
         )
         wrapper_digest = _validated_image_digest(wrapper_image, "wrapper_image")
         product_digest = _validated_image_digest(product_image, "product_image")
-        component_digest = _safe_text(
-            spec.get("retrieval_component_digest") or "",
-            "retrieval_component_digest",
-        )
-        binding_digest = _safe_text(
-            spec.get("retrieval_binding_digest") or "",
-            "retrieval_binding_digest",
-        )
-        for field, value in (
-            ("retrieval_component_digest", component_digest),
-            ("retrieval_binding_digest", binding_digest),
-        ):
-            if value and _DIGEST_RE.fullmatch(value) is None:
-                raise ReadonlyObservationError(f"{field}_invalid")
     except Exception:
         return {"status": "unavailable", "reason_code": "runtime_manifest_invalid"}
     return {
@@ -294,34 +266,7 @@ def _rollout_observation(
         "wrapper_digest": wrapper_digest,
         "product_image": product_image,
         "product_digest": product_digest,
-        "retrieval_enabled": spec.get("retrieval_enabled") is True,
-        "retrieval_component_digest": component_digest or None,
-        "retrieval_binding_digest": binding_digest or None,
     }
-
-
-def _retrieval_projection_identity_is_exact(fields: dict[str, str]) -> bool:
-    enabled = fields.get("retrieval_enabled")
-    capability_declared = fields.get("retrieval_contract_complete") == "true"
-    component = fields.get("retrieval_component_digest") or ""
-    binding = fields.get("retrieval_binding_digest") or ""
-    expected_binding = fields.get("retrieval_expected_binding_digest") or ""
-    resource = fields.get("retrieval_resource_profile_digest") or ""
-    common_binding_exact = bool(
-        enabled in {"true", "false"}
-        and fields.get("retrieval_projection_complete") == "true"
-        and fields.get("retrieval_projection_consistent") == "true"
-        and SHA256_RE.fullmatch(binding)
-        and SHA256_RE.fullmatch(expected_binding)
-        and binding == expected_binding
-    )
-    if not common_binding_exact:
-        return False
-    if capability_declared:
-        return bool(
-            SHA256_RE.fullmatch(component) and SHA256_RE.fullmatch(resource)
-        )
-    return enabled == "false" and component == "" and resource == ""
 
 
 def _runtime_observation(state_root: Any, target: str) -> dict[str, object]:
@@ -340,12 +285,6 @@ def _runtime_observation(state_root: Any, target: str) -> dict[str, object]:
             if not isinstance(passed, bool) or _CHECK_NAME_RE.fullmatch(name) is None:
                 raise ReadonlyObservationError("runtime_check_invalid")
             check_values.append({"name": name, "passed": passed})
-        check_values.append(
-            {
-                "name": "observation_retrieval_projection_identity",
-                "passed": _retrieval_projection_identity_is_exact(fields),
-            }
-        )
     except Exception:
         return {"status": "unavailable", "reason_code": "runtime_truth_invalid"}
     passed = fields.get("truth_status") == "ok" and all(
@@ -383,15 +322,7 @@ def _validate_runtime_fields(fields: dict[str, str], target: str) -> None:
             raise ReadonlyObservationError(f"runtime_{field}_invalid")
     if fields.get("enabled") not in {"yes", "no"}:
         raise ReadonlyObservationError("runtime_enabled_invalid")
-    for field in (
-        "nas_read_only",
-        "retrieval_labels_present",
-        "retrieval_contract_complete",
-        "retrieval_projection_labels_present",
-        "retrieval_projection_complete",
-        "retrieval_projection_consistent",
-        "retrieval_enabled",
-    ):
+    for field in ("nas_read_only",):
         if fields.get(field) not in {"true", "false"}:
             raise ReadonlyObservationError(f"runtime_{field}_invalid")
     if fields.get("nas_read_only") != "true":
@@ -401,49 +332,6 @@ def _validate_runtime_fields(fields: dict[str, str], target: str) -> None:
         _validated_image_digest(value, f"runtime_{field}")
     if _DIGEST_RE.fullmatch(fields.get("canonical_recipe_digest") or "") is None:
         raise ReadonlyObservationError("runtime_canonical_recipe_digest_invalid")
-    for field in (
-        "retrieval_component_digest",
-        "retrieval_binding_digest",
-        "retrieval_expected_binding_digest",
-        "retrieval_resource_profile_digest",
-    ):
-        value = fields.get(field) or ""
-        if value and _DIGEST_RE.fullmatch(value) is None:
-            raise ReadonlyObservationError(f"runtime_{field}_invalid")
-    capability_declared = fields.get("retrieval_contract_complete") == "true"
-    retrieval_enabled = fields.get("retrieval_enabled")
-    retrieval_schema = fields.get("retrieval_schema") or ""
-    retrieval_transport = fields.get("retrieval_transport") or ""
-    retrieval_default_enabled = fields.get("retrieval_default_enabled") or ""
-    retrieval_component = fields.get("retrieval_component_digest") or ""
-    retrieval_resource = fields.get("retrieval_resource_profile_digest") or ""
-    if capability_declared:
-        if retrieval_schema != RETRIEVAL_SCHEMA:
-            raise ReadonlyObservationError("runtime_retrieval_schema_mismatch")
-        if retrieval_transport != "in_process":
-            raise ReadonlyObservationError("runtime_retrieval_transport_mismatch")
-        if retrieval_default_enabled != "false":
-            raise ReadonlyObservationError(
-                "runtime_retrieval_default_enabled_policy_mismatch"
-            )
-        if not (
-            _DIGEST_RE.fullmatch(retrieval_component)
-            and _DIGEST_RE.fullmatch(retrieval_resource)
-        ):
-            raise ReadonlyObservationError(
-                "runtime_retrieval_capability_digest_mismatch"
-            )
-    elif not (
-        retrieval_enabled == "false"
-        and retrieval_schema == ""
-        and retrieval_transport == ""
-        and retrieval_default_enabled == ""
-        and retrieval_component == ""
-        and retrieval_resource == ""
-    ):
-        raise ReadonlyObservationError(
-            "runtime_retrieval_capability_absence_mismatch"
-        )
     if _REVISION_RE.fullmatch(fields.get("ops_repo_commit") or "") is None:
         raise ReadonlyObservationError("runtime_ops_repo_commit_invalid")
     recipe_name = fields.get("canonical_recipe_name") or ""
@@ -477,10 +365,6 @@ def _validate_runtime_fields(fields: dict[str, str], target: str) -> None:
         raise
     except Exception as exc:
         raise ReadonlyObservationError("runtime_canonical_recipe_invalid") from exc
-    if capability_declared:
-        for field in ("retrieval_schema", "retrieval_transport"):
-            if _LABEL_VALUE_RE.fullmatch(fields.get(field) or "") is None:
-                raise ReadonlyObservationError(f"runtime_{field}_invalid")
     container_nas_root = fields.get("container_nas_root") or ""
     if not container_nas_root.startswith("/") or ".." in container_nas_root.split("/"):
         raise ReadonlyObservationError("runtime_container_nas_root_invalid")
@@ -559,13 +443,6 @@ def _coherence_observation(
     fields = runtime.get("fields")
     if not isinstance(fields, dict):
         return {"status": "unavailable"}
-    rollout_retrieval_enabled = (
-        "true" if initial_rollout.get("retrieval_enabled") is True else "false"
-    )
-    rollout_component_digest = (
-        initial_rollout.get("retrieval_component_digest") or ""
-    )
-    rollout_binding_digest = initial_rollout.get("retrieval_binding_digest") or ""
     matches = all(
         (
             fields.get("instance_id") == initial_binding.get("instance_id"),
@@ -578,9 +455,6 @@ def _coherence_observation(
             fields.get("runtime_profile") == initial_rollout.get("runtime_profile"),
             fields.get("wrapper_image") == initial_rollout.get("wrapper_image"),
             fields.get("product_image") == initial_rollout.get("product_image"),
-            fields.get("retrieval_enabled") == rollout_retrieval_enabled,
-            fields.get("retrieval_component_digest") == rollout_component_digest,
-            fields.get("retrieval_binding_digest") == rollout_binding_digest,
         )
     )
     return {"status": "consistent" if matches else "mixed_snapshot"}

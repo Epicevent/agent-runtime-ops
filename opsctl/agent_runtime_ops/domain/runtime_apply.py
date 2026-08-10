@@ -8,7 +8,7 @@ from typing import Callable
 
 import os
 
-from ..host.account_files import ensure_not_symlink_chain, runtime_ids, slot_uid_gid
+from ..host.account_files import ensure_not_symlink_chain, runtime_ids
 from ..redaction import redact
 from ..renderer import render_compose
 from ..routing import RuntimeBinding
@@ -24,10 +24,7 @@ from .image_specs import image_spec_config_contract
 from .runtime_backup import (
     backup_agent_runtime_state,
     begin_rollback_transaction,
-    consume_legacy_retrieval_projection_exemption,
     finish_rollback_transaction,
-    legacy_retrieval_projection_failures_are_expected,
-    legacy_retrieval_projection_failures_may_be_expected,
     load_backup_runtime_contract,
     restore_backup,
     restore_backup_env,
@@ -48,13 +45,7 @@ from .runtime_paths import (
     slot_runtime_dir,
     state_manifest_path,
 )
-from .runtime_truth import find_gateway_container, live_runtime_truth
-from .dev_recipe_runtime import upsert_runtime_env_file
-from .retrieval_contract import (
-    require_retrieval_approval,
-    retrieval_env,
-    run_retrieval_status_probe,
-)
+from .runtime_truth import find_gateway_container
 from .workspace_guidance import ensure_runtime_workspace_guidance
 
 
@@ -159,57 +150,12 @@ def _restore_and_verify_backup(
             )
             if not ok
         }
-        legacy_projection_absence = False
-        if legacy_retrieval_projection_failures_may_be_expected(
-            state_root,
-            slot,
-            backup_dir,
-            failed,
-        ):
-            truth, _ = live_runtime_truth(slot, state_root)
-            legacy_projection_absence = (
-                legacy_retrieval_projection_failures_are_expected(
-                    state_root,
-                    slot,
-                    backup_dir,
-                    failed,
-                    truth,
-                )
-            )
-            if legacy_projection_absence:
-                failed.clear()
         if failed:
             return False, "rollback_live_failed:" + ",".join(sorted(failed))
-        if isinstance(previous_desired.image_spec.get("retrieval_contract"), dict):
-            container, lookup = find_gateway_container(
-                previous_desired.route,
-                previous_profile,
-            )
-            if not container:
-                return False, f"rollback_retrieval_container_failed:{lookup}"
-            status = run_retrieval_status_probe(
-                container,
-                previous_desired.image_spec,
-            )
-            if status is None:
-                return False, "rollback_retrieval_verifier_unavailable"
-        if legacy_projection_absence:
-            consume_legacy_retrieval_projection_exemption(
-                state_root,
-                slot,
-                backup_dir,
-            )
         finish_rollback_transaction(slot, state_root, backup_dir)
     except Exception as exc:
         return False, f"rollback_verification_failed:{exc}"
-    return (
-        True,
-        (
-            "rollback_applied_verified_legacy_projection_absence"
-            if legacy_projection_absence
-            else "rollback_applied_verified"
-        ),
-    )
+    return True, "rollback_applied_verified"
 
 
 def apply_desired_slot(
@@ -222,7 +168,6 @@ def apply_desired_slot(
     emit_progress: bool = False,
     prepare_runtime_env: Callable[[], None] | None = None,
     pre_apply_admission: Callable[[], None] | None = None,
-    post_live_retrieval_probe: Callable[[str], None] | None = None,
 ) -> int:
     try:
         with runtime_host_mutation_lock(state_root):
@@ -237,7 +182,6 @@ def apply_desired_slot(
                     action_name=action_name,
                     emit_progress=emit_progress,
                     prepare_runtime_env=prepare_runtime_env,
-                    post_live_retrieval_probe=post_live_retrieval_probe,
                 )
     except Exception as exc:
         print(f"target={getattr(desired, 'slot', '')}")
@@ -266,15 +210,10 @@ def _apply_desired_slot_locked(
     action_name: str = "apply",
     emit_progress: bool = False,
     prepare_runtime_env: Callable[[], None] | None = None,
-    post_live_retrieval_probe: Callable[[str], None] | None = None,
 ) -> int:
     backup_dir: Path | None = None
     runtime_env_prepared = False
     try:
-        # This check is deliberately inside both the host mutation lock and the
-        # slot transaction lock.  Command-level planning is useful diagnostics,
-        # but only this current policy read is authoritative for mutation.
-        require_retrieval_approval(desired, state_root)
         rendered = render_compose(profile, desired)
         static_failures = [
             name for ok, name, _ in run_static_slot_checks(desired, profile, rendered, state_root=state_root) if not ok
@@ -309,21 +248,6 @@ def _apply_desired_slot_locked(
                 )
         backup_dir = backup_agent_runtime_state(desired.slot, runtime_dir, state_root)
         begin_rollback_transaction(desired.slot, state_root, backup_dir)
-        # Runtime manifests are also accepted by ordinary ``opsctl apply``.
-        # Project their retrieval intent through the same recoverable .env
-        # transaction as direct-image rollout commands. Legacy/non-image test
-        # fixtures without the field remain outside this extension.
-        if "retrieval_enabled" in desired.image_spec:
-            runtime_env_prepared = True
-            retrieval_updates = retrieval_env(desired.image_spec)
-            uid, gid = slot_uid_gid(desired.slot)
-            upsert_runtime_env_file(
-                runtime_dir / ".env",
-                retrieval_updates,
-                uid,
-                gid,
-                remove_empty_keys=set(retrieval_updates),
-            )
         if prepare_runtime_env is not None:
             runtime_env_prepared = True
             prepare_runtime_env()
@@ -455,41 +379,6 @@ def _apply_desired_slot_locked(
         print(f"rollback_reason={reason}")
         append_action_log(state_root, action_name, desired.slot, desired.slot, "fail", f"live_failed={failed}")
         return 1
-
-    if isinstance(desired.image_spec.get("retrieval_contract"), dict):
-        container, lookup = find_gateway_container(desired.route, profile)
-        try:
-            if not container:
-                raise ValueError(f"container lookup failed: {lookup}")
-            if post_live_retrieval_probe is not None:
-                post_live_retrieval_probe(container)
-            retrieval_status = run_retrieval_status_probe(
-                container, desired.image_spec
-            )
-            if retrieval_status is None:
-                raise ValueError("embedded retrieval verifier is unavailable")
-        except Exception as exc:
-            ok, reason = _restore_and_verify_backup(
-                slot=desired.slot,
-                runtime_dir=runtime_dir,
-                backup_dir=backup_dir,
-                state_root=state_root,
-            )
-            print("apply_status=fail")
-            print(f"reason=retrieval_postcondition_failed:{exc}")
-            print(f"rollback_status={'ok' if ok else 'fail'}")
-            print(f"rollback_reason={reason}")
-            append_action_log(
-                state_root,
-                action_name,
-                desired.slot,
-                desired.slot,
-                "fail",
-                "retrieval_postcondition_failed",
-            )
-            return 1
-        for key in sorted(retrieval_status):
-            print(f"retrieval_{key}={retrieval_status[key]}")
 
     for index, delay_seconds in enumerate(FINAL_WORKSPACE_GUIDANCE_STABILIZE_DELAYS_SECONDS, start=1):
         if delay_seconds > 0:

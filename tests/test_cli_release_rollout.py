@@ -4,7 +4,6 @@ import argparse
 import contextlib
 import io
 import json
-import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -43,7 +42,6 @@ from agent_runtime_ops.domain.runtime_checks import (
     run_workspace_user_nas_docs_listing_check,
     workspace_hermes_config_api_checks,
 )
-from agent_runtime_ops.domain.retrieval_contract import bind_retrieval_intent
 from agent_runtime_ops.domain.runtime_truth import local_canonical_recipe_check_from_truth
 from agent_runtime_ops.domain.source_provenance import source_provenance
 from agent_runtime_ops.profiles import load_profile
@@ -541,10 +539,6 @@ class CliReleaseRolloutTests(unittest.TestCase):
             with (
                 patch("agent_runtime_ops.commands.apply._is_root", return_value=True),
                 patch("agent_runtime_ops.domain.runtime_apply.slot_runtime_dir", return_value=runtime_dir),
-                patch(
-                    "agent_runtime_ops.domain.runtime_apply.slot_uid_gid",
-                    return_value=(os.getuid(), os.getgid()),
-                ),
                 patch("agent_runtime_ops.domain.runtime_apply.FINAL_WORKSPACE_GUIDANCE_STABILIZE_DELAYS_SECONDS", []),
                 patch("agent_runtime_ops.domain.runtime_apply.ensure_runtime_workspace_guidance", return_value={"workspace_guidance": "present"}) as guidance,
                 patch("agent_runtime_ops.domain.runtime_apply.ensure_nas_workspace_dir", return_value=runtime_dir / "workspace"),
@@ -592,10 +586,6 @@ class CliReleaseRolloutTests(unittest.TestCase):
             with (
                 patch("agent_runtime_ops.commands.apply._is_root", return_value=True),
                 patch("agent_runtime_ops.domain.runtime_apply.slot_runtime_dir", return_value=runtime_dir),
-                patch(
-                    "agent_runtime_ops.domain.runtime_apply.slot_uid_gid",
-                    return_value=(os.getuid(), os.getgid()),
-                ),
                 patch("agent_runtime_ops.domain.runtime_apply.FINAL_WORKSPACE_GUIDANCE_STABILIZE_DELAYS_SECONDS", []),
                 patch("agent_runtime_ops.domain.runtime_apply.ensure_runtime_workspace_guidance", return_value={"workspace_guidance": "present"}),
                 patch("agent_runtime_ops.domain.runtime_apply.ensure_nas_workspace_dir", return_value=runtime_dir / "workspace"),
@@ -1390,6 +1380,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertIn(f"wrapper_image={wrapper}", output.getvalue())
             self.assertIn(f"product_image={product}", output.getvalue())
 
+    @unittest.skip("opsctl product retrieval ownership retired")
     def test_rollout_refuses_p1_attachment_fleet_promotion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1792,6 +1783,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
         self.assertEqual(truth["canonical_recipe_name"], "")
         self.assertEqual(truth["canonical_recipe_digest"], "")
 
+    @unittest.skip("opsctl product retrieval ownership retired")
     def test_live_image_truth_reports_partial_retrieval_label_presence(self) -> None:
         route = binding("oc20", "hermes", "customer", 30689, 30690)
         labels = hermes_recipe_labels()
@@ -1811,6 +1803,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
         self.assertEqual(truth["retrieval_contract_complete"], "false")
         self.assertEqual(truth["retrieval_schema"], "")
 
+    @unittest.skip("opsctl product retrieval ownership retired")
     def test_live_image_truth_rejects_schema_only_retrieval_label_set(self) -> None:
         route = binding("oc20", "hermes", "customer", 30689, 30690)
         labels = hermes_recipe_labels()
@@ -1829,6 +1822,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
         self.assertEqual(truth["retrieval_labels_present"], "true")
         self.assertEqual(truth["retrieval_contract_complete"], "false")
 
+    @unittest.skip("opsctl product retrieval ownership retired")
     def test_live_image_truth_accepts_exact_retrieval_label_set(self) -> None:
         route = binding("oc20", "hermes", "customer", 30689, 30690)
         fixture = json.loads(
@@ -1851,6 +1845,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
         self.assertEqual(truth["retrieval_labels_present"], "true")
         self.assertEqual(truth["retrieval_contract_complete"], "true")
 
+    @unittest.skip("opsctl product retrieval ownership retired")
     def test_live_image_truth_rejects_partial_runtime_projection_labels(self) -> None:
         route = binding("oc20", "hermes", "customer", 30689, 30690)
         labels = hermes_recipe_labels()
@@ -1868,6 +1863,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
         self.assertEqual(truth["retrieval_projection_complete"], "false")
         self.assertEqual(truth["retrieval_projection_consistent"], "false")
 
+    @unittest.skip("opsctl product retrieval ownership retired")
     def test_live_image_truth_rejects_unknown_only_runtime_projection_label(self) -> None:
         route = binding("oc20", "hermes", "customer", 30689, 30690)
         labels = hermes_recipe_labels()
@@ -1885,6 +1881,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
         self.assertEqual(truth["retrieval_projection_complete"], "false")
         self.assertEqual(truth["retrieval_projection_consistent"], "false")
 
+    @unittest.skip("opsctl product retrieval ownership retired")
     def test_live_image_truth_rejects_extra_runtime_projection_label(self) -> None:
         route = binding("oc20", "hermes", "customer", 30689, 30690)
         labels = hermes_recipe_labels()
@@ -1909,6 +1906,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
         self.assertEqual(truth["retrieval_projection_complete"], "false")
         self.assertEqual(truth["retrieval_projection_consistent"], "false")
 
+    @unittest.skip("opsctl product retrieval ownership retired")
     def test_live_image_truth_accepts_complete_absent_runtime_projection(self) -> None:
         route = binding("oc20", "hermes", "customer", 30689, 30690)
         labels = hermes_recipe_labels()
@@ -1932,6 +1930,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
         self.assertEqual(truth["retrieval_projection_complete"], "true")
         self.assertEqual(truth["retrieval_projection_consistent"], "true")
 
+    @unittest.skip("opsctl product retrieval ownership retired")
     def test_live_image_truth_accepts_exact_capability_projection_binding(self) -> None:
         route = binding("oc20", "hermes", "customer", 30689, 30690)
         fixture = json.loads(
@@ -1970,6 +1969,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
         self.assertEqual(truth["retrieval_projection_complete"], "true")
         self.assertEqual(truth["retrieval_projection_consistent"], "true")
 
+    @unittest.skip("opsctl product retrieval ownership retired")
     def test_enabled_promotion_refuses_unverified_retrieval_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2071,6 +2071,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertIn("consumer unhealthy", output.getvalue())
             apply.assert_called_once()
 
+    @unittest.skip("opsctl product retrieval ownership retired")
     def test_enabled_promotion_refuses_changed_live_source_tuple_under_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2363,7 +2364,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 family="openclaw",
                 runtime_class="customer",
                 image_name="direct-image",
-                image_spec={"retrieval_enabled": False},
+                image_spec={},
                 runtime_profile="openclaw-customer",
                 route=routes["oc4"],
             )
@@ -2399,7 +2400,6 @@ class CliReleaseRolloutTests(unittest.TestCase):
                         ValueError("second target plan is invalid"),
                     ],
                 ),
-                patch("agent_runtime_ops.commands.rollout._require_retrieval_approval"),
                 patch("agent_runtime_ops.commands.rollout._apply_desired_slot") as apply,
                 contextlib.redirect_stdout(output),
             ):
@@ -2452,7 +2452,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
                     family="openclaw",
                     runtime_class="customer",
                     image_name="direct-image",
-                    image_spec={"retrieval_enabled": False},
+                    image_spec={},
                     runtime_profile="openclaw-customer",
                     route=routes["oc4"],
                 ),
@@ -2461,7 +2461,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
                     family="openclaw",
                     runtime_class="customer",
                     image_name="direct-image",
-                    image_spec={"retrieval_enabled": False},
+                    image_spec={},
                     runtime_profile="openclaw-customer",
                     route=oc5_route,
                 ),
@@ -2542,9 +2542,6 @@ class CliReleaseRolloutTests(unittest.TestCase):
                             ],
                         ),
                         patch(
-                            "agent_runtime_ops.commands.rollout._require_retrieval_approval"
-                        ),
-                        patch(
                             "agent_runtime_ops.commands.rollout._ensure_runtime_dir",
                             side_effect=runtime_effect,
                         ),
@@ -2606,7 +2603,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
                     family="openclaw",
                     runtime_class="customer",
                     image_name="direct-image",
-                    image_spec={"retrieval_enabled": False},
+                    image_spec={},
                     runtime_profile="openclaw-customer",
                     route=routes["oc4"],
                 ),
@@ -2615,7 +2612,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
                     family="openclaw",
                     runtime_class="customer",
                     image_name="direct-image",
-                    image_spec={"retrieval_enabled": False},
+                    image_spec={},
                     runtime_profile="openclaw-customer",
                     route=oc5_route,
                 ),
@@ -2663,11 +2660,6 @@ class CliReleaseRolloutTests(unittest.TestCase):
                     ],
                 ),
                 patch(
-                    "agent_runtime_ops.commands.rollout.find_gateway_container_by_binding",
-                    return_value=("source-container", "instance_label"),
-                ),
-                patch("agent_runtime_ops.commands.rollout._require_retrieval_approval"),
-                patch(
                     "agent_runtime_ops.commands.rollout._ensure_runtime_dir",
                     side_effect=[
                         None,
@@ -2698,7 +2690,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 self.assertFalse(item.kwargs["create"])
                 self.assertTrue(item.kwargs["require_existing_manifest"])
 
-    def test_default_off_promotion_revalidates_live_source_inside_apply_lock(
+    def test_promotion_revalidates_live_source_inside_apply_lock(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2717,7 +2709,6 @@ class CliReleaseRolloutTests(unittest.TestCase):
                         "agent-runtime-openclaw", "9"
                     ),
                     "product_image": wrapper_image_ref("openclaw-jitech", "8"),
-                    "retrieval_enabled": False,
                 },
                 runtime_profile="openclaw-customer",
                 route=routes["oc3"],
@@ -2732,7 +2723,6 @@ class CliReleaseRolloutTests(unittest.TestCase):
                         "agent-runtime-openclaw", "9"
                     ),
                     "product_image": wrapper_image_ref("openclaw-jitech", "7"),
-                    "retrieval_enabled": False,
                 },
                 runtime_profile="openclaw-customer",
                 route=routes["oc3"],
@@ -2742,7 +2732,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 family="openclaw",
                 runtime_class="customer",
                 image_name="direct-image",
-                image_spec={"retrieval_enabled": False},
+                image_spec={},
                 runtime_profile="openclaw-customer",
                 route=routes["oc4"],
             )
@@ -2775,10 +2765,6 @@ class CliReleaseRolloutTests(unittest.TestCase):
                     return_value=[],
                 ),
                 patch(
-                    "agent_runtime_ops.commands.rollout.find_gateway_container_by_binding",
-                    return_value=("source-container", "instance_label"),
-                ),
-                patch(
                     "agent_runtime_ops.commands.rollout.image_spec_from_direct_images",
                     return_value={
                         "wrapper_image": source_desired.image_spec["wrapper_image"],
@@ -2789,7 +2775,6 @@ class CliReleaseRolloutTests(unittest.TestCase):
                     "agent_runtime_ops.commands.rollout._desired_from_direct_images",
                     return_value=(target, load_profile("openclaw-customer")),
                 ),
-                patch("agent_runtime_ops.commands.rollout._require_retrieval_approval"),
                 patch("agent_runtime_ops.commands.rollout._ensure_runtime_dir"),
                 patch(
                     "agent_runtime_ops.commands.rollout._apply_desired_slot",
@@ -2807,7 +2792,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
 
             self.assertEqual(rc, 1)
             self.assertIn(
-                "retrieval promotion source live tuple changed during promotion",
+                "promotion source live tuple changed during promotion",
                 output.getvalue(),
             )
             self.assertEqual(applied, [])
@@ -2829,7 +2814,6 @@ class CliReleaseRolloutTests(unittest.TestCase):
                         "agent-runtime-openclaw", "9"
                     ),
                     "product_image": wrapper_image_ref("openclaw-jitech", "8"),
-                    "retrieval_enabled": False,
                 },
                 runtime_profile="openclaw-customer",
                 route=routes["oc3"],
@@ -2839,7 +2823,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 family="openclaw",
                 runtime_class="customer",
                 image_name="direct-image",
-                image_spec={"retrieval_enabled": False},
+                image_spec={},
                 runtime_profile="openclaw-customer",
                 route=routes["oc4"],
             )
@@ -2882,7 +2866,6 @@ class CliReleaseRolloutTests(unittest.TestCase):
                     "agent_runtime_ops.commands.rollout._desired_from_direct_images",
                     return_value=(target, load_profile("openclaw-customer")),
                 ),
-                patch("agent_runtime_ops.commands.rollout._require_retrieval_approval"),
                 patch("agent_runtime_ops.commands.rollout._ensure_runtime_dir"),
                 patch(
                     "agent_runtime_ops.commands.rollout._pending_rollback_backup",
@@ -2987,6 +2970,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
                         )
                 apply.assert_not_called()
 
+    @unittest.skip("opsctl product retrieval ownership retired")
     def test_enabled_promotion_verifies_source_before_first_target_apply(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3102,6 +3086,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertIn("PASS promotion_retrieval_source_verified", output.getvalue())
             self.assertIn("PASS promotion_retrieval_headroom_verified", output.getvalue())
 
+    @unittest.skip("opsctl product retrieval ownership retired")
     def test_enabled_promotion_refuses_insufficient_headroom_before_apply(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3197,6 +3182,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertEqual(target_mutations, [])
             apply.assert_called_once()
 
+    @unittest.skip("opsctl product retrieval ownership retired")
     def test_enabled_promotion_refreshes_source_container_for_each_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3389,25 +3375,6 @@ class CliReleaseRolloutTests(unittest.TestCase):
             route = next(item for item in load_runtime_bindings(root) if item.linux_account == "oc3")
             product_image = wrapper_image_ref("openclaw-jitech", "8")
             labels = openclaw_recipe_labels(product_image=product_image)
-            profile = load_profile("openclaw-customer")
-            absent_binding = bind_retrieval_intent(
-                {},
-                instance_id=route.instance_id,
-                family=route.family,
-                runtime_profile_digest=profile.digest,
-                container_nas_root=str(profile.metadata["container_nas_root"]),
-                enabled=False,
-            )
-            labels.update(
-                {
-                    "agent-runtime.retrieval-enabled": "false",
-                    "agent-runtime.retrieval-component-digest": "",
-                    "agent-runtime.retrieval-binding-digest": str(
-                        absent_binding["retrieval_binding_digest"]
-                    ),
-                    "agent-runtime.retrieval-resource-profile-digest": "",
-                }
-            )
             info = {
                 "Config": {
                     "Image": wrapper_image_ref("agent-runtime-openclaw", "9"),
@@ -3438,11 +3405,12 @@ class CliReleaseRolloutTests(unittest.TestCase):
             self.assertTrue(any(name == "truth_container_lookup" and ok for ok, name, _ in checks))
             self.assertTrue(
                 any(
-                    name == "truth_retrieval_binding_matches_expected" and ok
+                    name == "truth_canonical_recipe_digest_matches_local" and ok
                     for ok, name, _ in checks
                 )
             )
 
+    @unittest.skip("opsctl product retrieval ownership retired")
     def test_live_runtime_truth_rejects_empty_runtime_projection_set(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3504,6 +3472,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 )
             )
 
+    @unittest.skip("opsctl product retrieval ownership retired")
     def test_live_runtime_truth_rejects_wrong_target_specific_binding(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3569,6 +3538,7 @@ class CliReleaseRolloutTests(unittest.TestCase):
                 )
             )
 
+    @unittest.skip("opsctl product retrieval ownership retired")
     def test_live_runtime_truth_rejects_partial_retrieval_label_set(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

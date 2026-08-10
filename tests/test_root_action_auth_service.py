@@ -18,10 +18,19 @@ from agent_runtime_ops.root_actions.endpoint import RootActionBrokerEndpoint
 from agent_runtime_ops.root_actions.posix_store import PosixRootActionStore
 from agent_runtime_ops.root_actions.protocol import auth_request, parse_response_frame
 from agent_runtime_ops.root_actions.state import JobState
-from agent_runtime_ops.root_actions.submission import BrokerPeerIdentity, SubmissionPolicy
+from agent_runtime_ops.root_actions.submission import (
+    BrokerPeerIdentity,
+    SubmissionPolicy,
+)
 from tests.test_root_action_admission import Events
-from tests.test_root_action_authorization import ORIGIN, RP_ID, USER_ID, VirtualAuthenticator
+from tests.test_root_action_authorization import (
+    ORIGIN,
+    RP_ID,
+    USER_ID,
+    VirtualAuthenticator,
+)
 from tests.test_root_action_contracts import encoded, valid_manifest
+from tests.root_action_support import TEST_EXECUTION_POLICIES
 
 
 def test_real_webauthn_registration_then_exact_action_claim() -> None:
@@ -71,7 +80,10 @@ def test_real_webauthn_registration_then_exact_action_claim() -> None:
         )
         assert result.credential.role is CredentialRole.APPROVAL
         assert result.remaining_registrations == 2
-        assert store.read_auth_bootstrap(bootstrap.bootstrap_id).remaining_registrations == 2
+        assert (
+            store.read_auth_bootstrap(bootstrap.bootstrap_id).remaining_registrations
+            == 2
+        )
         assert service.status()["approval_ready"] is True
         assert service.status()["recovery_ready"] is False
 
@@ -110,14 +122,13 @@ def test_bootstrap_endpoint_requires_kernel_root_peer() -> None:
         )
         authorization = RootActionAuthorizationService(
             store,
-            WebAuthnVerifier(
-                WebAuthnPolicy(RP_ID, "Root action", (ORIGIN,), USER_ID)
-            ),
+            WebAuthnVerifier(WebAuthnPolicy(RP_ID, "Root action", (ORIGIN,), USER_ID)),
             dispatch=lambda _job_id, _job_digest: None,
             events=Events([("event-bootstrap", "2026-07-28T01:00:00Z")]),
         )
         broker = TypedRootActionBroker(
             store,
+            policies=TEST_EXECUTION_POLICIES,
             submission_policy=SubmissionPolicy(
                 allowed_uids=frozenset({1002}),
                 allowed_gids=frozenset({1002}),

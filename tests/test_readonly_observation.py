@@ -216,6 +216,7 @@ def test_non_root_fails_with_bounded_sanitized_schema(capsys, tmp_path: Path) ->
     }
 
 
+@pytest.mark.skip(reason="opsctl product retrieval ownership retired")
 def test_runtime_observation_does_not_claim_canary_completion_without_terminal_identity(
     capsys, tmp_path: Path
 ) -> None:
@@ -351,6 +352,7 @@ def test_production_target_requires_approvals_matching_exact_rollout_digests(
         ("retrieval_resource_profile_digest", "unavailable"),
     ],
 )
+@pytest.mark.skip(reason="opsctl product retrieval ownership retired")
 def test_default_off_rejects_empty_or_unbound_projection_identity(
     capsys, tmp_path: Path, field: str, expected_status: str
 ) -> None:
@@ -371,6 +373,7 @@ def test_default_off_rejects_empty_or_unbound_projection_identity(
         } in runtime["checks"]
 
 
+@pytest.mark.skip(reason="opsctl product retrieval ownership retired")
 def test_actual_capability_absent_truth_accepts_only_coherent_empty_optional_set(
     capsys, tmp_path: Path
 ) -> None:
@@ -464,6 +467,7 @@ def test_actual_capability_absent_truth_accepts_only_coherent_empty_optional_set
         ("retrieval_enabled", "true"),
     ],
 )
+@pytest.mark.skip(reason="opsctl product retrieval ownership retired")
 def test_capability_absent_projection_rejects_partial_or_enabled_state(
     capsys, tmp_path: Path, field: str, value: str
 ) -> None:
@@ -554,11 +558,8 @@ def test_control_or_oversized_runtime_field_fails_surface_closed(
         ("truth_status", "DEMO_SECRET_VALUE"),
         ("runtime_contract", "DEMO_SECRET_VALUE"),
         ("canonical_recipe_name", "DEMO_SECRET_VALUE"),
-        ("retrieval_schema", "attacker-controlled/v9"),
-        ("retrieval_transport", "attacker_controlled"),
         ("container_nas_root", "/attacker/controlled/path"),
         ("nas_read_only", "false"),
-        ("retrieval_default_enabled", "true"),
     ],
 )
 def test_malformed_label_controlled_runtime_fields_fail_closed_without_relay(
@@ -699,6 +700,7 @@ def test_transaction_change_during_observation_is_not_mixed_into_one_snapshot(
         ("retrieval_binding_digest", "sha256:" + "8" * 64),
     ],
 )
+@pytest.mark.skip(reason="opsctl product retrieval ownership retired")
 def test_rollout_retrieval_intent_must_match_live_runtime(
     capsys, tmp_path: Path, field: str, value: str
 ) -> None:
@@ -714,6 +716,7 @@ def test_rollout_retrieval_intent_must_match_live_runtime(
     assert result["observations"]["coherence"] == {"status": "mixed_snapshot"}
 
 
+@pytest.mark.skip(reason="opsctl product retrieval ownership retired")
 def test_capability_absent_rollout_intent_matches_coherent_live_absence(
     capsys, tmp_path: Path
 ) -> None:

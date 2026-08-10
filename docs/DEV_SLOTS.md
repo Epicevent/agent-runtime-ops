@@ -49,28 +49,10 @@ built image (`@sha256:...`). Because `image-canary` requires `runtime_class=cust
 sudo /usr/local/bin/opsctl rollout image-canary --target dev-oc-img --wrapper-image WRAP@sha256:... --product-image PROD@sha256:...
 ```
 
-An attachment-capable image also needs its exact content-addressed runtime capsule. Keep the
-private archive owned and readable only by the invoking developer, at the fixed digest-derived
-path, then let the typed canary command validate and publish it:
-
-```bash
-chmod 600 /tmp/kwrag-runtime-capsule-sha256-CAPSULE_HEX.tar
-sudo /usr/local/bin/opsctl rollout image-canary \
-  --target dev-oc-img \
-  --wrapper-image WRAP@sha256:... \
-  --product-image PROD@sha256:... \
-  --retrieval-runtime-capsule-sha256 sha256:CAPSULE_HEX \
-  --stage-retrieval-runtime-capsule \
-  --retrieval-enabled
-```
-
-The same capsule staging contract applies to `dev-hermes-img`; its capsule must declare
-`family=hermes`, bind the Hermes product runtime projection, and use the Hermes NAS root.
-
-Staging is accepted only for a `dev-*` target. The command rejects links, non-private archives,
-unexpected members, digest drift, and existing content-addressed collisions before applying the
-image. It publishes the verified release first and the capsule commit marker last; customer
-targets still consume an already-published capsule and cannot use this developer staging flag.
+Product capabilities, including KWRAG, travel inside the exact product image and are interpreted
+by the product caller. Image rollout does not stage a KWRAG capsule or accept a retrieval enablement
+flag. The runtime profile only preserves the generic read-only NAS corpus bind; product code owns
+the physical source observation, retrieval execution, and receipts.
 
 They exist to separate source-mode failures from image-boot failures — artifact validation only, not
 a quick-preview surface. They must not be used as an `image-promote` source or target.

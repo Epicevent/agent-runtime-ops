@@ -52,7 +52,7 @@ def projection(*, terminal: bool) -> dict:
                 "kind": "terminal_notice",
                 "job_id": "job-cli",
                 "job_digest": DIGEST,
-                "operation_id": "artifact.probe_kwrag_product",
+                "operation_id": "audit.verify",
                 "request_id": "request-job-cli",
                 "reply_target": "reply-job-cli",
                 "terminal_outcome": "succeeded",
@@ -367,7 +367,7 @@ def test_cli_source_has_no_shell_payload_or_configurable_socket_surface() -> Non
     assert "subprocess" not in source
     assert "shell" not in source
     root_section = parser_source[
-        parser_source.index('root_action = sub.add_parser(') : parser_source.index(
+        parser_source.index("root_action = sub.add_parser(") : parser_source.index(
             '    config = sub.add_parser("config")'
         )
     ]
@@ -381,8 +381,14 @@ def test_cli_source_has_no_shell_payload_or_configurable_socket_surface() -> Non
     assert '"--projection-digest"' not in root_section
     assert 'root_action_sub.add_parser(\n        "preflight"' in root_section
     assert 'root_action_sub.add_parser(\n        "auth-activate"' in root_section
-    assert 'root_action_auth_activate.add_argument("--rp-id", required=True)' in root_section
-    assert 'root_action_auth_activate.add_argument("--origin", required=True)' in root_section
+    assert (
+        'root_action_auth_activate.add_argument("--rp-id", required=True)'
+        in root_section
+    )
+    assert (
+        'root_action_auth_activate.add_argument("--origin", required=True)'
+        in root_section
+    )
     assert '"--environment-file"' not in root_section
 
 

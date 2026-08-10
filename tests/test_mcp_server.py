@@ -22,15 +22,21 @@ class FakeRunner:
         self.responses = list(responses or [])
         self.calls: list[dict[str, object]] = []
 
-    def run(self, argv: list[str], *, input_text: str | None = None, timeout: int = 60) -> CommandResult:
+    def run(
+        self, argv: list[str], *, input_text: str | None = None, timeout: int = 60
+    ) -> CommandResult:
         self.calls.append({"argv": argv, "input_text": input_text, "timeout": timeout})
         if self.responses:
             returncode, stdout, stderr = self.responses.pop(0)
-            return CommandResult(argv=argv, returncode=returncode, stdout=stdout, stderr=stderr)
+            return CommandResult(
+                argv=argv, returncode=returncode, stdout=stdout, stderr=stderr
+            )
         return CommandResult(argv=argv, returncode=0, stdout="", stderr="")
 
 
-def call_tool_result(server: McpServer, name: str, arguments: dict[str, object] | None = None) -> dict[str, object]:
+def call_tool_result(
+    server: McpServer, name: str, arguments: dict[str, object] | None = None
+) -> dict[str, object]:
     response = server.handle_message(
         {
             "jsonrpc": "2.0",
@@ -43,7 +49,9 @@ def call_tool_result(server: McpServer, name: str, arguments: dict[str, object] 
     return response["result"]
 
 
-def call_tool(server: McpServer, name: str, arguments: dict[str, object] | None = None) -> dict[str, object]:
+def call_tool(
+    server: McpServer, name: str, arguments: dict[str, object] | None = None
+) -> dict[str, object]:
     return call_tool_result(server, name, arguments)["structuredContent"]
 
 
@@ -62,8 +70,9 @@ def root_action_cli_result(
     reason = "completed" if terminal else None
     receipt = None
     fixture = json.loads(
-        (Path(__file__).parent / "fixtures" / "root_action_public_projection_v1.json")
-        .read_text(encoding="utf-8")
+        (
+            Path(__file__).parent / "fixtures" / "root_action_public_projection_v1.json"
+        ).read_text(encoding="utf-8")
     )
     status = fixture["status"]
     history = fixture["history"]
@@ -140,7 +149,9 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("root_action_wait", response["result"]["instructions"])
         self.assertIn("Never ask the user to poll", response["result"]["instructions"])
 
-        tools = server.handle_message({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+        tools = server.handle_message(
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
+        )
         names = {item["name"] for item in tools["result"]["tools"]}
         self.assertIn("ops_orientation", names)
         self.assertNotIn("slot_list", names)
@@ -186,29 +197,53 @@ class McpServerTests(unittest.TestCase):
         self.assertNotIn("root_action_auth_bootstrap", names)
         self.assertIn("nas_remove", names)
         self.assertIn("nas_credential_status", names)
-        target_check_tool = next(item for item in tools["result"]["tools"] if item["name"] == "target_check")
+        target_check_tool = next(
+            item for item in tools["result"]["tools"] if item["name"] == "target_check"
+        )
         self.assertIn("runtime_class", target_check_tool["description"])
         target_check_schema = target_check_tool["inputSchema"]["properties"]
-        self.assertEqual(target_check_schema["runtime_class"]["enum"], ["customer", "dev"])
+        self.assertEqual(
+            target_check_schema["runtime_class"]["enum"], ["customer", "dev"]
+        )
         self.assertNotIn("live", target_check_schema)
-        status_tool = next(item for item in tools["result"]["tools"] if item["name"] == "runtime_secret_status")
+        status_tool = next(
+            item
+            for item in tools["result"]["tools"]
+            if item["name"] == "runtime_secret_status"
+        )
         self.assertIn("runtime_class", status_tool["description"])
         status_schema = status_tool["inputSchema"]["properties"]
         self.assertEqual(status_schema["runtime_class"]["enum"], ["customer", "dev"])
         self.assertEqual(status_schema["family"]["enum"], ["hermes", "openclaw"])
-        handoff_tool = next(item for item in tools["result"]["tools"] if item["name"] == "handoff_status")
+        handoff_tool = next(
+            item
+            for item in tools["result"]["tools"]
+            if item["name"] == "handoff_status"
+        )
         self.assertIn("gateway tokens", handoff_tool["description"])
         handoff_schema = handoff_tool["inputSchema"]["properties"]
         self.assertEqual(handoff_schema["runtime_class"]["enum"], ["customer", "dev"])
-        heartbeat_tool = next(item for item in tools["result"]["tools"] if item["name"] == "heartbeat_status")
+        heartbeat_tool = next(
+            item
+            for item in tools["result"]["tools"]
+            if item["name"] == "heartbeat_status"
+        )
         heartbeat_schema = heartbeat_tool["inputSchema"]["properties"]
         self.assertEqual(heartbeat_schema["family"]["enum"], ["openclaw"])
-        secret_tool = next(item for item in tools["result"]["tools"] if item["name"] == "runtime_secret_set_from_file")
+        secret_tool = next(
+            item
+            for item in tools["result"]["tools"]
+            if item["name"] == "runtime_secret_set_from_file"
+        )
         key_schema = secret_tool["inputSchema"]["properties"]["key"]
         self.assertIn("API_SERVER_KEY", key_schema["enum"])
         self.assertIn("GEMINI_API_KEY", key_schema["enum"])
         self.assertNotIn("API_KEY", key_schema["enum"])
-        image_plan_tool = next(item for item in tools["result"]["tools"] if item["name"] == "rollout_image_plan")
+        image_plan_tool = next(
+            item
+            for item in tools["result"]["tools"]
+            if item["name"] == "rollout_image_plan"
+        )
         self.assertIn("wrapper_image", image_plan_tool["inputSchema"]["properties"])
         for tool_name in (
             "rollout_image_plan",
@@ -218,14 +253,20 @@ class McpServerTests(unittest.TestCase):
             rollout_tool = next(
                 item for item in tools["result"]["tools"] if item["name"] == tool_name
             )
-            self.assertFalse(
-                rollout_tool["inputSchema"]["properties"]["retrieval_enabled"][
-                    "default"
-                ]
+            self.assertNotIn(
+                "retrieval_enabled", rollout_tool["inputSchema"]["properties"]
             )
-        document_tools_tool = next(item for item in tools["result"]["tools"] if item["name"] == "document_tools_status")
+        document_tools_tool = next(
+            item
+            for item in tools["result"]["tools"]
+            if item["name"] == "document_tools_status"
+        )
         self.assertIn("HWP/HWPX", document_tools_tool["description"])
-        sanitize_tool = next(item for item in tools["result"]["tools"] if item["name"] == "runtime_config_sanitize")
+        sanitize_tool = next(
+            item
+            for item in tools["result"]["tools"]
+            if item["name"] == "runtime_config_sanitize"
+        )
         self.assertFalse(sanitize_tool["inputSchema"]["properties"]["apply"]["default"])
 
     def test_mcp_specs_and_registry_stay_in_sync(self) -> None:
@@ -253,7 +294,9 @@ class McpServerTests(unittest.TestCase):
     def test_canonical_recipe_validate_uses_opsctl_argv(self) -> None:
         runner = FakeRunner([(0, "canonical_recipe_status=ok\n", "")])
         server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
-        payload = call_tool(server, "canonical_recipe_validate", {"name": "hermes-workspace"})
+        payload = call_tool(
+            server, "canonical_recipe_validate", {"name": "hermes-workspace"}
+        )
         self.assertTrue(payload["ok"])
         self.assertFalse(payload["mutated"])
         self.assertEqual(
@@ -267,22 +310,32 @@ class McpServerTests(unittest.TestCase):
         payload = call_tool(server, "runtime_truth", {"target": "oc3"})
         self.assertTrue(payload["ok"])
         self.assertFalse(payload["mutated"])
-        self.assertEqual(runner.calls[0]["argv"], ["sudo", "opsctl", "runtime", "truth", "oc3"])
+        self.assertEqual(
+            runner.calls[0]["argv"], ["sudo", "opsctl", "runtime", "truth", "oc3"]
+        )
 
     def test_document_tools_status_uses_sudo_opsctl_argv(self) -> None:
         runner = FakeRunner([(0, "document_tools_status=ok count=1 failed=0\n", "")])
         server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
-        payload = call_tool(server, "document_tools_status", {"target": "OC15.JI-TECH.CO.KR."})
+        payload = call_tool(
+            server, "document_tools_status", {"target": "OC15.JI-TECH.CO.KR."}
+        )
         self.assertTrue(payload["ok"])
         self.assertFalse(payload["mutated"])
-        self.assertEqual(runner.calls[0]["argv"], ["sudo", "opsctl", "document-tools", "status", "oc15.ji-tech.co.kr"])
+        self.assertEqual(
+            runner.calls[0]["argv"],
+            ["sudo", "opsctl", "document-tools", "status", "oc15.ji-tech.co.kr"],
+        )
 
     def test_document_tools_status_all_uses_sudo_opsctl_argv(self) -> None:
         runner = FakeRunner([(0, "document_tools_status=ok count=22 failed=0\n", "")])
         server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
         payload = call_tool(server, "document_tools_status", {"all": True})
         self.assertTrue(payload["ok"])
-        self.assertEqual(runner.calls[0]["argv"], ["sudo", "opsctl", "document-tools", "status", "--all"])
+        self.assertEqual(
+            runner.calls[0]["argv"],
+            ["sudo", "opsctl", "document-tools", "status", "--all"],
+        )
 
     def test_runtime_config_status_uses_sudo_opsctl_argv(self) -> None:
         runner = FakeRunner([(0, "runtime_config_status=ok\n", "")])
@@ -290,7 +343,10 @@ class McpServerTests(unittest.TestCase):
         payload = call_tool(server, "runtime_config_status", {"target": "oc16"})
         self.assertTrue(payload["ok"])
         self.assertFalse(payload["mutated"])
-        self.assertEqual(runner.calls[0]["argv"], ["sudo", "opsctl", "runtime", "config-status", "oc16"])
+        self.assertEqual(
+            runner.calls[0]["argv"],
+            ["sudo", "opsctl", "runtime", "config-status", "oc16"],
+        )
 
     def test_runtime_config_sanitize_defaults_to_dry_run(self) -> None:
         runner = FakeRunner([(0, "runtime_config_sanitize_status=dry_run\n", "")])
@@ -306,7 +362,9 @@ class McpServerTests(unittest.TestCase):
     def test_runtime_config_sanitize_apply_is_mutating(self) -> None:
         runner = FakeRunner([(0, "runtime_config_sanitize_status=updated\n", "")])
         server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
-        payload = call_tool(server, "runtime_config_sanitize", {"target": "oc16", "apply": True})
+        payload = call_tool(
+            server, "runtime_config_sanitize", {"target": "oc16", "apply": True}
+        )
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["mutated"])
         self.assertEqual(
@@ -316,7 +374,9 @@ class McpServerTests(unittest.TestCase):
 
     def test_runtime_config_sanitize_rejects_string_apply_flag(self) -> None:
         server = McpServer(runner=FakeRunner(), opsctl="opsctl", sudo="sudo")
-        result = call_tool_result(server, "runtime_config_sanitize", {"target": "oc16", "apply": "false"})
+        result = call_tool_result(
+            server, "runtime_config_sanitize", {"target": "oc16", "apply": "false"}
+        )
         payload = result["structuredContent"]
         self.assertFalse(payload["ok"])
         self.assertTrue(result["isError"])
@@ -359,7 +419,6 @@ class McpServerTests(unittest.TestCase):
                 "wrapper_image": wrapper,
                 "product_image": product,
                 "target": "oc3",
-                "retrieval_enabled": True,
             },
         )
         self.assertTrue(payload["ok"])
@@ -376,11 +435,10 @@ class McpServerTests(unittest.TestCase):
                 product,
                 "--target",
                 "oc3",
-                "--retrieval-enabled",
             ],
         )
 
-    def test_rollout_image_apply_tools_forward_typed_retrieval_enablement(self) -> None:
+    def test_rollout_image_apply_tools_use_product_agnostic_argv(self) -> None:
         wrapper = "ghcr.io/epicevent/agent-runtime-hermes@sha256:" + "a" * 64
         product = "ghcr.io/epicevent/hermes-runtime@sha256:" + "b" * 64
         for tool_name, command, target in (
@@ -397,7 +455,6 @@ class McpServerTests(unittest.TestCase):
                         "target": target,
                         "wrapper_image": wrapper,
                         "product_image": product,
-                        "retrieval_enabled": True,
                     },
                 )
                 self.assertTrue(payload["ok"])
@@ -414,11 +471,12 @@ class McpServerTests(unittest.TestCase):
                         wrapper,
                         "--product-image",
                         product,
-                        "--retrieval-enabled",
                     ],
                 )
 
-    def test_rollout_image_tools_reject_string_retrieval_enablement(self) -> None:
+    def test_rollout_image_tools_reject_retired_product_retrieval_argument(
+        self,
+    ) -> None:
         wrapper = "ghcr.io/epicevent/agent-runtime-hermes@sha256:" + "a" * 64
         product = "ghcr.io/epicevent/hermes-runtime@sha256:" + "b" * 64
         server = McpServer(runner=FakeRunner(), opsctl="opsctl", sudo="sudo")
@@ -429,13 +487,15 @@ class McpServerTests(unittest.TestCase):
                 "target": "oc20",
                 "wrapper_image": wrapper,
                 "product_image": product,
-                "retrieval_enabled": "false",
+                "retrieval_enabled": False,
             },
         )
         payload = result["structuredContent"]
         self.assertFalse(payload["ok"])
         self.assertTrue(result["isError"])
-        self.assertIn("retrieval_enabled must be a boolean", payload["next_action"])
+        self.assertIn(
+            "unsupported argument(s): retrieval_enabled", payload["next_action"]
+        )
 
     def test_projection_verify_target_uses_existing_opsctl_gate(self) -> None:
         wrapper = "ghcr.io/epicevent/agent-runtime-hermes@sha256:" + "a" * 64
@@ -511,7 +571,9 @@ class McpServerTests(unittest.TestCase):
         self.assertEqual(runner.calls[2]["argv"], ["opsctl", "profile", "list"])
 
     def test_binding_list_uses_argv_list(self) -> None:
-        runner = FakeRunner([(0, "linux_account=dev-oc runtime_class=dev family=openclaw\n", "")])
+        runner = FakeRunner(
+            [(0, "linux_account=dev-oc runtime_class=dev family=openclaw\n", "")]
+        )
         server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
         payload = call_tool(server, "binding_list")
         self.assertTrue(payload["ok"])
@@ -521,21 +583,39 @@ class McpServerTests(unittest.TestCase):
     def test_binding_set_public_host_uses_sudo_opsctl_argv(self) -> None:
         runner = FakeRunner([(0, "binding_set_public_host_status=ok\n", "")])
         server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
-        payload = call_tool(server, "binding_set_public_host", {"target": "oc3", "host": "Demo.JI-TECH.CO.KR."})
+        payload = call_tool(
+            server,
+            "binding_set_public_host",
+            {"target": "oc3", "host": "Demo.JI-TECH.CO.KR."},
+        )
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["mutated"])
         self.assertEqual(
             runner.calls[0]["argv"],
-            ["sudo", "opsctl", "binding", "set-public-host", "oc3", "demo.ji-tech.co.kr"],
+            [
+                "sudo",
+                "opsctl",
+                "binding",
+                "set-public-host",
+                "oc3",
+                "demo.ji-tech.co.kr",
+            ],
         )
 
     def test_apache_set_host_uses_sudo_opsctl_argv(self) -> None:
         runner = FakeRunner([(0, "apache_set_host_status=ok\n", "")])
         server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
-        payload = call_tool(server, "apache_set_host", {"linux_account": "oc3", "host": "Demo.JI-TECH.CO.KR."})
+        payload = call_tool(
+            server,
+            "apache_set_host",
+            {"linux_account": "oc3", "host": "Demo.JI-TECH.CO.KR."},
+        )
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["mutated"])
-        self.assertEqual(runner.calls[0]["argv"], ["sudo", "opsctl", "apache", "set-host", "oc3", "demo.ji-tech.co.kr"])
+        self.assertEqual(
+            runner.calls[0]["argv"],
+            ["sudo", "opsctl", "apache", "set-host", "oc3", "demo.ji-tech.co.kr"],
+        )
 
     def test_target_check_uses_argv_lists(self) -> None:
         runner = FakeRunner(
@@ -550,10 +630,16 @@ class McpServerTests(unittest.TestCase):
         payload = call_tool(server, "target_check", {"target": "oc1"})
         self.assertTrue(payload["ok"])
         self.assertFalse(payload["mutated"])
-        self.assertEqual(runner.calls[0]["argv"], ["opsctl", "binding", "status", "oc1"])
+        self.assertEqual(
+            runner.calls[0]["argv"], ["opsctl", "binding", "status", "oc1"]
+        )
         self.assertEqual(runner.calls[1]["argv"], ["opsctl", "apache", "status", "oc1"])
-        self.assertEqual(runner.calls[2]["argv"], ["sudo", "opsctl", "runtime", "truth", "oc1"])
-        self.assertEqual(runner.calls[3]["argv"], ["sudo", "opsctl", "check", "--live", "oc1"])
+        self.assertEqual(
+            runner.calls[2]["argv"], ["sudo", "opsctl", "runtime", "truth", "oc1"]
+        )
+        self.assertEqual(
+            runner.calls[3]["argv"], ["sudo", "opsctl", "check", "--live", "oc1"]
+        )
         self.assertTrue(all(isinstance(call["argv"], list) for call in runner.calls))
 
     def test_target_check_failure_is_structured_result_not_mcp_error(self) -> None:
@@ -562,7 +648,11 @@ class McpServerTests(unittest.TestCase):
                 (0, "binding_status=ok\n", ""),
                 (0, "apache_status=ok\n", ""),
                 (0, "truth_status=ok\n", ""),
-                (1, "FAIL live_container_nas_root_propagation\ncheck_status=fail failed=1\n", ""),
+                (
+                    1,
+                    "FAIL live_container_nas_root_propagation\ncheck_status=fail failed=1\n",
+                    "",
+                ),
             ]
         )
         server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
@@ -606,8 +696,12 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("PASS dev-hermess", payload["stdout"])
         self.assertIn("check_status=fail", payload["stdout"])
         self.assertEqual(runner.calls[0]["argv"], ["opsctl", "binding", "list"])
-        self.assertEqual(runner.calls[1]["argv"], ["opsctl", "binding", "status", "dev-hermess"])
-        self.assertEqual(runner.calls[5]["argv"], ["opsctl", "binding", "status", "dev-oc"])
+        self.assertEqual(
+            runner.calls[1]["argv"], ["opsctl", "binding", "status", "dev-hermess"]
+        )
+        self.assertEqual(
+            runner.calls[5]["argv"], ["opsctl", "binding", "status", "dev-oc"]
+        )
 
     def test_secret_raw_argument_is_rejected_and_redacted(self) -> None:
         secret = "AIza" + "A" * 32
@@ -623,7 +717,9 @@ class McpServerTests(unittest.TestCase):
         self.assertNotIn(secret, str(payload))
         self.assertIn("raw secret argument rejected", payload["next_action"])
 
-        runner = FakeRunner([(0, f"api_key={secret}\n", ""), (0, "openclaw-dev sha256:abc\n", "")])
+        runner = FakeRunner(
+            [(0, f"api_key={secret}\n", ""), (0, "openclaw-dev sha256:abc\n", "")]
+        )
         server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
         redacted = call_tool(server, "ops_orientation")
         self.assertNotIn(secret, redacted["stdout"])
@@ -634,8 +730,12 @@ class McpServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "gemini.txt"
             path.write_text(secret + "\n", encoding="utf-8")
-            runner = FakeRunner([(0, "secret_value_printed=no\nruntime_secret_status=stored\n", "")])
-            server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo", secret_roots=[Path(tmp)])
+            runner = FakeRunner(
+                [(0, "secret_value_printed=no\nruntime_secret_status=stored\n", "")]
+            )
+            server = McpServer(
+                runner=runner, opsctl="opsctl", sudo="sudo", secret_roots=[Path(tmp)]
+            )
             payload = call_tool(
                 server,
                 "runtime_secret_set_from_file",
@@ -665,7 +765,12 @@ class McpServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "gemini.txt"
             path.write_text("AIza" + "C" * 32 + "\n", encoding="utf-8")
-            server = McpServer(runner=FakeRunner(), opsctl="opsctl", sudo="sudo", secret_roots=[Path(tmp)])
+            server = McpServer(
+                runner=FakeRunner(),
+                opsctl="opsctl",
+                sudo="sudo",
+                secret_roots=[Path(tmp)],
+            )
             result = call_tool_result(
                 server,
                 "runtime_secret_set_from_file",
@@ -684,12 +789,22 @@ class McpServerTests(unittest.TestCase):
     def test_runtime_secret_status_accepts_multiple_targets(self) -> None:
         runner = FakeRunner(
             [
-                (0, "target=dev-oc\ngemini_api_key=present\nruntime_secret_status=ok\n", ""),
-                (0, "target=dev-hermess\ngemini_api_key=present\nruntime_secret_status=ok\n", ""),
+                (
+                    0,
+                    "target=dev-oc\ngemini_api_key=present\nruntime_secret_status=ok\n",
+                    "",
+                ),
+                (
+                    0,
+                    "target=dev-hermess\ngemini_api_key=present\nruntime_secret_status=ok\n",
+                    "",
+                ),
             ]
         )
         server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
-        payload = call_tool(server, "runtime_secret_status", {"targets": ["dev-oc", "dev-hermess"]})
+        payload = call_tool(
+            server, "runtime_secret_status", {"targets": ["dev-oc", "dev-hermess"]}
+        )
         self.assertTrue(payload["ok"])
         self.assertFalse(payload["mutated"])
         self.assertIn("gemini_api_key=present", payload["stdout"])
@@ -717,8 +832,16 @@ class McpServerTests(unittest.TestCase):
                     + "\n",
                     "",
                 ),
-                (0, "target=dev-hermess\ngemini_api_key=present\nruntime_secret_status=ok\n", ""),
-                (0, "target=dev-oc\ngemini_api_key=present\nruntime_secret_status=ok\n", ""),
+                (
+                    0,
+                    "target=dev-hermess\ngemini_api_key=present\nruntime_secret_status=ok\n",
+                    "",
+                ),
+                (
+                    0,
+                    "target=dev-oc\ngemini_api_key=present\nruntime_secret_status=ok\n",
+                    "",
+                ),
             ]
         )
         server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
@@ -751,20 +874,38 @@ class McpServerTests(unittest.TestCase):
                     + "\n",
                     "",
                 ),
-                (0, "target=dev-oc\ngemini_api_key=present\nruntime_secret_status=ok\n", ""),
+                (
+                    0,
+                    "target=dev-oc\ngemini_api_key=present\nruntime_secret_status=ok\n",
+                    "",
+                ),
             ]
         )
         server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
-        payload = call_tool(server, "runtime_secret_status", {"runtime_class": "dev", "family": "openclaw"})
+        payload = call_tool(
+            server,
+            "runtime_secret_status",
+            {"runtime_class": "dev", "family": "openclaw"},
+        )
         self.assertTrue(payload["ok"])
         self.assertIn("target=dev-oc", payload["stdout"])
-        self.assertEqual(runner.calls[-1]["argv"], ["sudo", "opsctl", "runtime-secret", "status", "dev-oc"])
+        self.assertEqual(
+            runner.calls[-1]["argv"],
+            ["sudo", "opsctl", "runtime-secret", "status", "dev-oc"],
+        )
 
     def test_runtime_secret_status_requires_one_target_shape(self) -> None:
         server = McpServer(runner=FakeRunner(), opsctl="opsctl", sudo="sudo")
-        payload = call_tool(server, "runtime_secret_status", {"target": "dev-oc", "targets": ["dev-hermess"]})
+        payload = call_tool(
+            server,
+            "runtime_secret_status",
+            {"target": "dev-oc", "targets": ["dev-hermess"]},
+        )
         self.assertFalse(payload["ok"])
-        self.assertIn("provide exactly one of target, targets, or runtime_class", payload["next_action"])
+        self.assertIn(
+            "provide exactly one of target, targets, or runtime_class",
+            payload["next_action"],
+        )
 
     def test_handoff_status_accepts_runtime_class_selector(self) -> None:
         runner = FakeRunner(
@@ -780,8 +921,16 @@ class McpServerTests(unittest.TestCase):
                     + "\n",
                     "",
                 ),
-                (0, "target=dev-hermess\nhandoff_password=present\nhandoff_value_printed=no\nhandoff_status=ok\n", ""),
-                (0, "target=dev-oc\nhandoff_token=present\nhandoff_value_printed=no\nhandoff_status=ok\n", ""),
+                (
+                    0,
+                    "target=dev-hermess\nhandoff_password=present\nhandoff_value_printed=no\nhandoff_status=ok\n",
+                    "",
+                ),
+                (
+                    0,
+                    "target=dev-oc\nhandoff_token=present\nhandoff_value_printed=no\nhandoff_status=ok\n",
+                    "",
+                ),
             ]
         )
         server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
@@ -791,10 +940,17 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("handoff_token=present", payload["stdout"])
         self.assertIn("handoff_password=present", payload["stdout"])
         self.assertEqual(runner.calls[0]["argv"], ["opsctl", "binding", "list"])
-        self.assertEqual(runner.calls[1]["argv"], ["sudo", "opsctl", "handoff", "status", "dev-hermess"])
-        self.assertEqual(runner.calls[2]["argv"], ["sudo", "opsctl", "handoff", "status", "dev-oc"])
+        self.assertEqual(
+            runner.calls[1]["argv"],
+            ["sudo", "opsctl", "handoff", "status", "dev-hermess"],
+        )
+        self.assertEqual(
+            runner.calls[2]["argv"], ["sudo", "opsctl", "handoff", "status", "dev-oc"]
+        )
 
-    def test_handoff_value_command_returns_repo_native_command_without_secret(self) -> None:
+    def test_handoff_value_command_returns_repo_native_command_without_secret(
+        self,
+    ) -> None:
         runner = FakeRunner(
             [
                 (
@@ -811,9 +967,15 @@ class McpServerTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertFalse(payload["mutated"])
         self.assertIn("handoff_value_printed=no", payload["stdout"])
-        self.assertIn("handoff_value_command=sudo /usr/local/bin/opsctl handoff print dev-oc", payload["stdout"])
+        self.assertIn(
+            "handoff_value_command=sudo /usr/local/bin/opsctl handoff print dev-oc",
+            payload["stdout"],
+        )
         self.assertNotIn("svcops-control.sh", payload["stdout"])
-        self.assertEqual(runner.calls[0]["argv"], ["sudo", "opsctl", "handoff", "value-command", "dev-oc"])
+        self.assertEqual(
+            runner.calls[0]["argv"],
+            ["sudo", "opsctl", "handoff", "value-command", "dev-oc"],
+        )
 
     def test_heartbeat_status_accepts_runtime_class_selector(self) -> None:
         runner = FakeRunner(
@@ -829,21 +991,33 @@ class McpServerTests(unittest.TestCase):
                     + "\n",
                     "",
                 ),
-                (0, "target=dev-oc\nheartbeat_config_enabled=no\nheartbeat_status=ok\n", ""),
+                (
+                    0,
+                    "target=dev-oc\nheartbeat_config_enabled=no\nheartbeat_status=ok\n",
+                    "",
+                ),
             ]
         )
         server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
-        payload = call_tool(server, "heartbeat_status", {"runtime_class": "dev", "family": "openclaw"})
+        payload = call_tool(
+            server, "heartbeat_status", {"runtime_class": "dev", "family": "openclaw"}
+        )
         self.assertTrue(payload["ok"])
         self.assertFalse(payload["mutated"])
         self.assertIn("heartbeat_status=ok", payload["stdout"])
         self.assertEqual(runner.calls[0]["argv"], ["opsctl", "binding", "list"])
-        self.assertEqual(runner.calls[1]["argv"], ["sudo", "opsctl", "heartbeat", "status", "dev-oc"])
+        self.assertEqual(
+            runner.calls[1]["argv"], ["sudo", "opsctl", "heartbeat", "status", "dev-oc"]
+        )
 
     def test_heartbeat_disable_runs_status_then_disable(self) -> None:
         runner = FakeRunner(
             [
-                (0, "target=dev-oc\nheartbeat_config_enabled=yes\nheartbeat_status=ok\n", ""),
+                (
+                    0,
+                    "target=dev-oc\nheartbeat_config_enabled=yes\nheartbeat_status=ok\n",
+                    "",
+                ),
                 (
                     0,
                     "target=dev-oc\nheartbeat_config_disabled=yes\nheartbeat_config_enabled=no\n"
@@ -857,19 +1031,28 @@ class McpServerTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["mutated"])
         self.assertIn("heartbeat_disable_status=ok", payload["stdout"])
-        self.assertEqual(runner.calls[0]["argv"], ["sudo", "opsctl", "heartbeat", "status", "dev-oc"])
-        self.assertEqual(runner.calls[1]["argv"], ["sudo", "opsctl", "heartbeat", "disable", "dev-oc"])
+        self.assertEqual(
+            runner.calls[0]["argv"], ["sudo", "opsctl", "heartbeat", "status", "dev-oc"]
+        )
+        self.assertEqual(
+            runner.calls[1]["argv"],
+            ["sudo", "opsctl", "heartbeat", "disable", "dev-oc"],
+        )
 
     def test_deploy_update_without_approval_returns_exact_root_command(self) -> None:
         target = "a" * 40
-        runner = FakeRunner([(1, "update_status=not_ready\ninstalled_ref=" + "b" * 40 + "\n", "")])
+        runner = FakeRunner(
+            [(1, "update_status=not_ready\ninstalled_ref=" + "b" * 40 + "\n", "")]
+        )
         server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
         payload = call_tool(server, "deploy_update", {"target_ref": target})
         self.assertFalse(payload["ok"])
         self.assertFalse(payload["mutated"])
         self.assertEqual(payload["next_action"], f"sudo opsctl update approve {target}")
 
-    def test_root_action_submit_passes_only_canonical_typed_manifest_on_stdin(self) -> None:
+    def test_root_action_submit_passes_only_canonical_typed_manifest_on_stdin(
+        self,
+    ) -> None:
         result, handle = root_action_cli_result()
         runner = FakeRunner([(0, json.dumps(result), "")])
         server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
@@ -949,7 +1132,9 @@ class McpServerTests(unittest.TestCase):
             ],
         )
 
-    def test_root_action_failed_retrieve_does_not_claim_submission_was_accepted(self) -> None:
+    def test_root_action_failed_retrieve_does_not_claim_submission_was_accepted(
+        self,
+    ) -> None:
         _result, handle = root_action_cli_result()
         error_result = {
             "schema": "agent-runtime-root-action-cli-result/v1",
@@ -1025,7 +1210,9 @@ class McpServerTests(unittest.TestCase):
             json.dumps(response, ensure_ascii=False),
         )
 
-    def test_root_action_retrieve_transport_failure_preserves_recovery_handle(self) -> None:
+    def test_root_action_retrieve_transport_failure_preserves_recovery_handle(
+        self,
+    ) -> None:
         class TimeoutRunner(FakeRunner):
             def run(
                 self,
@@ -1111,7 +1298,9 @@ class McpServerTests(unittest.TestCase):
             "root_action_retrieval_result_unavailable",
         )
 
-    def test_root_action_wait_non_timeout_failure_requires_retrieval_recovery(self) -> None:
+    def test_root_action_wait_non_timeout_failure_requires_retrieval_recovery(
+        self,
+    ) -> None:
         _result, handle = root_action_cli_result()
         error_result = {
             "schema": "agent-runtime-root-action-cli-result/v1",
@@ -1172,7 +1361,9 @@ class McpServerTests(unittest.TestCase):
                     "root_action_retrieval_result_unavailable",
                 )
 
-    def test_root_action_wait_unknown_outcome_stops_polling_and_requires_recovery(self) -> None:
+    def test_root_action_wait_unknown_outcome_stops_polling_and_requires_recovery(
+        self,
+    ) -> None:
         _result, handle = root_action_cli_result()
         unknown_result = {
             "schema": "agent-runtime-root-action-cli-result/v1",
@@ -1200,7 +1391,9 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("Stop polling", payload["next_action"])
         self.assertNotIn("Call root_action_wait again", payload["next_action"])
 
-    def test_observed_unknown_projection_is_not_reported_as_success_or_retryable(self) -> None:
+    def test_observed_unknown_projection_is_not_reported_as_success_or_retryable(
+        self,
+    ) -> None:
         _result, handle = root_action_cli_result()
         unknown_result = {
             "schema": "agent-runtime-root-action-cli-result/v1",
@@ -1230,7 +1423,9 @@ class McpServerTests(unittest.TestCase):
         self.assertEqual(payload["handle"], handle)
         self.assertIn("Stop polling", payload["next_action"])
 
-    def test_root_action_submit_transport_failure_exposes_derived_recovery_handle(self) -> None:
+    def test_root_action_submit_transport_failure_exposes_derived_recovery_handle(
+        self,
+    ) -> None:
         error_result = {
             "schema": "agent-runtime-root-action-cli-result/v1",
             "result": "error",
@@ -1260,7 +1455,9 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("root_action_retrieve", payload["next_action"])
         self.assertIn("Never change the digest", payload["next_action"])
 
-    def test_root_action_submit_malformed_output_preserves_derived_recovery_handle(self) -> None:
+    def test_root_action_submit_malformed_output_preserves_derived_recovery_handle(
+        self,
+    ) -> None:
         runner = FakeRunner([(0, '{"truncated":', "")])
         server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
         manifest_value = json.loads(root_action_manifest("job-mcp"))
@@ -1306,14 +1503,16 @@ class McpServerTests(unittest.TestCase):
         self.assertIsNone(payload["returncode"])
         self.assertIn("root_action_retrieve", payload["next_action"])
 
-    def test_root_action_tools_reject_untyped_or_incomplete_inputs_before_opsctl(self) -> None:
+    def test_root_action_tools_reject_untyped_or_incomplete_inputs_before_opsctl(
+        self,
+    ) -> None:
         runner = FakeRunner()
         server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
 
         malformed_submit = call_tool_result(
             server,
             "root_action_submit",
-            {"manifest": {"operation_id": "kwrag.network_ensure"}},
+            {"manifest": {"operation_id": "unregistered.operation"}},
         )
         malformed_wait = call_tool_result(
             server,
@@ -1378,7 +1577,9 @@ class McpServerTests(unittest.TestCase):
         )
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["mutated"])
-        self.assertEqual(runner.calls[0]["argv"], ["opsctl", "recipe", "status", "dev-oc"])
+        self.assertEqual(
+            runner.calls[0]["argv"], ["opsctl", "recipe", "status", "dev-oc"]
+        )
         self.assertEqual(
             runner.calls[1]["argv"],
             [
@@ -1398,7 +1599,9 @@ class McpServerTests(unittest.TestCase):
         )
 
     def test_nas_credential_status_uses_sudo_and_is_non_mutating(self) -> None:
-        runner = FakeRunner([(0, "official_credential_present=yes\nsecret_value_printed=no\n", "")])
+        runner = FakeRunner(
+            [(0, "official_credential_present=yes\nsecret_value_printed=no\n", "")]
+        )
         server = McpServer(runner=runner, opsctl="opsctl", sudo="sudo")
         payload = call_tool(
             server,
@@ -1409,7 +1612,15 @@ class McpServerTests(unittest.TestCase):
         self.assertFalse(payload["mutated"])
         self.assertEqual(
             runner.calls[0]["argv"],
-            ["sudo", "opsctl", "nas", "credential", "status", "oc3", "//192.168.0.222/hanpass"],
+            [
+                "sudo",
+                "opsctl",
+                "nas",
+                "credential",
+                "status",
+                "oc3",
+                "//192.168.0.222/hanpass",
+            ],
         )
 
     def test_nas_mount_accepts_public_host_target(self) -> None:
@@ -1430,11 +1641,24 @@ class McpServerTests(unittest.TestCase):
         self.assertTrue(payload["mutated"])
         self.assertEqual(
             runner.calls[0]["argv"],
-            ["opsctl", "nas", "policy-check", "oc3.ji-tech.co.kr", "//192.168.0.222/hanpass"],
+            [
+                "opsctl",
+                "nas",
+                "policy-check",
+                "oc3.ji-tech.co.kr",
+                "//192.168.0.222/hanpass",
+            ],
         )
         self.assertEqual(
             runner.calls[1]["argv"],
-            ["sudo", "opsctl", "nas", "mount", "oc3.ji-tech.co.kr", "//192.168.0.222/hanpass"],
+            [
+                "sudo",
+                "opsctl",
+                "nas",
+                "mount",
+                "oc3.ji-tech.co.kr",
+                "//192.168.0.222/hanpass",
+            ],
         )
 
     def test_nas_remove_uses_argv_lists_and_reports_mutation(self) -> None:
@@ -1450,13 +1674,25 @@ class McpServerTests(unittest.TestCase):
         payload = call_tool(
             server,
             "nas_remove",
-            {"target": "oc3", "share": "//192.168.0.222/hanpass", "delete_empty_dir": True},
+            {
+                "target": "oc3",
+                "share": "//192.168.0.222/hanpass",
+                "delete_empty_dir": True,
+            },
         )
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["mutated"])
         self.assertEqual(
             runner.calls[1]["argv"],
-            ["sudo", "opsctl", "nas", "remove", "oc3", "//192.168.0.222/hanpass", "--delete-empty-dir"],
+            [
+                "sudo",
+                "opsctl",
+                "nas",
+                "remove",
+                "oc3",
+                "//192.168.0.222/hanpass",
+                "--delete-empty-dir",
+            ],
         )
         self.assertTrue(all(isinstance(call["argv"], list) for call in runner.calls))
 

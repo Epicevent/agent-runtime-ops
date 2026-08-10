@@ -10,7 +10,6 @@ import pytest
 from agent_runtime_ops.root_actions.contracts import seal_typed_manifest
 from agent_runtime_ops.root_actions.execution import (
     HandlerResult,
-    OperationHandlerRegistry,
 )
 from agent_runtime_ops.root_actions.posix_store import PosixRootActionStore
 from agent_runtime_ops.root_actions.receipts import (
@@ -31,17 +30,15 @@ from agent_runtime_ops.root_actions.worker import (
 from agent_runtime_ops.root_actions.storage import StorageNotFound
 from tests.test_root_action_admission import Events
 from tests.test_root_action_contracts import encoded, valid_manifest
+from tests.root_action_support import make_test_handler_registry
 
 
-def artifact_job():
-    value = valid_manifest()
-    value["operation_id"] = "artifact.probe_kwrag_product"
-    value["parameters"] = {"revision": "1" * 40}
-    return seal_typed_manifest(encoded(value))
+def audit_job():
+    return seal_typed_manifest(encoded(valid_manifest()))
 
 
 def claimed(store: PosixRootActionStore):
-    job = artifact_job()
+    job = audit_job()
     store.seal_pending(
         job,
         event_id="event-worker-pending",
@@ -61,7 +58,7 @@ def claimed(store: PosixRootActionStore):
 
 
 class SuccessfulHandler:
-    operation_id = "artifact.probe_kwrag_product"
+    operation_id = "audit.verify"
     operation_version = 1
 
     def run(self, _job):
@@ -73,7 +70,7 @@ class SuccessfulHandler:
 
 
 class SecretFailureHandler:
-    operation_id = "artifact.probe_kwrag_product"
+    operation_id = "audit.verify"
     operation_version = 1
 
     def run(self, _job):
@@ -97,7 +94,7 @@ def test_worker_persists_terminal_raw_public_and_history_before_projection() -> 
         repaired = threading.Event()
         worker = RootActionExecutionWorker(
             store,
-            handlers=OperationHandlerRegistry((SuccessfulHandler(),)),
+            handlers=make_test_handler_registry(SuccessfulHandler()),
             events=Events([("event-worker-complete", "2026-07-28T02:00:02Z")]),
             repair_public=lambda _job_id: repaired.set(),
         )
@@ -130,7 +127,7 @@ def test_handler_exception_becomes_unknown_without_exception_message_leak() -> N
         repaired = threading.Event()
         worker = RootActionExecutionWorker(
             store,
-            handlers=OperationHandlerRegistry((SecretFailureHandler(),)),
+            handlers=make_test_handler_registry(SecretFailureHandler()),
             events=Events([("event-worker-unknown", "2026-07-28T02:00:02Z")]),
             repair_public=lambda _job_id: repaired.set(),
         )
@@ -155,14 +152,15 @@ def test_startup_recovery_marks_running_claim_unknown_and_never_reruns() -> None
         job = claimed(store)
         worker = RootActionExecutionWorker(
             store,
-            handlers=OperationHandlerRegistry((SuccessfulHandler(),)),
+            handlers=make_test_handler_registry(SuccessfulHandler()),
             events=Events([("event-worker-restart", "2026-07-28T02:00:02Z")]),
         )
         assert worker.recover_orphaned_claims() == (job.job_id,)
         assert store.read_record(job.job_id).state is JobState.UNKNOWN
-        assert store.retrieve(job.job_id, job.job_digest).receipt_copy()[
-            "reason_code"
-        ] == "broker_restarted_with_running_job"
+        assert (
+            store.retrieve(job.job_id, job.job_digest).receipt_copy()["reason_code"]
+            == "broker_restarted_with_running_job"
+        )
 
 
 def test_unstarted_worker_closes_claim_as_unknown_instead_of_stranding_it() -> None:
@@ -171,7 +169,7 @@ def test_unstarted_worker_closes_claim_as_unknown_instead_of_stranding_it() -> N
         job = claimed(store)
         worker = RootActionExecutionWorker(
             store,
-            handlers=OperationHandlerRegistry((SuccessfulHandler(),)),
+            handlers=make_test_handler_registry(SuccessfulHandler()),
             events=Events([("event-worker-unavailable", "2026-07-28T02:00:02Z")]),
         )
         with pytest.raises(RootActionWorkerError, match="unavailable"):
