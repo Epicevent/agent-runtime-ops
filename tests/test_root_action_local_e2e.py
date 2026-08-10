@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import tempfile
 import time
 
 from agent_runtime_ops.root_actions.auth_service import RootActionAuthorizationService
-from agent_runtime_ops.root_actions.authorization import WebAuthnPolicy, WebAuthnVerifier
+from agent_runtime_ops.root_actions.authorization import (
+    WebAuthnPolicy,
+    WebAuthnVerifier,
+)
 from agent_runtime_ops.root_actions.broker import TypedRootActionBroker
 from agent_runtime_ops.root_actions.endpoint import RootActionBrokerEndpoint
-from agent_runtime_ops.root_actions.execution import HandlerResult, OperationHandlerRegistry
+from agent_runtime_ops.root_actions.execution import HandlerResult
 from agent_runtime_ops.root_actions.posix_store import PosixRootActionStore
 from agent_runtime_ops.root_actions.protocol import (
     auth_request,
@@ -17,10 +19,22 @@ from agent_runtime_ops.root_actions.protocol import (
     submit_request,
 )
 from agent_runtime_ops.root_actions.state import JobState
-from agent_runtime_ops.root_actions.submission import BrokerPeerIdentity, SubmissionPolicy
+from agent_runtime_ops.root_actions.submission import (
+    BrokerPeerIdentity,
+    SubmissionPolicy,
+)
 from agent_runtime_ops.root_actions.worker import RootActionExecutionWorker
 from tests.test_root_action_admission import Events, MemoryPublicSink, manifest
-from tests.test_root_action_authorization import ORIGIN, RP_ID, USER_ID, VirtualAuthenticator
+from tests.test_root_action_authorization import (
+    ORIGIN,
+    RP_ID,
+    USER_ID,
+    VirtualAuthenticator,
+)
+from tests.root_action_support import (
+    TEST_EXECUTION_POLICIES,
+    make_test_handler_registry,
+)
 
 
 ROOT = BrokerPeerIdentity(uid=0, gid=0, pid=1)
@@ -28,7 +42,7 @@ SVCOPS = BrokerPeerIdentity(uid=1002, gid=1002, pid=500)
 
 
 class E2EHandler:
-    operation_id = "artifact.probe_kwrag_product"
+    operation_id = "audit.verify"
     operation_version = 1
 
     def run(self, _job):
@@ -58,6 +72,7 @@ def test_local_browser_message_to_root_worker_terminal_receipt_e2e() -> None:
                 ]
             ),
             public_sink=sink,
+            policies=TEST_EXECUTION_POLICIES,
             submission_policy=SubmissionPolicy(
                 allowed_uids=frozenset({SVCOPS.uid}),
                 allowed_gids=frozenset({SVCOPS.gid}),
@@ -66,16 +81,14 @@ def test_local_browser_message_to_root_worker_terminal_receipt_e2e() -> None:
         )
         worker = RootActionExecutionWorker(
             store,
-            handlers=OperationHandlerRegistry((E2EHandler(),)),
+            handlers=make_test_handler_registry(E2EHandler()),
             events=Events([("event-e2e-complete", "2026-07-28T01:00:07Z")]),
             repair_public=broker.repair_public_best_effort,
         )
         worker.start()
         authorization = RootActionAuthorizationService(
             store,
-            WebAuthnVerifier(
-                WebAuthnPolicy(RP_ID, "Root action", (ORIGIN,), USER_ID)
-            ),
+            WebAuthnVerifier(WebAuthnPolicy(RP_ID, "Root action", (ORIGIN,), USER_ID)),
             dispatch=worker.enqueue,
             events=Events(
                 [
@@ -153,14 +166,15 @@ def test_local_browser_message_to_root_worker_terminal_receipt_e2e() -> None:
                 submitted["job_id"], submitted["job_digest"]
             ).receipt_copy()
             assert receipt["terminal_outcome"] == "succeeded"
-            assert receipt["result"]["facts"] == [
-                {"name": "writes", "value": "0"}
-            ]
-            assert b"root-only e2e output" in store.read_raw_root_only(
-                submitted["job_id"]
-            ).raw_bytes
+            assert receipt["result"]["facts"] == [{"name": "writes", "value": "0"}]
+            assert (
+                b"root-only e2e output"
+                in store.read_raw_root_only(submitted["job_id"]).raw_bytes
+            )
             assert submitted["job_id"] in sink.bundles
-            assert [entry.action for entry in store.read_ledger(submitted["job_id"])] == [
+            assert [
+                entry.action for entry in store.read_ledger(submitted["job_id"])
+            ] == [
                 "sealed_pending",
                 "claim_execution",
                 "complete_execution",

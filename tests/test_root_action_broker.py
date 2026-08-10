@@ -19,6 +19,7 @@ from agent_runtime_ops.root_actions.state import (
     TransitionKind,
 )
 from agent_runtime_ops.root_actions.storage import StorageNotFound
+from tests.root_action_support import TEST_EXECUTION_POLICIES
 
 
 def manifest(*, job_id: str = "job-broker-1") -> bytes:
@@ -27,7 +28,7 @@ def manifest(*, job_id: str = "job-broker-1") -> bytes:
             "schema": "agent-runtime-root-action-manifest/v1",
             "registry_version": REGISTRY_VERSION,
             "job_id": job_id,
-            "operation_id": "artifact.probe_kwrag_product",
+            "operation_id": "audit.verify",
             "operation_version": 1,
             "request": {
                 "request_id": "request-broker-1",
@@ -36,27 +37,30 @@ def manifest(*, job_id: str = "job-broker-1") -> bytes:
                 "submitted_at": "2026-07-27T08:00:00Z",
             },
             "parameters": {
-                "revision": "1" * 40,
+                "target_identity": "runtime-evidence",
+                "expected_schema": "runtime-evidence-v1",
+                "freshness_seconds": 300,
+                "allowlisted_fields": ["image_id", "source_revision"],
             },
             "expected_pre_state": {"kind": "none", "digest": None},
             "review": {
-                "purpose": "Read one bounded candidate proof.",
+                "purpose": "Read one bounded runtime proof.",
                 "premises": [
                     {
-                        "claim": "The probe reads only the named proof fields.",
+                        "claim": "The audit reads only the named proof fields.",
                         "basis": "direct_observation",
                         "anchor": {
-                            "source": "opsctl artifact probe source",
+                            "source": "opsctl audit source",
                             "quote": "writes=0",
                         },
                         "falsifier": "Any host write or unbounded output invalidates the premise.",
                     }
                 ],
-                "targets": ["kwrag candidate proof"],
+                "targets": ["runtime evidence proof"],
                 "changes": ["No persistent change"],
                 "recovery": ["No rollback is required for a read-only operation"],
                 "risk_delta": {
-                    "baseline": "The artifact is not observed by this job.",
+                    "baseline": "The runtime evidence is not observed by this job.",
                     "added": [],
                     "removed": [],
                     "maximum_consequence": "The bounded observation may fail closed.",
@@ -157,6 +161,7 @@ class TypedRootActionBrokerTests(unittest.TestCase):
             self.store,
             events=self.events,
             public_sink=self.sink,
+            policies=TEST_EXECUTION_POLICIES,
             submission_policy=TEST_SUBMISSION_POLICY,
         )
 
@@ -213,6 +218,7 @@ class TypedRootActionBrokerTests(unittest.TestCase):
             store,
             events=FixedEvents(),
             public_sink=sink,
+            policies=TEST_EXECUTION_POLICIES,
             submission_policy=TEST_SUBMISSION_POLICY,
         )
         broker.submit(manifest(), peer=TEST_PEER)
@@ -237,13 +243,12 @@ class TypedRootActionBrokerTests(unittest.TestCase):
                 occurred_at="2026-07-27T00:00:00Z",
             )
 
-    def test_disabled_historical_family_is_rejected_without_execution(self) -> None:
-        value = json.loads(manifest(job_id="job-disabled-network"))
-        value["operation_id"] = "kwrag.network_ensure"
+    def test_registered_disabled_operation_is_rejected_without_execution(self) -> None:
+        value = json.loads(manifest(job_id="job-disabled-projection"))
+        value["operation_id"] = "projection.staging_selftest"
         value["parameters"] = {
-            "network_plan_digest": "sha256:" + "a" * 64,
-            "expected_state": "absent",
-            "expected_identity_digest": None,
+            "fixture_id": "projection-posix-v1",
+            "expected_contract_digest": "sha256:" + "a" * 64,
         }
         submitted = self.broker.submit(
             json.dumps(value).encode("utf-8"), peer=TEST_PEER
@@ -252,7 +257,7 @@ class TypedRootActionBrokerTests(unittest.TestCase):
         self.assertEqual(submitted.status["state"]["execution_count"], 0)
         self.assertEqual(
             submitted.status["state"]["reason_code"],
-            "disabled_by_product_boundary",
+            "disabled_unverified_authority",
         )
         self.assertEqual(submitted.status["receipt"]["kind"], "terminal_notice")
         self.assertEqual(
@@ -267,6 +272,7 @@ class TypedRootActionBrokerTests(unittest.TestCase):
             self.store,
             events=self.events,
             public_sink=FailingSink(),
+            policies=TEST_EXECUTION_POLICIES,
             submission_policy=TEST_SUBMISSION_POLICY,
         )
         submitted = failing.submit(
@@ -280,6 +286,7 @@ class TypedRootActionBrokerTests(unittest.TestCase):
             self.store,
             events=self.events,
             public_sink=recovered_sink,
+            policies=TEST_EXECUTION_POLICIES,
             submission_policy=TEST_SUBMISSION_POLICY,
         ).reconcile_public()
         self.assertEqual(
@@ -337,6 +344,7 @@ class TypedRootActionBrokerTests(unittest.TestCase):
             self.store,
             events=self.events,
             public_sink=sink,
+            policies=TEST_EXECUTION_POLICIES,
             submission_policy=TEST_SUBMISSION_POLICY,
         )
         broker.submit(manifest(job_id="job-serialized-one"), peer=TEST_PEER)

@@ -20,6 +20,7 @@ from tests.test_root_action_broker import (
     TEST_SUBMISSION_POLICY,
     manifest,
 )
+from tests.root_action_support import TEST_EXECUTION_POLICIES
 
 
 class RootActionPublicProjectionTests(unittest.TestCase):
@@ -38,6 +39,7 @@ class RootActionPublicProjectionTests(unittest.TestCase):
             self.store,
             events=FixedEvents(),
             public_sink=self.publisher,
+            policies=TEST_EXECUTION_POLICIES,
             submission_policy=TEST_SUBMISSION_POLICY,
         )
 
@@ -104,9 +106,7 @@ class RootActionPublicProjectionTests(unittest.TestCase):
         # publisher boundary directly so a symlink failure cannot be hidden by
         # the requester's recovery contract.
         with self.assertRaises(PublicProjectionError):
-            self.publisher.publish(
-                self.broker.public_projection(submitted.job_id)
-            )
+            self.publisher.publish(self.broker.public_projection(submitted.job_id))
         self.assertFalse((other / "projection.json").exists())
 
     @unittest.skipUnless(os.name == "posix", "POSIX owner/mode policy requires POSIX")

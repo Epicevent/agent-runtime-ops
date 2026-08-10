@@ -57,10 +57,12 @@ recovery procedure. There is no password or TOTP downgrade path.
 ## Dispatch and evidence
 
 Only an enabled operation in the executable registry may have a handler.
-`kwrag.network_ensure` remains `disabled_by_product_boundary`, has no handler,
-and can never consume an approval or claim execution. The worker receives the
-already sealed manifest bytes and the claimed digest; it never receives an
-authenticator private key, browser session secret, or approval credential.
+The current registry contains no KWRAG product operation or handler. The frozen
+59-action inventory remains historical evidence only and does not seed the
+active registry. KWRAG source, build, verification, and product caller work are
+owned by the KWRAG and product repositories. The worker receives the already
+sealed manifest bytes and the claimed digest; it never receives an authenticator
+private key, browser session secret, or approval credential.
 
 Raw output remains root-only. The OPS page and original requester receive only
 the canonical sanitized status, immutable history, and terminal receipt. A

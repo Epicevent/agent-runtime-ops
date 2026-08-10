@@ -84,7 +84,6 @@ from .execution import (
     DEFAULT_OPERATION_HANDLERS,
     ExecutionPolicyRegistry,
     HandlerResult,
-    KwragProductArtifactProbeHandler,
     OperationAvailability,
     OperationHandlerRegistry,
 )
@@ -173,7 +172,6 @@ __all__ = [
     "DEFAULT_OPERATION_HANDLERS",
     "ExecutionPolicyRegistry",
     "HandlerResult",
-    "KwragProductArtifactProbeHandler",
     "OperationAvailability",
     "OperationHandlerRegistry",
     "RootActionExecutionWorker",

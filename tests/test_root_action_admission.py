@@ -20,6 +20,7 @@ from agent_runtime_ops.root_actions.state import (
 )
 from agent_runtime_ops.root_actions.storage import SubmissionMetadata
 from tests.test_root_action_contracts import valid_manifest
+from tests.root_action_support import TEST_EXECUTION_POLICIES
 
 
 PEER = BrokerPeerIdentity(uid=1027, gid=1048, pid=200)
@@ -57,9 +58,6 @@ def manifest(
     value["request"]["lineage_id"] = lineage_id
     value["request"]["reply_target"] = "reply-" + job_id
     value["request"]["submitted_at"] = submitted_at
-    value["operation_id"] = "artifact.probe_kwrag_product"
-    value["operation_version"] = 1
-    value["parameters"] = {"revision": "a" * 40}
     return (
         json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         + "\n"
@@ -131,6 +129,7 @@ def broker(store: LocalRootActionFixture) -> TypedRootActionBroker:
                 ("event-third-circuit", "2026-07-27T12:00:01Z"),
             ]
         ),
+        policies=TEST_EXECUTION_POLICIES,
         submission_policy=SubmissionPolicy(
             allowed_uids=frozenset({PEER.uid}),
             allowed_gids=frozenset({PEER.gid}),
@@ -165,7 +164,7 @@ def test_two_typed_technical_failures_atomically_close_third_prestart() -> None:
     ("outcome", "reason_code"),
     [
         (TerminalOutcome.SUCCEEDED, "completed"),
-        (TerminalOutcome.REJECTED, "disabled_by_product_boundary"),
+        (TerminalOutcome.REJECTED, "disabled_unverified_authority"),
         (TerminalOutcome.CANCELED, "user_canceled"),
         (TerminalOutcome.PRESTART_FAILED, CIRCUIT_BREAKER_REASON_CODE),
         (TerminalOutcome.FAILED, "user_input_invalid"),
@@ -234,6 +233,7 @@ def test_public_lineage_snapshot_is_immutable_without_state_transition() -> None
             ]
         ),
         public_sink=sink,
+        policies=TEST_EXECUTION_POLICIES,
         submission_policy=SubmissionPolicy(
             allowed_uids=frozenset({PEER.uid}),
             allowed_gids=frozenset({PEER.gid}),

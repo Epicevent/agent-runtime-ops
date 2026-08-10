@@ -19,19 +19,6 @@ from ..domain.image_specs import (
     image_spec_recipe_payload,
     profile_runtime_contract,
 )
-from ..domain.hermes_p1_canary import (
-    run_hermes_p1_canary_probe,
-)
-from ..domain.kwrag_runtime_capsule import (
-    KwragRuntimeCapsule,
-    hermes_capsule_inputs,
-    load_runtime_capsule,
-    prepare_dev_runtime_capsule,
-    publish_prepared_dev_runtime_capsule,
-    publish_runtime_capsule_authority,
-    publish_runtime_capsule_inputs,
-    run_openclaw_runtime_capsule_probe,
-)
 from ..domain.dev_recipe_runtime import ensure_dev_runtime_dir as _ensure_runtime_dir
 from ..domain.dev_recipe_runtime import upsert_runtime_env_file as _upsert_runtime_env_file
 from ..domain.runtime_apply import apply_desired_slot as _apply_desired_slot
@@ -39,16 +26,10 @@ from ..domain.runtime_backup import pending_rollback_backup as _pending_rollback
 from ..domain.runtime_checks import run_live_slot_checks as _run_live_slot_checks
 from ..domain.runtime_checks import run_static_slot_checks as _run_static_slot_checks
 from ..domain.runtime_rollup import runtime_manifest_rollup
-from ..domain.retrieval_contract import (
-    require_retrieval_approval,
-    run_retrieval_status_probe,
-)
-from ..domain.retrieval_resources import measure_retrieval_promotion_headroom
 from ..domain.runtime_targets import (
     desired_from_direct_images as _desired_from_direct_images,
     desired_from_live_image_truth as _desired_from_live_image_truth,
 )
-from ..domain.runtime_truth import find_gateway_container_by_binding
 from ..renderer import render_compose
 from ..host.account_files import slot_uid_gid
 from ..routing import get_runtime_binding, load_runtime_bindings
@@ -103,10 +84,6 @@ def cmd_rollout_status(args: argparse.Namespace) -> int:
     print(f"runtime_manifest_product_images={','.join(runtime_rollup['product_images'])}")
     print(f"runtime_manifest_canonical_recipe_names={','.join(runtime_rollup['canonical_recipe_names'])}")
     print(f"runtime_manifest_canonical_recipe_digests={','.join(runtime_rollup['canonical_recipe_digests'])}")
-    print(f"runtime_manifest_retrieval_enabled_targets={','.join(runtime_rollup['retrieval_enabled_targets'])}")
-    print(f"runtime_manifest_retrieval_disabled_targets={','.join(runtime_rollup['retrieval_disabled_targets'])}")
-    print(f"runtime_manifest_retrieval_component_digests={','.join(runtime_rollup['retrieval_component_digests'])}")
-    print(f"runtime_manifest_retrieval_binding_digests={','.join(runtime_rollup['retrieval_binding_digests'])}")
     return 0
 
 
@@ -116,10 +93,6 @@ def _image_spec_canonical_record(image_spec: dict) -> dict[str, str]:
 
 def _direct_image_spec_from_args(args: argparse.Namespace) -> dict[str, object]:
     return image_spec_from_direct_images(str(args.wrapper_image), str(args.product_image))
-
-
-def _require_retrieval_approval(desired, state_root) -> None:
-    require_retrieval_approval(desired, state_root)
 
 
 def _prepare_runtime_env_for_direct_image(desired, profile) -> None:
@@ -149,66 +122,8 @@ def _prepare_runtime_env_for_direct_image(desired, profile) -> None:
     )
 
 
-def _desired_with_hermes_p1_canary(
-    slot: str,
-    image_spec: dict[str, object],
-    state_root,
-    *,
-    retrieval_enabled: bool,
-    capsule: KwragRuntimeCapsule | None = None,
-):
-    if not isinstance(image_spec.get("retrieval_attachment_contract"), dict):
-        desired, profile = _desired_from_direct_images(
-            slot,
-            image_spec,
-            state_root,
-            retrieval_enabled=retrieval_enabled,
-        )
-        if capsule is not None:
-            raise ValueError("runtime capsule requires a landed attachment contract")
-        return desired, profile, None
-    if capsule is None or capsule.slot != slot or capsule.family != image_spec.get("family"):
-        raise ValueError("exact published runtime capsule is required for attachment images")
-    desired, profile = _desired_from_direct_images(
-        slot,
-        image_spec,
-        state_root,
-        retrieval_enabled=retrieval_enabled,
-        retrieval_attachment_data=capsule.attachment_data if retrieval_enabled else None,
-        retrieval_source_generation=(
-            str(
-                (capsule.enabled_binding if retrieval_enabled else capsule.disabled_binding)[
-                    "expected_source_generation"
-                ]
-            )
-        ),
-    )
-    return desired, profile, capsule
-
-
-def _prepare_direct_image_runtime(desired, profile, prepared) -> None:
+def _prepare_direct_image_runtime(desired, profile) -> None:
     _prepare_runtime_env_for_direct_image(desired, profile)
-    if isinstance(desired.image_spec.get("retrieval_attachment_contract"), dict):
-        publish_runtime_capsule_inputs(desired, prepared)
-
-
-def _run_direct_image_retrieval_probe(
-    container: str, desired, prepared: KwragRuntimeCapsule
-) -> None:
-    publish_runtime_capsule_authority(desired, prepared)
-    if desired.image_spec.get("retrieval_enabled") is not True:
-        print("retrieval_canary_positive=disabled")
-        return
-    proof = (
-        run_hermes_p1_canary_probe(container, desired, hermes_capsule_inputs(prepared))
-        if prepared.family == "hermes"
-        else run_openclaw_runtime_capsule_probe(container)
-    )
-    print(f"retrieval_canary_schema={proof['schema']}")
-    print("retrieval_canary_positive=response_observed")
-    if prepared.family == "hermes":
-        print("retrieval_canary_negative=zero_hits")
-        print("retrieval_canary_tamper=rejected")
 
 
 def cmd_rollout_image_plan(args: argparse.Namespace) -> int:
@@ -222,14 +137,7 @@ def cmd_rollout_image_plan(args: argparse.Namespace) -> int:
             slots = [binding.linux_account for binding in load_runtime_bindings(state_root) if binding.enabled]
         plans = []
         for slot in slots:
-            capsule_digest = str(getattr(args, "retrieval_runtime_capsule_sha256", "") or "")
-            desired, profile, _prepared = _desired_with_hermes_p1_canary(
-                slot,
-                image_spec,
-                state_root,
-                retrieval_enabled=bool(getattr(args, "retrieval_enabled", False)),
-                capsule=load_runtime_capsule(slot, capsule_digest) if capsule_digest else None,
-            )
+            desired, profile = _desired_from_direct_images(slot, image_spec, state_root)
             rendered = render_compose(profile, desired)
             checks = [
                 {"ok": ok, "name": name, "detail": detail}
@@ -244,14 +152,6 @@ def cmd_rollout_image_plan(args: argparse.Namespace) -> int:
                     "bridge_port": desired.route.bridge_port if desired.route else "",
                     "runtime_profile": profile.name,
                     "runtime_contract": profile_runtime_contract(profile),
-                    "retrieval_enabled": desired.image_spec.get("retrieval_enabled") is True,
-                    "retrieval_component_digest": desired.image_spec.get("retrieval_component_digest") or None,
-                    "retrieval_binding_digest": desired.image_spec.get("retrieval_binding_digest") or None,
-                    "retrieval_resource_profile": (
-                        (desired.image_spec.get("retrieval_contract") or {}).get("resource")
-                        if isinstance(desired.image_spec.get("retrieval_contract"), dict)
-                        else None
-                    ),
                     "checks": checks,
                     "compatible": all(item["ok"] for item in checks),
                     "compose_sha256": rendered.sha256,
@@ -286,33 +186,9 @@ def _cmd_rollout_image_apply_slot(args: argparse.Namespace, *, required_runtime_
         return 2
     try:
         image_spec = _direct_image_spec_from_args(args)
-        capsule_digest = str(getattr(args, "retrieval_runtime_capsule_sha256", "") or "")
-        stage_capsule = bool(getattr(args, "stage_retrieval_runtime_capsule", False))
-        if stage_capsule and (not _is_dev_named_target(slot) or not capsule_digest):
-            raise ValueError(
-                "runtime capsule staging requires a dev-* target and an exact capsule digest"
-            )
-        dev_capsule = (
-            prepare_dev_runtime_capsule(slot, capsule_digest)
-            if stage_capsule
-            else None
-        )
-        desired, profile, prepared = _desired_with_hermes_p1_canary(
-            slot,
-            image_spec,
-            state_root,
-            retrieval_enabled=bool(getattr(args, "retrieval_enabled", False)),
-            capsule=(
-                dev_capsule.capsule
-                if dev_capsule is not None
-                else load_runtime_capsule(slot, capsule_digest)
-                if capsule_digest
-                else None
-            ),
-        )
+        desired, profile = _desired_from_direct_images(slot, image_spec, state_root)
         if desired.runtime_class != required_runtime_class:
             raise ValueError(f"{action_name} requires runtime_class={required_runtime_class}: {slot}")
-        _require_retrieval_approval(desired, state_root)
         _ensure_runtime_dir(desired.slot)
     except Exception as exc:
         print(f"rollout_{action_name.replace('-', '_')}_status=fail")
@@ -336,24 +212,9 @@ def _cmd_rollout_image_apply_slot(args: argparse.Namespace, *, required_runtime_
         state_root=state_root,
         allow_first_apply=bool(getattr(args, "allow_first_apply", False)),
         action_name=f"rollout_{action_name}",
-        prepare_runtime_env=lambda: _prepare_direct_image_runtime(
-            desired,
-            profile,
-            publish_prepared_dev_runtime_capsule(slot, dev_capsule)
-            if dev_capsule is not None
-            else prepared,
-        ),
-        post_live_retrieval_probe=(
-            (lambda container: _run_direct_image_retrieval_probe(
-                container, desired, prepared
-            ))
-            if prepared is not None
-            else None
-        ),
+        prepare_runtime_env=lambda: _prepare_direct_image_runtime(desired, profile),
     )
     if rc == 0:
-        if dev_capsule is not None:
-            print(f"retrieval_capsule_staged={capsule_digest}")
         print(f"rollout_{action_name.replace('-', '_')}_status=ok")
     return rc
 
@@ -378,16 +239,6 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
         source_desired, source_profile = _desired_from_live_image_truth(from_slot, state_root)
         if source_desired.runtime_class != "customer":
             raise ValueError(f"image-promote source must be a customer target: {from_slot}")
-        if (
-            source_desired.image_spec.get("retrieval_enabled") is True
-            and isinstance(
-                source_desired.image_spec.get("retrieval_attachment_contract"), dict
-            )
-        ):
-            raise ValueError(
-                "Hermes P1 attachment remains bounded to image-canary; "
-                "fleet promotion is unsupported"
-            )
         print("phase=projection_gate")
         rendered = render_compose(source_profile, source_desired)
         projection_failed = 0
@@ -449,26 +300,14 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
         if source_binding.instance_id in target_instance_ids:
             raise ValueError("image-promote source must not also be a target")
         slots = [binding.linux_account for binding in target_bindings]
-        source_retrieval_enabled = False
-        if source_desired.image_spec.get("retrieval_enabled") is True:
-            print("phase=retrieval_source_gate")
-            source_retrieval_enabled = True
         wrapper_image = str(source_desired.image_spec.get("wrapper_image") or "")
         product_image = str(source_desired.image_spec.get("product_image") or "")
         image_spec = image_spec_from_direct_images(wrapper_image, product_image)
         target_plans = []
         for slot in slots:
-            desired, profile = _desired_from_direct_images(
-                slot,
-                image_spec,
-                state_root,
-                retrieval_enabled=(
-                    source_desired.image_spec.get("retrieval_enabled") is True
-                ),
-            )
+            desired, profile = _desired_from_direct_images(slot, image_spec, state_root)
             if desired.runtime_class != "customer":
                 raise ValueError(f"promotion target is not a customer target: {slot}")
-            _require_retrieval_approval(desired, state_root)
             target_plans.append((slot, desired, profile))
         for slot, desired, profile in target_plans:
             _ensure_runtime_dir(
@@ -502,18 +341,13 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
                     f"target={slot} failed={target_projection_failed}"
                 )
         applied: list[str] = []
-        headroom_observation_digests: list[str] = []
         for slot, desired, profile in target_plans:
             if _is_dev_named_target(slot):
                 raise ValueError(f"image-promote target must not be a dev target: {slot}")
             if desired.runtime_class != "customer":
                 raise ValueError(f"promotion target is not a customer target: {slot}")
 
-            def verify_headroom_before_apply(
-                *,
-                target: str = slot,
-                target_image_spec: dict[str, object] = desired.image_spec,
-            ) -> None:
+            def verify_target_before_apply(*, target: str = slot) -> None:
                 _ensure_runtime_dir(
                     target,
                     create=False,
@@ -526,57 +360,14 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
                         "promotion target has a pending rollback transaction: "
                         f"target={target} backup={pending_backup.name}"
                     )
-                container_before, lookup_before = find_gateway_container_by_binding(
-                    source_desired.route
-                )
-                if not container_before:
-                    raise ValueError(
-                        "retrieval promotion source container lookup failed: "
-                        f"{lookup_before}"
-                    )
                 refreshed_source, _ = _desired_from_live_image_truth(
                     source_desired.route.instance_id,
                     state_root,
                 )
-                container, lookup_after = find_gateway_container_by_binding(
-                    source_desired.route
-                )
-                if not container:
-                    raise ValueError(
-                        "retrieval promotion source container lookup failed: "
-                        f"{lookup_after}"
-                    )
-                if container != container_before:
-                    raise ValueError(
-                        "retrieval promotion source container changed during admission"
-                    )
                 if refreshed_source != source_desired:
                     raise ValueError(
-                        "retrieval promotion source live tuple changed during promotion"
+                        "promotion source live tuple changed during promotion"
                     )
-                if not source_retrieval_enabled:
-                    return
-                status = run_retrieval_status_probe(
-                    container, refreshed_source.image_spec
-                )
-                if status is None:
-                    raise ValueError(
-                        "retrieval promotion source verifier was unavailable"
-                    )
-                _check_line(
-                    True,
-                    "promotion_retrieval_source_verified",
-                    str(status.get("bindingDigest") or "missing"),
-                )
-                headroom = measure_retrieval_promotion_headroom(
-                    container,
-                    target_image_spec,
-                )
-                for key in sorted(headroom):
-                    print(f"retrieval_headroom[{target}].{key}={headroom[key]}")
-                digest = str(headroom["observationDigest"])
-                headroom_observation_digests.append(digest)
-                _check_line(True, "promotion_retrieval_headroom_verified", digest)
 
             rc = _apply_desired_slot(
                 desired=desired,
@@ -587,7 +378,7 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
                 prepare_runtime_env=lambda desired=desired, profile=profile: (
                     _prepare_runtime_env_for_direct_image(desired, profile)
                 ),
-                pre_apply_admission=verify_headroom_before_apply,
+                pre_apply_admission=verify_target_before_apply,
             )
             if rc != 0:
                 print("rollout_image_promote_status=partial")
@@ -608,17 +399,12 @@ def cmd_rollout_image_promote(args: argparse.Namespace) -> int:
     print(f"targets={','.join(applied)}")
     print(f"wrapper_image={image_spec.get('wrapper_image')}")
     print(f"product_image={image_spec.get('product_image')}")
-    if headroom_observation_digests:
-        print(
-            "retrieval_headroom_observation_digests="
-            + ",".join(headroom_observation_digests)
-        )
     _append_action_log(
         state_root,
         "rollout_image_promote",
         from_slot,
         str(image_spec.get("wrapper_image") or ""),
         "ok",
-        f"targets={len(applied)} headroom={','.join(headroom_observation_digests) or 'not_applicable'}",
+        f"targets={len(applied)}",
     )
     return 0

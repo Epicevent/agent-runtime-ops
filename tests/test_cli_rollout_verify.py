@@ -85,65 +85,6 @@ class RolloutVerifyTest(unittest.TestCase):
         self.assertIn("dev-target-exempt", out)
         approved.assert_not_called()
 
-    def test_partial_retrieval_labels_never_report_capability_absent(self) -> None:
-        partial_truth = {
-            **TRUTH,
-            "retrieval_labels_present": "true",
-            "retrieval_schema": "",
-        }
-        with (
-            patch(f"{MODULE}._is_root", return_value=True),
-            patch(f"{MODULE}._authorize_deploy_target", return_value=None),
-            patch(
-                f"{MODULE}.live_runtime_truth",
-                return_value=(partial_truth, list(TRUTH_CHECKS)),
-            ),
-            patch(f"{MODULE}.is_image_ref_approved", return_value=True),
-            patch(
-                f"{MODULE}.desired_from_live_image_truth",
-                side_effect=ValueError("retrieval labels are incomplete"),
-            ) as desired,
-            patch(f"{MODULE}.cmd_checklist_pack") as pack,
-        ):
-            rc, out = _run(_args("oc14"))
-
-        self.assertEqual(rc, 1)
-        self.assertIn("retrieval labels are incomplete", out)
-        self.assertNotIn("capability-absent", out)
-        desired.assert_called_once()
-        pack.assert_not_called()
-
-    def test_partial_runtime_projection_never_reports_capability_absent(self) -> None:
-        partial_truth = {
-            **TRUTH,
-            "retrieval_labels_present": "false",
-            "retrieval_projection_labels_present": "true",
-            "retrieval_projection_complete": "false",
-            "retrieval_projection_consistent": "false",
-        }
-        projection_check = (
-            False,
-            "truth_retrieval_projection_complete_and_consistent",
-            "invalid",
-        )
-        with (
-            patch(f"{MODULE}._is_root", return_value=True),
-            patch(f"{MODULE}._authorize_deploy_target", return_value=None),
-            patch(
-                f"{MODULE}.live_runtime_truth",
-                return_value=(partial_truth, [*TRUTH_CHECKS, projection_check]),
-            ),
-            patch(f"{MODULE}.is_image_ref_approved", return_value=True),
-            patch(f"{MODULE}.desired_from_live_image_truth") as desired,
-            patch(f"{MODULE}.cmd_checklist_pack", return_value=0),
-        ):
-            rc, out = _run(_args("oc14"))
-
-        self.assertEqual(rc, 1)
-        self.assertIn("invalid-runtime-projection", out)
-        self.assertNotIn("capability-absent", out)
-        desired.assert_not_called()
-
     def test_fail_when_checklist_pack_fails(self) -> None:
         with (
             patch(f"{MODULE}._is_root", return_value=True),

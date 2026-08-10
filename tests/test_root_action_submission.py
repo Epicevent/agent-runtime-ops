@@ -19,6 +19,7 @@ from agent_runtime_ops.root_actions.contracts import MAX_MANIFEST_BYTES
 from agent_runtime_ops.root_actions.local_fixture import LocalRootActionFixture
 from agent_runtime_ops.root_actions.storage import StorageConflict, SubmissionLimits
 from tests.test_root_action_broker import FixedEvents, TEST_PEER, manifest
+from tests.root_action_support import TEST_EXECUTION_POLICIES
 
 
 class RootActionSubmissionTests(unittest.TestCase):
@@ -81,6 +82,7 @@ class RootActionSubmissionTests(unittest.TestCase):
         broker = TypedRootActionBroker(
             store,
             events=FixedEvents(),
+            policies=TEST_EXECUTION_POLICIES,
             submission_policy=policy,
         )
         broker.submit(manifest(job_id="job-lineage-1"), peer=TEST_PEER)
@@ -99,6 +101,7 @@ class RootActionSubmissionTests(unittest.TestCase):
         broker = TypedRootActionBroker(
             LocalRootActionFixture(),
             events=FixedEvents(),
+            policies=TEST_EXECUTION_POLICIES,
             submission_policy=SubmissionPolicy(
                 allowed_uids=frozenset({1002}),
                 allowed_gids=frozenset(),

@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 
 from .commands.admin import cmd_admin_create_image_dev, cmd_admin_serve
-from .commands.artifact import cmd_artifact_probe
 from .commands.apache import cmd_apache_set_host, cmd_apache_status
 from .commands.dev_upstream import cmd_dev_upstream
 from .commands.apply import cmd_apply, cmd_rollback
@@ -58,7 +57,11 @@ from .commands.nas_legacy import (
     cmd_nas_legacy_status,
 )
 from .commands.profile import cmd_profile_list
-from .commands.projection import cmd_projection_compare, cmd_projection_describe, cmd_projection_verify_target
+from .commands.projection import (
+    cmd_projection_compare,
+    cmd_projection_describe,
+    cmd_projection_verify_target,
+)
 from .commands.recipe import (
     cmd_recipe_capture_dev,
     cmd_recipe_dev_apply,
@@ -122,17 +125,9 @@ from .commands.usage import (
 )
 from .commands.image import cmd_image_approve, cmd_image_status
 from .commands.observation import cmd_observation_status
-from .commands.retrieval import cmd_retrieval_approve, cmd_retrieval_status
 from .commands.config import cmd_config_validate, cmd_config_migrate
 from .paths import DEFAULT_STATE_ROOT
-from .domain.artifact_probe import ArtifactProbeError, validate_revision
 
-
-def _artifact_revision(value: str) -> str:
-    try:
-        return validate_revision(value)
-    except ArtifactProbeError as exc:
-        raise argparse.ArgumentTypeError("revision must be exactly 40 lowercase hexadecimal characters") from exc
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="opsctl")
@@ -156,11 +151,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     image = sub.add_parser("image")
     image_sub = image.add_subparsers(dest="image_command", required=True)
-    image_approve = image_sub.add_parser("approve", help="root-approve an exact product/wrapper image digest")
+    image_approve = image_sub.add_parser(
+        "approve", help="root-approve an exact product/wrapper image digest"
+    )
     image_approve.add_argument("family", choices=["openclaw", "hermes"])
     image_approve.add_argument("role", choices=["product", "wrapper"])
-    image_approve.add_argument("image", metavar="IMAGE@sha256:...", help="digest-pinned image reference")
-    image_approve.add_argument("--source-commit", dest="source_commit", default="", help="optional source commit for provenance")
+    image_approve.add_argument(
+        "image", metavar="IMAGE@sha256:...", help="digest-pinned image reference"
+    )
+    image_approve.add_argument(
+        "--source-commit",
+        dest="source_commit",
+        default="",
+        help="optional source commit for provenance",
+    )
     image_approve.add_argument(
         "--allow-unmerged-source",
         action="store_true",
@@ -169,26 +173,6 @@ def build_parser() -> argparse.ArgumentParser:
     image_approve.set_defaults(func=cmd_image_approve)
     image_status = image_sub.add_parser("status")
     image_status.set_defaults(func=cmd_image_status)
-
-    retrieval = sub.add_parser(
-        "retrieval", help="approve and inspect embedded, in-process retrieval provenance"
-    )
-    retrieval_sub = retrieval.add_subparsers(dest="retrieval_command", required=True)
-    retrieval_approve = retrieval_sub.add_parser(
-        "approve", help="root-approve an embedded component in an approved product image"
-    )
-    retrieval_approve.add_argument("family", choices=["openclaw", "hermes"])
-    retrieval_approve.add_argument("product_image", metavar="PRODUCT@sha256:...")
-    retrieval_approve.set_defaults(func=cmd_retrieval_approve)
-    retrieval_status = retrieval_sub.add_parser("status")
-    retrieval_status.set_defaults(func=cmd_retrieval_status)
-
-    artifact = sub.add_parser("artifact", help="bounded read-only protected-host artifact observations")
-    artifact_sub = artifact.add_subparsers(dest="artifact_command", required=True)
-    artifact_probe = artifact_sub.add_parser("probe", help="observe one allowlisted local artifact scope")
-    artifact_probe.add_argument("scope", choices=["kwrag-product"])
-    artifact_probe.add_argument("--revision", required=True, type=_artifact_revision)
-    artifact_probe.set_defaults(func=cmd_artifact_probe)
 
     root_action = sub.add_parser(
         "root-action",
@@ -222,9 +206,15 @@ def build_parser() -> argparse.ArgumentParser:
     manifest_source.add_argument("--manifest-file")
     manifest_source.add_argument("--manifest-stdin", action="store_true")
     root_action_submit.add_argument("--wait", action="store_true")
-    root_action_submit.add_argument("--broker-timeout", type=broker_timeout_arg, default=5.0)
-    root_action_submit.add_argument("--wait-timeout", type=wait_timeout_arg, default=900.0)
-    root_action_submit.add_argument("--poll-interval", type=poll_interval_arg, default=0.25)
+    root_action_submit.add_argument(
+        "--broker-timeout", type=broker_timeout_arg, default=5.0
+    )
+    root_action_submit.add_argument(
+        "--wait-timeout", type=wait_timeout_arg, default=900.0
+    )
+    root_action_submit.add_argument(
+        "--poll-interval", type=poll_interval_arg, default=0.25
+    )
     root_action_submit.set_defaults(func=cmd_root_action_submit)
 
     def add_root_action_handle(parser: argparse.ArgumentParser) -> None:
@@ -235,12 +225,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     root_action_retrieve = root_action_sub.add_parser("retrieve")
     add_root_action_handle(root_action_retrieve)
-    root_action_retrieve.add_argument("--broker-timeout", type=broker_timeout_arg, default=5.0)
+    root_action_retrieve.add_argument(
+        "--broker-timeout", type=broker_timeout_arg, default=5.0
+    )
     root_action_retrieve.set_defaults(func=cmd_root_action_retrieve)
     root_action_wait = root_action_sub.add_parser("wait")
     add_root_action_handle(root_action_wait)
-    root_action_wait.add_argument("--wait-timeout", type=wait_timeout_arg, default=900.0)
-    root_action_wait.add_argument("--poll-interval", type=poll_interval_arg, default=0.25)
+    root_action_wait.add_argument(
+        "--wait-timeout", type=wait_timeout_arg, default=900.0
+    )
+    root_action_wait.add_argument(
+        "--poll-interval", type=poll_interval_arg, default=0.25
+    )
     root_action_wait.set_defaults(func=cmd_root_action_wait)
 
     observation = sub.add_parser(
@@ -260,19 +256,27 @@ def build_parser() -> argparse.ArgumentParser:
     config = sub.add_parser("config")
     config_sub = config.add_subparsers(dest="config_command", required=True)
     config_validate = config_sub.add_parser(
-        "validate", help="validate a slot's on-disk config against its target product image (read-only)"
+        "validate",
+        help="validate a slot's on-disk config against its target product image (read-only)",
     )
     config_validate.add_argument("slot", metavar="target")
     config_validate.add_argument(
-        "--product-image", dest="product_image", default="", help="override target product image (default: slot's current)"
+        "--product-image",
+        dest="product_image",
+        default="",
+        help="override target product image (default: slot's current)",
     )
     config_validate.set_defaults(func=cmd_config_validate)
     config_migrate = config_sub.add_parser(
-        "migrate", help="migrate a slot's on-disk config via the product's own doctor --fix (atomic, backed up)"
+        "migrate",
+        help="migrate a slot's on-disk config via the product's own doctor --fix (atomic, backed up)",
     )
     config_migrate.add_argument("slot", metavar="target")
     config_migrate.add_argument(
-        "--product-image", dest="product_image", default="", help="override target product image (default: slot's current)"
+        "--product-image",
+        dest="product_image",
+        default="",
+        help="override target product image (default: slot's current)",
     )
     config_migrate.add_argument(
         "--dry-run",
@@ -313,13 +317,17 @@ def build_parser() -> argparse.ArgumentParser:
     apache_set_host.set_defaults(func=cmd_apache_set_host)
 
     dev_upstream = sub.add_parser("dev-upstream")
-    dev_upstream_sub = dev_upstream.add_subparsers(dest="dev_upstream_command", required=True)
+    dev_upstream_sub = dev_upstream.add_subparsers(
+        dest="dev_upstream_command", required=True
+    )
     for action in ("status", "apply", "rollback"):
         dev_upstream_action = dev_upstream_sub.add_parser(action)
         dev_upstream_action.add_argument("target")
         if action == "apply":
             dev_upstream_action.add_argument("--container", required=True)
-        dev_upstream_action.add_argument("--authorization-check", action="store_true", help=argparse.SUPPRESS)
+        dev_upstream_action.add_argument(
+            "--authorization-check", action="store_true", help=argparse.SUPPRESS
+        )
         dev_upstream_action.set_defaults(func=cmd_dev_upstream)
 
     runtime = sub.add_parser("runtime")
@@ -356,10 +364,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="operator-authored patch notes shown in the workspace What's new dialog",
     )
     runtime_version_note.add_argument("slot", metavar="target")
-    runtime_version_note.add_argument("--version", default="", help="CalVer entry, e.g. 2026.7.17")
-    runtime_version_note.add_argument("--date", default="", help="optional YYYY-MM-DD shown next to the version")
-    runtime_version_note.add_argument("--note", action="append", help="note bullet (repeatable); customer-facing text")
-    runtime_version_note.add_argument("--clear", action="store_true", help="remove the entry for --version")
+    runtime_version_note.add_argument(
+        "--version", default="", help="CalVer entry, e.g. 2026.7.17"
+    )
+    runtime_version_note.add_argument(
+        "--date", default="", help="optional YYYY-MM-DD shown next to the version"
+    )
+    runtime_version_note.add_argument(
+        "--note", action="append", help="note bullet (repeatable); customer-facing text"
+    )
+    runtime_version_note.add_argument(
+        "--clear", action="store_true", help="remove the entry for --version"
+    )
     release_gate = runtime_version_note.add_mutually_exclusive_group()
     release_gate.add_argument(
         "--publish",
@@ -377,17 +393,27 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_version_note.set_defaults(func=cmd_runtime_version_note)
 
     document_tools = sub.add_parser("document-tools")
-    document_tools_sub = document_tools.add_subparsers(dest="document_tools_command", required=True)
+    document_tools_sub = document_tools.add_subparsers(
+        dest="document_tools_command", required=True
+    )
     document_tools_status = document_tools_sub.add_parser("status")
     document_tools_status.add_argument("slot", nargs="?", metavar="target")
     document_tools_status.add_argument("--all", action="store_true")
     document_tools_status.set_defaults(func=cmd_document_tools_status)
 
-    for name, func in (("status", cmd_status), ("plan", cmd_plan), ("check", cmd_check)):
+    for name, func in (
+        ("status", cmd_status),
+        ("plan", cmd_plan),
+        ("check", cmd_check),
+    ):
         item = sub.add_parser(name)
         item.add_argument("slot", metavar="target")
         if name == "check":
-            item.add_argument("--live", action="store_true", help="also inspect Docker and NAS runtime state without writing")
+            item.add_argument(
+                "--live",
+                action="store_true",
+                help="also inspect Docker and NAS runtime state without writing",
+            )
         item.set_defaults(func=func)
 
     apply = sub.add_parser("apply")
@@ -404,10 +430,14 @@ def build_parser() -> argparse.ArgumentParser:
     rollback.set_defaults(func=cmd_rollback)
 
     diagnostics = sub.add_parser("diagnostics")
-    diagnostics_sub = diagnostics.add_subparsers(dest="diagnostics_command", required=True)
+    diagnostics_sub = diagnostics.add_subparsers(
+        dest="diagnostics_command", required=True
+    )
     diagnostics_show = diagnostics_sub.add_parser("show")
     diagnostics_show.add_argument("slot", metavar="target")
-    diagnostics_show.add_argument("--dir", help="absolute backup dir or failed-container dir to show")
+    diagnostics_show.add_argument(
+        "--dir", help="absolute backup dir or failed-container dir to show"
+    )
     diagnostics_show.add_argument("--tail", type=int, default=120)
     diagnostics_show.set_defaults(func=cmd_diagnostics_show)
     diagnostics_logs = diagnostics_sub.add_parser("logs")
@@ -422,53 +452,63 @@ def build_parser() -> argparse.ArgumentParser:
     )
     diagnostics_session_health.set_defaults(func=cmd_diagnostics_session_health)
 
-    rollout = sub.add_parser("rollout", description="Inspect runtime manifests and apply digest-pinned wrapper/product images.")
+    rollout = sub.add_parser(
+        "rollout",
+        description="Inspect runtime manifests and apply digest-pinned wrapper/product images.",
+    )
     rollout_sub = rollout.add_subparsers(dest="rollout_command", required=True)
-    rollout_status = rollout_sub.add_parser("status", help="summarize runtime manifests for a product family")
-    rollout_status.add_argument("--family", required=True, choices=["hermes", "openclaw"])
+    rollout_status = rollout_sub.add_parser(
+        "status", help="summarize runtime manifests for a product family"
+    )
+    rollout_status.add_argument(
+        "--family", required=True, choices=["hermes", "openclaw"]
+    )
     rollout_status.set_defaults(func=cmd_rollout_status)
-    rollout_image_plan = rollout_sub.add_parser("image-plan", help="validate digest-pinned images without release state")
+    rollout_image_plan = rollout_sub.add_parser(
+        "image-plan", help="validate digest-pinned images without release state"
+    )
     rollout_image_plan.add_argument("--wrapper-image", required=True)
     rollout_image_plan.add_argument("--product-image", required=True)
     rollout_image_plan.add_argument("--target", dest="slot")
     rollout_image_plan.add_argument("--targets", dest="slots", nargs="*")
-    rollout_image_plan.add_argument(
-        "--retrieval-enabled",
-        action="store_true",
-        help="plan the image-attested in-process retrieval capability (default: disabled)",
-    )
     rollout_image_plan.set_defaults(func=cmd_rollout_image_plan)
-    rollout_image_dev_apply = rollout_sub.add_parser("image-dev-apply", help="apply digest-pinned images to a dev target")
+    rollout_image_dev_apply = rollout_sub.add_parser(
+        "image-dev-apply", help="apply digest-pinned images to a dev target"
+    )
     rollout_image_dev_apply.add_argument("--target", dest="slot", required=True)
     rollout_image_dev_apply.add_argument("--wrapper-image", required=True)
     rollout_image_dev_apply.add_argument("--product-image", required=True)
     rollout_image_dev_apply.add_argument("--allow-first-apply", action="store_true")
-    rollout_image_dev_apply.add_argument("--retrieval-enabled", action="store_true")
     rollout_image_dev_apply.set_defaults(func=cmd_rollout_image_dev_apply)
-    rollout_image_canary = rollout_sub.add_parser("image-canary", help="apply digest-pinned images to one customer canary target")
+    rollout_image_canary = rollout_sub.add_parser(
+        "image-canary", help="apply digest-pinned images to one customer canary target"
+    )
     rollout_image_canary.add_argument("--target", dest="slot", required=True)
     rollout_image_canary.add_argument("--wrapper-image", required=True)
     rollout_image_canary.add_argument("--product-image", required=True)
     rollout_image_canary.add_argument("--allow-first-apply", action="store_true")
-    rollout_image_canary.add_argument("--retrieval-enabled", action="store_true")
-    rollout_image_canary.add_argument(
-        "--stage-retrieval-runtime-capsule",
-        action="store_true",
-        help="stage the fixed digest-named retrieval capsule archive for a dev-* canary target",
-    )
-    for capsule_parser in (rollout_image_plan, rollout_image_dev_apply, rollout_image_canary):
-        capsule_parser.add_argument("--retrieval-runtime-capsule-sha256", default="")
     rollout_image_canary.set_defaults(func=cmd_rollout_image_canary)
-    rollout_image_promote = rollout_sub.add_parser("image-promote", help="promote the exact live canary image to explicit targets")
+    rollout_image_promote = rollout_sub.add_parser(
+        "image-promote", help="promote the exact live canary image to explicit targets"
+    )
     rollout_image_promote.add_argument("--from-target", dest="from_slot", required=True)
-    rollout_image_promote.add_argument("--targets", dest="slots", required=True, help="comma-separated customer targets to apply")
+    rollout_image_promote.add_argument(
+        "--targets",
+        dest="slots",
+        required=True,
+        help="comma-separated customer targets to apply",
+    )
     rollout_image_promote.set_defaults(func=cmd_rollout_image_promote)
     rollout_verify = rollout_sub.add_parser(
-        "verify", help="post-apply verification: live truth + approved-digest gate + runtime checklist pack"
+        "verify",
+        help="post-apply verification: live truth + approved-digest gate + runtime checklist pack",
     )
     rollout_verify.add_argument("slot", metavar="target")
     rollout_verify.add_argument(
-        "--pack", default=None, choices=["hermes-runtime", "openclaw-runtime"], help="override the family-derived pack"
+        "--pack",
+        default=None,
+        choices=["hermes-runtime", "openclaw-runtime"],
+        help="override the family-derived pack",
     )
     rollout_verify.add_argument("--gemini-chat-smoke", action="store_true")
     rollout_verify.add_argument(
@@ -476,7 +516,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="skip the hermes customer model round-trip (hermes -z); by default verify proves the model answers",
     )
-    rollout_verify.add_argument("--model-probe-timeout", type=int, default=90, help="seconds for the model round-trip probe (default 90)")
+    rollout_verify.add_argument(
+        "--model-probe-timeout",
+        type=int,
+        default=90,
+        help="seconds for the model round-trip probe (default 90)",
+    )
     rollout_verify.set_defaults(func=cmd_rollout_verify)
 
     recipe = sub.add_parser("recipe")
@@ -512,7 +557,9 @@ def build_parser() -> argparse.ArgumentParser:
     recipe_capture_dev.set_defaults(func=cmd_recipe_capture_dev)
 
     runtime_secret = sub.add_parser("runtime-secret")
-    runtime_secret_sub = runtime_secret.add_subparsers(dest="runtime_secret_command", required=True)
+    runtime_secret_sub = runtime_secret.add_subparsers(
+        dest="runtime_secret_command", required=True
+    )
     runtime_secret_set = runtime_secret_sub.add_parser(
         "set",
         help="WRITES the secret immediately, then (optionally) restarts. NOT a dry-run — "
@@ -525,7 +572,8 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_secret_set.add_argument("--value-stdin", action="store_true")
     runtime_secret_set.add_argument("--no-restart", action="store_true")
     runtime_secret_set.add_argument(
-        "--check", action="store_true",
+        "--check",
+        action="store_true",
         help="after writing, verify container delivery + health; live-verified provider keys are also probed. "
         "Any failure restores the protected pre-change files and recreates the previous runtime.",
     )
@@ -539,7 +587,8 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_secret_status.add_argument("slot", metavar="target")
     runtime_secret_status.set_defaults(func=cmd_runtime_secret_status)
     runtime_secret_recover = runtime_secret_sub.add_parser(
-        "recover", help="restore a retained failed-transaction recovery point and recreate the previous runtime",
+        "recover",
+        help="restore a retained failed-transaction recovery point and recreate the previous runtime",
     )
     runtime_secret_recover.add_argument("slot", metavar="target")
     runtime_secret_recover.set_defaults(func=cmd_runtime_secret_recover)
@@ -549,7 +598,10 @@ def build_parser() -> argparse.ArgumentParser:
         "The safe way to verify a key — never use `set` to test.",
     )
     runtime_secret_probe.add_argument("slot", metavar="target")
-    runtime_secret_probe.add_argument("--key", help="one provider key (e.g. GEMINI_API_KEY); default: all live-verified")
+    runtime_secret_probe.add_argument(
+        "--key",
+        help="one provider key (e.g. GEMINI_API_KEY); default: all live-verified",
+    )
     runtime_secret_probe.set_defaults(func=cmd_runtime_secret_probe)
 
     handoff = sub.add_parser("handoff")
@@ -585,11 +637,15 @@ def build_parser() -> argparse.ArgumentParser:
     nas_request.add_argument("share")
     nas_request.set_defaults(func=cmd_nas_request)
     nas_credential = nas_sub.add_parser("credential")
-    nas_credential_sub = nas_credential.add_subparsers(dest="credential_command", required=True)
+    nas_credential_sub = nas_credential.add_subparsers(
+        dest="credential_command", required=True
+    )
     nas_credential_set = nas_credential_sub.add_parser("set")
     nas_credential_set.add_argument("share")
     nas_credential_set.add_argument("--username", required=True)
-    nas_credential_set.add_argument("--password-stdin", action="store_true", required=True)
+    nas_credential_set.add_argument(
+        "--password-stdin", action="store_true", required=True
+    )
     nas_credential_set.add_argument("--domain")
     nas_credential_set.set_defaults(func=cmd_nas_credential_set)
     nas_credential_status = nas_credential_sub.add_parser("status")
@@ -597,7 +653,8 @@ def build_parser() -> argparse.ArgumentParser:
     nas_credential_status.add_argument("share")
     nas_credential_status.set_defaults(func=cmd_nas_credential_status)
     nas_credential_migrate = nas_credential_sub.add_parser(
-        "migrate-to-root", help="move a corpus credential from the slot home into the root vault; fstab line keeps its mountpoint"
+        "migrate-to-root",
+        help="move a corpus credential from the slot home into the root vault; fstab line keeps its mountpoint",
     )
     nas_credential_migrate.add_argument("slot", metavar="target")
     nas_credential_migrate.add_argument("share")
@@ -631,18 +688,21 @@ def build_parser() -> argparse.ArgumentParser:
     nas_mount.add_argument("--keep-fstab-on-failure", action="store_true")
     nas_mount.set_defaults(func=cmd_nas_mount)
     nas_workspace_assign = nas_sub.add_parser(
-        "workspace-assign", help="point the slot workspace at one writable mount (runs apply unless --no-apply)"
+        "workspace-assign",
+        help="point the slot workspace at one writable mount (runs apply unless --no-apply)",
     )
     nas_workspace_assign.add_argument("slot", metavar="target")
     nas_workspace_assign.add_argument("share")
     nas_workspace_assign.add_argument("--no-apply", action="store_true")
     nas_workspace_assign.set_defaults(func=cmd_nas_workspace_assign)
     nas_workspace_status = nas_sub.add_parser(
-        "workspace-status", help="fleet-wide live workspace reality per slot: bound share + writable mounts (read-only)"
+        "workspace-status",
+        help="fleet-wide live workspace reality per slot: bound share + writable mounts (read-only)",
     )
     nas_workspace_status.set_defaults(func=cmd_nas_workspace_status)
     nas_probe = nas_sub.add_parser(
-        "probe", help="mounted != connected: timed real-I/O probe of every cifs mount + SMB port per NAS host (read-only)"
+        "probe",
+        help="mounted != connected: timed real-I/O probe of every cifs mount + SMB port per NAS host (read-only)",
     )
     nas_probe.set_defaults(func=cmd_nas_probe)
     nas_unmount = nas_sub.add_parser("unmount")
@@ -669,7 +729,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="REL_PATH",
         help="corpus-relative folder to expose (repeatable). grant 원장이 진실인 코퍼스"
-             "(그룹웨어)는 필수 — 호출자가 준 경로만 붙는다. 카카오는 무시(패키지 자동탐색).",
+        "(그룹웨어)는 필수 — 호출자가 준 경로만 붙는다. 카카오는 무시(패키지 자동탐색).",
     )
     nas_view_assign.add_argument("--username")
     nas_view_assign.add_argument("--password-stdin", action="store_true")
@@ -681,7 +741,9 @@ def build_parser() -> argparse.ArgumentParser:
     nas_view_preflight.add_argument("slot", metavar="target")
     nas_view_preflight.add_argument("user_id")
     nas_view_preflight.add_argument("--share", required=True)
-    nas_view_preflight.add_argument("--path", action="append", default=[], metavar="REL_PATH")
+    nas_view_preflight.add_argument(
+        "--path", action="append", default=[], metavar="REL_PATH"
+    )
     nas_view_preflight.add_argument(
         "--require-content-ready",
         action="store_true",
@@ -704,7 +766,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     nas_view_package_info.add_argument("user_id")
     nas_view_package_info.set_defaults(func=cmd_nas_view_package_info)
-    nas_view_catalog = nas_view_sub.add_parser("catalog", help="show sanitized source observations (read-only)")
+    nas_view_catalog = nas_view_sub.add_parser(
+        "catalog", help="show sanitized source observations (read-only)"
+    )
     nas_view_catalog.add_argument("--source", default="kakao")
     nas_view_catalog.set_defaults(func=cmd_nas_view_catalog)
     nas_view_restore = nas_view_sub.add_parser("restore")
@@ -725,7 +789,9 @@ def build_parser() -> argparse.ArgumentParser:
     create_image_dev = admin_sub.add_parser("create-image-dev")
     create_image_dev.add_argument("target")
     create_image_dev.add_argument("--public-host", required=True)
-    create_image_dev.add_argument("--family", required=True, choices=["hermes", "openclaw"])
+    create_image_dev.add_argument(
+        "--family", required=True, choices=["hermes", "openclaw"]
+    )
     create_image_dev.add_argument("--gateway-port", required=True, type=int)
     create_image_dev.add_argument("--bridge-port", required=True, type=int)
     create_image_dev.add_argument("--instance-id")
@@ -750,13 +816,24 @@ def build_parser() -> argparse.ArgumentParser:
     projection_verify.add_argument("--live", action="store_true")
     projection_verify.set_defaults(func=cmd_projection_verify_target)
 
-    mitigation = sub.add_parser("mitigation", help="register of temporary workarounds with machine-checked expiry")
+    mitigation = sub.add_parser(
+        "mitigation",
+        help="register of temporary workarounds with machine-checked expiry",
+    )
     mitigation_sub = mitigation.add_subparsers(dest="mitigation_command", required=True)
-    mitigation_add = mitigation_sub.add_parser("add", help="record a temporary mitigation with its removal condition")
+    mitigation_add = mitigation_sub.add_parser(
+        "add", help="record a temporary mitigation with its removal condition"
+    )
     mitigation_add.add_argument("mitigation_id", metavar="id")
-    mitigation_add.add_argument("--slot", dest="slots", action="append", required=True, help="repeatable")
+    mitigation_add.add_argument(
+        "--slot", dest="slots", action="append", required=True, help="repeatable"
+    )
     mitigation_add.add_argument("--kind", choices=["env"], default="env")
-    mitigation_add.add_argument("--env-key", required=True, help="env var name (presence-only; values are never read)")
+    mitigation_add.add_argument(
+        "--env-key",
+        required=True,
+        help="env var name (presence-only; values are never read)",
+    )
     mitigation_add.add_argument("--reason", required=True)
     mitigation_add.add_argument(
         "--expires-product-version",
@@ -771,7 +848,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     mitigation_check.add_argument("--target", dest="slot", default=None)
     mitigation_check.set_defaults(func=cmd_mitigation_check)
-    mitigation_remove = mitigation_sub.add_parser("remove", help="retire a cleared register entry")
+    mitigation_remove = mitigation_sub.add_parser(
+        "remove", help="retire a cleared register entry"
+    )
     mitigation_remove.add_argument("mitigation_id", metavar="id")
     mitigation_remove.set_defaults(func=cmd_mitigation_remove)
 
@@ -779,7 +858,11 @@ def build_parser() -> argparse.ArgumentParser:
     checklist_sub = checklist.add_subparsers(dest="checklist_command", required=True)
     checklist_pack = checklist_sub.add_parser("pack")
     checklist_pack.add_argument("slot", metavar="target")
-    checklist_pack.add_argument("--pack", default="hermes-runtime", choices=["hermes-runtime", "openclaw-runtime"])
+    checklist_pack.add_argument(
+        "--pack",
+        default="hermes-runtime",
+        choices=["hermes-runtime", "openclaw-runtime"],
+    )
     checklist_pack.add_argument("--gemini-chat-smoke", action="store_true")
     checklist_pack.add_argument(
         "--gemini-model-attest",
@@ -788,18 +871,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     checklist_pack.set_defaults(func=cmd_checklist_pack)
 
-    usage = sub.add_parser("usage", help="collect and inspect content-free provider usage receipts")
+    usage = sub.add_parser(
+        "usage", help="collect and inspect content-free provider usage receipts"
+    )
     usage_sub = usage.add_subparsers(dest="usage_command", required=True)
-    usage_collect = usage_sub.add_parser("collect", help="incrementally collect verified product receipts")
+    usage_collect = usage_sub.add_parser(
+        "collect", help="incrementally collect verified product receipts"
+    )
     usage_collect.add_argument("target", nargs="?", metavar="TARGET")
     usage_collect.add_argument("--all", action="store_true")
-    usage_collect.add_argument("--limit", type=int, default=500, choices=range(1, 501), metavar="1..500")
-    usage_collect.add_argument("--max-pages", type=int, default=20, choices=range(1, 101), metavar="1..100")
-    usage_collect.add_argument("--db-defaults-file", default="/etc/agent-runtime-ops/usage-writer.cnf")
+    usage_collect.add_argument(
+        "--limit", type=int, default=500, choices=range(1, 501), metavar="1..500"
+    )
+    usage_collect.add_argument(
+        "--max-pages", type=int, default=20, choices=range(1, 101), metavar="1..100"
+    )
+    usage_collect.add_argument(
+        "--db-defaults-file", default="/etc/agent-runtime-ops/usage-writer.cnf"
+    )
     usage_collect.set_defaults(func=cmd_usage_collect)
-    usage_status = usage_sub.add_parser("status", help="show collection cursor and failure state")
+    usage_status = usage_sub.add_parser(
+        "status", help="show collection cursor and failure state"
+    )
     usage_status.add_argument("target", nargs="?", metavar="TARGET")
-    usage_status.add_argument("--db-defaults-file", default="/etc/agent-runtime-ops/usage-writer.cnf")
+    usage_status.add_argument(
+        "--db-defaults-file", default="/etc/agent-runtime-ops/usage-writer.cnf"
+    )
     usage_status.set_defaults(func=cmd_usage_status)
     usage_cost = usage_sub.add_parser(
         "cost-estimate",

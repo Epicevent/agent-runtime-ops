@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
@@ -9,7 +8,11 @@ from unittest.mock import patch
 
 import pytest
 
-from agent_runtime_ops.root_actions import BrokerPeerIdentity, SubmissionPolicy, TypedRootActionBroker
+from agent_runtime_ops.root_actions import (
+    BrokerPeerIdentity,
+    SubmissionPolicy,
+    TypedRootActionBroker,
+)
 from agent_runtime_ops.root_actions.catalog import (
     PUBLIC_CATALOG_PAGE_SIZE,
     build_public_catalog,
@@ -23,6 +26,7 @@ from agent_runtime_ops.root_actions.public_projection import (
 )
 from agent_runtime_ops.root_actions.storage import SubmissionLimits
 from tests.test_root_action_admission import manifest
+from tests.root_action_support import TEST_EXECUTION_POLICIES
 
 
 PEER = BrokerPeerIdentity(uid=1027, gid=1048, pid=401)
@@ -51,6 +55,7 @@ def bundles(count: int):
     broker = TypedRootActionBroker(
         store,
         events=CounterEvents(),
+        policies=TEST_EXECUTION_POLICIES,
         submission_policy=SubmissionPolicy(
             allowed_uids=frozenset({PEER.uid}),
             allowed_gids=frozenset({PEER.gid}),
@@ -64,10 +69,7 @@ def bundles(count: int):
     )
     for index in range(count):
         broker.submit(manifest_for(index), peer=PEER)
-    return tuple(
-        broker.public_projection(job_id)
-        for job_id in store.list_job_ids()
-    )
+    return tuple(broker.public_projection(job_id) for job_id in store.list_job_ids())
 
 
 def page_map(artifact) -> dict[str, bytes]:
@@ -89,11 +91,11 @@ def test_committed_catalog_fixtures_are_exact_producer_output() -> None:
     assert len(artifact.pages) == 1
     page_path, page_digest, page_bytes = artifact.pages[0]
     assert page_path == (
-        "catalog-generations/generation-0d2a4dab8728b6aa093787636cdfd0ef/"
+        "catalog-generations/generation-dd25330c15381ad9e395a0dcd2205df1/"
         "page-00000001.json"
     )
     assert page_digest == (
-        "sha256:3fe27051e1ab04dcb9d5b544400de4dd43e1ba07000e3c517528c646ef5fb9df"
+        "sha256:a863b876dd8805723342bddcdc689b6de27dcd33b7d6218b734d1933ebc24d69"
     )
     assert page_bytes == expected_page
     validated = validate_public_catalog(expected_catalog, {page_path: expected_page})
@@ -312,6 +314,7 @@ def test_new_submission_keeps_prior_projection_bytes_and_catalog_digest_aligned(
         store,
         events=CounterEvents(),
         public_sink=publisher,
+        policies=TEST_EXECUTION_POLICIES,
         submission_policy=SubmissionPolicy(
             allowed_uids=frozenset({PEER.uid}),
             allowed_gids=frozenset({PEER.gid}),

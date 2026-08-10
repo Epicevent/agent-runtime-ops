@@ -31,26 +31,26 @@ def valid_manifest() -> dict[str, object]:
             "submitted_at": "2026-07-27T05:00:00Z",
         },
         "parameters": {
-            "target_identity": "kwrag-candidate",
-            "expected_schema": "kwrag-receipt-v1",
+            "target_identity": "runtime-evidence",
+            "expected_schema": "runtime-evidence-v1",
             "freshness_seconds": 300,
             "allowlisted_fields": ["image_id", "source_revision"],
         },
         "expected_pre_state": {"kind": "required", "digest": DIGEST_A},
         "review": {
-            "purpose": "Verify a bounded candidate receipt.",
+            "purpose": "Verify a bounded runtime receipt.",
             "premises": [
                 {
-                    "claim": "The candidate identity was directly observed.",
+                    "claim": "The runtime identity was directly observed.",
                     "basis": "direct_observation",
                     "anchor": {
-                        "source": "request receipt 001",
-                        "quote": "candidate=kwrag-candidate",
+                        "source": "runtime receipt 001",
+                        "quote": "target=runtime-evidence",
                     },
-                    "falsifier": "A different candidate identity is observed.",
+                    "falsifier": "A different runtime identity is observed.",
                 }
             ],
-            "targets": ["KWRAG candidate receipt"],
+            "targets": ["runtime evidence receipt"],
             "changes": ["No persistent state is intended."],
             "recovery": ["No rollback is needed for the read-only operation."],
             "risk_delta": {
@@ -135,30 +135,16 @@ class RootActionManifestContractTests(unittest.TestCase):
     ) -> None:
         projection = DEFAULT_REGISTRY.projection()
         self.assertEqual(projection["schema"], REGISTRY_VERSION)
-        self.assertEqual(len(projection["operations"]), 8)
+        self.assertEqual(len(projection["operations"]), 3)
         forbidden = {"command", "argv", "path", "env", "payload", "shell"}
         for operation in projection["operations"]:
             self.assertFalse(forbidden & set(operation["parameters"]))
 
-    def test_network_expected_identity_is_state_dependent(self) -> None:
-        value = valid_manifest()
-        value["operation_id"] = "kwrag.network_ensure"
-        value["parameters"] = {
-            "network_plan_digest": DIGEST_A,
-            "expected_state": "absent",
-            "expected_identity_digest": None,
-        }
-        seal_typed_manifest(encoded(value))
-        value["parameters"]["expected_identity_digest"] = DIGEST_A  # type: ignore[index]
-        with self.assertRaisesRegex(ManifestValidationError, "must be null"):
-            seal_typed_manifest(encoded(value))
-
     def test_all_registered_parameter_contracts_have_valid_examples(self) -> None:
         examples = {
-            "artifact.probe_kwrag_product": {"revision": "c" * 40},
             "audit.verify": {
-                "target_identity": "kwrag-candidate",
-                "expected_schema": "kwrag-receipt-v1",
+                "target_identity": "runtime-evidence",
+                "expected_schema": "runtime-evidence-v1",
                 "freshness_seconds": 300,
                 "allowlisted_fields": ["image_id", "source_revision"],
             },
@@ -172,29 +158,6 @@ class RootActionManifestContractTests(unittest.TestCase):
                 "input_digest": "sha256:" + "b" * 64,
                 "runtime_seconds": 600,
                 "memory_mib": 4096,
-            },
-            "kwrag.candidate_build": {
-                "source_revision": "c" * 40,
-                "build_input_digest": DIGEST_A,
-                "base_image_digest": "sha256:" + "b" * 64,
-                "runtime_seconds": 3600,
-                "memory_mib": 32768,
-            },
-            "kwrag.artifact_finalize": {
-                "source_revision": "c" * 40,
-                "artifact_digests": [DIGEST_A, "sha256:" + "b" * 64],
-                "expected_image_id": "sha256:" + "c" * 64,
-            },
-            "kwrag.runtime_verify": {
-                "candidate_digest": DIGEST_A,
-                "fixture_id": "runtime-health-v1",
-                "projection_digest": "sha256:" + "b" * 64,
-                "runtime_seconds": 300,
-            },
-            "kwrag.network_ensure": {
-                "network_plan_digest": DIGEST_A,
-                "expected_state": "owned",
-                "expected_identity_digest": "sha256:" + "b" * 64,
             },
         }
         self.assertEqual(set(examples), set(DEFAULT_REGISTRY.operation_ids))

@@ -13,7 +13,6 @@ def image_plan(server, args: dict[str, Any]) -> dict[str, Any]:
             "product_image",
             "target",
             "targets",
-            "retrieval_enabled",
         },
         error_type=server.tool_error,
     )
@@ -35,13 +34,6 @@ def image_plan(server, args: dict[str, Any]) -> dict[str, Any]:
             raise server.tool_error("targets must be a non-empty array")
         argv.append("--targets")
         argv.extend(v.linux_account(item, error_type=server.tool_error) for item in slots)
-    if v.boolean_arg(
-        args,
-        "retrieval_enabled",
-        default=False,
-        error_type=server.tool_error,
-    ):
-        argv.append("--retrieval-enabled")
     runs = [server._run(argv, timeout=180)]
     return server._common_response(ok=runs[0]["returncode"] == 0, mutated=False, runs=runs)
 
@@ -62,7 +54,6 @@ def _image_apply(server, args: dict[str, Any], *, command: str) -> dict[str, Any
             "wrapper_image",
             "product_image",
             "allow_first_apply",
-            "retrieval_enabled",
         },
         error_type=server.tool_error,
     )
@@ -80,13 +71,6 @@ def _image_apply(server, args: dict[str, Any], *, command: str) -> dict[str, Any
     ]
     if bool(args.get("allow_first_apply", False)):
         argv.append("--allow-first-apply")
-    if v.boolean_arg(
-        args,
-        "retrieval_enabled",
-        default=False,
-        error_type=server.tool_error,
-    ):
-        argv.append("--retrieval-enabled")
     runs = [server._run(argv, timeout=900)]
     return server._common_response(ok=runs[0]["returncode"] == 0, mutated=True, runs=runs)
 

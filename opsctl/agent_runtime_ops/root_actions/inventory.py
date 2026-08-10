@@ -6,13 +6,6 @@ import json
 import re
 from typing import Any
 
-from .registry import (
-    DEFAULT_REGISTRY,
-    OperationRegistry,
-    RegistryValidationError,
-)
-
-
 INVENTORY_SCHEMA = "agent-runtime-root-action-historical-inventory/v1"
 EXPECTED_HISTORICAL_ACTION_COUNT = 59
 EXPECTED_FAMILY_COUNTS = {
@@ -77,9 +70,7 @@ def _exact_keys(value: Any, expected: set[str], field: str) -> dict[str, Any]:
     return value
 
 
-def validate_inventory_coverage(
-    value: dict[str, Any], registry: OperationRegistry = DEFAULT_REGISTRY
-) -> InventoryCoverage:
+def validate_inventory_coverage(value: dict[str, Any]) -> InventoryCoverage:
     root = _exact_keys(value, _TOP_KEYS, "inventory")
     if root["schema"] != INVENTORY_SCHEMA:
         raise InventoryValidationError("inventory schema mismatch")
@@ -97,10 +88,6 @@ def validate_inventory_coverage(
         operation_id = family["operation_id"]
         if not isinstance(operation_id, str):
             raise InventoryValidationError("inventory operation_id must be a string")
-        try:
-            registry.spec(operation_id)
-        except RegistryValidationError as exc:
-            raise InventoryValidationError(str(exc)) from exc
         if operation_id in family_counts:
             raise InventoryValidationError(
                 f"duplicate inventory family: {operation_id}"
@@ -131,10 +118,6 @@ def validate_inventory_coverage(
         raise InventoryValidationError(
             f"historical family counts mismatch expected={EXPECTED_FAMILY_COUNTS} "
             f"actual={family_counts}"
-        )
-    if not set(family_counts).issubset(set(registry.operation_ids)):
-        raise InventoryValidationError(
-            "historical inventory family is missing from the manifest registry"
         )
     return InventoryCoverage(
         actual_count=len(action_names),

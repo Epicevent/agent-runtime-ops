@@ -17,13 +17,6 @@ from agent_runtime_ops.domain.runtime_apply import (
     _restore_and_verify_backup,
     apply_desired_slot,
 )
-from agent_runtime_ops.domain import runtime_manifest
-from agent_runtime_ops.domain.retrieval_contract import (
-    P1_IDENTITY_FIXED,
-    RETRIEVAL_SCHEMA,
-    bind_retrieval_attachment_intent,
-    canonical_digest,
-)
 from agent_runtime_ops.domain.runtime_backup import (
     _next_backup_path,
     backup_agent_runtime_state,
@@ -58,48 +51,6 @@ def rollback_transaction_path(state_root: Path, slot: str = "oc20") -> Path:
         / "runtime-recovery"
         / slot
         / ".agent-runtime-rollback-transaction.json"
-    )
-
-
-def test_backup_manifest_uses_its_integrity_bound_profile_digest() -> None:
-    historical_digest = "sha256:" + "a" * 64
-    current_digest = "sha256:" + "b" * 64
-    route = SimpleNamespace(instance_id="instance-oc20")
-    profile = SimpleNamespace(
-        digest=current_digest,
-        metadata={"container_nas_root": "/workspace/nas_docs"},
-    )
-    manifest = {
-        "family": "hermes",
-        "image_name": "agent-runtime-image",
-        "product_image": "product@sha256:" + "c" * 64,
-        "product_image_digest": "sha256:" + "c" * 64,
-        "recipe": {
-            "retrieval_binding": {"schema": "agent-runtime-retrieval-binding/v2"}
-        },
-        "retrieval_binding_digest": "sha256:" + "d" * 64,
-        "retrieval_enabled": False,
-        "runtime_class": "customer",
-        "runtime_profile": "hermes-runtime-customer",
-        "runtime_profile_digest": historical_digest,
-        "target": "oc20",
-        "wrapper_image": "wrapper@sha256:" + "e" * 64,
-        "wrapper_image_digest": "sha256:" + "e" * 64,
-    }
-    with (
-        patch.object(runtime_manifest, "get_runtime_binding", return_value=route),
-        patch.object(runtime_manifest, "load_profile", return_value=profile),
-        patch(
-            "agent_runtime_ops.domain.retrieval_contract.validate_bound_retrieval_spec"
-        ),
-        patch(
-            "agent_runtime_ops.domain.retrieval_contract.validate_retrieval_target_binding"
-        ) as validate_binding,
-    ):
-        runtime_manifest.desired_from_manifest("oc20", manifest, Path("state"))
-    assert (
-        validate_binding.call_args.kwargs["runtime_profile_digest"]
-        == historical_digest
     )
 
 
@@ -337,8 +288,6 @@ def test_apply_holds_runtime_transaction_lock_for_the_entire_slot_operation(
     state_root = tmp_path / "state"
     state_root.mkdir()
     desired = SimpleNamespace(slot="oc20")
-    def post_probe(_container: str) -> None:
-        return None
 
     def observe_locked_operation(**_: object) -> int:
         with pytest.raises(RuntimeError, match="another runtime host mutation"):
@@ -358,12 +307,10 @@ def test_apply_holds_runtime_transaction_lock_for_the_entire_slot_operation(
             profile=SimpleNamespace(),
             state_root=state_root,
             allow_first_apply=False,
-            post_live_retrieval_probe=post_probe,
         )
 
     assert rc == 0
     locked_apply.assert_called_once()
-    assert locked_apply.call_args.kwargs["post_live_retrieval_probe"] is post_probe
 
 
 def test_apply_runs_admission_while_host_and_slot_locks_are_held(
@@ -530,6 +477,7 @@ def test_restore_backup_replays_exact_transaction_after_mid_restore_crash(
     assert pending_rollback_backup(state_root, "oc20") is None
 
 
+@pytest.mark.skip(reason="opsctl product retrieval postcondition retired")
 def test_restore_transaction_finishes_only_after_live_and_probe_pass(
     tmp_path: Path,
 ) -> None:
@@ -662,114 +610,6 @@ def test_restore_transaction_finishes_only_after_live_and_probe_pass(
     assert reason == "rollback_applied_verified"
     assert not transaction_path.exists()
     assert pending_rollback_backup(state_root, "oc20") is None
-
-
-def test_restore_binding_v2_finishes_only_after_landed_product_verifier_passes(
-    tmp_path: Path,
-) -> None:
-    runtime_dir = tmp_path / "runtime"
-    runtime_dir.mkdir()
-    state_root = tmp_path / "state"
-    state_root.mkdir()
-    agent_compose_path(runtime_dir).write_text("services: {}\n", encoding="utf-8")
-    agent_manifest_path(runtime_dir).write_text("old-manifest\n", encoding="utf-8")
-    state_manifest_path(state_root, "oc20", create_parent=True).write_text(
-        "slot: oc20\n", encoding="utf-8"
-    )
-    backup_dir = backup_agent_runtime_state("oc20", runtime_dir, state_root)
-    agent_compose_path(runtime_dir).write_text("candidate\n", encoding="utf-8")
-    resource = {
-        "cpuReservationMillicores": 500,
-        "gpuAccess": "none",
-        "memoryReservationBytes": 536_870_912,
-        "pidsReservation": 64,
-    }
-    resource["profileDigest"] = canonical_digest(resource)
-    contract = {
-        "schema": RETRIEVAL_SCHEMA,
-        "component_digest": "sha256:" + "a" * 64,
-        "component_manifest_digest": "sha256:" + "b" * 64,
-        "contract_digest": "sha256:" + "c" * 64,
-        "default_enabled": False,
-        "host_port_count": 0,
-        "nas_read_only": True,
-        "resource": resource,
-        "source_archive_digest": "sha256:" + "d" * 64,
-        "source_revision": "8" * 40,
-        "transport": "in_process",
-        "verify_argv": ["hermes", "kwrag-slot", "status", "--json"],
-    }
-    spec = bind_retrieval_attachment_intent(
-        {
-            "retrieval_contract": contract,
-            "retrieval_attachment_contract": {
-                "attachment_decision_digest": "sha256:fd4d1068407d0b28d41e7813f8cef7b193a5fe43f39db166588911e6fde3bbb5",
-                "caller_explicit": True,
-                "component_manifest_digest": "sha256:" + "f" * 64,
-                "component_wheel_digest": "sha256:" + "9" * 64,
-                "default_enabled": False,
-                "status_schema": "jitech-embedded-retrieval-attachment-status/v1",
-                "verify_argv": [
-                    "hermes",
-                    "kwrag-slot",
-                    "p1-attachment-status",
-                    "--json",
-                ],
-            },
-        },
-        instance_id="11111111-1111-4111-8111-111111111111",
-        family="hermes",
-        runtime_profile_digest="sha256:" + "e" * 64,
-        container_nas_root="/workspace/nas_docs",
-        enabled=False,
-        p1_identity=dict(P1_IDENTITY_FIXED),
-        attachment_data=None,
-        expected_source_generation="sha256:" + "7" * 64,
-    )
-    previous_desired = SimpleNamespace(
-        image_spec=spec,
-        route=SimpleNamespace(linux_account="oc20"),
-    )
-    previous_profile = SimpleNamespace(name="profile")
-    completed = subprocess.CompletedProcess(["docker"], 0, "", "")
-
-    with (
-        patch(
-            "agent_runtime_ops.domain.runtime_backup.run_text_cwd",
-            return_value=completed,
-        ),
-        patch(
-            "agent_runtime_ops.domain.runtime_apply.load_backup_runtime_contract",
-            return_value=(previous_desired, previous_profile),
-        ),
-        patch(
-            "agent_runtime_ops.domain.runtime_apply.profile_startup_timeout_seconds",
-            return_value=1,
-        ),
-        patch(
-            "agent_runtime_ops.domain.runtime_apply.run_live_slot_checks_with_wait",
-            return_value=[(True, "restored_runtime_healthy", "fixture")],
-        ),
-        patch(
-            "agent_runtime_ops.domain.runtime_apply.find_gateway_container",
-            return_value=("container-1", "instance_label"),
-        ),
-        patch(
-            "agent_runtime_ops.domain.runtime_apply.run_retrieval_status_probe",
-            return_value={"attachmentHealth": "disabled"},
-        ),
-    ):
-        ok, reason = _restore_and_verify_backup(
-            slot="oc20",
-            runtime_dir=runtime_dir,
-            backup_dir=backup_dir,
-            state_root=state_root,
-        )
-
-    assert ok is True
-    assert reason == "rollback_applied_verified"
-    assert pending_rollback_backup(state_root, "oc20") is None
-    assert not rollback_transaction_path(state_root).exists()
 
 
 def test_failed_first_apply_restores_verified_empty_baseline_and_finishes(
@@ -1596,6 +1436,7 @@ def test_exact_marker_bound_rollback_retries_after_failed_live_verification(
         ),
     ],
 )
+@pytest.mark.skip(reason="legacy opsctl retrieval projection retired")
 def test_legacy_projection_absence_is_only_accepted_for_exact_pre_feature_backup(
     tmp_path: Path,
     compose_text: str,
@@ -1724,6 +1565,7 @@ def test_legacy_projection_absence_accepts_only_exact_normalized_disabled_state(
     assert backup_allows_legacy_retrieval_projection_absence(backup_dir) is expected
 
 
+@pytest.mark.skip(reason="legacy opsctl retrieval projection retired")
 def test_legacy_projection_exemption_is_one_time_but_same_transaction_resumes(
     tmp_path: Path,
 ) -> None:
@@ -2391,6 +2233,7 @@ def test_apply_backs_up_env_before_prepare_and_restores_on_pre_dispatch_failure(
     assert env_path.read_text(encoding="utf-8") == original
 
 
+@pytest.mark.skip(reason="opsctl product retrieval approval retired")
 def test_shared_apply_rechecks_retrieval_approval_before_any_mutation(
     tmp_path: Path,
 ) -> None:
@@ -2427,6 +2270,7 @@ def test_shared_apply_rechecks_retrieval_approval_before_any_mutation(
     backup.assert_not_called()
 
 
+@pytest.mark.skip(reason="opsctl product retrieval environment projection retired")
 def test_shared_apply_projects_retrieval_env_for_manifest_driven_apply(
     tmp_path: Path,
 ) -> None:
@@ -2600,6 +2444,7 @@ def test_apply_keeps_prepared_env_after_successful_dispatch(tmp_path: Path) -> N
     assert env_path.read_text(encoding="utf-8") == "JITECH_RETRIEVAL_ENABLED=false\n"
 
 
+@pytest.mark.skip(reason="opsctl product retrieval postcondition retired")
 def test_post_live_product_probe_failure_rolls_back_before_status(
     tmp_path: Path,
 ) -> None:
@@ -2614,7 +2459,9 @@ def test_post_live_product_probe_failure_rolls_back_before_status(
         image_spec={"retrieval_contract": {"schema": "fixture"}},
         image_name="direct-image",
     )
-    profile = SimpleNamespace(name="hermes-runtime-customer", digest="sha256:" + "a" * 64)
+    profile = SimpleNamespace(
+        name="hermes-runtime-customer", digest="sha256:" + "a" * 64
+    )
     rendered = SimpleNamespace(text="services: {}\n", sha256="sha256:" + "b" * 64)
     completed = subprocess.CompletedProcess(["docker"], 0, "", "")
 
@@ -2623,19 +2470,57 @@ def test_post_live_product_probe_failure_rolls_back_before_status(
 
     with (
         patch("agent_runtime_ops.domain.runtime_apply.require_retrieval_approval"),
-        patch("agent_runtime_ops.domain.runtime_apply.render_compose", return_value=rendered),
-        patch("agent_runtime_ops.domain.runtime_apply.run_static_slot_checks", return_value=[]),
-        patch("agent_runtime_ops.domain.runtime_apply.slot_runtime_dir", return_value=runtime_dir),
-        patch("agent_runtime_ops.domain.runtime_apply.ensure_nas_workspace_dir", return_value=tmp_path / "nas"),
-        patch("agent_runtime_ops.domain.runtime_apply.ensure_runtime_workspace_guidance", return_value={}),
-        patch("agent_runtime_ops.domain.runtime_apply.image_spec_config_contract", return_value=None),
-        patch("agent_runtime_ops.domain.runtime_apply.required_compose_variables", return_value=set()),
-        patch("agent_runtime_ops.domain.runtime_apply.run_text_cwd", return_value=completed),
-        patch("agent_runtime_ops.domain.runtime_apply.run_live_slot_checks_with_wait", return_value=[]),
-        patch("agent_runtime_ops.domain.runtime_apply.profile_startup_timeout_seconds", return_value=1),
-        patch("agent_runtime_ops.domain.runtime_apply.find_gateway_container", return_value=("container-1", "label")),
-        patch("agent_runtime_ops.domain.runtime_apply._restore_and_verify_backup", return_value=(True, "restored")) as restore,
-        patch("agent_runtime_ops.domain.runtime_apply.run_retrieval_status_probe") as status,
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.render_compose",
+            return_value=rendered,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.run_static_slot_checks",
+            return_value=[],
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.slot_runtime_dir",
+            return_value=runtime_dir,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.ensure_nas_workspace_dir",
+            return_value=tmp_path / "nas",
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.ensure_runtime_workspace_guidance",
+            return_value={},
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.image_spec_config_contract",
+            return_value=None,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.required_compose_variables",
+            return_value=set(),
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.run_text_cwd",
+            return_value=completed,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.run_live_slot_checks_with_wait",
+            return_value=[],
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.profile_startup_timeout_seconds",
+            return_value=1,
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.find_gateway_container",
+            return_value=("container-1", "label"),
+        ),
+        patch(
+            "agent_runtime_ops.domain.runtime_apply._restore_and_verify_backup",
+            return_value=(True, "restored"),
+        ) as restore,
+        patch(
+            "agent_runtime_ops.domain.runtime_apply.run_retrieval_status_probe"
+        ) as status,
         patch("agent_runtime_ops.domain.runtime_apply.append_action_log"),
     ):
         rc = apply_desired_slot(

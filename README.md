@@ -82,18 +82,6 @@ ssh svcops "/usr/local/bin/opsctl binding status TARGET"
 ssh svcops "/usr/local/bin/opsctl apache status TARGET"
 ```
 
-Bounded protected-host artifact observation:
-
-```bash
-ssh svcops "sudo /usr/local/bin/opsctl artifact probe kwrag-product --revision FULL_40_CHARACTER_SOURCE_SHA"
-```
-
-This command derives its host path and candidate image tag from the fixed scope and revision. It
-reads only allowlisted build artifacts plus local Docker image metadata, emits a capped redacted JSON
-observation, and writes no receipt or server state. It does not qualify, attach, canary, or promote an
-artifact. Arbitrary paths, tags, process IDs, ports, GPU probes, shell commands, and environment dumps
-are intentionally not accepted.
-
 Single-slot re-apply and rollback:
 
 ```bash

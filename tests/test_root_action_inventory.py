@@ -14,6 +14,7 @@ from agent_runtime_ops.root_actions.inventory import (
     InventoryValidationError,
     validate_inventory_coverage,
 )
+from agent_runtime_ops.root_actions.registry import DEFAULT_REGISTRY
 
 
 def inventory_names(value: dict[str, object]) -> set[str]:
@@ -37,6 +38,13 @@ class RootActionHistoricalInventoryTests(unittest.TestCase):
         self.assertNotIn(
             "artifact.probe_kwrag_product", INVENTORY_COVERAGE.operation_ids
         )
+        historical_kwrag = {
+            operation_id
+            for operation_id in INVENTORY_COVERAGE.operation_ids
+            if operation_id.startswith("kwrag.")
+        }
+        self.assertTrue(historical_kwrag)
+        self.assertTrue(historical_kwrag.isdisjoint(DEFAULT_REGISTRY.operation_ids))
 
     def test_historical_inventory_never_seeds_operational_job_catalog(self) -> None:
         self.assertEqual(len(inventory_names(HISTORICAL_INVENTORY)), 59)

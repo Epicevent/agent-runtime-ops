@@ -202,12 +202,6 @@ class PosixRootActionStoreTests(unittest.TestCase):
         )
         value = valid_manifest()
         value["job_id"] = "job-atomic-disabled"
-        value["operation_id"] = "kwrag.network_ensure"
-        value["parameters"] = {
-            "network_plan_digest": "sha256:" + "a" * 64,
-            "expected_state": "absent",
-            "expected_identity_digest": None,
-        }
         job = seal_typed_manifest(encoded(value))
         close = transition(
             job,
@@ -216,7 +210,7 @@ class PosixRootActionStoreTests(unittest.TestCase):
             TransitionKind.CLOSE_PENDING,
             second=1,
             outcome=TerminalOutcome.REJECTED,
-            reason="disabled_by_product_boundary",
+            reason="disabled_unverified_authority",
         )
         notice = seal_receipt(
             receipt_bytes(
@@ -229,7 +223,7 @@ class PosixRootActionStoreTests(unittest.TestCase):
                     "request_id": job.request_id,
                     "reply_target": job.reply_target,
                     "terminal_outcome": "rejected",
-                    "reason_code": "disabled_by_product_boundary",
+                    "reason_code": "disabled_unverified_authority",
                 }
             )
         )
