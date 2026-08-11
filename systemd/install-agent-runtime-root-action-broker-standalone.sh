@@ -212,6 +212,12 @@ cleanup() {
             rm -f -- "$UNIT_PATH"
         fi
         systemctl daemon-reload >/dev/null 2>&1 || true
+        if [[ "$standalone_was_enabled" -eq 1 ]]; then
+            systemctl enable "$UNIT_NAME" >/dev/null 2>&1 || true
+        fi
+        if [[ "$standalone_was_active" -eq 1 ]]; then
+            systemctl start "$UNIT_NAME" >/dev/null 2>&1 || true
+        fi
         if [[ "$legacy_was_enabled" -eq 1 ]]; then
             systemctl enable "$LEGACY_UNIT" >/dev/null 2>&1 || true
         fi
@@ -389,7 +395,8 @@ install -o root -g root -m 0644 "$UNIT_NEXT" "$UNIT_PATH" \
 cutover_started=1
 systemctl daemon-reload || die daemon_reload_failed
 systemctl disable --now "$LEGACY_UNIT" || die legacy_disable_failed
-systemctl enable --now "$UNIT_NAME" || die standalone_enable_failed
+systemctl enable "$UNIT_NAME" || die standalone_enable_failed
+systemctl restart "$UNIT_NAME" || die standalone_restart_failed
 
 for _ in $(seq 1 30); do
     systemctl is-active --quiet "$UNIT_NAME" && [[ -S "$SOCKET" ]] && break

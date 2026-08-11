@@ -76,11 +76,11 @@ def test_standalone_installer_builds_only_from_hash_locked_inputs() -> None:
 
     assert template_digest.group(1) == hashlib.sha256(UNIT.read_bytes()).hexdigest()
     assert lock_digest.group(1) == hashlib.sha256(LOCK.read_bytes()).hexdigest()
-    assert "--require-hashes -r \"$REQUIREMENTS_COPY\"" in source
-    assert "--no-index --no-deps --force-reinstall \"$WHEEL_COPY\"" in source
+    assert '--require-hashes -r "$REQUIREMENTS_COPY"' in source
+    assert '--no-index --no-deps --force-reinstall "$WHEEL_COPY"' in source
     assert "WHEEL_COPY=$TMP/agent_runtime_ops-0.1.0-py3-none-any.whl" in source
     assert "WHEEL_COPY=$TMP/source.whl" not in source
-    assert "/usr/bin/python3 -m venv --copies \"$STAGE/.venv\"" in source
+    assert '/usr/bin/python3 -m venv --copies "$STAGE/.venv"' in source
     assert "copied_wheel_sha256_mismatch" in source
     assert "unit_template_sha256_mismatch" in source
     assert "requirements_lock_sha256_mismatch" in source
@@ -112,14 +112,23 @@ def test_standalone_installer_pins_release_and_process_identity() -> None:
 def test_standalone_cutover_rolls_back_before_reporting_success() -> None:
     source = _source()
     stop_legacy = source.index('systemctl disable --now "$LEGACY_UNIT"')
-    start_new = source.index('systemctl enable --now "$UNIT_NAME"')
+    enable_new = source.index(
+        'systemctl enable "$UNIT_NAME" || die standalone_enable_failed'
+    )
+    restart_new = source.index(
+        'systemctl restart "$UNIT_NAME" || die standalone_restart_failed'
+    )
     attest = source.index("standalone broker argv mismatch")
     receipt = source.index("write_receipt succeeded cutover_attested")
     committed = source.index("cutover_committed=1", receipt)
-    assert stop_legacy < start_new < attest < receipt < committed
+    assert stop_legacy < enable_new < restart_new < attest < receipt < committed
     cleanup = source[source.index("cleanup() {") : source.index("tree_digest() {")]
     assert 'systemctl stop "$UNIT_NAME"' in cleanup
     assert 'systemctl disable "$UNIT_NAME"' in cleanup
+    assert 'if [[ "$standalone_was_enabled" -eq 1 ]]; then' in cleanup
+    assert 'systemctl enable "$UNIT_NAME"' in cleanup
+    assert 'if [[ "$standalone_was_active" -eq 1 ]]; then' in cleanup
+    assert 'systemctl start "$UNIT_NAME"' in cleanup
     assert 'systemctl start "$LEGACY_UNIT"' in cleanup
     assert 'install -o root -g root -m 0644 "$PREVIOUS_UNIT" "$UNIT_PATH"' in cleanup
 
@@ -128,11 +137,11 @@ def test_standalone_receipt_is_durable_and_svcops_readable() -> None:
     source = _source()
     for expected in (
         'install -d -o root -g svcops -m 0750 "$RECEIPT_ROOT"',
-        'os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL',
-        'os.fsync(fd)',
+        "os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL",
+        "os.fsync(fd)",
         'os.fchown(fd, 0, grp.getgrnam("svcops").gr_gid)',
-        'os.replace(tmp, target)',
-        'os.fsync(directory)',
+        "os.replace(tmp, target)",
+        "os.fsync(directory)",
         '"legacy_broker_active": legacy_active',
         '"standalone_broker_active": standalone_active',
         '"terminal": terminal',
@@ -158,7 +167,9 @@ def test_standalone_installer_never_seeds_from_mutable_current_release() -> None
     assert "/opt/agent-runtime-ops/current" not in source
     assert "cp -a" not in source
     assert "--system-site-packages" not in source
-    assert "grep -Eq '^ExecStart=/opt/agent-runtime-root-action-broker/releases/" in source
+    assert (
+        "grep -Eq '^ExecStart=/opt/agent-runtime-root-action-broker/releases/" in source
+    )
 
 
 def test_embedded_python_blocks_compile(tmp_path: Path) -> None:
