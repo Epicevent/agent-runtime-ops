@@ -111,6 +111,15 @@ def test_standalone_installer_pins_release_and_process_identity() -> None:
 
 def test_standalone_cutover_rolls_back_before_reporting_success() -> None:
     source = _source()
+    capture_active = source.index(
+        'systemctl is-active --quiet "$UNIT_NAME" && standalone_was_active=1'
+    )
+    capture_enabled = source.index(
+        'systemctl is-enabled --quiet "$UNIT_NAME" && standalone_was_enabled=1'
+    )
+    publish_unit = source.index(
+        'install -o root -g root -m 0644 "$UNIT_NEXT" "$UNIT_PATH"'
+    )
     stop_legacy = source.index('systemctl disable --now "$LEGACY_UNIT"')
     enable_new = source.index(
         'systemctl enable "$UNIT_NAME" || die standalone_enable_failed'
@@ -121,16 +130,29 @@ def test_standalone_cutover_rolls_back_before_reporting_success() -> None:
     attest = source.index("standalone broker argv mismatch")
     receipt = source.index("write_receipt succeeded cutover_attested")
     committed = source.index("cutover_committed=1", receipt)
+    assert capture_active < capture_enabled < publish_unit < stop_legacy
     assert stop_legacy < enable_new < restart_new < attest < receipt < committed
+    assert 'systemctl enable --now "$UNIT_NAME"' not in source
     cleanup = source[source.index("cleanup() {") : source.index("tree_digest() {")]
-    assert 'systemctl stop "$UNIT_NAME"' in cleanup
-    assert 'systemctl disable "$UNIT_NAME"' in cleanup
+    stop_new = cleanup.index('systemctl stop "$UNIT_NAME"')
+    disable_new = cleanup.index('systemctl disable "$UNIT_NAME"')
+    restore_unit = cleanup.index(
+        'install -o root -g root -m 0644 "$PREVIOUS_UNIT" "$UNIT_PATH"'
+    )
+    reload_units = cleanup.index('systemctl daemon-reload')
+    restore_enabled = cleanup.index('systemctl enable "$UNIT_NAME"')
+    restore_active = cleanup.index('systemctl start "$UNIT_NAME"')
+    assert (
+        stop_new
+        < disable_new
+        < restore_unit
+        < reload_units
+        < restore_enabled
+        < restore_active
+    )
     assert 'if [[ "$standalone_was_enabled" -eq 1 ]]; then' in cleanup
-    assert 'systemctl enable "$UNIT_NAME"' in cleanup
     assert 'if [[ "$standalone_was_active" -eq 1 ]]; then' in cleanup
-    assert 'systemctl start "$UNIT_NAME"' in cleanup
     assert 'systemctl start "$LEGACY_UNIT"' in cleanup
-    assert 'install -o root -g root -m 0644 "$PREVIOUS_UNIT" "$UNIT_PATH"' in cleanup
 
 
 def test_standalone_receipt_is_durable_and_svcops_readable() -> None:
