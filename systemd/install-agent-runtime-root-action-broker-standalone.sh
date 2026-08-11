@@ -369,7 +369,12 @@ systemctl is-active --quiet "$LEGACY_UNIT" && legacy_was_active=1 || true
 systemctl is-enabled --quiet "$LEGACY_UNIT" && legacy_was_enabled=1 || true
 if [[ -e "$UNIT_PATH" ]]; then
     [[ -f "$UNIT_PATH" && ! -L "$UNIT_PATH" ]] || die existing_unit_invalid
-    cmp -s "$UNIT_PATH" "$UNIT_NEXT" || die existing_unit_mismatch
+    if ! cmp -s "$UNIT_PATH" "$UNIT_NEXT"; then
+        grep -Eq '^ExecStart=/opt/agent-runtime-root-action-broker/releases/[0-9a-f]{40}/\.venv/bin/python -I -B -m agent_runtime_ops\.root_actions\.service$' "$UNIT_PATH" || die existing_unit_mismatch
+        grep -Eq '^Environment=AGENT_RUNTIME_ROOT_ACTION_RELEASE=/opt/agent-runtime-root-action-broker/releases/[0-9a-f]{40}$' "$UNIT_PATH" || die existing_unit_mismatch
+        grep -Eq '^Environment=AGENT_RUNTIME_ROOT_ACTION_SOURCE_COMMIT=[0-9a-f]{40}$' "$UNIT_PATH" || die existing_unit_mismatch
+        grep -Eq '^Environment=AGENT_RUNTIME_ROOT_ACTION_TREE_SHA256=sha256:[0-9a-f]{64}$' "$UNIT_PATH" || die existing_unit_mismatch
+    fi
     cp --preserve=mode,ownership,timestamps "$UNIT_PATH" "$PREVIOUS_UNIT" \
         || die previous_unit_copy_failed
     unit_preexisted=1

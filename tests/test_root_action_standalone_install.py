@@ -158,7 +158,7 @@ def test_standalone_installer_never_seeds_from_mutable_current_release() -> None
     assert "/opt/agent-runtime-ops/current" not in source
     assert "cp -a" not in source
     assert "--system-site-packages" not in source
-    assert 'cmp -s "$UNIT_PATH" "$UNIT_NEXT" || die existing_unit_mismatch' in source
+    assert "grep -Eq '^ExecStart=/opt/agent-runtime-root-action-broker/releases/" in source
 
 
 def test_embedded_python_blocks_compile(tmp_path: Path) -> None:
