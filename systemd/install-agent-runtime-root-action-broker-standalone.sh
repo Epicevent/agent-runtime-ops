@@ -136,6 +136,8 @@ REQUIREMENTS_COPY=$TMP/requirements.lock
 PREVIOUS_UNIT=$TMP/previous.service
 legacy_was_active=0
 legacy_was_enabled=0
+standalone_was_active=0
+standalone_was_enabled=0
 unit_preexisted=0
 
 write_receipt() {
@@ -216,15 +218,16 @@ cleanup() {
         if [[ "$legacy_was_active" -eq 1 ]]; then
             systemctl start "$LEGACY_UNIT" >/dev/null 2>&1 || true
         fi
-        if ! systemctl is-active --quiet "$UNIT_NAME"; then
-            legacy_active_now=0
-            legacy_enabled_now=0
-            systemctl is-active --quiet "$LEGACY_UNIT" && legacy_active_now=1 || true
-            systemctl is-enabled --quiet "$LEGACY_UNIT" && legacy_enabled_now=1 || true
-            if [[ "$legacy_active_now" -eq "$legacy_was_active" \
-                && "$legacy_enabled_now" -eq "$legacy_was_enabled" ]]; then
-                rollback_verified=1
-            fi
+        standalone_active_now=0
+        standalone_enabled_now=0
+        legacy_active_now=0
+        legacy_enabled_now=0
+        systemctl is-active --quiet "$UNIT_NAME" && standalone_active_now=1 || true
+        systemctl is-enabled --quiet "$UNIT_NAME" && standalone_enabled_now=1 || true
+        systemctl is-active --quiet "$LEGACY_UNIT" && legacy_active_now=1 || true
+        systemctl is-enabled --quiet "$LEGACY_UNIT" && legacy_enabled_now=1 || true
+        if [[ "$standalone_active_now" -eq "$standalone_was_active"             && "$standalone_enabled_now" -eq "$standalone_was_enabled"             && "$legacy_active_now" -eq "$legacy_was_active"             && "$legacy_enabled_now" -eq "$legacy_was_enabled" ]]; then
+            rollback_verified=1
         fi
     fi
     if [[ "$rc" -ne 0 && "$receipt_enabled" -eq 1 ]]; then
@@ -367,6 +370,8 @@ systemd-analyze verify "$UNIT_NEXT" >/dev/null || die rendered_unit_verify_faile
 
 systemctl is-active --quiet "$LEGACY_UNIT" && legacy_was_active=1 || true
 systemctl is-enabled --quiet "$LEGACY_UNIT" && legacy_was_enabled=1 || true
+systemctl is-active --quiet "$UNIT_NAME" && standalone_was_active=1 || true
+systemctl is-enabled --quiet "$UNIT_NAME" && standalone_was_enabled=1 || true
 if [[ -e "$UNIT_PATH" ]]; then
     [[ -f "$UNIT_PATH" && ! -L "$UNIT_PATH" ]] || die existing_unit_invalid
     if ! cmp -s "$UNIT_PATH" "$UNIT_NEXT"; then
