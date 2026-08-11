@@ -61,6 +61,7 @@ def main() -> int:
         store,
         repair_public=broker.repair_public_best_effort,
     )
+    broker.set_dispatch(worker.enqueue)
     worker.recover_orphaned_claims()
     broker.reconcile_public()
     worker.start()
