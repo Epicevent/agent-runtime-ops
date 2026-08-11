@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 from pathlib import Path
 import tempfile
@@ -77,6 +78,7 @@ def resolved() -> ResolvedRuntime:
         777,
         "/workspace/nas_docs",
         ("groupware_mails_example",),
+        ("//nas.example/groupware[/groupware/mails/example]",),
         DIGEST_A,
         DIGEST_B,
     )
@@ -92,7 +94,7 @@ def observation() -> RuntimeObservation:
         principal(),
         (
             DeclaredPathProbe(
-                0, True, True, True, True, True, True, None, "regular_file"
+                0, True, True, True, True, True, True, True, True, None, "regular_file"
             ),
         ),
     )
@@ -103,21 +105,31 @@ def observe_with(
     *,
     host_present: bool = True,
     container_present: bool = True,
+    host_source_match: bool = True,
+    host_readonly: bool = True,
+    host_observed: bool = True,
 ) -> RuntimeObservation:
+    expected_source = "//nas.example/groupware[/groupware/mails/example]"
     host_rows = []
     container_rows = []
     if host_present:
         host_rows.append(
             {
                 "target": "/home/oc16/nas_docs/groupware/groupware_mails_example",
+                "source": (
+                    expected_source
+                    if host_source_match
+                    else "//other.example/groupware[/groupware/mails/example]"
+                ),
                 "fstype": "cifs",
-                "options": "ro,nosuid,nodev",
+                "options": f"{'ro' if host_readonly else 'rw'},nosuid,nodev",
             }
         )
     if container_present:
         container_rows.append(
             {
                 "target": "/workspace/nas_docs/groupware/groupware_mails_example",
+                "source": expected_source,
                 "fstype": "cifs",
                 "options": "ro,nosuid,nodev",
             }
@@ -137,7 +149,11 @@ def observe_with(
         ),
         patch(
             "agent_runtime_ops.domain.groupware_runtime_observation.findmnt_under",
-            return_value=(0, "", host_rows),
+            return_value=(
+                (0, "", host_rows)
+                if host_observed
+                else (1, "unavailable", [])
+            ),
         ),
         patch(
             "agent_runtime_ops.domain.groupware_runtime_observation.mountinfo_under",
@@ -281,9 +297,19 @@ class GroupwareRuntimeObservationTests(unittest.TestCase):
         healthy = observe_with(result)
         missing_host = observe_with(result, host_present=False)
         self.assertEqual(healthy.status, "healthy")
+        healthy_facts = dict(healthy.public_facts())
+        self.assertEqual(healthy_facts["failure_class"], "HEALTHY")
+        self.assertEqual(healthy_facts["host_mount_present_count"], "1")
+        self.assertEqual(healthy_facts["host_mount_source_match_count"], "1")
+        self.assertEqual(healthy_facts["host_mount_readonly_count"], "1")
+        self.assertEqual(healthy_facts["bounded_probe_open_read_count"], "1")
         self.assertTrue(healthy.probes[0].container_mount_present)
         self.assertTrue(healthy.probes[0].open_read_ok)
         self.assertEqual(missing_host.status, "unhealthy")
+        self.assertEqual(missing_host.reason_code, "runtime_mount_missing")
+        missing_facts = dict(missing_host.public_facts())
+        self.assertEqual(missing_facts["failure_class"], "MOUNT_MISSING")
+        self.assertEqual(missing_facts["mount_missing_count"], "1")
         self.assertFalse(missing_host.probes[0].host_mount_present)
         self.assertTrue(missing_host.probes[0].open_read_ok)
 
@@ -298,9 +324,77 @@ class GroupwareRuntimeObservationTests(unittest.TestCase):
             }
         )
         self.assertEqual(value.status, "unknown")
-        self.assertEqual(value.reason_code, "runtime_observation_incomplete")
+        self.assertEqual(value.reason_code, "runtime_empty_readable")
+        facts = dict(value.public_facts())
+        self.assertEqual(facts["failure_class"], "EMPTY_READABLE")
+        self.assertEqual(facts["bounded_probe_empty_readable_count"], "1")
+
+    def test_source_mismatch_is_explicit_without_publishing_source(self) -> None:
+        value = observe_with(
+            {
+                "index": 0,
+                "list_ok": True,
+                "open_read_ok": True,
+                "errno": None,
+                "representative": "regular_file",
+            },
+            host_source_match=False,
+        )
+        facts = dict(value.public_facts())
+        self.assertEqual(value.status, "unhealthy")
+        self.assertEqual(value.reason_code, "runtime_source_mismatch")
+        self.assertEqual(facts["failure_class"], "SOURCE_MISMATCH")
+        self.assertEqual(facts["host_mount_present_count"], "1")
+        self.assertEqual(facts["host_mount_source_match_count"], "0")
+        self.assertNotIn("nas.example", json.dumps(facts))
+
+    def test_access_denied_and_contract_mismatch_are_distinct(self) -> None:
+        denied = observe_with(
+            {
+                "index": 0,
+                "list_ok": False,
+                "open_read_ok": False,
+                "errno": errno.EACCES,
+                "representative": "directory_open_failed",
+            }
+        )
+        contract = observe_with(
+            {
+                "index": 0,
+                "list_ok": True,
+                "open_read_ok": True,
+                "errno": None,
+                "representative": "regular_file",
+            },
+            host_readonly=False,
+        )
+        unobserved = observe_with(
+            {
+                "index": 0,
+                "list_ok": True,
+                "open_read_ok": True,
+                "errno": None,
+                "representative": "regular_file",
+            },
+            host_observed=False,
+        )
+        denied_facts = dict(denied.public_facts())
+        contract_facts = dict(contract.public_facts())
+        self.assertEqual(denied.reason_code, "runtime_access_denied")
+        self.assertEqual(denied_facts["access_denied_count"], "1")
+        self.assertEqual(contract.status, "unknown")
+        self.assertEqual(
+            contract.reason_code, "runtime_observer_contract_mismatch"
+        )
+        self.assertEqual(contract_facts["host_mount_readonly_count"], "0")
+        self.assertEqual(
+            contract_facts["observer_contract_mismatch_count"], "1"
+        )
+        self.assertEqual(unobserved.reason_code, "runtime_observer_contract_mismatch")
+        self.assertNotEqual(unobserved.reason_code, "runtime_mount_missing")
 
     def test_handler_receipt_is_redacted_and_binds_principal(self) -> None:
+
         with patch(
             "agent_runtime_ops.root_actions.groupware_runtime_observation.observe_groupware_runtime",
             return_value=observation(),
@@ -312,6 +406,10 @@ class GroupwareRuntimeObservationTests(unittest.TestCase):
         self.assertEqual(raw["principal"]["uid"], 1022)
         self.assertEqual(raw["principal"]["supplementary_group_count"], 2)
         self.assertEqual(facts["open_read_verified_count"], "1")
+        self.assertEqual(facts["failure_class"], "HEALTHY")
+        self.assertEqual(facts["container_mount_present_count"], "1")
+        self.assertEqual(facts["container_mount_source_match_count"], "1")
+        self.assertEqual(facts["bounded_probe_open_read_count"], "1")
         text = result.raw_bytes.decode()
         self.assertNotIn("groupware/mails/example", text)
         self.assertNotIn("0123456789ab", text)
@@ -379,6 +477,9 @@ class GroupwareRuntimeObservationTests(unittest.TestCase):
         raw = json.loads(result.raw_bytes)
         self.assertEqual(result.terminal_outcome, "failed")
         self.assertEqual(result.public_status, "unknown")
+        self.assertEqual(
+            dict(result.public_facts)["failure_class"], "OBSERVER_CONTRACT_MISMATCH"
+        )
         self.assertEqual(raw["reason_code"], "container_not_found")
         self.assertEqual(raw["declared_paths"], [])
         self.assertEqual(raw["writes"], 0)
