@@ -20,6 +20,7 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 Restart=on-failure
 RestartSec=2s
 NoNewPrivileges=yes
+AmbientCapabilities=CAP_SETUID
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
