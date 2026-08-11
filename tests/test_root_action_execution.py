@@ -11,8 +11,11 @@ from agent_runtime_ops.root_actions import (
 
 
 class RootActionExecutionRegistryTests(unittest.TestCase):
-    def test_default_registry_has_no_product_operation_or_handler(self) -> None:
-        self.assertEqual(DEFAULT_EXECUTION_POLICIES.enabled_operation_ids, ())
+    def test_only_fixed_groupware_observer_is_enabled(self) -> None:
+        self.assertEqual(
+            DEFAULT_EXECUTION_POLICIES.enabled_operation_ids,
+            ("nas.observe_groupware_runtime",),
+        )
         self.assertEqual(
             set(DEFAULT_EXECUTION_POLICIES.disabled_operation_ids),
             {
@@ -27,7 +30,13 @@ class RootActionExecutionRegistryTests(unittest.TestCase):
                 for operation_id in DEFAULT_REGISTRY.operation_ids
             )
         )
-        for operation_id in DEFAULT_REGISTRY.operation_ids:
+        self.assertEqual(
+            DEFAULT_OPERATION_HANDLERS.handler(
+                "nas.observe_groupware_runtime"
+            ).operation_version,
+            1,
+        )
+        for operation_id in DEFAULT_EXECUTION_POLICIES.disabled_operation_ids:
             with self.assertRaises(KeyError):
                 DEFAULT_OPERATION_HANDLERS.handler(operation_id)
 

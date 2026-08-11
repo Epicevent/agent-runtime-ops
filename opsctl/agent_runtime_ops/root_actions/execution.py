@@ -93,6 +93,12 @@ DEFAULT_EXECUTION_POLICIES = ExecutionPolicyRegistry(
             OperationAvailability.DISABLED_UNVERIFIED_AUTHORITY,
             "disabled_unverified_authority",
         ),
+        ExecutionPolicy(
+            "nas.observe_groupware_runtime",
+            1,
+            OperationAvailability.ENABLED,
+            None,
+        ),
     )
 )
 
@@ -153,4 +159,9 @@ class OperationHandlerRegistry:
         return self._handlers[operation_id]
 
 
-DEFAULT_OPERATION_HANDLERS = OperationHandlerRegistry(())
+from .groupware_runtime_observation import GroupwareRuntimeObservationHandler
+
+
+DEFAULT_OPERATION_HANDLERS = OperationHandlerRegistry(
+    (GroupwareRuntimeObservationHandler(),)
+)

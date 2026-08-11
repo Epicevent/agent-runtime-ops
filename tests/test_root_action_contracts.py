@@ -135,7 +135,7 @@ class RootActionManifestContractTests(unittest.TestCase):
     ) -> None:
         projection = DEFAULT_REGISTRY.projection()
         self.assertEqual(projection["schema"], REGISTRY_VERSION)
-        self.assertEqual(len(projection["operations"]), 3)
+        self.assertEqual(len(projection["operations"]), 4)
         forbidden = {"command", "argv", "path", "env", "payload", "shell"}
         for operation in projection["operations"]:
             self.assertFalse(forbidden & set(operation["parameters"]))
@@ -159,6 +159,7 @@ class RootActionManifestContractTests(unittest.TestCase):
                 "runtime_seconds": 600,
                 "memory_mib": 4096,
             },
+            "nas.observe_groupware_runtime": {"slot": "oc16"},
         }
         self.assertEqual(set(examples), set(DEFAULT_REGISTRY.operation_ids))
         for operation_id, parameters in examples.items():

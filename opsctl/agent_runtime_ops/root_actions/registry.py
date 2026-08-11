@@ -198,5 +198,10 @@ DEFAULT_REGISTRY = OperationRegistry(
                 ("memory_mib", _rule("integer", minimum=128, maximum=262_144)),
             ),
         ),
+        OperationSpec(
+            "nas.observe_groupware_runtime",
+            1,
+            (("slot", _rule("identifier")),),
+        ),
     )
 )

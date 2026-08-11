@@ -23,6 +23,12 @@ TEST_EXECUTION_POLICIES = ExecutionPolicyRegistry(
             OperationAvailability.DISABLED_UNVERIFIED_AUTHORITY,
             "disabled_unverified_authority",
         ),
+        ExecutionPolicy(
+            "nas.observe_groupware_runtime",
+            1,
+            OperationAvailability.DISABLED_UNVERIFIED_AUTHORITY,
+            "disabled_unverified_authority",
+        ),
     )
 )
 
