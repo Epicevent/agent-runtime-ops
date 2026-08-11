@@ -1,4 +1,5 @@
 from dataclasses import asdict, dataclass
+import errno as errno_codes
 import hashlib
 import json
 import os
@@ -33,6 +34,13 @@ MAX_PROBE_DEPTH = 2
 PROBE_TIMEOUT_SECONDS = 15.0
 _INSPECT_TEMPLATE = '{{.State.Pid}}\n{{.State.Running}}\n{{index .Config.Labels "agent-runtime.profile"}}'
 
+HEALTHY = "HEALTHY"
+MOUNT_MISSING = "MOUNT_MISSING"
+SOURCE_MISMATCH = "SOURCE_MISMATCH"
+ACCESS_DENIED = "ACCESS_DENIED"
+EMPTY_READABLE = "EMPTY_READABLE"
+OBSERVER_CONTRACT_MISMATCH = "OBSERVER_CONTRACT_MISMATCH"
+
 
 class GroupwareRuntimeObservationError(RuntimeError):
     def __init__(self, reason_code: str) -> None:
@@ -52,14 +60,52 @@ class ServicePrincipal:
 @dataclass(frozen=True)
 class DeclaredPathProbe:
     index: int
-    host_mount_present: bool
-    host_mount_readonly: bool
-    container_mount_present: bool
-    container_mount_readonly: bool
+    host_mount_present: bool | None
+    host_mount_source_match: bool | None
+    host_mount_readonly: bool | None
+    container_mount_present: bool | None
+    container_mount_source_match: bool | None
+    container_mount_readonly: bool | None
     list_ok: bool | None
     open_read_ok: bool | None
     errno: int | None
     representative: str
+
+    def mount_failure_class(self) -> str | None:
+        present = (self.host_mount_present, self.container_mount_present)
+        if any(value is None for value in present):
+            return OBSERVER_CONTRACT_MISMATCH
+        if not all(present):
+            return MOUNT_MISSING
+        sources = (
+            self.host_mount_source_match,
+            self.container_mount_source_match,
+        )
+        if any(value is None for value in sources):
+            return OBSERVER_CONTRACT_MISMATCH
+        if not all(sources):
+            return SOURCE_MISMATCH
+        readonly = (self.host_mount_readonly, self.container_mount_readonly)
+        if any(value is not True for value in readonly):
+            return OBSERVER_CONTRACT_MISMATCH
+        return None
+
+    def bounded_probe_outcome(self) -> str:
+        if self.list_ok is True and self.open_read_ok is True:
+            return HEALTHY
+        if self.errno in {errno_codes.EACCES, errno_codes.EPERM}:
+            return ACCESS_DENIED
+        if (
+            self.list_ok is True
+            and self.open_read_ok is False
+            and self.errno is None
+            and self.representative == "no_regular_file_within_bound"
+        ):
+            return EMPTY_READABLE
+        return OBSERVER_CONTRACT_MISMATCH
+
+    def failure_class(self) -> str:
+        return self.mount_failure_class() or self.bounded_probe_outcome()
 
 
 @dataclass(frozen=True)
@@ -99,7 +145,15 @@ class RuntimeObservation:
 
     def public_facts(self) -> tuple[tuple[str, str], ...]:
         principal = self.principal
-        count = lambda field: str(sum(getattr(item, field) is True for item in self.probes))
+        count = lambda field: str(
+            sum(getattr(item, field) is True for item in self.probes)
+        )
+        class_count = lambda value: str(
+            sum(item.failure_class() == value for item in self.probes)
+        )
+        probe_count = lambda value: str(
+            sum(item.bounded_probe_outcome() == value for item in self.probes)
+        )
         return (
             ("observation_schema", RAW_SCHEMA),
             ("status", self.status),
@@ -109,12 +163,60 @@ class RuntimeObservation:
             ("container_identity_digest", self.container_identity_digest),
             ("reason_code", self.reason_code),
             ("declared_path_count", str(len(self.probes))),
-            ("host_mount_verified_count", count("host_mount_readonly")),
-            ("container_mount_verified_count", count("container_mount_readonly")),
+            ("host_mount_present_count", count("host_mount_present")),
+            ("host_mount_source_match_count", count("host_mount_source_match")),
+            ("host_mount_readonly_count", count("host_mount_readonly")),
+            (
+                "host_mount_verified_count",
+                str(
+                    sum(
+                        item.host_mount_present is True
+                        and item.host_mount_source_match is True
+                        and item.host_mount_readonly is True
+                        for item in self.probes
+                    )
+                ),
+            ),
+            ("container_mount_present_count", count("container_mount_present")),
+            (
+                "container_mount_source_match_count",
+                count("container_mount_source_match"),
+            ),
+            ("container_mount_readonly_count", count("container_mount_readonly")),
+            (
+                "container_mount_verified_count",
+                str(
+                    sum(
+                        item.container_mount_present is True
+                        and item.container_mount_source_match is True
+                        and item.container_mount_readonly is True
+                        for item in self.probes
+                    )
+                ),
+            ),
+            ("failure_class", _aggregate_failure_class(self.probes)),
+            ("mount_missing_count", class_count(MOUNT_MISSING)),
+            ("source_mismatch_count", class_count(SOURCE_MISMATCH)),
+            ("access_denied_count", class_count(ACCESS_DENIED)),
+            ("empty_readable_count", class_count(EMPTY_READABLE)),
+            (
+                "observer_contract_mismatch_count",
+                class_count(OBSERVER_CONTRACT_MISMATCH),
+            ),
+            ("bounded_probe_open_read_count", probe_count(HEALTHY)),
+            ("bounded_probe_access_denied_count", probe_count(ACCESS_DENIED)),
+            ("bounded_probe_empty_readable_count", probe_count(EMPTY_READABLE)),
+            (
+                "bounded_probe_contract_mismatch_count",
+                probe_count(OBSERVER_CONTRACT_MISMATCH),
+            ),
             ("principal_resolved", str(principal is not None).lower()),
             ("principal_uid", str(principal.uid) if principal else "unavailable"),
             ("principal_gid", str(principal.gid) if principal else "unavailable"),
-            ("principal_supplementary_group_count", str(len(principal.groups)) if principal else "unavailable"),
+            (
+                "principal_supplementary_group_count",
+                str(len(principal.groups)) if principal else "unavailable",
+            ),
             ("list_verified_count", count("list_ok")),
             ("open_read_verified_count", count("open_read_ok")),
             ("writes", "0"),
@@ -128,6 +230,7 @@ class ResolvedRuntime:
     container_pid: int
     container_nas_root: str
     aliases: tuple[str, ...]
+    expected_sources: tuple[str, ...]
     desired_digest: str
     container_identity_digest: str
 
@@ -138,6 +241,17 @@ def _canonical_json(value: object) -> bytes:
 
 def _digest(value: object, domain: bytes = b"") -> str:
     return "sha256:" + hashlib.sha256(domain + _canonical_json(value)).hexdigest()
+
+
+def _aggregate_failure_class(probes: tuple[DeclaredPathProbe, ...]) -> str:
+    if not probes:
+        return OBSERVER_CONTRACT_MISMATCH
+    failures = {item.failure_class() for item in probes} - {HEALTHY}
+    if not failures:
+        return HEALTHY
+    if len(failures) == 1:
+        return next(iter(failures))
+    return OBSERVER_CONTRACT_MISMATCH
 
 
 def _container_path(root: str, alias: str) -> str:
@@ -356,9 +470,14 @@ def _resolve_runtime(slot: str, state_root: Path) -> ResolvedRuntime:
     if not isinstance(record, dict):
         raise GroupwareRuntimeObservationError("groupware_view_not_declared")
     try:
-        corpus = corpus_for_share(str(record.get("share") or ""))
+        share = str(record.get("share") or "").rstrip("/")
+        corpus = corpus_for_share(share)
         paths = tuple(effective_granted_paths(record))
         aliases = tuple(path_alias(item) for item in paths)
+        expected_sources = tuple(
+            f"{share}[/{PurePosixPath(item).as_posix().lstrip('/')}]"
+            for item in paths
+        )
     except ValueError as exc:
         raise GroupwareRuntimeObservationError("groupware_view_invalid") from exc
     if corpus.name != "groupware" or not paths or len(paths) > MAX_DECLARED_PATHS:
@@ -382,6 +501,7 @@ def _resolve_runtime(slot: str, state_root: Path) -> ResolvedRuntime:
         "container_nas_root": container_root,
         "declared_paths": sorted(paths),
         "aliases": sorted(aliases),
+        "expected_sources": sorted(expected_sources),
     }
     return ResolvedRuntime(
         binding,
@@ -389,15 +509,22 @@ def _resolve_runtime(slot: str, state_root: Path) -> ResolvedRuntime:
         container_pid,
         container_root,
         aliases,
+        expected_sources,
         _digest(desired, DESIRED_DOMAIN),
         _digest({"instance_id": binding.instance_id, "container": container}, b"agent-runtime-container-identity/v1\x00"),
     )
 
 
-def _mount(rows: Iterable[dict[str, str]], target: str) -> tuple[bool, bool]:
+def _mount(
+    rows: Iterable[dict[str, str]], target: str, expected_source: str
+) -> tuple[bool | None, bool | None, bool | None]:
     matched = [row for row in rows if row.get("target") == target]
-    present = len(matched) == 1 and matched[0].get("fstype") == "cifs"
-    return present, present and is_readonly_mount(matched[0])
+    if not matched:
+        return False, None, None
+    if len(matched) != 1 or matched[0].get("fstype") != "cifs":
+        return None, None, None
+    row = matched[0]
+    return True, row.get("source") == expected_source, is_readonly_mount(row)
 
 
 def observe_groupware_runtime(slot: str, state_root: Path = DEFAULT_STATE_ROOT) -> RuntimeObservation:
@@ -410,34 +537,37 @@ def observe_groupware_runtime(slot: str, state_root: Path = DEFAULT_STATE_ROOT) 
     destinations = tuple(_container_path(runtime.container_nas_root, alias) for alias in runtime.aliases)
     results = _probe_namespace(runtime.container_pid, principal, destinations)
     probes = []
-    for index, (alias, target, result) in enumerate(zip(runtime.aliases, destinations, results)):
-        host_present, host_ro = _mount(host_rows, f"{host_root}/{alias}") if host_rc == 0 else (False, False)
-        container_present, container_ro = _mount(container_rows, target) if container_rc == 0 else (False, False)
+    for index, (alias, target, expected_source, result) in enumerate(
+        zip(runtime.aliases, destinations, runtime.expected_sources, results)
+    ):
+        host_mount = (
+            _mount(host_rows, f"{host_root}/{alias}", expected_source)
+            if host_rc == 0
+            else (None, None, None)
+        )
+        container_mount = (
+            _mount(container_rows, target, expected_source)
+            if container_rc == 0
+            else (None, None, None)
+        )
         probes.append(
             DeclaredPathProbe(
                 index,
-                host_present,
-                host_ro,
-                container_present,
-                container_ro,
+                *host_mount,
+                *container_mount,
                 result.get("list_ok") if isinstance(result.get("list_ok"), bool) else None,
                 result.get("open_read_ok") if isinstance(result.get("open_read_ok"), bool) else None,
                 result.get("errno") if type(result.get("errno")) is int else None,
                 str(result.get("representative") or "unobserved"),
             )
         )
-    all_mounts = all(p.host_mount_readonly and p.container_mount_readonly for p in probes)
-    all_reads = all(p.list_ok is True and p.open_read_ok is True for p in probes)
-    unknown = host_rc != 0 or container_rc != 0 or any(
-        p.list_ok is None or p.open_read_ok is None or p.representative in {"no_regular_file_within_bound", "search_bound_reached"}
-        for p in probes
-    )
-    if all_mounts and all_reads:
+    failure_class = _aggregate_failure_class(tuple(probes))
+    if failure_class == HEALTHY:
         status, reason = "healthy", "runtime_observation_healthy"
-    elif unknown:
-        status, reason = "unknown", "runtime_observation_incomplete"
+    elif failure_class in {MOUNT_MISSING, SOURCE_MISMATCH, ACCESS_DENIED}:
+        status, reason = "unhealthy", f"runtime_{failure_class.lower()}"
     else:
-        status, reason = "unhealthy", "runtime_observation_failed"
+        status, reason = "unknown", f"runtime_{failure_class.lower()}"
     return RuntimeObservation(runtime.binding.linux_account, runtime.desired_digest, runtime.container_identity_digest, status, reason, principal, tuple(probes))
 
 
