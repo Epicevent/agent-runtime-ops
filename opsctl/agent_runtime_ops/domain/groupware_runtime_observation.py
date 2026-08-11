@@ -17,9 +17,10 @@ from .nas_views import (
     get_view_record,
     load_views_state,
     path_alias,
+    slot_entry,
 )
 from .runtime_truth import find_gateway_container_by_binding
-from ..host.mounts import findmnt_under, is_readonly_mount, mountinfo_under
+from ..host.mounts import is_readonly_mount, mountinfo_under
 from ..paths import DEFAULT_STATE_ROOT
 from ..profiles import load_profile
 from ..routing import RuntimeBinding, get_runtime_binding
@@ -32,6 +33,7 @@ MAX_DIRECTORY_ENTRIES = 64
 MAX_PROBE_ENTRIES = 256
 MAX_PROBE_DEPTH = 2
 PROBE_TIMEOUT_SECONDS = 15.0
+HOST_MOUNT_NAMESPACE_PID = 1
 _INSPECT_TEMPLATE = '{{.State.Pid}}\n{{.State.Running}}\n{{index .Config.Labels "agent-runtime.profile"}}'
 
 HEALTHY = "HEALTHY"
@@ -229,6 +231,7 @@ class ResolvedRuntime:
     container: str
     container_pid: int
     container_nas_root: str
+    host_nas_root: str
     aliases: tuple[str, ...]
     expected_sources: tuple[str, ...]
     desired_digest: str
@@ -492,6 +495,7 @@ def _resolve_runtime(slot: str, state_root: Path) -> ResolvedRuntime:
     if profile.metadata.get("family") != binding.family or profile.metadata.get("slot_class") != binding.runtime_class:
         raise GroupwareRuntimeObservationError("container_profile_mismatch")
     container_root = str(profile.metadata.get("container_nas_root") or "")
+    host_root = str(slot_entry(binding.linux_account, corpus.name))
     for alias in aliases:
         _container_path(container_root, alias)
     desired = {
@@ -499,6 +503,7 @@ def _resolve_runtime(slot: str, state_root: Path) -> ResolvedRuntime:
         "instance_id": binding.instance_id,
         "corpus": "groupware",
         "container_nas_root": container_root,
+        "host_nas_root": host_root,
         "declared_paths": sorted(paths),
         "aliases": sorted(aliases),
         "expected_sources": sorted(expected_sources),
@@ -508,6 +513,7 @@ def _resolve_runtime(slot: str, state_root: Path) -> ResolvedRuntime:
         container,
         container_pid,
         container_root,
+        host_root,
         aliases,
         expected_sources,
         _digest(desired, DESIRED_DOMAIN),
@@ -530,9 +536,12 @@ def _mount(
 def observe_groupware_runtime(slot: str, state_root: Path = DEFAULT_STATE_ROOT) -> RuntimeObservation:
     runtime = _resolve_runtime(slot, Path(state_root))
     principal = _service_principal(runtime)
-    host_root = f"/home/{runtime.binding.linux_account}/nas_docs/groupware"
+    host_root = runtime.host_nas_root.rstrip("/")
     container_root = f"{runtime.container_nas_root.rstrip('/')}/groupware"
-    host_rc, _, host_rows = findmnt_under(host_root)
+    # ProtectHome=yes isolates the standalone broker's own /home view. Read
+    # the host mount namespace through the existing bounded mountinfo parser
+    # instead of weakening the unit sandbox or accepting a caller path.
+    host_rc, _, host_rows = mountinfo_under(HOST_MOUNT_NAMESPACE_PID, host_root)
     container_rc, _, container_rows = mountinfo_under(runtime.container_pid, container_root)
     destinations = tuple(_container_path(runtime.container_nas_root, alias) for alias in runtime.aliases)
     results = _probe_namespace(runtime.container_pid, principal, destinations)
