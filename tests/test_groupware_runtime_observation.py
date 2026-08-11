@@ -21,7 +21,16 @@ from agent_runtime_ops.root_actions.contracts import seal_typed_manifest
 from agent_runtime_ops.root_actions.execution import (
     DEFAULT_EXECUTION_POLICIES,
     DEFAULT_OPERATION_HANDLERS,
+    ExecutionPolicy,
+    ExecutionPolicyRegistry,
+    OperationAvailability,
     OperationHandlerRegistry,
+)
+from agent_runtime_ops.root_actions.broker import TypedRootActionBroker
+from agent_runtime_ops.root_actions.local_fixture import LocalRootActionFixture
+from agent_runtime_ops.root_actions.submission import (
+    BrokerPeerIdentity,
+    SubmissionPolicy,
 )
 from agent_runtime_ops.root_actions.groupware_runtime_observation import (
     GroupwareRuntimeObservationHandler,
@@ -113,26 +122,98 @@ def observe_with(
                 "options": "ro,nosuid,nodev",
             }
         )
-    with patch(
-        "agent_runtime_ops.domain.groupware_runtime_observation._resolve_runtime",
-        return_value=resolved(),
-    ), patch(
-        "agent_runtime_ops.domain.groupware_runtime_observation._service_principal",
-        return_value=principal(),
-    ), patch(
-        "agent_runtime_ops.domain.groupware_runtime_observation._probe_namespace",
-        return_value=(result,),
-    ), patch(
-        "agent_runtime_ops.domain.groupware_runtime_observation.findmnt_under",
-        return_value=(0, "", host_rows),
-    ), patch(
-        "agent_runtime_ops.domain.groupware_runtime_observation.mountinfo_under",
-        return_value=(0, "", container_rows),
+    with (
+        patch(
+            "agent_runtime_ops.domain.groupware_runtime_observation._resolve_runtime",
+            return_value=resolved(),
+        ),
+        patch(
+            "agent_runtime_ops.domain.groupware_runtime_observation._service_principal",
+            return_value=principal(),
+        ),
+        patch(
+            "agent_runtime_ops.domain.groupware_runtime_observation._probe_namespace",
+            return_value=(result,),
+        ),
+        patch(
+            "agent_runtime_ops.domain.groupware_runtime_observation.findmnt_under",
+            return_value=(0, "", host_rows),
+        ),
+        patch(
+            "agent_runtime_ops.domain.groupware_runtime_observation.mountinfo_under",
+            return_value=(0, "", container_rows),
+        ),
     ):
         return observe_groupware_runtime("oc16")
 
 
 class GroupwareRuntimeObservationTests(unittest.TestCase):
+    def test_enabled_observation_policy_claims_and_dispatches_once_on_submit(
+        self,
+    ) -> None:
+        policies = ExecutionPolicyRegistry(
+            (
+                ExecutionPolicy(
+                    "audit.verify",
+                    1,
+                    OperationAvailability.DISABLED_UNVERIFIED_AUTHORITY,
+                    "disabled",
+                ),
+                ExecutionPolicy(
+                    "projection.staging_selftest",
+                    1,
+                    OperationAvailability.DISABLED_UNVERIFIED_AUTHORITY,
+                    "disabled",
+                ),
+                ExecutionPolicy(
+                    "agent_loop.campaign_run",
+                    1,
+                    OperationAvailability.DISABLED_UNVERIFIED_AUTHORITY,
+                    "disabled",
+                ),
+                ExecutionPolicy(
+                    "nas.observe_groupware_runtime",
+                    1,
+                    OperationAvailability.ENABLED,
+                    None,
+                    True,
+                ),
+            )
+        )
+        store = LocalRootActionFixture()
+        dispatched: list[tuple[str, str]] = []
+        broker = TypedRootActionBroker(
+            store,
+            events=Events(
+                [
+                    ("event-observe-submit", "2026-07-27T05:00:01Z"),
+                    ("event-observe-circuit", "2026-07-27T05:00:01Z"),
+                    ("event-observe-claim", "2026-07-27T05:00:02Z"),
+                ]
+            ),
+            policies=policies,
+            submission_policy=SubmissionPolicy(
+                allowed_uids=frozenset({1002}), allowed_gids=frozenset()
+            ),
+            dispatch=lambda job_id, job_digest: dispatched.append((job_id, job_digest)),
+        )
+        value = valid_manifest()
+        value["operation_id"] = "nas.observe_groupware_runtime"
+        value["parameters"] = {"slot": "oc16"}
+        value["expected_pre_state"] = {"kind": "none", "digest": None}
+        job = seal_typed_manifest(encoded(value))
+        submitted = broker.submit(
+            job.canonical_manifest, peer=BrokerPeerIdentity(1002, 1002, 1)
+        )
+        self.assertEqual(submitted.status["state"]["name"], "running")
+        self.assertEqual(dispatched, [(job.job_id, job.job_digest)])
+        self.assertEqual(store.read_record(job.job_id).execution_count, 1)
+        retry = broker.submit(
+            job.canonical_manifest, peer=BrokerPeerIdentity(1002, 1002, 1)
+        )
+        self.assertEqual(retry.status["state"]["name"], "running")
+        self.assertEqual(dispatched, [(job.job_id, job.job_digest)])
+
     def test_registry_exposes_only_slot_and_fixed_handler(self) -> None:
         spec = DEFAULT_REGISTRY.spec("nas.observe_groupware_runtime")
         self.assertEqual(spec.parameter_names, ("slot",))
@@ -152,15 +233,19 @@ class GroupwareRuntimeObservationTests(unittest.TestCase):
 
     def test_principal_transition_preserves_groups_before_gid_uid(self) -> None:
         calls: list[tuple[str, object]] = []
-        with patch(
-            "agent_runtime_ops.domain.groupware_runtime_observation.os.setgroups",
-            side_effect=lambda value: calls.append(("groups", value)),
-        ), patch(
-            "agent_runtime_ops.domain.groupware_runtime_observation.os.setgid",
-            side_effect=lambda value: calls.append(("gid", value)),
-        ), patch(
-            "agent_runtime_ops.domain.groupware_runtime_observation.os.setuid",
-            side_effect=lambda value: calls.append(("uid", value)),
+        with (
+            patch(
+                "agent_runtime_ops.domain.groupware_runtime_observation.os.setgroups",
+                side_effect=lambda value: calls.append(("groups", value)),
+            ),
+            patch(
+                "agent_runtime_ops.domain.groupware_runtime_observation.os.setgid",
+                side_effect=lambda value: calls.append(("gid", value)),
+            ),
+            patch(
+                "agent_runtime_ops.domain.groupware_runtime_observation.os.setuid",
+                side_effect=lambda value: calls.append(("uid", value)),
+            ),
         ):
             _assume_service_principal(principal())
         self.assertEqual(
@@ -234,9 +319,12 @@ class GroupwareRuntimeObservationTests(unittest.TestCase):
 
     def test_worker_persists_raw_and_public_receipts(self) -> None:
         handlers = OperationHandlerRegistry((GroupwareRuntimeObservationHandler(),))
-        with tempfile.TemporaryDirectory() as temporary, patch(
-            "agent_runtime_ops.root_actions.groupware_runtime_observation.observe_groupware_runtime",
-            return_value=observation(),
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch(
+                "agent_runtime_ops.root_actions.groupware_runtime_observation.observe_groupware_runtime",
+                return_value=observation(),
+            ),
         ):
             store = PosixRootActionStore(
                 Path(temporary) / "root-actions",
@@ -265,9 +353,7 @@ class GroupwareRuntimeObservationTests(unittest.TestCase):
             worker = RootActionExecutionWorker(
                 store,
                 handlers=handlers,
-                events=Events(
-                    [("event-groupware-complete", "2026-08-11T01:00:02Z")]
-                ),
+                events=Events([("event-groupware-complete", "2026-08-11T01:00:02Z")]),
                 repair_public=lambda _job_id: repaired.set(),
             )
             worker.start()
@@ -278,7 +364,9 @@ class GroupwareRuntimeObservationTests(unittest.TestCase):
                 worker.close()
             raw = json.loads(store.read_raw_root_only(job.job_id).raw_bytes)
             receipt = store.retrieve(job.job_id, job.job_digest).receipt_copy()
-        self.assertEqual(raw["schema"], "agent-runtime-groupware-runtime-observation/v1")
+        self.assertEqual(
+            raw["schema"], "agent-runtime-groupware-runtime-observation/v1"
+        )
         self.assertEqual(receipt["operation_id"], "nas.observe_groupware_runtime")
         self.assertEqual(receipt["result"]["status"], "healthy")
 

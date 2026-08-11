@@ -18,6 +18,7 @@ class ExecutionPolicy:
     operation_version: int
     availability: OperationAvailability
     reason_code: str | None
+    auto_dispatch: bool = False
 
 
 class ExecutionPolicyRegistry:
@@ -44,6 +45,13 @@ class ExecutionPolicyRegistry:
                     )
             elif not policy.reason_code:
                 raise ValueError("disabled execution policy requires a reason code")
+            if not isinstance(policy.auto_dispatch, bool):
+                raise ValueError("execution policy auto-dispatch flag is invalid")
+            if (
+                policy.availability is not OperationAvailability.ENABLED
+                and policy.auto_dispatch
+            ):
+                raise ValueError("disabled operation cannot auto-dispatch")
             by_id[policy.operation_id] = policy
         if set(by_id) != set(DEFAULT_REGISTRY.operation_ids):
             raise ValueError("execution policy must cover every manifest operation")
@@ -98,6 +106,7 @@ DEFAULT_EXECUTION_POLICIES = ExecutionPolicyRegistry(
             1,
             OperationAvailability.ENABLED,
             None,
+            True,
         ),
     )
 )

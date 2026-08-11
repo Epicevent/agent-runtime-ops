@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import secrets
 import json
 import threading
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, runtime_checkable
 
 from .admission import LineageFailurePolicy
 from .contracts import SealedJob, seal_typed_manifest
@@ -109,6 +109,7 @@ class TypedRootActionBroker:
         policies: ExecutionPolicyRegistry = DEFAULT_EXECUTION_POLICIES,
         submission_policy: SubmissionPolicy,
         lineage_failure_policy: LineageFailurePolicy = LineageFailurePolicy(),
+        dispatch: Callable[[str, str], None] | None = None,
     ) -> None:
         self._store = store
         self._events = events or SystemBrokerEventSource()
@@ -116,6 +117,7 @@ class TypedRootActionBroker:
         self._policies = policies
         self._submission_policy = submission_policy
         self._lineage_failure_policy = lineage_failure_policy
+        self._dispatch = dispatch
         self._last_publication_error: str | None = None
         self._publication_lock = threading.RLock()
         self._published_projection_digests: dict[str, str] = {}
@@ -143,6 +145,7 @@ class TypedRootActionBroker:
         policy = self._policies.policy(job.operation_id)
         if policy.operation_version != job.operation_version:
             raise BrokerContractError("execution policy version mismatch")
+        admission = None
         if policy.availability is not OperationAvailability.ENABLED:
             close_event_id, close_time = self._events.next_event()
             close_event = TransitionEvent(
@@ -215,7 +218,7 @@ class TypedRootActionBroker:
                 ).encode("utf-8")
             )
             try:
-                record, _admission = self._store.seal_with_lineage_admission(
+                record, admission = self._store.seal_with_lineage_admission(
                     job,
                     pending_event_id=event_id,
                     pending_occurred_at=occurred_at,
@@ -230,6 +233,8 @@ class TypedRootActionBroker:
                     return self._recover_idempotent(job, peer=peer)
                 except StorageNotFound:
                     raise exc
+        if policy.auto_dispatch and admission is not None and admission.allowed:
+            record = self._auto_claim_and_dispatch(job, record)
         submitted = SubmittedJob(
             job_id=job.job_id,
             job_digest=job.job_digest,
@@ -239,6 +244,34 @@ class TypedRootActionBroker:
         )
         self._repair_public_best_effort(job.job_id)
         return submitted
+
+    def set_dispatch(self, dispatch: Callable[[str, str], None]) -> None:
+        if not callable(dispatch):
+            raise TypeError("dispatch must be callable")
+        self._dispatch = dispatch
+
+    def _auto_claim_and_dispatch(self, job: SealedJob, record: JobRecord) -> JobRecord:
+        if self._dispatch is None:
+            raise BrokerContractError("automatic read-only dispatch is unavailable")
+        event_id, claimed_at = self._events.next_event()
+        claimed = self._store.compare_and_append(
+            TransitionEvent(
+                event_id=event_id,
+                job_id=job.job_id,
+                job_digest=job.job_digest,
+                expected_revision=record.revision,
+                kind=TransitionKind.CLAIM_EXECUTION,
+                occurred_at=claimed_at,
+            )
+        )
+        try:
+            self._dispatch(claimed.job_id, claimed.job_digest)
+        except Exception:
+            try:
+                return self._store.read_record(job.job_id)
+            except Exception:
+                return claimed
+        return claimed
 
     def status(self, job_id: str) -> dict[str, Any]:
         job, record = self._read_job_and_record(job_id)
