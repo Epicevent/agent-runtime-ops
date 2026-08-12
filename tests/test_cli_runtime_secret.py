@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import io
 from pathlib import Path
 import tempfile
@@ -11,7 +12,13 @@ import unittest
 import uuid
 from unittest.mock import patch
 
+from agent_runtime_ops.cli import build_parser
 from agent_runtime_ops.commands.runtime_secret import (
+    _SecretFingerprintRow,
+    _runtime_secret_fingerprint_digest,
+    _runtime_secret_fingerprint_row,
+    _runtime_secret_fingerprint_targets,
+    cmd_runtime_secret_fingerprint,
     _begin_secret_transaction,
     _run_runtime_secret_container_checks,
     _secret_value_matches_container_env,
@@ -479,6 +486,340 @@ class CliRuntimeSecretTests(unittest.TestCase):
         self.assertIn("runtime_env_synced_keys=API_SERVER_KEY", text)
         self.assertIn("restart=skipped", text)
 
+    def test_runtime_secret_fingerprint_parser_defaults_to_sha256(self) -> None:
+        args = build_parser().parse_args(
+            ["runtime-secret", "fingerprint", "--key", "GEMINI_API_KEY", "--targets", "all"]
+        )
+        self.assertIs(args.func, cmd_runtime_secret_fingerprint)
+        self.assertEqual(args.algorithm, "sha256")
+        self.assertEqual(args.targets, "all")
+
+    def test_runtime_secret_fingerprint_hashes_only_parsed_value_without_mutation(self) -> None:
+        secret_value = "quoted secret value"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_state(root)
+            secret_file = root / "secret.env"
+            secret_file.write_text(f"GEMINI_API_KEY='{secret_value}'\n", encoding="utf-8")
+            before = secret_file.read_bytes()
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.commands.runtime_secret._is_root", return_value=True),
+                patch("agent_runtime_ops.commands.runtime_secret._assert_secret_path_safe"),
+                patch(
+                    "agent_runtime_ops.commands.runtime_secret.primary_profile_secret_file",
+                    return_value=RuntimeSecretFile(path=secret_file, owner_mode="runtime"),
+                ),
+                patch("agent_runtime_ops.commands.runtime_secret._append_action_log") as action_log,
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_runtime_secret_fingerprint(
+                    argparse.Namespace(
+                        key="GEMINI_API_KEY",
+                        targets="dev-hermess",
+                        algorithm="md5",
+                        state_root=str(root),
+                    )
+                )
+
+            text = output.getvalue()
+            expected = hashlib.md5(
+                secret_value.encode("utf-8"), usedforsecurity=False
+            ).hexdigest()
+            self.assertEqual(rc, 0, text)
+            self.assertIn(f"dev-hermess     PRESENT        md5        {expected}", text)
+            self.assertIn("all_same=yes", text)
+            self.assertIn("mutates=false", text)
+            self.assertIn("secret_value_printed=no", text)
+            self.assertNotIn(secret_value, text)
+            self.assertNotIn(str(secret_file), text)
+            self.assertEqual(secret_file.read_bytes(), before)
+            action_log.assert_not_called()
+
+    def test_runtime_secret_fingerprint_all_uses_enabled_bindings_natural_sort(self) -> None:
+        expected = [
+            "dev-hermes-img",
+            "dev-hermess",
+            "dev-oc",
+            "dev-oc-img",
+            *[f"oc{index}" for index in range(1, 21)],
+        ]
+        bindings = [
+            *(
+                SimpleNamespace(linux_account=target, enabled=True)
+                for target in reversed(expected)
+            ),
+            SimpleNamespace(linux_account="oc-disabled", enabled=False),
+        ]
+        observed: list[str] = []
+
+        def same(target: str, _key: str, algorithm: str, _root: Path):
+            observed.append(target)
+            return _SecretFingerprintRow(target, "PRESENT", algorithm, "a" * 64)
+
+        output = io.StringIO()
+        with (
+            patch("agent_runtime_ops.commands.runtime_secret._is_root", return_value=True),
+            patch(
+                "agent_runtime_ops.commands.runtime_secret.load_runtime_bindings",
+                return_value=bindings,
+            ),
+            patch(
+                "agent_runtime_ops.commands.runtime_secret._runtime_secret_fingerprint_row",
+                side_effect=same,
+            ),
+            contextlib.redirect_stdout(output),
+        ):
+            rc = cmd_runtime_secret_fingerprint(
+                argparse.Namespace(
+                    key="GEMINI_API_KEY",
+                    targets="all",
+                    algorithm="sha256",
+                    state_root="/state",
+                )
+            )
+        text = output.getvalue()
+        self.assertEqual(rc, 0, text)
+        self.assertEqual(observed, expected)
+        self.assertIn("targets_checked=24", text)
+        self.assertIn("present=24", text)
+        self.assertIn("unique_fingerprints=1", text)
+        self.assertIn("all_present=yes", text)
+        self.assertIn("all_same=yes", text)
+
+    def test_runtime_secret_fingerprint_difference_and_error_exit_contracts(self) -> None:
+        def different(target: str, _key: str, algorithm: str, _root: Path):
+            return _SecretFingerprintRow(
+                target, "PRESENT", algorithm, "a" * 64 if target == "oc1" else "b" * 64
+            )
+
+        output = io.StringIO()
+        with (
+            patch("agent_runtime_ops.commands.runtime_secret._is_root", return_value=True),
+            patch(
+                "agent_runtime_ops.commands.runtime_secret._runtime_secret_fingerprint_row",
+                side_effect=different,
+            ),
+            contextlib.redirect_stdout(output),
+        ):
+            rc = cmd_runtime_secret_fingerprint(
+                argparse.Namespace(
+                    key="GEMINI_API_KEY",
+                    targets="oc2,oc1",
+                    algorithm="sha256",
+                    state_root="/state",
+                )
+            )
+        text = output.getvalue()
+        self.assertEqual(rc, 1, text)
+        self.assertIn("unique_fingerprints=2", text)
+        self.assertIn("all_present=yes", text)
+        self.assertIn("all_same=no", text)
+
+        states = {
+            "oc1": "MISSING",
+            "oc2": "FILE_MISSING",
+            "oc3": "FILE_UNSAFE",
+            "oc4": "PARSE_FAILED",
+            "oc5": "TARGET_ERROR",
+        }
+        output = io.StringIO()
+        with (
+            patch("agent_runtime_ops.commands.runtime_secret._is_root", return_value=True),
+            patch(
+                "agent_runtime_ops.commands.runtime_secret._runtime_secret_fingerprint_row",
+                side_effect=lambda target, _key, algorithm, _root: _SecretFingerprintRow(
+                    target, states[target], algorithm, "-"
+                ),
+            ),
+            contextlib.redirect_stdout(output),
+        ):
+            rc = cmd_runtime_secret_fingerprint(
+                argparse.Namespace(
+                    key="GEMINI_API_KEY",
+                    targets="oc5,oc4,oc3,oc2,oc1",
+                    algorithm="sha256",
+                    state_root="/state",
+                )
+            )
+        text = output.getvalue()
+        self.assertEqual(rc, 2, text)
+        self.assertIn("missing=1", text)
+        self.assertIn("errors=4", text)
+        self.assertIn("unique_fingerprints=0", text)
+        self.assertNotIn(hashlib.md5(b"").hexdigest(), text)
+
+    def test_runtime_secret_fingerprint_row_has_closed_failure_states(self) -> None:
+        with patch(
+            "agent_runtime_ops.commands.runtime_secret.load_runtime_target",
+            side_effect=KeyError("secret-bearing target error"),
+        ):
+            row = _runtime_secret_fingerprint_row(
+                "unknown", "GEMINI_API_KEY", "sha256", Path("/state")
+            )
+        self.assertEqual((row.state, row.fingerprint), ("TARGET_ERROR", "-"))
+
+        desired = SimpleNamespace(slot="oc1", runtime_profile="openclaw-customer")
+        profile = SimpleNamespace(name="openclaw-customer")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            missing = root / "missing.env"
+            invalid = root / "invalid.env"
+            invalid.write_text("not env syntax\n", encoding="utf-8")
+            absent_key = root / "absent.env"
+            absent_key.write_text("OPENAI_API_KEY=value\n", encoding="utf-8")
+            with (
+                patch(
+                    "agent_runtime_ops.commands.runtime_secret.load_runtime_target",
+                    return_value=desired,
+                ),
+                patch(
+                    "agent_runtime_ops.commands.runtime_secret.load_profile",
+                    return_value=profile,
+                ),
+                patch("agent_runtime_ops.commands.runtime_secret._assert_secret_path_safe"),
+                patch(
+                    "agent_runtime_ops.commands.runtime_secret.primary_profile_secret_file",
+                    return_value=RuntimeSecretFile(path=missing, owner_mode="root"),
+                ),
+            ):
+                row = _runtime_secret_fingerprint_row(
+                    "oc1", "GEMINI_API_KEY", "sha256", root
+                )
+            self.assertEqual((row.state, row.fingerprint), ("FILE_MISSING", "-"))
+
+            with (
+                patch(
+                    "agent_runtime_ops.commands.runtime_secret.load_runtime_target",
+                    return_value=desired,
+                ),
+                patch(
+                    "agent_runtime_ops.commands.runtime_secret.load_profile",
+                    return_value=profile,
+                ),
+                patch(
+                    "agent_runtime_ops.commands.runtime_secret._assert_secret_path_safe",
+                    side_effect=ValueError("unsafe secret path"),
+                ),
+                patch(
+                    "agent_runtime_ops.commands.runtime_secret.primary_profile_secret_file",
+                    return_value=RuntimeSecretFile(path=invalid, owner_mode="root"),
+                ),
+            ):
+                row = _runtime_secret_fingerprint_row(
+                    "oc1", "GEMINI_API_KEY", "sha256", root
+                )
+            self.assertEqual((row.state, row.fingerprint), ("FILE_UNSAFE", "-"))
+
+            for path, expected_state in (
+                (invalid, "PARSE_FAILED"),
+                (absent_key, "MISSING"),
+            ):
+                with (
+                    patch(
+                        "agent_runtime_ops.commands.runtime_secret.load_runtime_target",
+                        return_value=desired,
+                    ),
+                    patch(
+                        "agent_runtime_ops.commands.runtime_secret.load_profile",
+                        return_value=profile,
+                    ),
+                    patch("agent_runtime_ops.commands.runtime_secret._assert_secret_path_safe"),
+                    patch(
+                        "agent_runtime_ops.commands.runtime_secret.primary_profile_secret_file",
+                        return_value=RuntimeSecretFile(path=path, owner_mode="root"),
+                    ),
+                ):
+                    row = _runtime_secret_fingerprint_row(
+                        "oc1", "GEMINI_API_KEY", "sha256", root
+                    )
+                self.assertEqual((row.state, row.fingerprint), (expected_state, "-"))
+
+    def test_runtime_secret_fingerprint_refuses_symlink_and_nonregular_files(self) -> None:
+        desired = SimpleNamespace(slot="oc1", runtime_profile="openclaw-customer")
+        profile = SimpleNamespace(name="openclaw-customer")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            regular = root / "regular.env"
+            regular.write_text("GEMINI_API_KEY=value\n", encoding="utf-8")
+            symlink = root / "symlink.env"
+            symlink.symlink_to(regular)
+            directory = root / "directory.env"
+            directory.mkdir()
+            for path in (symlink, directory):
+                with (
+                    patch(
+                        "agent_runtime_ops.commands.runtime_secret.load_runtime_target",
+                        return_value=desired,
+                    ),
+                    patch(
+                        "agent_runtime_ops.commands.runtime_secret.load_profile",
+                        return_value=profile,
+                    ),
+                    patch(
+                        "agent_runtime_ops.commands.runtime_secret.slot_home",
+                        return_value=root,
+                    ),
+                    patch(
+                        "agent_runtime_ops.commands.runtime_secret.primary_profile_secret_file",
+                        return_value=RuntimeSecretFile(path=path, owner_mode="root"),
+                    ),
+                ):
+                    row = _runtime_secret_fingerprint_row(
+                        "oc1", "GEMINI_API_KEY", "sha256", root
+                    )
+                self.assertEqual((row.state, row.fingerprint), ("FILE_UNSAFE", "-"))
+
+    def test_runtime_secret_fingerprint_rejects_authority_and_argument_errors(self) -> None:
+        stderr = io.StringIO()
+        with (
+            patch("agent_runtime_ops.commands.runtime_secret._is_root", return_value=False),
+            contextlib.redirect_stderr(stderr),
+        ):
+            rc = cmd_runtime_secret_fingerprint(
+                argparse.Namespace(
+                    key="GEMINI_API_KEY",
+                    targets="all",
+                    algorithm="sha256",
+                    state_root="/state",
+                )
+            )
+        self.assertEqual(rc, 2)
+        self.assertIn("run as root/admin", stderr.getvalue())
+
+        for key, algorithm, reason in (
+            ("UNSUPPORTED_SECRET", "sha256", "unsupported_key"),
+            ("GEMINI_API_KEY", "sha1", "unsupported_algorithm"),
+        ):
+            output = io.StringIO()
+            with (
+                patch("agent_runtime_ops.commands.runtime_secret._is_root", return_value=True),
+                contextlib.redirect_stdout(output),
+            ):
+                rc = cmd_runtime_secret_fingerprint(
+                    argparse.Namespace(
+                        key=key,
+                        targets="all",
+                        algorithm=algorithm,
+                        state_root="/state",
+                    )
+                )
+            self.assertEqual(rc, 2)
+            self.assertIn(f"reason={reason}", output.getvalue())
+            self.assertIn("secret_value_printed=no", output.getvalue())
+            self.assertNotIn(key, output.getvalue())
+
+    def test_runtime_secret_fingerprint_digest_support_is_closed(self) -> None:
+        self.assertEqual(
+            _runtime_secret_fingerprint_digest("value", "md5"),
+            hashlib.md5(b"value", usedforsecurity=False).hexdigest(),
+        )
+        self.assertEqual(
+            _runtime_secret_fingerprint_digest("value", "sha256"),
+            hashlib.sha256(b"value").hexdigest(),
+        )
+        with self.assertRaisesRegex(ValueError, "unsupported fingerprint algorithm"):
+            _runtime_secret_fingerprint_digest("value", "sha1")
 
 if __name__ == "__main__":
     unittest.main()

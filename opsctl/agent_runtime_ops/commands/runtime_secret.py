@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import stat
@@ -32,6 +33,7 @@ from ..domain.runtime_paths import agent_compose_path, slot_runtime_dir
 from ..domain.runtime_truth import find_gateway_container as _find_gateway_container
 from ..host.account_files import ensure_not_symlink_chain, runtime_ids, slot_home, slot_uid_gid
 from ..profiles import load_profile
+from ..routing import load_runtime_bindings, validate_linux_account
 from ..runtime_secrets import (
     RUNTIME_SECRET_KEYS,
     parse_secret_env_text,
@@ -404,6 +406,158 @@ def _secret_status_rows(path: Path) -> tuple[str, dict[str, bool]]:
         return "parse_failed", {}
     return "present", {key: bool(values.get(key)) for key in sorted(RUNTIME_SECRET_KEYS)}
 
+
+@dataclass(frozen=True)
+class _SecretFingerprintRow:
+    target: str
+    state: str
+    algorithm: str
+    fingerprint: str
+
+
+_SECRET_FINGERPRINT_ERROR_STATES = {
+    "FILE_MISSING",
+    "FILE_UNSAFE",
+    "PARSE_FAILED",
+    "TARGET_ERROR",
+}
+
+
+def _natural_target_key(target: str) -> tuple[tuple[int, int | str], ...]:
+    return tuple(
+        (0, int(part)) if part.isdigit() else (1, part.casefold())
+        for part in re.split(r"(\d+)", target)
+        if part
+    )
+
+
+def _runtime_secret_fingerprint_targets(raw: str, state_root: Path) -> list[str]:
+    value = str(raw or "").strip()
+    if value == "all":
+        targets = [
+            binding.linux_account
+            for binding in load_runtime_bindings(state_root)
+            if binding.enabled
+        ]
+    else:
+        parts = [part.strip() for part in value.split(",")]
+        if not parts or any(not part for part in parts):
+            raise ValueError("invalid targets")
+        targets = [validate_linux_account(part) for part in parts]
+    if not targets:
+        raise ValueError("no runtime targets")
+    return sorted(set(targets), key=_natural_target_key)
+
+
+def _runtime_secret_fingerprint_digest(value: str, algorithm: str) -> str:
+    encoded = value.encode("utf-8")
+    if algorithm == "md5":
+        return hashlib.md5(encoded, usedforsecurity=False).hexdigest()
+    if algorithm == "sha256":
+        return hashlib.sha256(encoded).hexdigest()
+    raise ValueError("unsupported fingerprint algorithm")
+
+
+def _runtime_secret_fingerprint_row(
+    target: str,
+    key: str,
+    algorithm: str,
+    state_root: Path,
+) -> _SecretFingerprintRow:
+    try:
+        desired = load_runtime_target(target, state_root)
+        profile = load_profile(desired.runtime_profile)
+        secret_file = primary_profile_secret_file(profile, desired.slot)
+    except Exception:
+        return _SecretFingerprintRow(target, "TARGET_ERROR", algorithm, "-")
+    try:
+        _assert_secret_path_safe(desired.slot, secret_file.path)
+    except Exception:
+        return _SecretFingerprintRow(target, "FILE_UNSAFE", algorithm, "-")
+    if not secret_file.path.exists():
+        return _SecretFingerprintRow(target, "FILE_MISSING", algorithm, "-")
+    try:
+        values = parse_secret_env_text(
+            secret_file.path.read_text(encoding="utf-8", errors="replace"),
+            source="<runtime-secret>",
+        )
+    except (OSError, UnicodeError):
+        return _SecretFingerprintRow(target, "FILE_UNSAFE", algorithm, "-")
+    except Exception:
+        return _SecretFingerprintRow(target, "PARSE_FAILED", algorithm, "-")
+    value = values.get(key)
+    if not value:
+        return _SecretFingerprintRow(target, "MISSING", algorithm, "-")
+    return _SecretFingerprintRow(
+        target,
+        "PRESENT",
+        algorithm,
+        _runtime_secret_fingerprint_digest(value, algorithm),
+    )
+
+
+def cmd_runtime_secret_fingerprint(args: argparse.Namespace) -> int:
+    if not _is_root():
+        print(
+            "error: run as root/admin: sudo /usr/local/bin/opsctl runtime-secret fingerprint",
+            file=sys.stderr,
+        )
+        return 2
+    key = str(args.key or "").strip().upper()
+    algorithm = str(args.algorithm or "sha256").strip().lower()
+    if key not in RUNTIME_SECRET_KEYS:
+        print("reason=unsupported_key")
+        print("mutates=false")
+        print("secret_value_printed=no")
+        print("runtime_secret_fingerprint_status=fail")
+        return 2
+    if algorithm not in {"md5", "sha256"}:
+        print("reason=unsupported_algorithm")
+        print("mutates=false")
+        print("secret_value_printed=no")
+        print("runtime_secret_fingerprint_status=fail")
+        return 2
+    state_root = _state_root(args)
+    try:
+        targets = _runtime_secret_fingerprint_targets(args.targets, state_root)
+    except Exception:
+        print("reason=invalid_targets")
+        print("mutates=false")
+        print("secret_value_printed=no")
+        print("runtime_secret_fingerprint_status=fail")
+        return 2
+
+    rows = [
+        _runtime_secret_fingerprint_row(target, key, algorithm, state_root)
+        for target in targets
+    ]
+    print("TARGET          STATE          ALGORITHM  FINGERPRINT")
+    for row in rows:
+        print(f"{row.target:<15} {row.state:<14} {row.algorithm:<10} {row.fingerprint}")
+
+    fingerprints = {
+        row.fingerprint for row in rows if row.state == "PRESENT"
+    }
+    present = sum(row.state == "PRESENT" for row in rows)
+    missing = sum(row.state == "MISSING" for row in rows)
+    errors = sum(row.state in _SECRET_FINGERPRINT_ERROR_STATES for row in rows)
+    all_present = present == len(rows)
+    all_same = all_present and len(fingerprints) == 1
+    rc = 2 if errors else 0 if all_same else 1
+    print(f"targets_checked={len(rows)}")
+    print(f"present={present}")
+    print(f"missing={missing}")
+    print(f"errors={errors}")
+    print(f"unique_fingerprints={len(fingerprints)}")
+    print(f"all_present={'yes' if all_present else 'no'}")
+    print(f"all_same={'yes' if all_same else 'no'}")
+    print("mutates=false")
+    print("secret_value_printed=no")
+    print(
+        "runtime_secret_fingerprint_status="
+        + ("ok" if rc == 0 else "partial")
+    )
+    return rc
 
 def cmd_runtime_secret_set(args: argparse.Namespace) -> int:
     if not _is_root():

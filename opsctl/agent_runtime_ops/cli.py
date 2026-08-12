@@ -84,6 +84,7 @@ from .commands.mitigation import (
     cmd_mitigation_remove,
 )
 from .commands.runtime_secret import (
+    cmd_runtime_secret_fingerprint,
     cmd_runtime_secret_probe,
     cmd_runtime_secret_recover,
     cmd_runtime_secret_set,
@@ -586,6 +587,19 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_secret_status = runtime_secret_sub.add_parser("status")
     runtime_secret_status.add_argument("slot", metavar="target")
     runtime_secret_status.set_defaults(func=cmd_runtime_secret_status)
+    runtime_secret_fingerprint = runtime_secret_sub.add_parser(
+        "fingerprint",
+        help="compare parsed secret values without printing the values (read-only)",
+    )
+    runtime_secret_fingerprint.add_argument("--key", required=True)
+    runtime_secret_fingerprint.add_argument("--targets", required=True)
+    runtime_secret_fingerprint.add_argument(
+        "--algorithm",
+        choices=("md5", "sha256"),
+        default="sha256",
+        help="digest for equality diagnostics; MD5 is not for security storage",
+    )
+    runtime_secret_fingerprint.set_defaults(func=cmd_runtime_secret_fingerprint)
     runtime_secret_recover = runtime_secret_sub.add_parser(
         "recover",
         help="restore a retained failed-transaction recovery point and recreate the previous runtime",
