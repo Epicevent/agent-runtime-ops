@@ -75,11 +75,13 @@ class ManagedFstabMountTargetsTest(unittest.TestCase):
 class GroupwareDesiredDigestStatusTest(unittest.TestCase):
     def test_uses_runtime_manifest_profile_and_shared_contract_builder(self) -> None:
         digest = "sha256:" + "a" * 64
+        profile_digest = "sha256:" + "b" * 64
         with (
             patch(
                 "agent_runtime_ops.commands.nas_view.load_runtime_target",
                 return_value=SimpleNamespace(
                     runtime_profile="hermes-runtime-customer",
+                    runtime_profile_digest=profile_digest,
                     family="hermes",
                     runtime_class="customer",
                 ),
@@ -87,11 +89,13 @@ class GroupwareDesiredDigestStatusTest(unittest.TestCase):
             patch(
                 "agent_runtime_ops.commands.nas_view.load_profile",
                 return_value=SimpleNamespace(
+                    name="hermes-runtime-customer",
+                    digest=profile_digest,
                     metadata={
                         "family": "hermes",
                         "slot_class": "customer",
                         "container_nas_root": "/workspace/nas_docs",
-                    }
+                    },
                 ),
             ),
             patch(
@@ -101,7 +105,13 @@ class GroupwareDesiredDigestStatusTest(unittest.TestCase):
         ):
             actual = _groupware_runtime_desired_digest("oc16", Path("/state"))
         self.assertEqual(actual, digest)
-        builder.assert_called_once_with("oc16", Path("/state"), "/workspace/nas_docs")
+        builder.assert_called_once_with(
+            "oc16",
+            Path("/state"),
+            "/workspace/nas_docs",
+            "hermes-runtime-customer",
+            profile_digest,
+        )
 
     def test_profile_drift_fails_closed_before_digest_build(self) -> None:
         with (
@@ -109,6 +119,7 @@ class GroupwareDesiredDigestStatusTest(unittest.TestCase):
                 "agent_runtime_ops.commands.nas_view.load_runtime_target",
                 return_value=SimpleNamespace(
                     runtime_profile="p",
+                    runtime_profile_digest="sha256:" + "a" * 64,
                     family="hermes",
                     runtime_class="customer",
                 ),
@@ -116,14 +127,42 @@ class GroupwareDesiredDigestStatusTest(unittest.TestCase):
             patch(
                 "agent_runtime_ops.commands.nas_view.load_profile",
                 return_value=SimpleNamespace(
+                    name="p",
+                    digest="sha256:" + "a" * 64,
                     metadata={
                         "family": "openclaw",
                         "slot_class": "customer",
-                    }
+                    },
                 ),
             ),
         ):
             with self.assertRaisesRegex(ValueError, "does not match"):
+                _groupware_runtime_desired_digest("oc16", Path("/state"))
+
+    def test_profile_digest_drift_fails_closed_before_digest_build(self) -> None:
+        with (
+            patch(
+                "agent_runtime_ops.commands.nas_view.load_runtime_target",
+                return_value=SimpleNamespace(
+                    runtime_profile="p",
+                    runtime_profile_digest="sha256:" + "a" * 64,
+                    family="hermes",
+                    runtime_class="customer",
+                ),
+            ),
+            patch(
+                "agent_runtime_ops.commands.nas_view.load_profile",
+                return_value=SimpleNamespace(
+                    name="p",
+                    digest="sha256:" + "b" * 64,
+                    metadata={
+                        "family": "hermes",
+                        "slot_class": "customer",
+                    },
+                ),
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "digest does not match"):
                 _groupware_runtime_desired_digest("oc16", Path("/state"))
 
 

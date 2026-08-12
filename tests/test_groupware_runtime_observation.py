@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import errno
 import json
+from dataclasses import replace
 from pathlib import Path
 import tempfile
 import threading
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -17,6 +19,7 @@ from agent_runtime_ops.domain.groupware_runtime_observation import (
     groupware_runtime_desired_contract,
     _assume_service_principal,
     _matches_service,
+    _resolve_runtime,
     observe_groupware_runtime,
 )
 from agent_runtime_ops.root_actions.contracts import seal_typed_manifest
@@ -49,6 +52,7 @@ from tests.test_root_action_contracts import encoded, valid_manifest
 DIGEST_A = "sha256:" + "a" * 64
 DIGEST_B = "sha256:" + "b" * 64
 DIGEST_C = "sha256:" + "c" * 64
+PROFILE_DIGEST = "sha256:" + "d" * 64
 
 
 def groupware_job():
@@ -77,8 +81,12 @@ def resolved() -> ResolvedRuntime:
         binding,
         "0123456789ab",
         777,
+        "hermes-runtime-customer",
+        PROFILE_DIGEST,
         "/workspace/nas_docs",
         "/home/oc16/nas_docs/groupware",
+        ("groupware/mails/example",),
+        ("groupware/mails/example",),
         ("groupware_mails_example",),
         ("//nas.example/groupware[/groupware/mails/example]",),
         DIGEST_A,
@@ -89,6 +97,9 @@ def resolved() -> ResolvedRuntime:
 def observation() -> RuntimeObservation:
     return RuntimeObservation(
         "oc16",
+        PROFILE_DIGEST,
+        1,
+        1,
         DIGEST_A,
         DIGEST_B,
         "healthy",
@@ -105,6 +116,7 @@ def observation() -> RuntimeObservation:
 def observe_with(
     result: dict[str, object],
     *,
+    runtime: ResolvedRuntime | None = None,
     host_present: bool = True,
     container_present: bool = True,
     host_source_match: bool = True,
@@ -148,7 +160,7 @@ def observe_with(
     with (
         patch(
             "agent_runtime_ops.domain.groupware_runtime_observation._resolve_runtime",
-            return_value=resolved(),
+            return_value=runtime or resolved(),
         ),
         patch(
             "agent_runtime_ops.domain.groupware_runtime_observation._service_principal",
@@ -188,14 +200,88 @@ class GroupwareRuntimeObservationTests(unittest.TestCase):
             ),
         ):
             contract = groupware_runtime_desired_contract(
-                "oc16", Path("/unused"), "/workspace/nas_docs"
+                "oc16",
+                Path("/unused"),
+                "/workspace/nas_docs",
+                "hermes-runtime-customer",
+                PROFILE_DIGEST,
             )
         self.assertEqual(contract.host_nas_root, "/home/oc16/nas_docs/groupware")
         self.assertEqual(contract.aliases, ("groupware_mails_example",))
+        self.assertEqual(contract.runtime_profile_digest, PROFILE_DIGEST)
+        self.assertEqual(contract.requested_paths, ("groupware/mails/example",))
+        self.assertEqual(contract.effective_paths, ("groupware/mails/example",))
         self.assertEqual(
             contract.desired_digest,
-            "sha256:e704c29e921ac9f424ba1d11f49d33ab563d394ddb9f25fc204d1a93cdc057d4",
+            "sha256:ce7e75d5ebd561b6d87f118fb32a2a17c8b0a22e6c64da263f11ea75530da934",
         )
+
+    def test_desired_digest_binds_profile_digest_and_requested_effective_sets(
+        self,
+    ) -> None:
+        binding = resolved().binding
+        record = {
+            "share": "//10.10.10.2/hanpass_groupware",
+            "paths": ["groupware/mails/example", "groupware/approval/example"],
+            "rooms_missing_media": ["groupware/approval/example"],
+        }
+        with (
+            patch(
+                "agent_runtime_ops.domain.groupware_runtime_observation.get_runtime_binding",
+                return_value=binding,
+            ),
+            patch(
+                "agent_runtime_ops.domain.groupware_runtime_observation.load_views_state",
+                return_value={},
+            ),
+            patch(
+                "agent_runtime_ops.domain.groupware_runtime_observation.get_view_record",
+                return_value=record,
+            ),
+        ):
+            first = groupware_runtime_desired_contract(
+                "oc16",
+                Path("/unused"),
+                "/workspace/nas_docs",
+                "hermes-runtime-customer",
+                PROFILE_DIGEST,
+            )
+            second = groupware_runtime_desired_contract(
+                "oc16",
+                Path("/unused"),
+                "/workspace/nas_docs",
+                "hermes-runtime-customer",
+                DIGEST_C,
+            )
+        self.assertEqual(len(first.requested_paths), 2)
+        self.assertEqual(len(first.effective_paths), 1)
+        self.assertNotEqual(first.desired_digest, second.desired_digest)
+
+    def test_requested_effective_shortfall_cannot_be_healthy(self) -> None:
+        runtime = replace(
+            resolved(),
+            requested_paths=(
+                "groupware/mails/example",
+                "groupware/approval/example",
+            ),
+        )
+        value = observe_with(
+            {
+                "index": 0,
+                "list_ok": True,
+                "open_read_ok": True,
+                "errno": None,
+                "representative": "regular_file",
+            },
+            runtime=runtime,
+        )
+        facts = dict(value.public_facts())
+        self.assertEqual(value.status, "unhealthy")
+        self.assertEqual(value.reason_code, "runtime_path_cardinality_mismatch")
+        self.assertEqual(facts["failure_class"], "PATH_CARDINALITY_MISMATCH")
+        self.assertEqual(facts["requested_path_count"], "2")
+        self.assertEqual(facts["effective_path_count"], "1")
+        self.assertEqual(facts["declared_path_count"], "1")
 
     def test_host_mount_uses_canonical_slot_target_in_host_namespace(self) -> None:
         calls: list[tuple[int, str]] = []
@@ -324,14 +410,17 @@ class GroupwareRuntimeObservationTests(unittest.TestCase):
             patch(
                 "agent_runtime_ops.domain.groupware_runtime_observation.os.setgroups",
                 side_effect=lambda value: calls.append(("groups", value)),
+                create=True,
             ),
             patch(
                 "agent_runtime_ops.domain.groupware_runtime_observation.os.setgid",
                 side_effect=lambda value: calls.append(("gid", value)),
+                create=True,
             ),
             patch(
                 "agent_runtime_ops.domain.groupware_runtime_observation.os.setuid",
                 side_effect=lambda value: calls.append(("uid", value)),
+                create=True,
             ),
         ):
             _assume_service_principal(principal())
@@ -356,6 +445,115 @@ class GroupwareRuntimeObservationTests(unittest.TestCase):
         self.assertFalse(
             _matches_service("hermes", ("node", "/tmp/caller-selected.js"))
         )
+
+    def test_runtime_resolution_binds_applied_profile_to_container_identity(
+        self,
+    ) -> None:
+        runtime = resolved()
+        target = SimpleNamespace(
+            route=runtime.binding,
+            runtime_profile=runtime.runtime_profile,
+            runtime_profile_digest=runtime.runtime_profile_digest,
+        )
+        contract = SimpleNamespace(
+            runtime_profile=runtime.runtime_profile,
+            runtime_profile_digest=runtime.runtime_profile_digest,
+            container_nas_root=runtime.container_nas_root,
+            host_nas_root=runtime.host_nas_root,
+            requested_paths=runtime.requested_paths,
+            effective_paths=runtime.effective_paths,
+            aliases=runtime.aliases,
+            expected_sources=runtime.expected_sources,
+            desired_digest=runtime.desired_digest,
+        )
+        with (
+            patch(
+                "agent_runtime_ops.domain.groupware_runtime_observation.load_runtime_target",
+                return_value=target,
+            ),
+            patch(
+                "agent_runtime_ops.domain.groupware_runtime_observation.find_gateway_container_by_binding",
+                return_value=(runtime.container, "instance_label"),
+            ),
+            patch(
+                "agent_runtime_ops.domain.groupware_runtime_observation._container_state",
+                return_value=(runtime.container_pid, runtime.runtime_profile),
+            ),
+            patch(
+                "agent_runtime_ops.domain.groupware_runtime_observation.load_profile",
+                return_value=SimpleNamespace(
+                    name=runtime.runtime_profile,
+                    digest=runtime.runtime_profile_digest,
+                    metadata={
+                        "family": "hermes",
+                        "slot_class": "customer",
+                        "container_nas_root": runtime.container_nas_root,
+                    },
+                ),
+            ),
+            patch(
+                "agent_runtime_ops.domain.groupware_runtime_observation._groupware_desired_contract",
+                return_value=contract,
+            ),
+        ):
+            actual = _resolve_runtime("oc16", Path("/state"))
+        self.assertEqual(actual.runtime_profile_digest, PROFILE_DIGEST)
+        self.assertNotEqual(actual.container_identity_digest, DIGEST_B)
+
+    def test_runtime_resolution_rejects_profile_name_and_digest_drift(self) -> None:
+        runtime = resolved()
+        target = SimpleNamespace(
+            route=runtime.binding,
+            runtime_profile=runtime.runtime_profile,
+            runtime_profile_digest=runtime.runtime_profile_digest,
+        )
+        with (
+            patch(
+                "agent_runtime_ops.domain.groupware_runtime_observation.load_runtime_target",
+                return_value=target,
+            ),
+            patch(
+                "agent_runtime_ops.domain.groupware_runtime_observation.find_gateway_container_by_binding",
+                return_value=(runtime.container, "instance_label"),
+            ),
+            patch(
+                "agent_runtime_ops.domain.groupware_runtime_observation._container_state",
+                return_value=(runtime.container_pid, "different-profile"),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                GroupwareRuntimeObservationError, "container_profile_mismatch"
+            ):
+                _resolve_runtime("oc16", Path("/state"))
+        with (
+            patch(
+                "agent_runtime_ops.domain.groupware_runtime_observation.load_runtime_target",
+                return_value=target,
+            ),
+            patch(
+                "agent_runtime_ops.domain.groupware_runtime_observation.find_gateway_container_by_binding",
+                return_value=(runtime.container, "instance_label"),
+            ),
+            patch(
+                "agent_runtime_ops.domain.groupware_runtime_observation._container_state",
+                return_value=(runtime.container_pid, runtime.runtime_profile),
+            ),
+            patch(
+                "agent_runtime_ops.domain.groupware_runtime_observation.load_profile",
+                return_value=SimpleNamespace(
+                    name=runtime.runtime_profile,
+                    digest=DIGEST_C,
+                    metadata={
+                        "family": "hermes",
+                        "slot_class": "customer",
+                    },
+                ),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                GroupwareRuntimeObservationError, "runtime_profile_digest_mismatch"
+            ):
+                _resolve_runtime("oc16", Path("/state"))
 
     def test_evidence_axes_are_distinct_and_required_for_healthy(self) -> None:
         result = {
@@ -474,6 +672,12 @@ class GroupwareRuntimeObservationTests(unittest.TestCase):
         raw = json.loads(result.raw_bytes)
         facts = dict(result.public_facts)
         self.assertEqual(result.terminal_outcome, "succeeded")
+        self.assertEqual(
+            raw["schema"], "agent-runtime-groupware-runtime-observation/v2"
+        )
+        self.assertEqual(raw["runtime_profile_digest"], PROFILE_DIGEST)
+        self.assertEqual(raw["requested_path_count"], 1)
+        self.assertEqual(raw["effective_path_count"], 1)
         self.assertEqual(raw["principal"]["uid"], 1022)
         self.assertEqual(raw["principal"]["supplementary_group_count"], 2)
         self.assertEqual(facts["open_read_verified_count"], "1")
@@ -481,6 +685,9 @@ class GroupwareRuntimeObservationTests(unittest.TestCase):
         self.assertEqual(facts["container_mount_present_count"], "1")
         self.assertEqual(facts["container_mount_source_match_count"], "1")
         self.assertEqual(facts["bounded_probe_open_read_count"], "1")
+        self.assertEqual(facts["runtime_profile_digest"], PROFILE_DIGEST)
+        self.assertEqual(facts["requested_path_count"], "1")
+        self.assertEqual(facts["effective_path_count"], "1")
         text = result.raw_bytes.decode()
         self.assertNotIn("groupware/mails/example", text)
         self.assertNotIn("0123456789ab", text)
@@ -534,7 +741,7 @@ class GroupwareRuntimeObservationTests(unittest.TestCase):
             raw = json.loads(store.read_raw_root_only(job.job_id).raw_bytes)
             receipt = store.retrieve(job.job_id, job.job_digest).receipt_copy()
         self.assertEqual(
-            raw["schema"], "agent-runtime-groupware-runtime-observation/v1"
+            raw["schema"], "agent-runtime-groupware-runtime-observation/v2"
         )
         self.assertEqual(receipt["operation_id"], "nas.observe_groupware_runtime")
         self.assertEqual(receipt["result"]["status"], "healthy")
@@ -552,6 +759,9 @@ class GroupwareRuntimeObservationTests(unittest.TestCase):
             dict(result.public_facts)["failure_class"], "OBSERVER_CONTRACT_MISMATCH"
         )
         self.assertEqual(raw["reason_code"], "container_not_found")
+        self.assertEqual(raw["runtime_profile_digest"], "unavailable")
+        self.assertIsNone(raw["requested_path_count"])
+        self.assertIsNone(raw["effective_path_count"])
         self.assertEqual(raw["declared_paths"], [])
         self.assertEqual(raw["writes"], 0)
 
