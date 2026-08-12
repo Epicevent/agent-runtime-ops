@@ -376,6 +376,8 @@ systemd-analyze verify "$UNIT_NEXT" >/dev/null || die rendered_unit_verify_faile
 
 systemctl is-active --quiet "$LEGACY_UNIT" && legacy_was_active=1 || true
 systemctl is-enabled --quiet "$LEGACY_UNIT" && legacy_was_enabled=1 || true
+# Capture the standalone intent before publishing the replacement unit so a
+# failed cutover can restore both the previous bytes and active/enabled state.
 systemctl is-active --quiet "$UNIT_NAME" && standalone_was_active=1 || true
 systemctl is-enabled --quiet "$UNIT_NAME" && standalone_was_enabled=1 || true
 if [[ -e "$UNIT_PATH" ]]; then
@@ -395,6 +397,8 @@ install -o root -g root -m 0644 "$UNIT_NEXT" "$UNIT_PATH" \
 cutover_started=1
 systemctl daemon-reload || die daemon_reload_failed
 systemctl disable --now "$LEGACY_UNIT" || die legacy_disable_failed
+# Enabling an already-active unit does not replace its running process.  Keep
+# enable and restart separate so process attestation observes this release.
 systemctl enable "$UNIT_NAME" || die standalone_enable_failed
 systemctl restart "$UNIT_NAME" || die standalone_restart_failed
 
