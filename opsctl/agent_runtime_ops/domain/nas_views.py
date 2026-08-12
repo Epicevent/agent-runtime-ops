@@ -502,8 +502,10 @@ def drop_view_record(views: dict, slot: str, corpus: str = PRIMARY_CORPUS) -> bo
     return removed
 
 
-def effective_granted_paths(record: dict) -> list[str]:
-    """Return paths that the last successful mutation actually bound."""
+def requested_and_effective_granted_paths(
+    record: dict,
+) -> tuple[list[str], list[str]]:
+    """Return the requested intent and the paths the last mutation bound."""
     requested_raw = record.get("paths") or []
     missing_raw = record.get("rooms_missing_media") or []
     if not isinstance(requested_raw, list) or not isinstance(missing_raw, list):
@@ -516,7 +518,14 @@ def effective_granted_paths(record: dict) -> list[str]:
     if unexpected:
         raise ValueError("missing_path_not_requested")
     missing_set = set(missing)
-    return [value for value in requested if value not in missing_set]
+    effective = [value for value in requested if value not in missing_set]
+    return requested, effective
+
+
+def effective_granted_paths(record: dict) -> list[str]:
+    """Return paths that the last successful mutation actually bound."""
+    _requested, effective = requested_and_effective_granted_paths(record)
+    return effective
 
 
 def _svcops_gid() -> int:

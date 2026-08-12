@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Any
 
 from .paths import DEFAULT_STATE_ROOT
@@ -10,6 +11,7 @@ from .yamlio import load_yaml
 
 
 IMAGE_ROLLOUT_IMAGE_NAME = "direct-image"
+_DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 
 
 @dataclass(frozen=True)
@@ -21,6 +23,7 @@ class RuntimeTarget:
     image_spec: dict[str, Any]
     runtime_profile: str
     route: RuntimeBinding
+    runtime_profile_digest: str = ""
 
     @property
     def slot(self) -> str:
@@ -108,6 +111,9 @@ def load_runtime_target(target: str, state_root: Path = DEFAULT_STATE_ROOT) -> R
     runtime_profile = str(manifest.get("runtime_profile") or "")
     if not runtime_profile:
         raise ValueError("runtime manifest is missing runtime_profile")
+    runtime_profile_digest = str(manifest.get("runtime_profile_digest") or "")
+    if runtime_profile_digest and _DIGEST_RE.fullmatch(runtime_profile_digest) is None:
+        raise ValueError("runtime manifest has invalid runtime_profile_digest")
     image_spec = image_spec_from_manifest(manifest)
     return RuntimeTarget(
         target=binding.linux_account,
@@ -117,4 +123,5 @@ def load_runtime_target(target: str, state_root: Path = DEFAULT_STATE_ROOT) -> R
         image_spec=image_spec,
         runtime_profile=runtime_profile,
         route=binding,
+        runtime_profile_digest=runtime_profile_digest,
     )

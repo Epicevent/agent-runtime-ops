@@ -1,0 +1,22 @@
+# Agent OPS user-visible terminal
+
+The terminal is a current v2 kernel receipt showing every declared groupware grant readable by the exact service principal, with the authenticated OPS page rendering that same receipt digest.
+
+## Layers and blockers
+
+- Source: this branch binds the applied runtime-profile digest and preserves requested versus effective groupware paths in the observer receipt.
+- Build/install/runtime: not performed here; the live broker must be rebuilt and installed before v2 receipts exist.
+- Actual turn: product UI terminals belong to Hermes/OpenClaw and are not claimed by this observer lane.
+- First blocker: the current root host must provide a new v2 receipt for each declared slot; old v1 receipts are historical only.
+
+## Cross-lane contract
+
+The page consumes typed receipt states and never turns host ledger evidence into green. Products provide candidate/prestate fixtures to the rollback lane; this lane provides v2 receipt schema and profile/desired/container binding facts.
+
+## Positive/negative and next action
+
+Positive requires requested=mounted=read-success and exact profile/container/desired bindings. Negative cases include source/mount/access/policy failures, stale or pending observations, and requested/effective cardinality mismatch. Next action is focused source/test review, then build/install and fresh server observations; no repair is automated by the observer.
+
+## Supersession
+
+Observer v1 remains readable history but cannot establish the v2 terminal once profile binding is required.

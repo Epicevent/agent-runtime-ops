@@ -87,7 +87,7 @@ _GRANT_EVIDENCE_MAX_PATHS = 64
 _GRANT_EVIDENCE_TIMEOUT_SECONDS = 15.0
 
 
-def _groupware_runtime_desired_digest(slot: str, state_root: Path) -> str:
+def _groupware_runtime_desired_status(slot: str, state_root: Path):
     target = load_runtime_target(slot, state_root)
     profile = load_profile(target.runtime_profile)
     if (
@@ -95,12 +95,23 @@ def _groupware_runtime_desired_digest(slot: str, state_root: Path) -> str:
         or profile.metadata.get("slot_class") != target.runtime_class
     ):
         raise ValueError("runtime manifest profile does not match runtime binding")
-    contract = groupware_runtime_desired_contract(
+    if not target.runtime_profile_digest:
+        raise ValueError("runtime manifest profile digest is missing")
+    if profile.digest != target.runtime_profile_digest:
+        raise ValueError(
+            "runtime manifest profile digest does not match installed profile"
+        )
+    return groupware_runtime_desired_contract(
         slot,
         state_root,
         str(profile.metadata.get("container_nas_root") or ""),
+        profile.name,
+        profile.digest,
     )
-    return contract.desired_digest
+
+
+def _groupware_runtime_desired_digest(slot: str, state_root: Path) -> str:
+    return _groupware_runtime_desired_status(slot, state_root).desired_digest
 
 
 def _view_grant_evidence(
@@ -730,12 +741,20 @@ def cmd_nas_view_status(args: argparse.Namespace) -> int:
         print(f"{prefix}_paths_json={json.dumps(status_record.get('paths') or [], ensure_ascii=False, separators=(',', ':'))}")
         if corpus == "groupware":
             try:
-                desired_digest = _groupware_runtime_desired_digest(
-                    slot, Path(state_root)
-                )
+                desired = _groupware_runtime_desired_status(slot, Path(state_root))
+                desired_digest = desired.desired_digest
+                runtime_profile_digest = desired.runtime_profile_digest
+                requested_path_count = str(len(desired.requested_paths))
+                effective_path_count = str(len(desired.effective_paths))
             except Exception:
                 desired_digest = ""
+                runtime_profile_digest = ""
+                requested_path_count = ""
+                effective_path_count = ""
             print(f"{prefix}_desired_digest={desired_digest}")
+            print(f"{prefix}_runtime_profile_digest={runtime_profile_digest}")
+            print(f"{prefix}_requested_path_count={requested_path_count}")
+            print(f"{prefix}_effective_path_count={effective_path_count}")
         healthy = status_paths_valid
         try:
             master_mode = _record_master_mode(record)
