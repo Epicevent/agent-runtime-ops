@@ -5,7 +5,7 @@ The terminal is a current v2 kernel receipt showing every declared groupware gra
 ## Layers and blockers
 
 - Source: this branch binds the applied runtime-profile digest and preserves requested versus effective groupware paths in the observer receipt.
-- Build/install/runtime: not performed here; the live broker must be rebuilt and installed before v2 receipts exist.
+- Build/install/runtime: not performed here; the live broker and the bounded 15-minute Persistent producer must be rebuilt and installed before fresh v2 receipts exist.
 - Actual turn: product UI terminals belong to Hermes/OpenClaw and are not claimed by this observer lane.
 - First blocker: the current root host must provide a new v2 receipt for each declared slot; old v1 receipts are historical only.
 
@@ -16,6 +16,8 @@ The page consumes typed receipt states and never turns host ledger evidence into
 ## Positive/negative and next action
 
 Positive requires requested=mounted=read-success and exact profile/container/desired bindings. Negative cases include source/mount/access/policy failures, stale or pending observations, and requested/effective cardinality mismatch. Next action is focused source/test review, then build/install and fresh server observations; no repair is automated by the observer.
+
+The producer accepts no caller path, argv, or slot override. It enumerates only enabled declared groupware slots, creates one deterministic manifest per slot per 15-minute UTC bucket, and submits only the existing read-only observer. Duplicate bucket submissions are broker-deduplicated; malformed inventory, cap overflow, or broker failure stops before claiming success. The timer never mounts, detaches, changes permissions, or applies a repair.
 
 ## Supersession
 
