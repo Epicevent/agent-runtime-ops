@@ -30,7 +30,11 @@ from .runtime_backup import (
     restore_backup_env,
     runtime_host_mutation_lock,
     runtime_transaction_lock,
+    pending_rollback_identity,
 )
+from .canary_transaction import begin as begin_canary_transaction
+from .canary_transaction import finish as finish_canary_transaction
+from .image_specs import digest_from_image_ref
 from .runtime_manifest import write_slot_manifests
 from .docker_compose import (
     docker_compose_command,
@@ -131,6 +135,7 @@ def _restore_and_verify_backup(
     if reason == "rollback_empty_baseline_restored":
         try:
             finish_rollback_transaction(slot, state_root, backup_dir)
+            _finish_canary_rollback(slot=slot, state_root=state_root, backup_dir=backup_dir)
         except Exception as exc:
             return False, f"rollback_verification_failed:{exc}"
         return True, "rollback_empty_baseline_restored_verified"
@@ -153,9 +158,36 @@ def _restore_and_verify_backup(
         if failed:
             return False, "rollback_live_failed:" + ",".join(sorted(failed))
         finish_rollback_transaction(slot, state_root, backup_dir)
+        _finish_canary_rollback(slot=slot, state_root=state_root, backup_dir=backup_dir)
     except Exception as exc:
         return False, f"rollback_verification_failed:{exc}"
     return True, "rollback_applied_verified"
+
+
+def _finish_canary_rollback(*, slot: str, state_root: Path, backup_dir: Path) -> None:
+    """Consume the canary's one rollback exception only after live verification."""
+    try:
+        from .canary_transaction import load as load_canary_transaction
+
+        tx = load_canary_transaction(state_root, slot)
+    except ValueError as exc:
+        if str(exc) == "canary transaction absent":
+            return
+        raise
+    previous_desired, _ = load_backup_runtime_contract(slot, backup_dir, state_root)
+    product_digest = digest_from_image_ref(previous_desired.image_spec.get("product_image"))
+    wrapper_digest = digest_from_image_ref(previous_desired.image_spec.get("wrapper_image"))
+    if not product_digest or not wrapper_digest:
+        raise ValueError("rollback prestate image digests are unavailable")
+    if tx["prestate_product_digest"] != product_digest or tx["prestate_wrapper_digest"] != wrapper_digest:
+        raise ValueError("rollback prestate image digest mismatch")
+    finish_canary_transaction(
+        state_root,
+        slot,
+        outcome="rollback_succeeded",
+        result_product_digest=product_digest,
+        result_wrapper_digest=wrapper_digest,
+    )
 
 
 def apply_desired_slot(
@@ -248,6 +280,26 @@ def _apply_desired_slot_locked(
                 )
         backup_dir = backup_agent_runtime_state(desired.slot, runtime_dir, state_root)
         begin_rollback_transaction(desired.slot, state_root, backup_dir)
+        if action_name.startswith("rollout_image_") and previous_manifest is not None:
+            previous_desired, _ = load_backup_runtime_contract(desired.slot, backup_dir, state_root)
+            candidate_product = digest_from_image_ref(desired.image_spec.get("product_image"))
+            candidate_wrapper = digest_from_image_ref(desired.image_spec.get("wrapper_image"))
+            prestate_product = digest_from_image_ref(previous_desired.image_spec.get("product_image"))
+            prestate_wrapper = digest_from_image_ref(previous_desired.image_spec.get("wrapper_image"))
+            pending_identity = pending_rollback_identity(state_root, desired.slot)
+            if not all((candidate_product, candidate_wrapper, prestate_product, prestate_wrapper, pending_identity)):
+                raise ValueError("canary transaction image or backup identity is incomplete")
+            begin_canary_transaction(
+                state_root,
+                slot=desired.slot,
+                family=str(desired.family or ""),
+                candidate_product_digest=candidate_product,
+                candidate_wrapper_digest=candidate_wrapper,
+                prestate_product_digest=prestate_product,
+                prestate_wrapper_digest=prestate_wrapper,
+                backup_name=str(pending_identity["backup_name"]),
+                backup_metadata_sha256=str(pending_identity["backup_metadata_sha256"]),
+            )
         if prepare_runtime_env is not None:
             runtime_env_prepared = True
             prepare_runtime_env()
@@ -432,6 +484,18 @@ def _apply_desired_slot_locked(
             previous_manifest=previous_manifest,
         )
         finish_rollback_transaction(desired.slot, state_root, backup_dir)
+        if action_name.startswith("rollout_image_"):
+            candidate_product = digest_from_image_ref(desired.image_spec.get("product_image"))
+            candidate_wrapper = digest_from_image_ref(desired.image_spec.get("wrapper_image"))
+            if not candidate_product or not candidate_wrapper:
+                raise ValueError("candidate image digests are unavailable")
+            finish_canary_transaction(
+                state_root,
+                desired.slot,
+                outcome="candidate_succeeded",
+                result_product_digest=candidate_product,
+                result_wrapper_digest=candidate_wrapper,
+            )
         append_action_log(state_root, action_name, desired.slot, desired.image_name, "ok", rendered.sha256)
     except Exception as exc:
         ok, reason = _restore_and_verify_backup(

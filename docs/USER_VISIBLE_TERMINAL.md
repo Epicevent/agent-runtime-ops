@@ -22,3 +22,10 @@ The producer accepts no caller path, argv, or slot override. It enumerates only 
 ## Supersession
 
 Observer v1 remains readable history but cannot establish the v2 terminal once profile binding is required.
+
+## Rollback transaction lane
+
+The canary rollback contract seals the target, family, candidate product/wrapper pair, live prestate pair,
+and backup identity in one single-use transaction. Candidate and rollback receipts share that transaction
+identity; arbitrary historical digests, cross-slot reuse, conflicting reuse, and consumed transactions are
+rejected. This source change is not an install, canary, or runtime completion claim.
