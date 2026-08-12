@@ -14,6 +14,7 @@ from agent_runtime_ops.domain.groupware_runtime_observation import (
     ResolvedRuntime,
     RuntimeObservation,
     ServicePrincipal,
+    groupware_runtime_desired_contract,
     _assume_service_principal,
     _matches_service,
     observe_groupware_runtime,
@@ -77,6 +78,7 @@ def resolved() -> ResolvedRuntime:
         "0123456789ab",
         777,
         "/workspace/nas_docs",
+        "/home/oc16/nas_docs/groupware",
         ("groupware_mails_example",),
         ("//nas.example/groupware[/groupware/mails/example]",),
         DIGEST_A,
@@ -108,6 +110,8 @@ def observe_with(
     host_source_match: bool = True,
     host_readonly: bool = True,
     host_observed: bool = True,
+    host_target: str = "/home/oc16/nas_docs/groupware/groupware_mails_example",
+    mountinfo_calls: list[tuple[int, str]] | None = None,
 ) -> RuntimeObservation:
     expected_source = "//nas.example/groupware[/groupware/mails/example]"
     host_rows = []
@@ -115,7 +119,7 @@ def observe_with(
     if host_present:
         host_rows.append(
             {
-                "target": "/home/oc16/nas_docs/groupware/groupware_mails_example",
+                "target": host_target,
                 "source": (
                     expected_source
                     if host_source_match
@@ -134,6 +138,13 @@ def observe_with(
                 "options": "ro,nosuid,nodev",
             }
         )
+    def mountinfo(pid: int, target: str):
+        if mountinfo_calls is not None:
+            mountinfo_calls.append((pid, target))
+        if pid == 1:
+            return (0, "", host_rows) if host_observed else (1, "unavailable", [])
+        return 0, "", container_rows
+
     with (
         patch(
             "agent_runtime_ops.domain.groupware_runtime_observation._resolve_runtime",
@@ -148,22 +159,82 @@ def observe_with(
             return_value=(result,),
         ),
         patch(
-            "agent_runtime_ops.domain.groupware_runtime_observation.findmnt_under",
-            return_value=(
-                (0, "", host_rows)
-                if host_observed
-                else (1, "unavailable", [])
-            ),
-        ),
-        patch(
             "agent_runtime_ops.domain.groupware_runtime_observation.mountinfo_under",
-            return_value=(0, "", container_rows),
+            side_effect=mountinfo,
         ),
     ):
         return observe_groupware_runtime("oc16")
 
 
 class GroupwareRuntimeObservationTests(unittest.TestCase):
+    def test_status_contract_builder_matches_observer_digest_payload(self) -> None:
+        binding = resolved().binding
+        record = {
+            "share": "//10.10.10.2/hanpass_groupware",
+            "paths": ["groupware/mails/example"],
+        }
+        with (
+            patch(
+                "agent_runtime_ops.domain.groupware_runtime_observation.get_runtime_binding",
+                return_value=binding,
+            ),
+            patch(
+                "agent_runtime_ops.domain.groupware_runtime_observation.load_views_state",
+                return_value={},
+            ),
+            patch(
+                "agent_runtime_ops.domain.groupware_runtime_observation.get_view_record",
+                return_value=record,
+            ),
+        ):
+            contract = groupware_runtime_desired_contract(
+                "oc16", Path("/unused"), "/workspace/nas_docs"
+            )
+        self.assertEqual(contract.host_nas_root, "/home/oc16/nas_docs/groupware")
+        self.assertEqual(contract.aliases, ("groupware_mails_example",))
+        self.assertEqual(
+            contract.desired_digest,
+            "sha256:e704c29e921ac9f424ba1d11f49d33ab563d394ddb9f25fc204d1a93cdc057d4",
+        )
+
+    def test_host_mount_uses_canonical_slot_target_in_host_namespace(self) -> None:
+        calls: list[tuple[int, str]] = []
+        value = observe_with(
+            {
+                "index": 0,
+                "list_ok": True,
+                "open_read_ok": True,
+                "errno": None,
+                "representative": "regular_file",
+            },
+            mountinfo_calls=calls,
+        )
+        self.assertEqual(value.status, "healthy")
+        self.assertEqual(
+            calls,
+            [
+                (1, "/home/oc16/nas_docs/groupware"),
+                (777, "/workspace/nas_docs/groupware"),
+            ],
+        )
+
+    def test_wrong_host_target_fails_closed_without_path_fallback(self) -> None:
+        value = observe_with(
+            {
+                "index": 0,
+                "list_ok": True,
+                "open_read_ok": True,
+                "errno": None,
+                "representative": "regular_file",
+            },
+            host_target="/home/oc20/nas_docs/groupware/groupware_mails_example",
+        )
+        facts = dict(value.public_facts())
+        self.assertEqual(value.reason_code, "runtime_mount_missing")
+        self.assertEqual(facts["host_mount_present_count"], "0")
+        self.assertEqual(facts["container_mount_verified_count"], "1")
+        self.assertEqual(facts["bounded_probe_open_read_count"], "1")
+
     def test_enabled_observation_policy_claims_and_dispatches_once_on_submit(
         self,
     ) -> None:

@@ -15,6 +15,9 @@ from ..domain.common import is_root as _is_root
 from ..domain.common import now_iso as _now_iso
 from ..domain.common import run_text as _run_text
 from ..domain.common import state_root as _state_root
+from ..domain.groupware_runtime_observation import (
+    groupware_runtime_desired_contract,
+)
 from ..domain.nas_credentials import migrate_customer_credential_to_root
 from ..domain.nas_mounts import write_managed_fstab_entry as _write_managed_fstab_entry
 from ..domain.nas_views import (
@@ -73,6 +76,8 @@ from ..nas import (
     shared_credential_for_share,
     shared_master_for_share,
 )
+from ..profiles import load_profile
+from ..state import load_runtime_target
 
 
 _MASTER_MODE_PER_SLOT = "per_slot_cifs"
@@ -80,6 +85,22 @@ _MASTER_MODE_SHARED = "shared_policy_mount"
 _KAKAO_PACKAGE_ROOT = Path("/mnt/nas/kakao-work")
 _GRANT_EVIDENCE_MAX_PATHS = 64
 _GRANT_EVIDENCE_TIMEOUT_SECONDS = 15.0
+
+
+def _groupware_runtime_desired_digest(slot: str, state_root: Path) -> str:
+    target = load_runtime_target(slot, state_root)
+    profile = load_profile(target.runtime_profile)
+    if (
+        profile.metadata.get("family") != target.family
+        or profile.metadata.get("slot_class") != target.runtime_class
+    ):
+        raise ValueError("runtime manifest profile does not match runtime binding")
+    contract = groupware_runtime_desired_contract(
+        slot,
+        state_root,
+        str(profile.metadata.get("container_nas_root") or ""),
+    )
+    return contract.desired_digest
 
 
 def _view_grant_evidence(
@@ -707,6 +728,14 @@ def cmd_nas_view_status(args: argparse.Namespace) -> int:
         print(f"{prefix}_share={record.get('share', '')}")
         print(f"{prefix}_package={record.get('package', '')}")
         print(f"{prefix}_paths_json={json.dumps(status_record.get('paths') or [], ensure_ascii=False, separators=(',', ':'))}")
+        if corpus == "groupware":
+            try:
+                desired_digest = _groupware_runtime_desired_digest(
+                    slot, Path(state_root)
+                )
+            except Exception:
+                desired_digest = ""
+            print(f"{prefix}_desired_digest={desired_digest}")
         healthy = status_paths_valid
         try:
             master_mode = _record_master_mode(record)
