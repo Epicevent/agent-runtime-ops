@@ -17,8 +17,8 @@ from agent_runtime_ops.root_actions.contracts import seal_typed_manifest
 from agent_runtime_ops.root_actions.endpoint import RootActionBrokerEndpoint
 from agent_runtime_ops.root_actions.execution import DEFAULT_EXECUTION_POLICIES
 from agent_runtime_ops.root_actions.groupware_reobservation import (
-    MAX_BUCKET_AGE_SECONDS,
     MAX_GROUPWARE_SLOTS_PER_CYCLE,
+    TERMINAL_WAIT_SECONDS_PER_SLOT,
     GroupwareReobservationError,
     build_groupware_reobservation_manifest,
     declared_groupware_slots,
@@ -38,7 +38,13 @@ MODULE = "agent_runtime_ops.root_actions.groupware_reobservation"
 PEER = BrokerPeerIdentity(uid=1002, gid=1002, pid=4242)
 
 
-def _binding(slot: str, index: int, *, enabled: bool = True) -> RuntimeBinding:
+def _binding(
+    slot: str,
+    index: int,
+    *,
+    enabled: bool = True,
+    upstream_kind: str = "managed-rootful",
+) -> RuntimeBinding:
     return RuntimeBinding(
         instance_id=str(uuid.UUID(int=index + 1)),
         linux_account=slot,
@@ -48,6 +54,9 @@ def _binding(slot: str, index: int, *, enabled: bool = True) -> RuntimeBinding:
         gateway_port=20000 + index * 2,
         bridge_port=20001 + index * 2,
         enabled=enabled,
+        upstream_kind=upstream_kind,
+        upstream_owner="owner" if upstream_kind == "developer-rootless" else "",
+        upstream_container="runtime" if upstream_kind == "developer-rootless" else "",
     )
 
 
@@ -82,15 +91,23 @@ class _Events:
 
 
 class _FailingClient:
-    def __init__(self, *, fail_at: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        fail_at: int | None = None,
+        terminal_state: str = "terminal",
+    ) -> None:
         self.fail_at = fail_at
+        self.terminal_state = terminal_state
         self.manifests: list[bytes] = []
+        self.calls: list[tuple[str, str]] = []
 
     def submit(self, manifest: bytes):
         self.manifests.append(manifest)
+        job = seal_typed_manifest(manifest)
+        self.calls.append(("submit", job.job_id))
         if self.fail_at == len(self.manifests):
             raise OSError("broker unavailable")
-        job = seal_typed_manifest(manifest)
         return (
             RootActionRequestHandle(
                 job.job_id,
@@ -100,6 +117,26 @@ class _FailingClient:
             ),
             {},
         )
+
+    def poll_terminal(self, handle, *, timeout_seconds: float):
+        assert timeout_seconds == TERMINAL_WAIT_SECONDS_PER_SLOT
+        self.calls.append(("poll", handle.job_id))
+        return (
+            {"status": {"state": {"name": self.terminal_state}}},
+            object(),
+        )
+
+
+class _TerminalProxy:
+    def __init__(self, client: RootActionBrokerClient) -> None:
+        self.client = client
+
+    def submit(self, manifest: bytes):
+        return self.client.submit(manifest)
+
+    def poll_terminal(self, _handle, *, timeout_seconds: float):
+        assert timeout_seconds == TERMINAL_WAIT_SECONDS_PER_SLOT
+        return {"status": {"state": {"name": "terminal"}}}, object()
 
 
 def test_manifest_is_exactly_deterministic_per_slot_and_15_minute_bucket(
@@ -113,7 +150,7 @@ def test_manifest_is_exactly_deterministic_per_slot_and_15_minute_bucket(
     assert first == second
     job = seal_typed_manifest(first[0].manifest)
     value = job.manifest_copy()
-    assert job.job_id == "groupware-reobserve.oc16.20260812t09z"
+    assert job.job_id == "groupware-reobserve.oc16.20260812t0900z"
     assert value["operation_id"] == "nas.observe_groupware_runtime"
     assert value["operation_version"] == 1
     assert value["request"] == {
@@ -136,14 +173,14 @@ def test_declared_slots_are_sorted_and_require_enabled_bindings() -> None:
     bindings = [_binding(slot, index) for index, slot in enumerate(slots)]
     with (
         patch(f"{MODULE}.load_runtime_bindings", return_value=bindings),
-        patch(f"{MODULE}.load_views_state", return_value=_views(slots)),
+        patch(f"{MODULE}.load_yaml", return_value=_views(slots)),
     ):
         assert declared_groupware_slots(Path("/state")) == ("oc16", "oc20", "oc6")
 
     bindings[0] = _binding("oc20", 0, enabled=False)
     with (
         patch(f"{MODULE}.load_runtime_bindings", return_value=bindings),
-        patch(f"{MODULE}.load_views_state", return_value=_views(slots)),
+        patch(f"{MODULE}.load_yaml", return_value=_views(slots)),
         pytest.raises(GroupwareReobservationError, match="groupware_slot_not_enabled"),
     ):
         declared_groupware_slots(Path("/state"))
@@ -159,7 +196,7 @@ def test_slot_cap_and_malformed_record_fail_before_any_broker_submission(
     client = _FailingClient()
     with (
         patch(f"{MODULE}.load_runtime_bindings", return_value=bindings),
-        patch(f"{MODULE}.load_views_state", return_value=_views(too_many)),
+        patch(f"{MODULE}.load_yaml", return_value=_views(too_many)),
         pytest.raises(GroupwareReobservationError, match="groupware_slot_cap_exceeded"),
     ):
         submit_groupware_reobservations(
@@ -171,10 +208,8 @@ def test_slot_cap_and_malformed_record_fail_before_any_broker_submission(
 
     with (
         patch(f"{MODULE}.load_runtime_bindings", return_value=[_binding("oc6", 0)]),
-        patch(f"{MODULE}.load_views_state", return_value=_views(("oc6",), record=[])),
-        pytest.raises(
-            GroupwareReobservationError, match="groupware_view_record_invalid"
-        ),
+        patch(f"{MODULE}.load_yaml", return_value=_views(("oc6",), record=[])),
+        pytest.raises(GroupwareReobservationError, match="groupware_inventory_invalid"),
     ):
         submit_groupware_reobservations(
             tmp_path,
@@ -184,25 +219,96 @@ def test_slot_cap_and_malformed_record_fail_before_any_broker_submission(
     assert client.manifests == []
 
 
-def test_bucket_bounds_and_naive_clock_fail_before_submission(
+def test_unknown_disabled_and_rootless_inventory_fail_before_submission(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 8, 12, 9, 1, tzinfo=timezone.utc)
+    cases = (
+        ([], _views(("oc6",)), "groupware_slot_not_enabled"),
+        (
+            [_binding("oc6", 0, enabled=False)],
+            _views(("oc6",)),
+            "groupware_slot_not_enabled",
+        ),
+        (
+            [_binding("oc6", 0, upstream_kind="developer-rootless")],
+            _views(("oc6",)),
+            "groupware_slot_not_rootful",
+        ),
+        (
+            [_binding("oc6", 0)],
+            {"views": {}, "corpus_views": []},
+            "groupware_inventory_invalid",
+        ),
+    )
+    for bindings, views, reason in cases:
+        client = _FailingClient()
+        with (
+            patch(f"{MODULE}.load_runtime_bindings", return_value=bindings),
+            patch(f"{MODULE}.load_yaml", return_value=views),
+            pytest.raises(GroupwareReobservationError, match=reason),
+        ):
+            submit_groupware_reobservations(tmp_path, now=now, client=client)
+        assert client.calls == []
+
+
+def test_slots_submit_and_reach_terminal_strictly_sequentially(tmp_path: Path) -> None:
+    client = _FailingClient()
+    with patch(
+        f"{MODULE}.declared_groupware_slots",
+        return_value=("oc1", "oc6", "oc16"),
+    ):
+        cycle = submit_groupware_reobservations(
+            tmp_path,
+            now=datetime(2026, 8, 12, 9, 1, tzinfo=timezone.utc),
+            client=client,
+        )
+    ids = [handle.job_id for handle in cycle.handles]
+    assert client.calls == [
+        (action, job_id) for job_id in ids for action in ("submit", "poll")
+    ]
+
+
+def test_unknown_terminal_state_stops_before_the_next_slot(tmp_path: Path) -> None:
+    client = _FailingClient(terminal_state="unknown")
+    with (
+        patch(
+            f"{MODULE}.declared_groupware_slots",
+            return_value=("oc1", "oc6"),
+        ),
+        pytest.raises(
+            GroupwareReobservationError, match="broker_terminal_state_unknown"
+        ),
+    ):
+        submit_groupware_reobservations(
+            tmp_path,
+            now=datetime(2026, 8, 12, 9, 1, tzinfo=timezone.utc),
+            client=client,
+        )
+    assert len(client.manifests) == 1
+    assert [action for action, _job_id in client.calls] == ["submit", "poll"]
+
+
+def test_persistent_catchup_uses_current_quarter_and_naive_clock_fails_closed(
     tmp_path: Path,
 ) -> None:
     client = _FailingClient()
     with patch(f"{MODULE}.declared_groupware_slots", return_value=("oc6",)):
         cycle = submit_groupware_reobservations(
             tmp_path,
-            now=datetime(2026, 8, 12, 9, tzinfo=timezone.utc)
-            + timedelta(seconds=MAX_BUCKET_AGE_SECONDS),
+            now=datetime(2026, 8, 12, 9, 37, tzinfo=timezone.utc),
             client=client,
         )
-    assert cycle.bucket == "2026-08-12T09:00:00Z"
+    assert cycle.bucket == "2026-08-12T09:30:00Z"
+    assert cycle.handles[0].job_id.endswith(".20260812t0930z")
+    naive_client = _FailingClient()
     with pytest.raises(GroupwareReobservationError, match="clock_not_timezone_aware"):
         submit_groupware_reobservations(
             tmp_path,
             now=datetime(2026, 8, 12, 9),
-            client=client,
+            client=naive_client,
         )
-    assert client.manifests == []
+    assert naive_client.manifests == []
 
 
 def test_exact_duplicate_submission_does_not_redispatch(tmp_path: Path) -> None:
@@ -223,10 +329,15 @@ def test_exact_duplicate_submission_does_not_redispatch(tmp_path: Path) -> None:
     client = RootActionBrokerClient(
         transport=lambda frame, _timeout: endpoint.handle(frame, peer=PEER)
     )
+    producer_client = _TerminalProxy(client)
     now = bucket + timedelta(seconds=30)
     with patch(f"{MODULE}.declared_groupware_slots", return_value=("oc16",)):
-        first = submit_groupware_reobservations(tmp_path, now=now, client=client)
-        second = submit_groupware_reobservations(tmp_path, now=now, client=client)
+        first = submit_groupware_reobservations(
+            tmp_path, now=now, client=producer_client
+        )
+        second = submit_groupware_reobservations(
+            tmp_path, now=now, client=producer_client
+        )
     assert first == second
     assert len(dispatched) == 1
     assert [item.action for item in store.read_ledger(first.handles[0].job_id)] == [
@@ -277,6 +388,9 @@ def test_install_contract_is_fixed_read_only_oneshot_and_persistent_timer() -> N
     package_start = install.index("install_package()")
     package_end = install.index("\n}\n", package_start) + 3
     package = install[package_start:package_end]
+    check_start = install.index("check_install()")
+    check_end = install.index("\n}\n", check_start) + 3
+    check = install[check_start:check_end]
 
     assert "Type=oneshot" in function
     assert "User=$OPS_USER" in function
@@ -286,6 +400,7 @@ def test_install_contract_is_fixed_read_only_oneshot_and_persistent_timer() -> N
         "agent_runtime_ops.root_actions.groupware_reobservation"
     ) in function
     assert "Environment=AGENT_RUNTIME_STATE_ROOT=$STATE_ROOT" in function
+    assert "TimeoutStartSec=1200" in function
     assert "NoNewPrivileges=true" in function
     assert "ProtectSystem=strict" in function
     assert "ReadOnlyPaths=$STATE_ROOT $CURRENT_LINK" in function
@@ -302,3 +417,10 @@ def test_install_contract_is_fixed_read_only_oneshot_and_persistent_timer() -> N
     assert package.index("install_root_action_broker_or_restore") < package.index(
         "install_groupware_reobservation_timer"
     )
+    assert package.index("install_usage_collect_timer") < package.index(
+        "install_groupware_reobservation_timer"
+    )
+    assert "GROUPWARE_REOBSERVATION_SERVICE_FILE" in check
+    assert "GROUPWARE_REOBSERVATION_TIMER_FILE" in check
+    assert "groupware reobservation timer is not enabled" in check
+    assert "groupware reobservation timer is not active" in check

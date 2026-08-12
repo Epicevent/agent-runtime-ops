@@ -7,12 +7,13 @@ from pathlib import Path
 import sys
 
 from ..domain.nas_views import (
+    VIEWS_STATE_NAME,
     iter_view_records,
-    load_views_state,
     requested_and_effective_granted_paths,
 )
-from ..paths import DEFAULT_STATE_ROOT
+from ..paths import DEFAULT_STATE_ROOT, state_path
 from ..routing import load_runtime_bindings, validate_linux_account
+from ..yamlio import load_yaml
 from .client import RootActionBrokerClient, RootActionRequestHandle
 from .contracts import MANIFEST_SCHEMA, canonical_manifest_bytes, seal_typed_manifest
 from .registry import REGISTRY_VERSION
@@ -22,13 +23,13 @@ from .storage import SubmissionLimits
 OPERATION_ID = "nas.observe_groupware_runtime"
 OPERATION_VERSION = 1
 BUCKET_MINUTES = 15
-MAX_BUCKET_AGE_SECONDS = BUCKET_MINUTES * 60 - 1
-# Keep one cycle below the broker's simultaneous-open limit. The six declared
-# product slots therefore remain admissible without fire-and-forget overflow.
+# Four quarter-hour cycles fit inside the broker's rolling one-hour window.
+# Sequential terminal waits keep simultaneous-open jobs at one.
 MAX_GROUPWARE_SLOTS_PER_CYCLE = min(
     SubmissionLimits().max_jobs_per_uid_window // 4,
     SubmissionLimits().max_open_per_uid,
 )
+TERMINAL_WAIT_SECONDS_PER_SLOT = 60.0
 REPLY_TARGET = "ops-groupware-reobserver"
 
 
@@ -77,7 +78,7 @@ def _bucket_timestamp(bucket: datetime) -> str:
 
 
 def _bucket_token(bucket: datetime) -> str:
-    return _utc(bucket).strftime("%Y%m%dt%Hz")
+    return _utc(bucket).strftime("%Y%m%dt%H%Mz")
 
 
 def build_groupware_reobservation_manifest(slot: str, bucket: datetime) -> bytes:
@@ -127,10 +128,42 @@ def build_groupware_reobservation_manifest(slot: str, bucket: datetime) -> bytes
     return sealed.canonical_manifest
 
 
+def _strict_views_state(state_root: Path) -> dict:
+    try:
+        raw = load_yaml(state_path(state_root, VIEWS_STATE_NAME))
+    except Exception as exc:
+        raise GroupwareReobservationError("groupware_inventory_unavailable") from exc
+    if not isinstance(raw, dict):
+        raise GroupwareReobservationError("groupware_inventory_invalid")
+    views = raw.get("views", {})
+    corpus_views = raw.get("corpus_views", {})
+    if not isinstance(views, dict) or not isinstance(corpus_views, dict):
+        raise GroupwareReobservationError("groupware_inventory_invalid")
+    if any(
+        not isinstance(slot, str) or not isinstance(record, dict)
+        for slot, record in views.items()
+    ):
+        raise GroupwareReobservationError("groupware_inventory_invalid")
+    for slot, by_corpus in corpus_views.items():
+        if not isinstance(slot, str) or not isinstance(by_corpus, dict):
+            raise GroupwareReobservationError("groupware_inventory_invalid")
+        if any(
+            not isinstance(corpus, str) or not isinstance(record, dict)
+            for corpus, record in by_corpus.items()
+        ):
+            raise GroupwareReobservationError("groupware_inventory_invalid")
+    return raw
+
+
 def declared_groupware_slots(state_root: Path) -> tuple[str, ...]:
-    bindings = {item.linux_account: item for item in load_runtime_bindings(state_root)}
+    try:
+        bindings = {
+            item.linux_account: item for item in load_runtime_bindings(state_root)
+        }
+    except Exception as exc:
+        raise GroupwareReobservationError("runtime_bindings_invalid") from exc
     slots: set[str] = set()
-    for raw_slot, corpus, record in iter_view_records(load_views_state(state_root)):
+    for raw_slot, corpus, record in iter_view_records(_strict_views_state(state_root)):
         if corpus != "groupware":
             continue
         try:
@@ -146,6 +179,8 @@ def declared_groupware_slots(state_root: Path) -> tuple[str, ...]:
             raise GroupwareReobservationError("groupware_view_record_invalid") from exc
         if binding is None or not binding.enabled:
             raise GroupwareReobservationError("groupware_slot_not_enabled")
+        if binding.upstream_kind != "managed-rootful":
+            raise GroupwareReobservationError("groupware_slot_not_rootful")
         if slot in slots:
             raise GroupwareReobservationError("groupware_slot_duplicate")
         slots.add(slot)
@@ -159,11 +194,7 @@ def plan_groupware_reobservations(
     *,
     now: datetime,
 ) -> tuple[PlannedReobservation, ...]:
-    current = _utc(now)
-    bucket = observation_bucket(current)
-    age = (current - bucket).total_seconds()
-    if age < 0 or age > MAX_BUCKET_AGE_SECONDS:
-        raise GroupwareReobservationError("observation_bucket_stale")
+    bucket = observation_bucket(now)
     slots = declared_groupware_slots(Path(state_root))
     return tuple(
         PlannedReobservation(
@@ -189,6 +220,15 @@ def submit_groupware_reobservations(
             handle, _projection = broker.submit(plan.manifest)
         except Exception as exc:
             raise GroupwareReobservationError("broker_submission_failed") from exc
+        try:
+            projection, _receipt = broker.poll_terminal(
+                handle,
+                timeout_seconds=TERMINAL_WAIT_SECONDS_PER_SLOT,
+            )
+        except Exception as exc:
+            raise GroupwareReobservationError("broker_terminal_wait_failed") from exc
+        if projection.get("status", {}).get("state", {}).get("name") != "terminal":
+            raise GroupwareReobservationError("broker_terminal_state_unknown")
         handles.append(handle)
     return ReobservationCycle(
         _bucket_timestamp(bucket),

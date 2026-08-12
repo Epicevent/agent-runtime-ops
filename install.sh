@@ -894,7 +894,7 @@ User=$OPS_USER
 Group=$OPS_GROUP
 ExecStart=$CURRENT_LINK/.venv/bin/python -I -B -m agent_runtime_ops.root_actions.groupware_reobservation
 Environment=AGENT_RUNTIME_STATE_ROOT=$STATE_ROOT
-TimeoutStartSec=120
+TimeoutStartSec=1200
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
@@ -2077,12 +2077,12 @@ install_package() {
   install_root_action_broker_or_restore \
     "$release_dir" "$commit" "$previous_active_release" \
     "$previous_broker_state" "$activation_helper"
-  install_groupware_reobservation_timer
   persist_dev_users
   install_ops_sudoers
   attest_dev_user_sudoers
   install_boot_restore_unit
   install_usage_collect_timer
+  install_groupware_reobservation_timer
   install_usage_pricing_timers "$release_dir"
   install_ops_home_agents "$release_dir"
   install_codex_agents "$release_dir"
@@ -2140,6 +2140,8 @@ check_install() {
   [[ -r "$SUDOERS_FILE" ]] || die "missing sudoers file: $SUDOERS_FILE"
   [[ -r "$USAGE_COLLECT_SERVICE_FILE" ]] || die "missing usage collector service: $USAGE_COLLECT_SERVICE_FILE"
   [[ -r "$USAGE_COLLECT_TIMER_FILE" ]] || die "missing usage collector timer: $USAGE_COLLECT_TIMER_FILE"
+  [[ -r "$GROUPWARE_REOBSERVATION_SERVICE_FILE" ]] || die "missing groupware reobservation service: $GROUPWARE_REOBSERVATION_SERVICE_FILE"
+  [[ -r "$GROUPWARE_REOBSERVATION_TIMER_FILE" ]] || die "missing groupware reobservation timer: $GROUPWARE_REOBSERVATION_TIMER_FILE"
   [[ -r "$USAGE_COST_TIMER_FILE" ]] || die "missing usage cost timer: $USAGE_COST_TIMER_FILE"
   [[ -r "$USAGE_FX_TIMER_FILE" ]] || die "missing usage FX timer: $USAGE_FX_TIMER_FILE"
   command -v systemctl >/dev/null 2>&1 || die "missing command: systemctl"
@@ -2147,6 +2149,10 @@ check_install() {
     || die "usage collector timer is not enabled"
   systemctl is-active --quiet "$(basename "$USAGE_COLLECT_TIMER_FILE")" \
     || die "usage collector timer is not active"
+  systemctl is-enabled --quiet "$(basename "$GROUPWARE_REOBSERVATION_TIMER_FILE")" \
+    || die "groupware reobservation timer is not enabled"
+  systemctl is-active --quiet "$(basename "$GROUPWARE_REOBSERVATION_TIMER_FILE")" \
+    || die "groupware reobservation timer is not active"
   systemctl is-active --quiet "$(basename "$USAGE_COST_TIMER_FILE")" \
     || die "usage cost timer is not active"
   systemctl is-active --quiet "$(basename "$USAGE_FX_TIMER_FILE")" \
@@ -2162,6 +2168,7 @@ check_install() {
   info "manifest=present"
   info "sudoers=present"
   info "usage_collector_units=present_enabled_active"
+  info "groupware_reobservation_units=present_enabled_active"
   info "usage_cost_units=present_enabled_active"
   info "usage_fx_units=present_enabled_active"
   if [[ -r "$CODEX_SKILL_DIR/SKILL.md" ]]; then
