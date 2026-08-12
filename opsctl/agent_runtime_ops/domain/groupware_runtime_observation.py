@@ -238,6 +238,16 @@ class ResolvedRuntime:
     container_identity_digest: str
 
 
+@dataclass(frozen=True)
+class GroupwareDesiredContract:
+    binding: RuntimeBinding
+    container_nas_root: str
+    host_nas_root: str
+    aliases: tuple[str, ...]
+    expected_sources: tuple[str, ...]
+    desired_digest: str
+
+
 def _canonical_json(value: object) -> bytes:
     return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
@@ -465,8 +475,11 @@ def _probe_namespace(container_pid: int, principal: ServicePrincipal, paths: tup
     return tuple(rows)
 
 
-def _resolve_runtime(slot: str, state_root: Path) -> ResolvedRuntime:
-    binding = get_runtime_binding(slot, state_root)
+def _groupware_desired_contract(
+    binding: RuntimeBinding,
+    state_root: Path,
+    container_nas_root: str,
+) -> GroupwareDesiredContract:
     if binding.upstream_kind != "managed-rootful":
         raise GroupwareRuntimeObservationError("rootless_runtime_unsupported")
     record = get_view_record(load_views_state(state_root), binding.linux_account, "groupware")
@@ -487,6 +500,44 @@ def _resolve_runtime(slot: str, state_root: Path) -> ResolvedRuntime:
         raise GroupwareRuntimeObservationError("groupware_view_invalid")
     if len(set(aliases)) != len(aliases):
         raise GroupwareRuntimeObservationError("groupware_alias_collision")
+    host_root = str(slot_entry(binding.linux_account, corpus.name))
+    for alias in aliases:
+        _container_path(container_nas_root, alias)
+    desired = {
+        "slot": binding.linux_account,
+        "instance_id": binding.instance_id,
+        "corpus": "groupware",
+        "container_nas_root": container_nas_root,
+        "host_nas_root": host_root,
+        "declared_paths": sorted(paths),
+        "aliases": sorted(aliases),
+        "expected_sources": sorted(expected_sources),
+    }
+    return GroupwareDesiredContract(
+        binding,
+        container_nas_root,
+        host_root,
+        aliases,
+        expected_sources,
+        _digest(desired, DESIRED_DOMAIN),
+    )
+
+
+def groupware_runtime_desired_contract(
+    slot: str,
+    state_root: Path,
+    container_nas_root: str,
+) -> GroupwareDesiredContract:
+    """Build the digest-bound observer contract without probing runtime state."""
+    return _groupware_desired_contract(
+        get_runtime_binding(slot, Path(state_root)),
+        Path(state_root),
+        container_nas_root,
+    )
+
+
+def _resolve_runtime(slot: str, state_root: Path) -> ResolvedRuntime:
+    binding = get_runtime_binding(slot, state_root)
     container, lookup = find_gateway_container_by_binding(binding)
     if not container or lookup != "instance_label":
         raise GroupwareRuntimeObservationError("container_identity_unverified")
@@ -494,29 +545,20 @@ def _resolve_runtime(slot: str, state_root: Path) -> ResolvedRuntime:
     profile = load_profile(profile_name)
     if profile.metadata.get("family") != binding.family or profile.metadata.get("slot_class") != binding.runtime_class:
         raise GroupwareRuntimeObservationError("container_profile_mismatch")
-    container_root = str(profile.metadata.get("container_nas_root") or "")
-    host_root = str(slot_entry(binding.linux_account, corpus.name))
-    for alias in aliases:
-        _container_path(container_root, alias)
-    desired = {
-        "slot": binding.linux_account,
-        "instance_id": binding.instance_id,
-        "corpus": "groupware",
-        "container_nas_root": container_root,
-        "host_nas_root": host_root,
-        "declared_paths": sorted(paths),
-        "aliases": sorted(aliases),
-        "expected_sources": sorted(expected_sources),
-    }
+    contract = _groupware_desired_contract(
+        binding,
+        state_root,
+        str(profile.metadata.get("container_nas_root") or ""),
+    )
     return ResolvedRuntime(
         binding,
         container,
         container_pid,
-        container_root,
-        host_root,
-        aliases,
-        expected_sources,
-        _digest(desired, DESIRED_DOMAIN),
+        contract.container_nas_root,
+        contract.host_nas_root,
+        contract.aliases,
+        contract.expected_sources,
+        contract.desired_digest,
         _digest({"instance_id": binding.instance_id, "container": container}, b"agent-runtime-container-identity/v1\x00"),
     )
 

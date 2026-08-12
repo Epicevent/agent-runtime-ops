@@ -7,7 +7,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from agent_runtime_ops.commands.nas_view import cmd_nas_view_status
+from agent_runtime_ops.commands.nas_view import (
+    _groupware_runtime_desired_digest,
+    cmd_nas_view_status,
+)
 from agent_runtime_ops.domain.nas_views import (
     crontab_has_reboot_restore,
     fstab_boot_entry_present,
@@ -67,6 +70,61 @@ class ManagedFstabMountTargetsTest(unittest.TestCase):
 
     def test_marker_without_entry_skipped(self) -> None:
         self.assertEqual(managed_fstab_mount_targets(f"{MARKER}\n# junk\n"), [])
+
+
+class GroupwareDesiredDigestStatusTest(unittest.TestCase):
+    def test_uses_runtime_manifest_profile_and_shared_contract_builder(self) -> None:
+        digest = "sha256:" + "a" * 64
+        with (
+            patch(
+                "agent_runtime_ops.commands.nas_view.load_runtime_target",
+                return_value=SimpleNamespace(
+                    runtime_profile="hermes-runtime-customer",
+                    family="hermes",
+                    runtime_class="customer",
+                ),
+            ),
+            patch(
+                "agent_runtime_ops.commands.nas_view.load_profile",
+                return_value=SimpleNamespace(
+                    metadata={
+                        "family": "hermes",
+                        "slot_class": "customer",
+                        "container_nas_root": "/workspace/nas_docs",
+                    }
+                ),
+            ),
+            patch(
+                "agent_runtime_ops.commands.nas_view.groupware_runtime_desired_contract",
+                return_value=SimpleNamespace(desired_digest=digest),
+            ) as builder,
+        ):
+            actual = _groupware_runtime_desired_digest("oc16", Path("/state"))
+        self.assertEqual(actual, digest)
+        builder.assert_called_once_with("oc16", Path("/state"), "/workspace/nas_docs")
+
+    def test_profile_drift_fails_closed_before_digest_build(self) -> None:
+        with (
+            patch(
+                "agent_runtime_ops.commands.nas_view.load_runtime_target",
+                return_value=SimpleNamespace(
+                    runtime_profile="p",
+                    family="hermes",
+                    runtime_class="customer",
+                ),
+            ),
+            patch(
+                "agent_runtime_ops.commands.nas_view.load_profile",
+                return_value=SimpleNamespace(
+                    metadata={
+                        "family": "openclaw",
+                        "slot_class": "customer",
+                    }
+                ),
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                _groupware_runtime_desired_digest("oc16", Path("/state"))
 
 
 def _status_output(*, fstab_text: str, is_root: bool, cron_rc: int = 0, cron_out: str = CRON_OK, failed_units=([], None)):

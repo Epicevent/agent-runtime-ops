@@ -109,6 +109,20 @@ def test_standalone_installer_pins_release_and_process_identity() -> None:
     assert "existing_release_invalid" in source
 
 
+def test_standalone_unit_retains_only_required_setuid_ambient_capability() -> None:
+    assignments = re.findall(
+        r"^AmbientCapabilities=(.*)$", UNIT.read_text(encoding="utf-8"), re.M
+    )
+    assert assignments == ["CAP_SETUID"]
+
+
+def test_standalone_unit_does_not_broaden_capability_authority() -> None:
+    unit = UNIT.read_text(encoding="utf-8")
+    assert "AmbientCapabilities=~" not in unit
+    assert "CapabilityBoundingSet=" not in unit
+    assert "CAP_SYS_ADMIN" not in unit
+
+
 def test_standalone_cutover_rolls_back_before_reporting_success() -> None:
     source = _source()
     capture_active = source.index(
