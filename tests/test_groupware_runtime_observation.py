@@ -14,6 +14,7 @@ from agent_runtime_ops.domain.groupware_runtime_observation import (
     ResolvedRuntime,
     RuntimeObservation,
     ServicePrincipal,
+    groupware_runtime_desired_contract,
     _assume_service_principal,
     _matches_service,
     observe_groupware_runtime,
@@ -166,6 +167,36 @@ def observe_with(
 
 
 class GroupwareRuntimeObservationTests(unittest.TestCase):
+    def test_status_contract_builder_matches_observer_digest_payload(self) -> None:
+        binding = resolved().binding
+        record = {
+            "share": "//10.10.10.2/hanpass_groupware",
+            "paths": ["groupware/mails/example"],
+        }
+        with (
+            patch(
+                "agent_runtime_ops.domain.groupware_runtime_observation.get_runtime_binding",
+                return_value=binding,
+            ),
+            patch(
+                "agent_runtime_ops.domain.groupware_runtime_observation.load_views_state",
+                return_value={},
+            ),
+            patch(
+                "agent_runtime_ops.domain.groupware_runtime_observation.get_view_record",
+                return_value=record,
+            ),
+        ):
+            contract = groupware_runtime_desired_contract(
+                "oc16", Path("/unused"), "/workspace/nas_docs"
+            )
+        self.assertEqual(contract.host_nas_root, "/home/oc16/nas_docs/groupware")
+        self.assertEqual(contract.aliases, ("groupware_mails_example",))
+        self.assertEqual(
+            contract.desired_digest,
+            "sha256:e704c29e921ac9f424ba1d11f49d33ab563d394ddb9f25fc204d1a93cdc057d4",
+        )
+
     def test_host_mount_uses_canonical_slot_target_in_host_namespace(self) -> None:
         calls: list[tuple[int, str]] = []
         value = observe_with(
