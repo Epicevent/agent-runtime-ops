@@ -878,7 +878,7 @@ UNIT
 
 install_groupware_reobservation_timer() {
   # This producer submits only the existing typed read-only observation. It
-  # never starts the broker, approves a job, polls a receipt, or repairs state.
+  # never starts the broker, approves a job, or repairs runtime state.
   local service_tmp timer_tmp
   service_tmp="$(mktemp)"
   timer_tmp="$(mktemp)"
