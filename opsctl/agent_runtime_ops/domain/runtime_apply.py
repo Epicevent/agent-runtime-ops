@@ -11,6 +11,7 @@ import os
 from ..host.account_files import ensure_not_symlink_chain, runtime_ids
 from ..redaction import redact
 from ..renderer import render_compose
+from ..runtime_socket_projection import require_runtime_socket_source
 from ..routing import RuntimeBinding
 from .actions import append_action_log
 from .common import check_line, now_iso, run_text, run_text_cwd
@@ -252,6 +253,10 @@ def _apply_desired_slot_locked(
         ]
         if static_failures:
             raise ValueError(f"static contract check failed: {','.join(static_failures)}")
+        # Fail before directory creation, backup publication, compose writes, or
+        # container recreation. Docker must not dispatch a RAG-enabled runtime
+        # without the exact source socket and its slot runtime peer grant.
+        require_runtime_socket_source(profile, desired.slot)
         runtime_dir = slot_runtime_dir(desired.slot)
         compose_path = agent_compose_path(runtime_dir)
         manifest_path = agent_manifest_path(runtime_dir)
