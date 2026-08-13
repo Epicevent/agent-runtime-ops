@@ -14,7 +14,7 @@ from .profiles import profile_digest
 _SLOT_RE = re.compile(r"[a-z][a-z0-9_-]{0,63}")
 _CONTRACT_KEYS = {
     "source_template",
-    "target",
+    "target_template",
     "read_only",
     "supplementary_group",
 }
@@ -35,6 +35,18 @@ def _absolute_normalized_path(value: str, label: str) -> str:
     return str(path)
 
 
+def _slot_scoped_path(value: object, slot: str, label: str) -> str:
+    template = str(value or "")
+    if template.count("{slot}") != 1:
+        raise ValueError(
+            f"runtime socket {label}_template must contain exactly one {{slot}}"
+        )
+    remainder = template.replace("{slot}", "", 1)
+    if "{" in remainder or "}" in remainder:
+        raise ValueError(f"runtime socket {label}_template contains an unknown field")
+    return _absolute_normalized_path(template.replace("{slot}", slot, 1), label)
+
+
 def runtime_socket_projection(profile: Any, slot: str) -> RuntimeSocketProjection | None:
     metadata = getattr(profile, "metadata", {})
     if not isinstance(metadata, dict):
@@ -47,14 +59,8 @@ def runtime_socket_projection(profile: Any, slot: str) -> RuntimeSocketProjectio
     if not _SLOT_RE.fullmatch(slot):
         raise ValueError("runtime socket slot is invalid")
 
-    source_template = str(raw.get("source_template") or "")
-    if source_template.count("{slot}") != 1:
-        raise ValueError("runtime socket source_template must contain exactly one {slot}")
-    remainder = source_template.replace("{slot}", "", 1)
-    if "{" in remainder or "}" in remainder:
-        raise ValueError("runtime socket source_template contains an unknown field")
-    source = _absolute_normalized_path(source_template.replace("{slot}", slot, 1), "source")
-    target = _absolute_normalized_path(str(raw.get("target") or ""), "target")
+    source = _slot_scoped_path(raw.get("source_template"), slot, "source")
+    target = _slot_scoped_path(raw.get("target_template"), slot, "target")
     if raw.get("read_only") is not True:
         raise ValueError("runtime socket projection must be read-only")
     if raw.get("supplementary_group") != "runtime_gid":
