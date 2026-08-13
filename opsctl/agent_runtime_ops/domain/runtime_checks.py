@@ -31,6 +31,9 @@ from ..nas import (
 )
 from ..routing import get_runtime_binding
 from ..runtime_secrets import parse_secret_env_text
+from ..runtime_socket_projection import (
+    runtime_socket_projection_live_checks,
+)
 from ..yamlio import load_yaml
 from .common import is_dev_slot, is_root, run_text
 from .image_specs import (
@@ -770,6 +773,18 @@ def run_live_slot_checks(desired, profile, state_root: Path) -> list[tuple[bool,
         checks.append((bool(user) and user not in {"0", "0:0", "root"}, "live_container_user_non_root", f"user={user or 'empty'}"))
     if pid <= 0:
         return checks
+
+    try:
+        checks.extend(
+            runtime_socket_projection_live_checks(
+                profile,
+                desired.slot,
+                info,
+                pid,
+            )
+        )
+    except Exception as exc:
+        checks.append((False, "live_runtime_socket_contract_valid", str(exc)))
 
     smoke_path = str(profile.metadata.get("http_smoke_path") or "")
     if smoke_path:

@@ -43,6 +43,7 @@ services:
       agent-runtime.service: gateway
     group_add:
       - "{{ data_gid }}"
+      - "{{ runtime_gid }}"
     volumes:
       - "{{ target_home }}/.hermes:/opt/data"
       - "{{ target_home }}/.hermes/workspace:/workspace"
@@ -65,4 +66,10 @@ services:
         target: /workspace/ocn
         bind:
           propagation: rslave
+      # Slot-scoped shared GPU transport. The host worker grants the slot's
+      # runtime group access to exactly one socket; no directory is projected.
+      - type: bind
+        source: "/run/kwrag-gpu/{{ slot }}.sock"
+        target: /run/kwrag/shared-gpu.sock
+        read_only: true
     working_dir: /opt/hermes-workspace

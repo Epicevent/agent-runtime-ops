@@ -7,6 +7,7 @@ from typing import Any
 import yaml
 
 from .yamlio import load_yaml
+from .runtime_socket_projection import runtime_group_token, runtime_socket_projection
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,12 @@ def _volume_is_read_only(volume: Any) -> bool:
         parts = volume.split(":")
         return any(part == "ro" or part.endswith(",ro") or ",ro," in part for part in parts[2:])
     return False
+
+
+def _volume_type(volume: Any) -> str:
+    if isinstance(volume, dict):
+        return str(volume.get("type") or "")
+    return "bind" if isinstance(volume, str) else ""
 
 
 def _volume_propagation(volume: Any) -> str:
@@ -300,6 +307,52 @@ def validate_compose_contract(profile: Any, desired: Any, rendered_text: str) ->
         )
 
     volumes = service.get("volumes") if isinstance(service.get("volumes"), list) else []
+    try:
+        socket_projection = runtime_socket_projection(profile, desired.slot)
+    except ValueError as exc:
+        checks.append(ComposeContractCheck(False, "compose_runtime_socket_contract_valid", str(exc)))
+        socket_projection = None
+    if socket_projection is not None:
+        socket_volumes = [
+            volume for volume in volumes if _volume_target(volume) == socket_projection.target
+        ]
+        checks.append(
+            ComposeContractCheck(
+                len(socket_volumes) == 1,
+                "compose_runtime_socket_bind_present",
+                f"target={socket_projection.target} count={len(socket_volumes)}",
+            )
+        )
+        socket_volume = socket_volumes[0] if len(socket_volumes) == 1 else None
+        checks.extend(
+            [
+                ComposeContractCheck(
+                    _volume_type(socket_volume) == "bind",
+                    "compose_runtime_socket_bind_type",
+                    f"type={_volume_type(socket_volume) or 'missing'}",
+                ),
+                ComposeContractCheck(
+                    _volume_source(socket_volume) == str(socket_projection.source),
+                    "compose_runtime_socket_source_slot_scoped",
+                    f"source={_volume_source(socket_volume) or 'missing'}",
+                ),
+                ComposeContractCheck(
+                    _volume_is_read_only(socket_volume),
+                    "compose_runtime_socket_readonly",
+                    f"target={socket_projection.target}",
+                ),
+            ]
+        )
+        raw_group_add = service.get("group_add")
+        group_add = raw_group_add if isinstance(raw_group_add, list) else []
+        expected_group = runtime_group_token(desired.slot)
+        checks.append(
+            ComposeContractCheck(
+                expected_group in {str(item) for item in group_add},
+                "compose_runtime_socket_peer_group_present",
+                f"expected={expected_group}",
+            )
+        )
     container_nas_root = str(profile.metadata.get("container_nas_root") or "")
     nas_volumes = [volume for volume in volumes if _volume_target(volume) == container_nas_root]
     checks.append(
