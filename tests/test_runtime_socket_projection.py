@@ -53,7 +53,7 @@ def _socket_profile(tmp_path: Path, *, digest: str = "sha256:" + "b" * 64):
         metadata={
             "runtime_socket_projection": {
                 "source_template": str(tmp_path / "{slot}.sock"),
-                "target": "/run/kwrag/shared-gpu.sock",
+                "target_template": "/run/kwrag-gpu/{slot}.sock",
                 "read_only": True,
                 "supplementary_group": "runtime_gid",
             }
@@ -84,7 +84,8 @@ def test_hermes_runtime_customer_renders_exact_readonly_slot_socket() -> None:
         }
 
     assert '/run/kwrag-gpu/oc20.sock' in rendered.text
-    assert 'target: /run/kwrag/shared-gpu.sock' in rendered.text
+    assert 'target: "/run/kwrag-gpu/oc20.sock"' in rendered.text
+    assert "/run/kwrag/shared-gpu.sock" not in rendered.text
     assert '      - "963"' in rendered.text
     assert checks["compose_runtime_socket_bind_present"]
     assert checks["compose_runtime_socket_bind_type"]
@@ -102,8 +103,13 @@ def test_hermes_runtime_customer_renders_exact_readonly_slot_socket() -> None:
             "compose_runtime_socket_source_slot_scoped",
         ),
         (
-            "        target: /run/kwrag/shared-gpu.sock\n        read_only: true",
-            "        target: /run/kwrag/shared-gpu.sock\n        read_only: false",
+            '        target: "/run/kwrag-gpu/oc20.sock"',
+            "        target: /run/kwrag/shared-gpu.sock",
+            "compose_runtime_socket_bind_present",
+        ),
+        (
+            '        target: "/run/kwrag-gpu/oc20.sock"\n        read_only: true',
+            '        target: "/run/kwrag-gpu/oc20.sock"\n        read_only: false',
             "compose_runtime_socket_readonly",
         ),
         (
@@ -204,6 +210,56 @@ def test_live_checks_verify_exact_bind_readonly_namespace_and_peer_group(
             {
                 "Type": "bind",
                 "Source": str(source),
+                "Destination": "/run/kwrag-gpu/oc20.sock",
+                "RW": False,
+            }
+        ],
+        "HostConfig": {"GroupAdd": [str(os.getgid())]},
+    }
+    try:
+        with (
+            patch(
+                "agent_runtime_ops.runtime_socket_projection.runtime_ids",
+                return_value=(os.getuid(), os.getgid(), os.getgid()),
+            ),
+            patch(
+                "agent_runtime_ops.runtime_socket_projection.profile_digest",
+                return_value=profile.digest,
+            ),
+            patch(
+                "agent_runtime_ops.runtime_socket_projection.mountinfo_under",
+                return_value=(
+                    0,
+                    "",
+                    [
+                        {
+                            "target": "/run/kwrag-gpu/oc20.sock",
+                            "source": "tmpfs[/oc20.sock]",
+                            "fstype": "tmpfs",
+                            "options": "ro,nosuid,nodev",
+                            "propagation": "private",
+                        }
+                    ],
+                ),
+            ),
+        ):
+            checks = runtime_socket_projection_live_checks(profile, "oc20", info, 749599)
+    finally:
+        server.close()
+
+    assert checks
+    assert all(ok for ok, _name, _detail in checks), checks
+
+
+def test_live_checks_reject_legacy_shared_gpu_target(tmp_path: Path) -> None:
+    profile = _socket_profile(tmp_path)
+    source = tmp_path / "oc20.sock"
+    server = _bound_socket(source)
+    info = {
+        "Mounts": [
+            {
+                "Type": "bind",
+                "Source": str(source),
                 "Destination": "/run/kwrag/shared-gpu.sock",
                 "RW": False,
             }
@@ -241,8 +297,11 @@ def test_live_checks_verify_exact_bind_readonly_namespace_and_peer_group(
     finally:
         server.close()
 
-    assert checks
-    assert all(ok for ok, _name, _detail in checks), checks
+    results = {name: ok for ok, name, _detail in checks}
+    assert results["live_runtime_socket_host_ready"] is True
+    assert results["live_runtime_socket_bind_present"] is False
+    assert results["live_runtime_socket_namespace_mounted"] is False
+    assert results["live_runtime_socket_namespace_readonly"] is False
 
 
 def test_live_checks_fail_closed_for_missing_projection(tmp_path: Path) -> None:

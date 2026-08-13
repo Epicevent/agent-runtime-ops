@@ -25,6 +25,6 @@ startup_timeout_seconds: 300
 container_workspace_root: /workspace/ocn
 runtime_socket_projection:
   source_template: /run/kwrag-gpu/{slot}.sock
-  target: /run/kwrag/shared-gpu.sock
+  target_template: /run/kwrag-gpu/{slot}.sock
   read_only: true
   supplementary_group: runtime_gid

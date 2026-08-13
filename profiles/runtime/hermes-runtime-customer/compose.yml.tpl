@@ -70,6 +70,6 @@ services:
       # runtime group access to exactly one socket; no directory is projected.
       - type: bind
         source: "/run/kwrag-gpu/{{ slot }}.sock"
-        target: /run/kwrag/shared-gpu.sock
+        target: "/run/kwrag-gpu/{{ slot }}.sock"
         read_only: true
     working_dir: /opt/hermes-workspace
