@@ -738,6 +738,9 @@ def cmd_nas_view_status(args: argparse.Namespace) -> int:
         print(f"{prefix}_user_id={record.get('user_id', '')}")
         print(f"{prefix}_share={record.get('share', '')}")
         print(f"{prefix}_package={record.get('package', '')}")
+        # Preserve the applied view identity so web consumers can bind a
+        # kernel receipt to this exact read-only status snapshot.
+        print(f"{prefix}_desired_digest={record.get('desired_digest', '')}")
         print(f"{prefix}_paths_json={json.dumps(status_record.get('paths') or [], ensure_ascii=False, separators=(',', ':'))}")
         if corpus == "groupware":
             try:

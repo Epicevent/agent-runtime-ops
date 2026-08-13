@@ -6,6 +6,7 @@ view_1_corpus=kakao
 view_1_user_id=7362168
 view_1_share=//192.168.0.222/kakao-work
 view_1_package=p
+view_1_desired_digest=
 view_1_paths_json=[]
 view_1_master_mode=per_slot_cifs
 view_1_master_path=/srv/kw-nas/slots/oc1/master

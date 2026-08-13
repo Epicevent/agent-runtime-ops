@@ -395,6 +395,7 @@ class NasViewCliTests(unittest.TestCase):
             data = load_views_state(root)
             data["views"]["oc3"] = {
                 "user_id": "42", "share": "//h/s", "package": "p_42",
+                "desired_digest": "sha256:" + "a" * 64,
                 "paths": ["groupware/mails/jitech", "groupware/approval/대표 이사"],
             }
             save_views_state(root, data)
@@ -412,6 +413,7 @@ class NasViewCliTests(unittest.TestCase):
                 rc = cmd_nas_view_status(argparse.Namespace(state_root=str(root)))
             self.assertEqual(rc, 0, output.getvalue())
             self.assertIn("view_1_target=oc3", output.getvalue())
+            self.assertIn("view_1_desired_digest=sha256:" + "a" * 64, output.getvalue())
             self.assertIn(
                 'view_1_paths_json=["groupware/mails/jitech","groupware/approval/대표 이사"]',
                 output.getvalue(),

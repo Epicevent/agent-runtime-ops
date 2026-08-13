@@ -38,6 +38,10 @@ Current observation-gap allowlist:
 
 The v1 schema is extended append-only. Every view row emits:
 
+- `view_N_desired_digest=sha256:<64 lowercase hex>` when the applied view has
+  a desired-state binding; an empty value is retained for legacy/unbound
+  records and must never be treated as a current kernel observation.
+
 - `view_N_grant_evidence_applicable=yes|no`
 - `view_N_grant_evidence_count=K`
 - `view_N_grant_evidence_json=[...]`
