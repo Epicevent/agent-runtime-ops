@@ -16,7 +16,7 @@ from typing import Any
 
 
 ASSIGNMENT_SCHEMA = "root-review-assignment/v3"
-HANDLE_SCHEMA = "agent-runtime-root-review-handle/v1"
+HANDLE_SCHEMA = "agent-runtime-root-review-handle/v2"
 MAX_ASSIGNMENT_BYTES = 8 * 1024
 MAX_REQUEST_BYTES = 64 * 1024
 MAX_COMMAND_BYTES = 32 * 1024
@@ -67,6 +67,7 @@ class FileIdentity:
 class RootReviewAssignment:
     agent_session: str
     agent_pane: str
+    agent_pane_pid: int
     request_path: Path
     transcript_path: Path
 
@@ -75,6 +76,7 @@ class RootReviewAssignment:
 class RootReviewHandle:
     agent_session: str
     agent_pane: str
+    agent_pane_pid: int
     request_sha256: str
     transcript_device: int
     transcript_inode: int
@@ -86,6 +88,7 @@ class RootReviewHandle:
                 "schema": HANDLE_SCHEMA,
                 "agent_session": self.agent_session,
                 "agent_pane": self.agent_pane,
+                "agent_pane_pid": self.agent_pane_pid,
                 "request_sha256": self.request_sha256,
                 "transcript_device": self.transcript_device,
                 "transcript_inode": self.transcript_inode,
@@ -112,6 +115,7 @@ class RootReviewHandle:
             "schema",
             "agent_session",
             "agent_pane",
+            "agent_pane_pid",
             "request_sha256",
             "transcript_device",
             "transcript_inode",
@@ -126,6 +130,9 @@ class RootReviewHandle:
             or _AGENT_SLUG_RE.fullmatch(value["agent_session"]) is None
             or not isinstance(value.get("agent_pane"), str)
             or _PANE_RE.fullmatch(value["agent_pane"]) is None
+            or isinstance(value.get("agent_pane_pid"), bool)
+            or not isinstance(value.get("agent_pane_pid"), int)
+            or value["agent_pane_pid"] <= 0
             or not isinstance(value.get("request_sha256"), str)
             or re.fullmatch(r"sha256:[0-9a-f]{64}", value["request_sha256"]) is None
             or any(
@@ -143,6 +150,7 @@ class RootReviewHandle:
         return cls(
             agent_session=value["agent_session"],
             agent_pane=value["agent_pane"],
+            agent_pane_pid=value["agent_pane_pid"],
             request_sha256=value["request_sha256"],
             transcript_device=value["transcript_device"],
             transcript_inode=value["transcript_inode"],
@@ -217,6 +225,7 @@ class RootReviewStore:
         self.agent_gid = agent_gid
         self.root_uid = root_uid
         self.enforce_posix_metadata = enforce_posix_metadata
+        self.enforce_agent_process = enforce_posix_metadata and os.name == "posix"
 
     @classmethod
     def current(cls) -> RootReviewStore:
@@ -289,6 +298,7 @@ class RootReviewStore:
         handle = RootReviewHandle(
             agent_session=assignment.agent_session,
             agent_pane=assignment.agent_pane,
+            agent_pane_pid=assignment.agent_pane_pid,
             request_sha256=_sha256(published),
             transcript_device=transcript_identity.device,
             transcript_inode=transcript_identity.inode,
@@ -429,6 +439,7 @@ class RootReviewStore:
                 continue
             if value["agent_pane"] != self.pane_id:
                 continue
+            self._validate_agent_process(value)
             session = value["agent_tmux_session"]
             if candidate.stem != session:
                 raise RootReviewError("root_review_assignment_mismatch")
@@ -443,6 +454,7 @@ class RootReviewStore:
                 RootReviewAssignment(
                     agent_session=session,
                     agent_pane=value["agent_pane"],
+                    agent_pane_pid=int(value["agent_pane_pid"]),
                     request_path=request_path,
                     transcript_path=transcript_path,
                 )
@@ -450,6 +462,49 @@ class RootReviewStore:
         if len(matches) != 1:
             raise RootReviewError("root_review_assignment_not_unique")
         return matches[0]
+
+    def _validate_agent_process(self, value: dict[str, str]) -> None:
+        """Reject assignments left behind by an exited or replaced agent."""
+        if not self.enforce_agent_process or os.name != "posix":
+            return
+        try:
+            pid = int(value["agent_pane_pid"])
+            if pid <= 0:
+                raise ValueError
+            proc = Path("/proc") / str(pid)
+            status = (proc / "status").read_text(encoding="utf-8")
+            cmdline = (proc / "cmdline").read_bytes().split(b"\0")
+        except (OSError, ValueError, UnicodeDecodeError) as exc:
+            raise RootReviewError("root_review_agent_process_stale") from exc
+        state = next(
+            (
+                line.split("\t", 1)[1]
+                for line in status.splitlines()
+                if line.startswith("State:")
+            ),
+            "",
+        )
+        uid_line = next(
+            (line for line in status.splitlines() if line.startswith("Uid:")),
+            "",
+        )
+        try:
+            process_uid = int(uid_line.split()[1])
+        except (IndexError, ValueError) as exc:
+            raise RootReviewError("root_review_agent_process_stale") from exc
+        executable = Path(value["agent_codex_executable"]).name.encode("utf-8")
+        if (
+            state.startswith("Z")
+            or process_uid != self.agent_uid
+            or not executable
+            or not any(
+                Path(token.decode("utf-8", "ignore")).name.encode("utf-8")
+                == executable
+                for token in cmdline
+                if token
+            )
+        ):
+            raise RootReviewError("root_review_agent_process_stale")
 
     @staticmethod
     def _parse_assignment(raw: bytes) -> dict[str, str]:
@@ -507,6 +562,7 @@ class RootReviewStore:
         if (
             handle.agent_session != assignment.agent_session
             or handle.agent_pane != assignment.agent_pane
+            or handle.agent_pane_pid != assignment.agent_pane_pid
             or handle.request_sha256 != _sha256(request_bytes)
             or handle.transcript_device != transcript_identity.device
             or handle.transcript_inode != transcript_identity.inode

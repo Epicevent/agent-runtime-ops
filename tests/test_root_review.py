@@ -197,6 +197,39 @@ def test_stale_handle_rejects_changed_request(root_review: RootReviewFixture) ->
         )
 
 
+def test_handle_binds_agent_process_generation(
+    root_review: RootReviewFixture,
+) -> None:
+    published = root_review.store.publish(purpose="Read", command="/usr/bin/true")
+    assignment = root_review.assignments / f"{root_review.session}.env"
+    assignment.write_text(
+        assignment.read_text(encoding="utf-8").replace(
+            "agent_pane_pid=4242", "agent_pane_pid=4243"
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(RootReviewError, match="stale_or_mismatched"):
+        root_review.store.wait(
+            raw_handle=published["handle"],
+            timeout_seconds=0,
+            poll_interval_seconds=0.001,
+        )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires /proc process identity")
+def test_missing_agent_process_is_rejected_fail_closed(
+    root_review: RootReviewFixture,
+) -> None:
+    root_review.store.enforce_agent_process = True
+    with pytest.raises(RootReviewError, match="agent_process_stale"):
+        root_review.store._validate_agent_process(
+            {
+                "agent_pane_pid": "999999999",
+                "agent_codex_executable": "/usr/local/bin/codex",
+            }
+        )
+
+
 def test_assignment_mismatch_and_irregular_request_fail_closed(
     root_review: RootReviewFixture,
 ) -> None:
