@@ -35,6 +35,7 @@ from .commands.nas_view import (
     cmd_nas_view_package_info,
     cmd_nas_view_catalog,
 )
+from .commands.groupware_view_replace import cmd_nas_view_replace
 from .commands.nas import (
     cmd_nas_approve_auto,
     cmd_nas_credential_migrate_root,
@@ -749,6 +750,14 @@ def build_parser() -> argparse.ArgumentParser:
     nas_view_assign.add_argument("--password-stdin", action="store_true")
     nas_view_assign.add_argument("--domain")
     nas_view_assign.set_defaults(func=cmd_nas_view_assign)
+    nas_view_replace = nas_view_sub.add_parser("replace")
+    nas_view_replace.add_argument("slot", metavar="target")
+    nas_view_replace.add_argument("user_id")
+    nas_view_replace.add_argument("--share", required=True)
+    nas_view_replace.add_argument("--path", action="append", default=[])
+    nas_view_replace.add_argument("--expected-runtime-desired-digest", required=True)
+    nas_view_replace.add_argument("--require-content-ready", action="store_true")
+    nas_view_replace.set_defaults(func=cmd_nas_view_replace)
     nas_view_preflight = nas_view_sub.add_parser(
         "preflight", help="validate one intended view assignment without writes"
     )

@@ -12,7 +12,10 @@ from unittest.mock import patch
 
 import pytest
 
+from agent_runtime_ops.commands import apply as apply_command
+from agent_runtime_ops.commands import groupware_view_replace
 from agent_runtime_ops.commands.apply import _cmd_rollback_locked, cmd_rollback
+from agent_runtime_ops.domain import runtime_apply as runtime_apply_module
 from agent_runtime_ops.domain.runtime_apply import (
     _restore_and_verify_backup,
     apply_desired_slot,
@@ -348,6 +351,80 @@ def test_apply_runs_admission_while_host_and_slot_locks_are_held(
 
     assert rc == 0
     assert events == ["admitted", "mutated"]
+
+
+def test_apply_recovers_pending_groupware_view_before_slot_mutation() -> None:
+    events: list[str] = []
+
+    @contextmanager
+    def host_lock(root):
+        events.append("host-lock")
+        yield
+
+    @contextmanager
+    def slot_lock(root, slot):
+        events.append("slot-lock")
+        yield
+
+    with (
+        patch.object(runtime_apply_module, "runtime_host_mutation_lock", host_lock),
+        patch.object(runtime_apply_module, "runtime_transaction_lock", slot_lock),
+        patch.object(
+            groupware_view_replace,
+            "recover_pending",
+            side_effect=lambda root: events.append("recover") or False,
+        ),
+        patch.object(
+            runtime_apply_module,
+            "_apply_desired_slot_locked",
+            side_effect=lambda **kwargs: events.append("mutate") or 0,
+        ),
+    ):
+        rc = apply_desired_slot(
+            desired=SimpleNamespace(slot="oc6"),
+            profile=SimpleNamespace(),
+            state_root=Path("/state"),
+            allow_first_apply=False,
+        )
+
+    assert rc == 0
+    assert events == ["host-lock", "recover", "slot-lock", "mutate"]
+
+
+def test_rollback_stops_when_pending_groupware_recovery_fails(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mutation = SimpleNamespace(called=False)
+
+    @contextmanager
+    def host_lock(root):
+        yield
+
+    def mutate(*args, **kwargs):
+        mutation.called = True
+        return 0
+
+    with (
+        patch.object(apply_command, "_is_root", return_value=True),
+        patch.object(apply_command, "_state_root", return_value=Path("/state")),
+        patch.object(
+            apply_command,
+            "runtime_host_mutation_lock",
+            side_effect=host_lock,
+        ),
+        patch.object(
+            groupware_view_replace,
+            "recover_pending",
+            side_effect=RuntimeError("pending_replace_unresolved"),
+        ),
+        patch.object(apply_command, "_cmd_rollback_locked", side_effect=mutate),
+        patch.object(apply_command, "_append_action_log"),
+    ):
+        rc = cmd_rollback(SimpleNamespace(slot="oc6"))
+
+    assert rc == 1
+    assert mutation.called is False
+    assert "reason=pending_replace_unresolved" in capsys.readouterr().out
 
 
 def test_manual_rollback_holds_the_same_runtime_transaction_lock(

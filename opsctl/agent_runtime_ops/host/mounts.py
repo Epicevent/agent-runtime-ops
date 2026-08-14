@@ -92,6 +92,10 @@ def parse_mountinfo_lines(lines: list[str], path: str) -> list[dict[str, str]]:
         options = ",".join(part for part in (mount_options, super_options) if part)
         rows.append(
             {
+                "mount_id": fields[0],
+                "parent_id": fields[1],
+                "major_minor": fields[2],
+                "root": fs_root,
                 "target": target,
                 "source": source,
                 "fstype": fstype,

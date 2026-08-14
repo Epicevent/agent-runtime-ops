@@ -105,6 +105,14 @@ def _run_restore(*, readiness: dict, mount_all_rc: int = 0, nas_wait_seconds: fl
     stdout = io.StringIO()
     with (
         patch("agent_runtime_ops.commands.nas_view._is_root", return_value=True),
+        patch(
+            "agent_runtime_ops.commands.nas_view.runtime_host_mutation_lock",
+            return_value=contextlib.nullcontext(),
+        ),
+        patch(
+            "agent_runtime_ops.commands.groupware_view_replace.recover_pending",
+            return_value=False,
+        ),
         patch("agent_runtime_ops.commands.nas_view.load_views_state", return_value=records),
         patch("agent_runtime_ops.commands.nas_view.wait_for_nas_ready", return_value=readiness) as wait,
         patch(
@@ -127,6 +135,54 @@ def _run_restore(*, readiness: dict, mount_all_rc: int = 0, nas_wait_seconds: fl
 
 
 class RestoreWaitsForNasTest(unittest.TestCase):
+    def test_pending_recovery_runs_only_after_nas_readiness_and_mount_all(self) -> None:
+        records = {
+            "views": {
+                "oc1": {
+                    "user_id": "7362168",
+                    "share": "//192.168.0.222/kakao-work",
+                }
+            }
+        }
+        events: list[str] = []
+        with (
+            patch("agent_runtime_ops.commands.nas_view._is_root", return_value=True),
+            patch(
+                "agent_runtime_ops.commands.nas_view.runtime_host_mutation_lock",
+                return_value=contextlib.nullcontext(),
+            ),
+            patch(
+                "agent_runtime_ops.commands.nas_view.load_views_state",
+                return_value=records,
+            ),
+            patch(
+                "agent_runtime_ops.commands.nas_view.wait_for_nas_ready",
+                side_effect=lambda *args, **kwargs: events.append("ready") or {},
+            ),
+            patch(
+                "agent_runtime_ops.commands.nas_view._run_text",
+                side_effect=lambda *args, **kwargs: events.append("mount-all")
+                or SimpleNamespace(returncode=0),
+            ),
+            patch(
+                "agent_runtime_ops.commands.groupware_view_replace.recover_pending",
+                side_effect=lambda *args, **kwargs: events.append("recover") or False,
+            ),
+            patch(
+                "agent_runtime_ops.commands.nas_view._restore_views",
+                side_effect=lambda *args, **kwargs: events.append("restore") or 0,
+            ),
+            patch("agent_runtime_ops.commands.nas_view.save_views_state"),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(
+                cmd_nas_view_restore(
+                    SimpleNamespace(state_root="/unused", nas_wait_seconds=0)
+                ),
+                0,
+            )
+        self.assertEqual(events, ["ready", "mount-all", "recover", "restore"])
+
     def test_restore_probes_nas_and_remounts_fstab(self) -> None:
         rc, output, wait, run_text, save_state = _run_restore(readiness={"192.168.0.222": True})
         self.assertEqual(rc, 0, output)

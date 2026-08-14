@@ -273,6 +273,7 @@ class ResolvedRuntime:
     expected_sources: tuple[str, ...]
     desired_digest: str
     container_identity_digest: str
+    view_record: dict
 
 
 @dataclass(frozen=True)
@@ -287,6 +288,7 @@ class GroupwareDesiredContract:
     aliases: tuple[str, ...]
     expected_sources: tuple[str, ...]
     desired_digest: str
+    view_record: dict
 
 
 def _canonical_json(value: object) -> bytes:
@@ -522,10 +524,19 @@ def _groupware_desired_contract(
     container_nas_root: str,
     runtime_profile: str,
     runtime_profile_digest: str,
+    record_override: dict | None = None,
 ) -> GroupwareDesiredContract:
     if binding.upstream_kind != "managed-rootful":
         raise GroupwareRuntimeObservationError("rootless_runtime_unsupported")
-    record = get_view_record(load_views_state(state_root), binding.linux_account, "groupware")
+    state = load_views_state(state_root)
+    pending = state.get("pending_replace")
+    if record_override is None and isinstance(pending, dict) and pending.get("slot") == binding.linux_account:
+        raise GroupwareRuntimeObservationError("groupware_view_replace_in_progress")
+    record = (
+        record_override
+        if record_override is not None
+        else get_view_record(state, binding.linux_account, "groupware")
+    )
     if not isinstance(record, dict):
         raise GroupwareRuntimeObservationError("groupware_view_not_declared")
     try:
@@ -577,6 +588,7 @@ def _groupware_desired_contract(
         aliases,
         expected_sources,
         _digest(desired, DESIRED_DOMAIN),
+        dict(record),
     )
 
 
@@ -597,7 +609,9 @@ def groupware_runtime_desired_contract(
     )
 
 
-def _resolve_runtime(slot: str, state_root: Path) -> ResolvedRuntime:
+def _resolve_runtime(
+    slot: str, state_root: Path, record_override: dict | None = None
+) -> ResolvedRuntime:
     target = load_runtime_target(slot, state_root)
     binding = target.route
     container, lookup = find_gateway_container_by_binding(binding)
@@ -622,6 +636,7 @@ def _resolve_runtime(slot: str, state_root: Path) -> ResolvedRuntime:
         str(profile.metadata.get("container_nas_root") or ""),
         profile.name,
         profile.digest,
+        record_override,
     )
     return ResolvedRuntime(
         binding,
@@ -645,6 +660,7 @@ def _resolve_runtime(slot: str, state_root: Path) -> ResolvedRuntime:
             },
             CONTAINER_IDENTITY_DOMAIN,
         ),
+        contract.view_record,
     )
 
 
@@ -660,8 +676,99 @@ def _mount(
     return True, row.get("source") == expected_source, is_readonly_mount(row)
 
 
-def observe_groupware_runtime(slot: str, state_root: Path = DEFAULT_STATE_ROOT) -> RuntimeObservation:
-    runtime = _resolve_runtime(slot, Path(state_root))
+def groupware_mount_tree(
+    root: str | Path,
+    record: dict,
+    *,
+    require_complete: bool = False,
+    require_private: bool = False,
+    pid: int = HOST_MOUNT_NAMESPACE_PID,
+    rows_override: Iterable[dict[str, str]] | None = None,
+    mountinfo_rc: int = 0,
+    allow_expected_failures: bool = False,
+) -> tuple[tuple[str, ...], str]:
+    root = Path(root).as_posix()
+    requested, effective = requested_and_effective_granted_paths(record)
+    aliases = tuple(path_alias(path) for path in effective)
+    if (
+        not requested
+        or len(set(aliases)) != len(aliases)
+        or (require_complete and requested != effective)
+    ):
+        raise GroupwareRuntimeObservationError("groupware_content_not_ready")
+    share = str(record.get("share") or "").rstrip("/")
+    expected = dict(
+        zip(
+            aliases,
+            (f"{share}[/{PurePosixPath(path).as_posix().lstrip('/')}]" for path in effective),
+        )
+    )
+    if rows_override is None:
+        rc, _, rows = mountinfo_under(pid, root)
+    else:
+        rc, rows = mountinfo_rc, list(rows_override)
+    base = PurePosixPath(root)
+    try:
+        relative = {}
+        for row in rows:
+            value = PurePosixPath(row["target"]).relative_to(base).as_posix()
+            relative[row["mount_id"]] = "" if value == "." else value
+        graph, seen, seen_targets, roots = [], set(), set(), 0
+        for row in rows:
+            target = relative[row["mount_id"]]
+            if target in seen_targets:
+                raise ValueError
+            seen_targets.add(target)
+            parent = relative.get(row["parent_id"], "@outside")
+            if parent != ("" if target else "@outside"):
+                raise ValueError
+            options = frozenset(filter(None, row["options"].split(",")))
+            if not {"ro", "nosuid", "nodev"} <= options or (
+                require_private and row["propagation"] != "private"
+            ):
+                raise ValueError
+            if target:
+                if target not in expected or (
+                    not allow_expected_failures
+                    and (expected[target] != row["source"] or row["fstype"] != "cifs")
+                ):
+                    raise ValueError
+                seen.add(target)
+            else:
+                roots += 1
+            graph.append(
+                (
+                    target,
+                    parent,
+                    row["root"],
+                    row["major_minor"],
+                    row["fstype"],
+                    row["source"],
+                    tuple(sorted(options)),
+                )
+            )
+        incomplete_ok = (
+            allow_expected_failures
+            and len(rows) <= len(aliases) + 1
+            and roots <= 1
+            and seen <= set(aliases)
+        )
+        if rc or not (
+            incomplete_ok
+            or (len(rows) == len(aliases) + 1 and roots == 1 and seen == set(aliases))
+        ):
+            raise ValueError
+    except (KeyError, ValueError) as exc:
+        raise GroupwareRuntimeObservationError("mount_tree_mismatch") from exc
+    return aliases, _digest(sorted(graph), b"agent-runtime-mount-tree/v1\0")
+
+
+def observe_groupware_runtime(
+    slot: str,
+    state_root: Path = DEFAULT_STATE_ROOT,
+    record_override: dict | None = None,
+) -> RuntimeObservation:
+    runtime = _resolve_runtime(slot, Path(state_root), record_override)
     principal = _service_principal(runtime)
     host_root = runtime.host_nas_root.rstrip("/")
     container_root = f"{runtime.container_nas_root.rstrip('/')}/groupware"
@@ -670,6 +777,26 @@ def observe_groupware_runtime(slot: str, state_root: Path = DEFAULT_STATE_ROOT) 
     # instead of weakening the unit sandbox or accepting a caller path.
     host_rc, _, host_rows = mountinfo_under(HOST_MOUNT_NAMESPACE_PID, host_root)
     container_rc, _, container_rows = mountinfo_under(runtime.container_pid, container_root)
+    try:
+        groupware_mount_tree(
+            host_root,
+            runtime.view_record,
+            pid=HOST_MOUNT_NAMESPACE_PID,
+            rows_override=host_rows,
+            mountinfo_rc=host_rc,
+            allow_expected_failures=True,
+        )
+        groupware_mount_tree(
+            container_root,
+            runtime.view_record,
+            pid=runtime.container_pid,
+            rows_override=container_rows,
+            mountinfo_rc=container_rc,
+            allow_expected_failures=True,
+        )
+        topology_exact = True
+    except GroupwareRuntimeObservationError:
+        topology_exact = False
     destinations = tuple(_container_path(runtime.container_nas_root, alias) for alias in runtime.aliases)
     results = _probe_namespace(runtime.container_pid, principal, destinations)
     probes = []
@@ -697,9 +824,20 @@ def observe_groupware_runtime(slot: str, state_root: Path = DEFAULT_STATE_ROOT) 
                 str(result.get("representative") or "unobserved"),
             )
         )
+    if record_override is None:
+        closing_state = load_views_state(state_root)
+        pending = closing_state.get("pending_replace")
+        current = get_view_record(closing_state, slot, "groupware")
+        if (
+            isinstance(pending, dict)
+            and pending.get("slot") == runtime.binding.linux_account
+        ) or current != runtime.view_record:
+            topology_exact = False
     requested_path_count = len(runtime.requested_paths)
     effective_path_count = len(runtime.effective_paths)
-    if requested_path_count != effective_path_count:
+    if not topology_exact:
+        failure_class = OBSERVER_CONTRACT_MISMATCH
+    elif requested_path_count != effective_path_count:
         failure_class = PATH_CARDINALITY_MISMATCH
     else:
         failure_class = _aggregate_failure_class(tuple(probes))

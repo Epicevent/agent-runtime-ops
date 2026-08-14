@@ -38,9 +38,14 @@ Current observation-gap allowlist:
 
 The v1 schema is extended append-only. Every view row emits:
 
-- `view_N_desired_digest=sha256:<64 lowercase hex>` when the applied view has
+- `view_N_record_desired_digest=sha256:<64 lowercase hex>` when the applied view has
   a desired-state binding; an empty value is retained for legacy/unbound
   records and must never be treated as a current kernel observation.
+
+- `view_N_desired_digest=sha256:<64 lowercase hex>` preserves the v1
+  desired-state field. For groupware it is the runtime-observation contract
+  digest and compare-and-swap token for a typed replacement. For corpora
+  without that runtime contract it remains the applied record digest.
 
 - `view_N_grant_evidence_applicable=yes|no`
 - `view_N_grant_evidence_count=K`
