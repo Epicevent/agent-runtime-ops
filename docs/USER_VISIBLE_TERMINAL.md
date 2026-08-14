@@ -5,7 +5,7 @@ The terminal is a current v2 kernel receipt showing every declared groupware gra
 ## Layers and blockers
 
 - Source: this branch binds the applied runtime-profile digest and preserves requested versus effective groupware paths in the observer receipt.
-- Build/install/runtime: not performed here; the live broker and the hourly Persistent producer using 15-minute identity buckets must be rebuilt and installed before fresh v2 receipts exist.
+- Build/install/runtime: not performed here; the live broker and the Persistent 15-minute producer aligned to the identity buckets must be rebuilt and installed before fresh v2 receipts exist.
 - Actual turn: product UI terminals belong to Hermes/OpenClaw and are not claimed by this observer lane.
 - First blocker: the current root host must provide a new v2 receipt for each declared slot; old v1 receipts are historical only.
 

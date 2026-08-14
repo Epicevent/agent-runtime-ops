@@ -38,6 +38,10 @@ MODULE = "agent_runtime_ops.root_actions.groupware_reobservation"
 PEER = BrokerPeerIdentity(uid=1002, gid=1002, pid=4242)
 
 
+def test_slot_cap_reserves_the_cutoff_inclusive_fifth_quarter_hour() -> None:
+    assert MAX_GROUPWARE_SLOTS_PER_CYCLE == 6
+
+
 def _binding(
     slot: str,
     index: int,
@@ -405,7 +409,7 @@ def test_install_contract_is_fixed_read_only_oneshot_and_persistent_timer() -> N
     assert "ProtectSystem=strict" in function
     assert "ReadOnlyPaths=$STATE_ROOT $CURRENT_LINK" in function
     assert "RestrictAddressFamilies=AF_UNIX" in function
-    assert "OnCalendar=*-*-* *:00:00 UTC" in function
+    assert "OnCalendar=*-*-* *:00/15:00 UTC" in function
     assert "Persistent=true" in function
     assert "RandomizedDelaySec" not in function
     assert "systemctl enable --now" in function

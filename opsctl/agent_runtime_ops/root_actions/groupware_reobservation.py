@@ -23,10 +23,10 @@ from .storage import SubmissionLimits
 OPERATION_ID = "nas.observe_groupware_runtime"
 OPERATION_VERSION = 1
 BUCKET_MINUTES = 15
-# Four quarter-hour cycles fit inside the broker's rolling one-hour window.
-# Sequential terminal waits keep simultaneous-open jobs at one.
+# The rolling window is cutoff-inclusive, so five quarter-hour boundaries can
+# coexist. Sequential terminal waits keep simultaneous-open jobs at one.
 MAX_GROUPWARE_SLOTS_PER_CYCLE = min(
-    SubmissionLimits().max_jobs_per_uid_window // 4,
+    SubmissionLimits().max_jobs_per_uid_window // 5,
     SubmissionLimits().max_open_per_uid,
 )
 TERMINAL_WAIT_SECONDS_PER_SLOT = 60.0
