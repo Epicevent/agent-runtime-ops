@@ -255,7 +255,13 @@ class RuntimeObservation:
             and self.requested_path_count != self.effective_path_count
         ):
             return PATH_CARDINALITY_MISMATCH
-        return _aggregate_failure_class(self.probes)
+        failure_class = _aggregate_failure_class(self.probes)
+        # A topology/contract failure can leave the bounded probes healthy.
+        # Never publish that healthy probe result as the receipt's failure
+        # class when the observation itself is not healthy.
+        if self.status != "healthy" and failure_class == HEALTHY:
+            return OBSERVER_CONTRACT_MISMATCH
+        return failure_class
 
 
 @dataclass(frozen=True)

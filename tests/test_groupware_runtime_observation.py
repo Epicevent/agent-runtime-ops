@@ -778,6 +778,23 @@ class GroupwareRuntimeObservationTests(unittest.TestCase):
         self.assertNotIn("0123456789ab", text)
         self.assertNotIn("argv", text)
 
+    def test_unknown_observation_cannot_publish_healthy_failure_class(self) -> None:
+        value = observe_with(
+            {
+                "index": 0,
+                "list_ok": True,
+                "open_read_ok": True,
+                "errno": None,
+                "representative": "regular_file",
+            },
+            closing_record_matches=False,
+        )
+        self.assertEqual(value.status, "unknown")
+        self.assertEqual(
+            dict(value.public_facts())["failure_class"],
+            "OBSERVER_CONTRACT_MISMATCH",
+        )
+
     def test_worker_persists_raw_and_public_receipts(self) -> None:
         handlers = OperationHandlerRegistry((GroupwareRuntimeObservationHandler(),))
         with (
