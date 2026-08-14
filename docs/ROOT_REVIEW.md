@@ -7,6 +7,10 @@ daemon, database, queue, broker job, or execution authority.
 The existing assignment binds the current server-agent tmux pane to exactly one
 request file and one root transcript. The tools discover that assignment from
 the MCP process's `TMUX_PANE`; callers cannot provide an agent name or path.
+The assignment's agent process id is also checked against `/proc` before a
+card is published or observed. An exited, replaced, or non-Codex process makes
+the assignment stale and fails closed; the handle binds that process
+generation, so a later process cannot consume an old card.
 
 ## Calls
 
