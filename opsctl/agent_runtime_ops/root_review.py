@@ -223,7 +223,12 @@ class RootReviewStore:
         if os.name != "posix" or not hasattr(os, "getuid"):
             raise RootReviewError("root_review_posix_runtime_required")
         uid = os.getuid()
-        gid = os.getgid()
+        try:
+            import pwd
+
+            gid = pwd.getpwuid(uid).pw_gid
+        except (ImportError, KeyError) as exc:
+            raise RootReviewError("root_review_agent_identity_unavailable") from exc
         pane_id = os.environ.get("TMUX_PANE", "")
         if _PANE_RE.fullmatch(pane_id) is None:
             raise RootReviewError("root_review_agent_pane_unavailable")
