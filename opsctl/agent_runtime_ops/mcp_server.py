@@ -101,12 +101,17 @@ class McpServer:
                 "version": "0.1.0",
             },
             "instructions": (
+                "For root-review tools, preserve the existing user-only root pane: publish one "
+                "card, wait for a transcript append, inspect that transcript through the "
+                "existing surface, then resolve or publish the next card. Root-review tools "
+                "never type into the root pane or execute the displayed command. "
                 "Use these tools to inspect and operate the svcops runtime through opsctl. "
                 "Separate intended runtime binding, actual Apache route state, live image truth, canonical recipe, runtime profile, and applied manifest before changing a target. "
                 "Call one MCP tool at a time and wait for its response before calling another tool. "
                 "Use selector arguments such as runtime_class for group queries instead of parallel per-target calls. "
                 "For a typed root action, submit one exact manifest, preserve its returned handle, and keep calling root_action_wait yourself until the bound terminal receipt is returned. "
-                "Never ask the user to poll, run a root shell, or carry receipt output. "
+                "For typed root actions: Never ask the user to poll, run a root shell, or "
+                "carry receipt output. "
                 "Do not pass raw secret values as tool arguments."
             ),
         }

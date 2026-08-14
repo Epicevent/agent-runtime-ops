@@ -627,6 +627,79 @@ def list_tool_specs() -> list[dict[str, Any]]:
             },
         },
         {
+            "name": "root_review_publish",
+            "title": "Publish Root Review Card",
+            "description": (
+                "Atomically publish one purpose and one prevalidated command to this server "
+                "agent's existing root-review request file. This never accesses the root tmux "
+                "socket or executes the command. Use previous_handle only to replace an already "
+                "observed card."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "purpose": {"type": "string", "minLength": 1, "maxLength": 240},
+                    "command": {"type": "string", "minLength": 1, "maxLength": 60000},
+                    "previous_handle": {
+                        "type": "string",
+                        "pattern": "^rr1\\.[A-Za-z0-9_-]+\\.[0-9a-f]{64}$",
+                    },
+                },
+                "required": ["purpose", "command"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "root_review_wait",
+            "title": "Wait for Root Review Transcript",
+            "description": (
+                "Wait for a bounded append to the existing root transcript for one opaque "
+                "root-review handle. The result is content-free and never clears the card."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "handle": {
+                        "type": "string",
+                        "pattern": "^rr1\\.[A-Za-z0-9_-]+\\.[0-9a-f]{64}$",
+                    },
+                    "wait_timeout_seconds": {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "maximum": 50,
+                        "default": 0.25,
+                    },
+                    "poll_interval_seconds": {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "maximum": 5,
+                        "default": 0.05,
+                    },
+                },
+                "required": ["handle"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "root_review_resolve",
+            "title": "Clear Observed Root Review Card",
+            "description": (
+                "Replace an observed root-review card with the canonical NO_PENDING card. "
+                "The exact handle must still match and the transcript must have appended."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "handle": {
+                        "type": "string",
+                        "pattern": "^rr1\\.[A-Za-z0-9_-]+\\.[0-9a-f]{64}$",
+                    }
+                },
+                "required": ["handle"],
+                "additionalProperties": False,
+            },
+        },
+        {
             "name": "target_rollback",
             "title": "Rollback Target",
             "description": "Rollback one target and run a live check.",

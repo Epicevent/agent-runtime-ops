@@ -12,6 +12,7 @@ from .handlers import observation as observation_handlers
 from .handlers import recipe as recipe_handlers
 from .handlers import rollout as rollout_handlers
 from .handlers import root_action as root_action_handlers
+from .handlers import root_review as root_review_handlers
 from .handlers import routing as routing_handlers
 from .handlers import runtime_config as runtime_config_handlers
 from .handlers import secrets as secret_handlers
@@ -61,6 +62,9 @@ HANDLERS: dict[str, ToolHandler] = {
     "root_action_submit": _bind(root_action_handlers.submit),
     "root_action_retrieve": _bind(root_action_handlers.retrieve),
     "root_action_wait": _bind(root_action_handlers.wait),
+    "root_review_publish": _bind(root_review_handlers.publish),
+    "root_review_wait": _bind(root_review_handlers.wait),
+    "root_review_resolve": _bind(root_review_handlers.resolve),
     "target_rollback": _bind(routing_handlers.target_rollback),
     "nas_status": _bind(nas_handlers.status),
     "nas_mount": _bind(nas_handlers.mount),
