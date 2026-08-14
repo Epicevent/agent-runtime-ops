@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 
@@ -79,8 +80,19 @@ def test_publish_wait_and_resolve_preserve_existing_viewer_contract(
     assert lines[1].startswith("CARD_ID=")
     assert len(lines[1]) == len("CARD_ID=") + 32
     assert lines[2:] == ["# 목적: Read identity", f"command={command}"]
-    assert command not in str(published)
-    assert set(published) == {"handle", "state", "request_sha256"}
+    assert published["command"] == command
+    assert published["command_sha256"] == (
+        "sha256:" + hashlib.sha256(command.encode("utf-8")).hexdigest()
+    )
+    assert published["command_bytes"] == len(command.encode("utf-8"))
+    assert set(published) == {
+        "handle",
+        "state",
+        "request_sha256",
+        "command",
+        "command_sha256",
+        "command_bytes",
+    }
     assert published["state"] == "pending"
 
     unchanged = root_review.store.wait(
@@ -111,6 +123,22 @@ def test_publish_wait_and_resolve_preserve_existing_viewer_contract(
         "TRANSCRIPT_VERIFIED=YES",
         "POST_STATE_VERIFIED=YES",
     ]
+
+
+def test_publish_preserves_full_multiline_command_for_viewer(
+    root_review: RootReviewFixture,
+) -> None:
+    command = "set -eu\nprintf '%s\\n' visible\n/usr/bin/id -u"
+
+    published = root_review.store.publish(
+        purpose="Show every operation", command=command
+    )
+
+    assert published["command"] == command
+    assert published["command_bytes"] == len(command.encode("utf-8"))
+    request = root_review.request.read_text(encoding="utf-8")
+    assert "command=" not in request
+    assert f"COMMAND_BEGIN\n{command}\nCOMMAND_END\n" in request
 
 
 def test_publish_replaces_observed_card_with_same_handle(
@@ -186,13 +214,30 @@ def test_assignment_mismatch_and_irregular_request_fail_closed(
 @pytest.mark.parametrize(
     "field,value", [("purpose", "bad\nline"), ("command", "bad\targ")]
 )
-def test_publish_rejects_multiline_or_control_input(
+def test_publish_rejects_invalid_control_input(
     root_review: RootReviewFixture, field: str, value: str
 ) -> None:
     arguments = {"purpose": "Read", "command": "/usr/bin/true"}
     arguments[field] = value
     with pytest.raises(RootReviewError, match=f"root_review_{field}_invalid"):
         root_review.store.publish(**arguments)
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "echo before\nCOMMAND_END\necho after",
+        "echo before\nSTATUS=NO_PENDING_ROOT_COMMAND",
+        "echo before\ncommand=/usr/bin/false",
+        "echo before\nPURPOSE=hidden",
+        "echo before\n# 목적: hidden",
+    ),
+)
+def test_publish_rejects_viewer_grammar_injection(
+    root_review: RootReviewFixture, command: str
+) -> None:
+    with pytest.raises(RootReviewError, match="root_review_command_invalid"):
+        root_review.store.publish(purpose="Read", command=command)
 
 
 def test_root_review_module_has_no_execution_or_root_control_dependency() -> None:

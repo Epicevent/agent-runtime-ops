@@ -11,10 +11,17 @@ the MCP process's `TMUX_PANE`; callers cannot provide an agent name or path.
 ## Calls
 
 `root_review_publish` accepts one human-readable purpose and one prevalidated
-single-line command. It writes the viewer-compatible request atomically and
-returns only an opaque handle, state, and request digest. An existing pending
-card is not overwritten. Each publication includes a caller-inaccessible random
-card generation id, so an old handle cannot match republished identical text.
+command of at most 32 KiB. Single-line commands use the existing `command=`
+form; multiline commands use the viewer's existing `COMMAND_BEGIN` / `COMMAND_END`
+form so the entire executable body remains visible and copyable. It writes the
+viewer-compatible request atomically and
+returns the exact same full command together with its UTF-8 byte count and
+digest, in addition to the opaque handle, state, and request digest. The command
+must remain fully visible in the existing root-review viewer; agents must not
+replace it with an opaque command-copy-file or digest-checking wrapper merely to
+make copying easier. An existing pending card is not overwritten. Each
+publication includes a caller-inaccessible random card generation id, so an old
+handle cannot match republished identical text.
 After its transcript has appended, the same operation
 may publish the next card by providing `previous_handle`.
 

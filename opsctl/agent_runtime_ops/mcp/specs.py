@@ -632,14 +632,15 @@ def list_tool_specs() -> list[dict[str, Any]]:
             "description": (
                 "Atomically publish one purpose and one prevalidated command to this server "
                 "agent's existing root-review request file. This never accesses the root tmux "
-                "socket or executes the command. Use previous_handle only to replace an already "
-                "observed card."
+                "socket or executes the command. The result repeats the exact full command, its "
+                "UTF-8 byte count, and digest so the authoring tool never hides what the user will "
+                "review and copy. Use previous_handle only to replace an already observed card."
             ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "purpose": {"type": "string", "minLength": 1, "maxLength": 240},
-                    "command": {"type": "string", "minLength": 1, "maxLength": 60000},
+                    "command": {"type": "string", "minLength": 1, "maxLength": 32768},
                     "previous_handle": {
                         "type": "string",
                         "pattern": "^rr1\\.[A-Za-z0-9_-]+\\.[0-9a-f]{64}$",

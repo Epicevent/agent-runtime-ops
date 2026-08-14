@@ -19,6 +19,7 @@ ASSIGNMENT_SCHEMA = "root-review-assignment/v3"
 HANDLE_SCHEMA = "agent-runtime-root-review-handle/v1"
 MAX_ASSIGNMENT_BYTES = 8 * 1024
 MAX_REQUEST_BYTES = 64 * 1024
+MAX_COMMAND_BYTES = 32 * 1024
 MAX_TRANSCRIPT_APPEND_BYTES = 1024 * 1024
 MAX_WAIT_SECONDS = 50.0
 MAX_POLL_SECONDS = 5.0
@@ -171,6 +172,28 @@ def _safe_single_line(value: Any, *, field: str, maximum_chars: int) -> str:
     return value
 
 
+def _safe_command(value: Any) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise RootReviewError("root_review_command_invalid")
+    if len(value.encode("utf-8")) > MAX_COMMAND_BYTES:
+        raise RootReviewError("root_review_command_invalid")
+    if any(
+        character == "\r"
+        or (
+            character != "\n"
+            and unicodedata.category(character) in {"Cc", "Cf", "Cs"}
+        )
+        for character in value
+    ):
+        raise RootReviewError("root_review_command_invalid")
+    for line in value.splitlines():
+        if line in {"COMMAND_BEGIN", "COMMAND_END"} or line.startswith(
+            ("STATUS=", "command=", "PURPOSE=", "# 목적:")
+        ):
+            raise RootReviewError("root_review_command_invalid")
+    return value
+
+
 class RootReviewStore:
     """Thin adapter over the existing assignment/request/transcript files."""
 
@@ -221,9 +244,7 @@ class RootReviewStore:
         previous_handle: str | None = None,
     ) -> dict[str, Any]:
         purpose_value = _safe_single_line(purpose, field="purpose", maximum_chars=240)
-        command_value = _safe_single_line(
-            command, field="command", maximum_chars=60_000
-        )
+        command_value = _safe_command(command)
         assignment = self._discover_assignment()
         current_request, current_identity = self._read_request(assignment)
         transcript_identity = self._transcript_identity(assignment)
@@ -241,11 +262,16 @@ class RootReviewStore:
             if transcript_identity.size <= handle.transcript_offset:
                 raise RootReviewError("root_review_transcript_unchanged")
 
+        command_projection = (
+            f"command={command_value}\n"
+            if "\n" not in command_value
+            else f"COMMAND_BEGIN\n{command_value}\nCOMMAND_END\n"
+        )
         request_bytes = (
             "STATUS=WAITING_FOR_USER_REVIEW_AND_APPROVAL_NOT_EXECUTED\n"
             f"CARD_ID={secrets.token_hex(16)}\n"
             f"# 목적: {purpose_value}\n"
-            f"command={command_value}\n"
+            f"{command_projection}"
         ).encode("utf-8")
         if len(request_bytes) > MAX_REQUEST_BYTES:
             raise RootReviewError("root_review_request_too_large")
@@ -267,6 +293,9 @@ class RootReviewStore:
             "handle": handle,
             "state": "pending",
             "request_sha256": _sha256(published),
+            "command": command_value,
+            "command_sha256": _sha256(command_value.encode("utf-8")),
+            "command_bytes": len(command_value.encode("utf-8")),
         }
 
     def wait(

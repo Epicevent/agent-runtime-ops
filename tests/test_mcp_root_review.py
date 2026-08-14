@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 
@@ -85,7 +86,7 @@ def make_store(tmp_path: Path) -> tuple[RootReviewStore, Path, Path]:
     )
 
 
-def test_mcp_publish_wait_resolve_are_content_free_and_do_not_run(
+def test_mcp_publish_is_visible_wait_resolve_are_content_free_and_do_not_run(
     tmp_path: Path,
 ) -> None:
     store, request, transcript = make_store(tmp_path)
@@ -102,7 +103,11 @@ def test_mcp_publish_wait_resolve_are_content_free_and_do_not_run(
     assert is_error is False
     assert published["ok"] is True
     assert published["mutated"] is True
-    assert command not in str(published)
+    assert published["root_review"]["command"] == command
+    assert published["root_review"]["command_sha256"] == (
+        "sha256:" + hashlib.sha256(command.encode("utf-8")).hexdigest()
+    )
+    assert published["root_review"]["command_bytes"] == len(command.encode("utf-8"))
     handle = published["root_review"]["handle"]
 
     pending, is_error = call(
@@ -120,10 +125,12 @@ def test_mcp_publish_wait_resolve_are_content_free_and_do_not_run(
     assert is_error is False
     assert observed["root_review"]["state"] == "transcript_appended"
     assert "complete" not in str(observed)
+    assert command not in str(observed)
 
     resolved, is_error = call(server, "root_review_resolve", {"handle": handle})
     assert is_error is False
     assert resolved["root_review"]["state"] == "no_pending"
+    assert command not in str(resolved)
     assert request.read_text(encoding="utf-8").startswith(
         "STATUS=NO_PENDING_ROOT_COMMAND\n"
     )
@@ -157,6 +164,25 @@ def test_mcp_rejects_unknown_fields_and_stale_handle(tmp_path: Path) -> None:
     assert is_error is True
     assert stale["reason"] == "root_review_handle_stale_or_mismatched"
     assert runner.calls == []
+
+
+def test_mcp_publish_returns_exact_multiline_command(tmp_path: Path) -> None:
+    store, request, _transcript = make_store(tmp_path)
+    server = McpServer(runner=NoRunRunner(), opsctl="/opsctl", sudo="/sudo")
+    server.root_review_store_factory = lambda: store
+    command = "set -eu\nprintf '%s\\n' visible\n/usr/bin/id -u"
+
+    published, is_error = call(
+        server,
+        "root_review_publish",
+        {"purpose": "Show every operation", "command": command},
+    )
+
+    assert is_error is False
+    assert published["root_review"]["command"] == command
+    assert f"COMMAND_BEGIN\n{command}\nCOMMAND_END\n" in request.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_mcp_tool_specs_do_not_accept_paths_or_status_fields() -> None:
