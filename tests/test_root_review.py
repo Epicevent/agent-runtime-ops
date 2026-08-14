@@ -74,11 +74,11 @@ def test_publish_wait_and_resolve_preserve_existing_viewer_contract(
     published = root_review.store.publish(purpose="Read identity", command=command)
 
     request = root_review.request.read_text(encoding="utf-8")
-    assert request == (
-        "STATUS=WAITING_FOR_USER_REVIEW_AND_APPROVAL_NOT_EXECUTED\n"
-        "# 목적: Read identity\n"
-        f"command={command}\n"
-    )
+    lines = request.splitlines()
+    assert lines[0] == "STATUS=WAITING_FOR_USER_REVIEW_AND_APPROVAL_NOT_EXECUTED"
+    assert lines[1].startswith("CARD_ID=")
+    assert len(lines[1]) == len("CARD_ID=") + 32
+    assert lines[2:] == ["# 목적: Read identity", f"command={command}"]
     assert command not in str(published)
     assert set(published) == {"handle", "state", "request_sha256"}
     assert published["state"] == "pending"
@@ -127,6 +127,21 @@ def test_publish_replaces_observed_card_with_same_handle(
     )
     assert second["handle"] != first["handle"]
     assert "# 목적: Second" in root_review.request.read_text(encoding="utf-8")
+
+
+def test_old_handle_cannot_clear_republished_identical_card(
+    root_review: RootReviewFixture,
+) -> None:
+    first = root_review.store.publish(purpose="Same", command="/usr/bin/true")
+    with root_review.transcript.open("ab") as stream:
+        stream.write(b"first complete\n")
+    root_review.store.resolve(raw_handle=first["handle"])
+
+    second = root_review.store.publish(purpose="Same", command="/usr/bin/true")
+    assert second["request_sha256"] != first["request_sha256"]
+    with pytest.raises(RootReviewError, match="stale_or_mismatched"):
+        root_review.store.resolve(raw_handle=first["handle"])
+    assert "command=/usr/bin/true" in root_review.request.read_text(encoding="utf-8")
 
 
 def test_publish_refuses_to_overwrite_pending_card(

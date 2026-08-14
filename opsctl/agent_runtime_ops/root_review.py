@@ -243,6 +243,7 @@ class RootReviewStore:
 
         request_bytes = (
             "STATUS=WAITING_FOR_USER_REVIEW_AND_APPROVAL_NOT_EXECUTED\n"
+            f"CARD_ID={secrets.token_hex(16)}\n"
             f"# 목적: {purpose_value}\n"
             f"command={command_value}\n"
         ).encode("utf-8")

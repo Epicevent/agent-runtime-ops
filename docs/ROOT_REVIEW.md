@@ -13,7 +13,9 @@ the MCP process's `TMUX_PANE`; callers cannot provide an agent name or path.
 `root_review_publish` accepts one human-readable purpose and one prevalidated
 single-line command. It writes the viewer-compatible request atomically and
 returns only an opaque handle, state, and request digest. An existing pending
-card is not overwritten. After its transcript has appended, the same operation
+card is not overwritten. Each publication includes a caller-inaccessible random
+card generation id, so an old handle cannot match republished identical text.
+After its transcript has appended, the same operation
 may publish the next card by providing `previous_handle`.
 
 `root_review_wait` accepts only the opaque handle and bounded wait controls. It
