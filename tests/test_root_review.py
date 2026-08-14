@@ -248,3 +248,18 @@ def test_root_review_module_has_no_execution_or_root_control_dependency() -> Non
     assert "import socket" not in source
     assert "tmux send-keys" not in source
     assert "/run/codex-root-review/control" not in source
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX account identity contract")
+def test_current_uses_account_primary_gid_not_effective_gid(monkeypatch) -> None:
+    import pwd
+
+    uid = os.getuid()
+    primary_gid = pwd.getpwuid(uid).pw_gid
+    monkeypatch.setattr(os, "getgid", lambda: primary_gid + 1)
+    monkeypatch.setenv("TMUX_PANE", "%42")
+
+    store = RootReviewStore.current()
+
+    assert store.agent_uid == uid
+    assert store.agent_gid == primary_gid
