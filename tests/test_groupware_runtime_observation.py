@@ -549,6 +549,7 @@ class GroupwareRuntimeObservationTests(unittest.TestCase):
             aliases=runtime.aliases,
             expected_sources=runtime.expected_sources,
             desired_digest=runtime.desired_digest,
+            view_record=runtime.view_record,
         )
         with (
             patch(

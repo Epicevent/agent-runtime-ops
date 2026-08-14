@@ -603,7 +603,7 @@ class ReplaceRecoveryTests(unittest.TestCase):
         def tree(root, record, **kwargs):
             return (), "new-tree" if record.get("paths") == ["new"] else "old-tree"
 
-        with (
+        patchers = (
             patch.object(replace_view.nas_views, "load_views_state", return_value=state),
             patch.object(
                 replace_view.legacy,
@@ -662,7 +662,10 @@ class ReplaceRecoveryTests(unittest.TestCase):
                 "recover_pending",
                 side_effect=lambda root: events.append(("recover",)) or False,
             ),
-        ):
+        )
+        with contextlib.ExitStack() as stack:
+            for patcher in patchers:
+                stack.enter_context(patcher)
             replace_view._replace(args, Path("/state"))
 
         labels = [event[0] for event in events]
