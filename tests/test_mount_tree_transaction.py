@@ -2,7 +2,6 @@ import contextlib
 import ctypes
 import errno
 import io
-import os
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -134,7 +133,7 @@ class MountTreeTransactionTests(unittest.TestCase):
                         raise OSError(errno.EIO, step)
 
                 def move_mount(fd, path, *, beneath):
-                    events.append("attach-anchor")
+                    events.append(("move", path, beneath))
                     if failure == "attach-anchor":
                         raise OSError(errno.EIO, "attach-anchor")
 
@@ -169,6 +168,23 @@ class MountTreeTransactionTests(unittest.TestCase):
                         transaction.prepare_transaction(CANDIDATE, LIVE, ANCHOR)
 
                 self.assertNotIn(("detach", LIVE), events)
+                self.assertFalse(
+                    any(
+                        event[:2] == ("move", LIVE)
+                        for event in events
+                        if isinstance(event, tuple)
+                    )
+                )
+                anchor_cleanup_expected = failure in {
+                    "open-candidate",
+                    "private-candidate",
+                    "detach-candidate",
+                    "vacancy",
+                }
+                self.assertEqual(
+                    [event for event in events if event == ("detach", ANCHOR)],
+                    [("detach", ANCHOR)] if anchor_cleanup_expected else [],
+                )
                 opened = []
                 if "open-old" in events and failure != "open-old":
                     opened.append(10)
@@ -354,6 +370,32 @@ class ReplaceRecoveryTests(unittest.TestCase):
             replace_view.recover_pending(Path("C:/state"))
         self.assertEqual(len(writes), 1)
 
+    def test_recovery_rejects_tampered_pending_before_observing_mounts(self) -> None:
+        state, _, _ = self._state("prepared")
+        state["pending_replace"]["old_tree_digest"] = "tampered-tree"
+        findmnt = Mock()
+        observe = Mock()
+        persist = Mock()
+        with (
+            patch.object(replace_view.nas_views, "load_views_state", return_value=state),
+            patch.object(replace_view.legacy, "_findmnt_one", findmnt),
+            patch.object(
+                replace_view.observation,
+                "observe_groupware_runtime",
+                observe,
+            ),
+            patch.object(replace_view, "_persist", persist),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "pending_replace_authority_mismatch"
+            ):
+                replace_view.recover_pending(Path("C:/state"))
+
+        findmnt.assert_not_called()
+        observe.assert_not_called()
+        persist.assert_not_called()
+        self.assertIn("pending_replace", state)
+
     def test_hidden_candidate_rolls_back_via_anchor_without_move_back(self) -> None:
         state, old, candidate = self._state("rollback_authoritative")
         events = []
@@ -412,6 +454,7 @@ class ReplaceRecoveryTests(unittest.TestCase):
         state, _, _ = self._state("rollback_beneath")
         events = []
         top_digest = Mock(side_effect=["new-tree", "old-tree"])
+        persist = Mock()
         with (
             self._base(state),
             patch.object(replace_view, "_tree", lambda *args, **kwargs: ((), "old-tree")),
@@ -423,10 +466,11 @@ class ReplaceRecoveryTests(unittest.TestCase):
                 lambda path: events.append(path.name),
             ),
             patch.object(replace_view.mount_tx, "_move_mount") as move,
-            patch.object(replace_view, "_persist"),
+            patch.object(replace_view, "_persist", persist),
         ):
             replace_view.recover_pending(Path("C:/state"))
         move.assert_not_called()
+        persist.assert_called_once()
         self.assertEqual(events, ["groupware", "rollback"])
         self.assertEqual(top_digest.call_count, 2)
 
@@ -470,6 +514,35 @@ class ReplaceRecoveryTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "committed_live_mismatch"):
                 replace_view.recover_pending(Path("C:/state"))
+
+    def test_commit_decided_rejects_runtime_not_matching_sealed_candidate(self) -> None:
+        state, _, _ = self._state("commit_decided", current_is_candidate=True)
+        mismatched = Mock(
+            status="healthy",
+            reason_code="runtime_observation_healthy",
+            desired_digest="different-desired",
+            runtime_profile_digest="profile",
+            principal=Mock(identity_digest="principal"),
+        )
+        detach = Mock()
+        persist = Mock()
+        with (
+            self._base(state),
+            patch.object(replace_view, "_tree", lambda *args, **kwargs: ((), "new-tree")),
+            patch.object(replace_view.mount_tx, "root_mount_layers", return_value=1),
+            patch.object(
+                replace_view.observation,
+                "observe_groupware_runtime",
+                return_value=mismatched,
+            ),
+            patch.object(replace_view.mount_tx, "detach_top", detach),
+            patch.object(replace_view, "_persist", persist),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "committed_runtime_mismatch"):
+                replace_view.recover_pending(Path("C:/state"))
+
+        detach.assert_not_called()
+        persist.assert_not_called()
 
     def test_boot_change_requires_restore_readiness_before_clearing_pending(self) -> None:
         state, _, _ = self._state("prepared")
@@ -533,6 +606,7 @@ class ReplaceRecoveryTests(unittest.TestCase):
                     Path("C:/state"), boot_restore_ready=True
                 )
         persist.assert_not_called()
+        self.assertIn("pending_replace", state)
 
     def test_replace_persists_each_authority_gate_before_the_next_mount_step(self) -> None:
         old = {
@@ -603,26 +677,55 @@ class ReplaceRecoveryTests(unittest.TestCase):
         def tree(root, record, **kwargs):
             return (), "new-tree" if record.get("paths") == ["new"] else "old-tree"
 
+        observations = iter((before, candidate))
+
+        def observe_runtime(*args, **kwargs):
+            result = next(observations)
+            events.append(
+                (
+                    "post-observe" if kwargs.get("record_override") else "pre-observe",
+                )
+            )
+            return result
+
+        put_view_record = replace_view.nas_views.put_view_record
+
+        def put_record(current_state, slot, corpus, record):
+            events.append(("put-record",))
+            put_view_record(current_state, slot, corpus, record)
+
         patchers = (
             patch.object(replace_view.nas_views, "load_views_state", return_value=state),
             patch.object(
                 replace_view.legacy,
                 "_groupware_runtime_desired_digest",
-                return_value="cas",
+                side_effect=lambda *args: events.append(("cas",)) or "cas",
             ),
-            patch.object(replace_view.observation, "_resolve_runtime", return_value=runtime),
+            patch.object(
+                replace_view.observation,
+                "_resolve_runtime",
+                side_effect=lambda *args: events.append(("resolve",)) or runtime,
+            ),
             patch.object(
                 replace_view.observation,
                 "_service_principal",
-                return_value=principal,
+                side_effect=lambda *args: events.append(("principal",)) or principal,
             ),
             patch.object(
                 replace_view.observation,
                 "observe_groupware_runtime",
-                side_effect=(before, candidate),
+                side_effect=observe_runtime,
             ),
-            patch.object(replace_view, "_master", return_value=Path("/master")),
-            patch.object(replace_view.nas_views, "build_view_plan", return_value=plan),
+            patch.object(
+                replace_view,
+                "_master",
+                side_effect=lambda *args: events.append(("master",)) or Path("/master"),
+            ),
+            patch.object(
+                replace_view.nas_views,
+                "build_view_plan",
+                side_effect=lambda *args, **kwargs: events.append(("plan",)) or plan,
+            ),
             patch.object(replace_view, "_tree", side_effect=tree),
             patch.object(replace_view, "_persist", side_effect=persist),
             patch.object(
@@ -653,6 +756,11 @@ class ReplaceRecoveryTests(unittest.TestCase):
                 side_effect=lambda *args: events.append(("reveal",)),
             ),
             patch.object(replace_view.mount_tx, "root_mount_layers", return_value=1),
+            patch.object(
+                replace_view.nas_views,
+                "put_view_record",
+                side_effect=put_record,
+            ),
             patch.object(replace_view.os, "urandom", return_value=b"x" * 16),
             patch.object(replace_view.os, "close"),
             patch.object(Path, "read_text", return_value="boot\n"),
@@ -668,22 +776,88 @@ class ReplaceRecoveryTests(unittest.TestCase):
                 stack.enter_context(patcher)
             replace_view._replace(args, Path("/state"))
 
-        labels = [event[0] for event in events]
-        self.assertLess(labels.index("persist"), labels.index("stage"))
-        self.assertLess(labels.index("bind"), labels.index("prepare"))
-        self.assertLess(labels.index("prepare"), labels.index("beneath"))
-        rollback_gate = next(
-            index
-            for index, event in enumerate(events)
-            if event[:2] == ("persist", "rollback_authoritative")
+        authority_events = [
+            event[:2]
+            for event in events
+            if event[0]
+            in {
+                "cas",
+                "pre-observe",
+                "persist",
+                "prepare",
+                "beneath",
+                "reveal",
+                "post-observe",
+                "put-record",
+                "recover",
+            }
+        ]
+        self.assertEqual(
+            authority_events,
+            [
+                ("cas",),
+                ("pre-observe",),
+                ("persist", "prepared"),
+                ("persist", "prepared"),
+                ("prepare",),
+                ("persist", "rollback_authoritative"),
+                ("beneath",),
+                ("reveal",),
+                ("post-observe",),
+                ("put-record",),
+                ("persist", "commit_decided"),
+                ("recover",),
+            ],
         )
-        self.assertLess(rollback_gate, labels.index("beneath"))
         commit = next(
             event for event in events if event[:2] == ("persist", "commit_decided")
         )
         self.assertEqual(commit[2], ("new",))
         self.assertTrue(commit[3].startswith("sha256:"))
         self.assertEqual(events[-1], ("recover",))
+
+    def test_replace_rejects_stale_cas_before_runtime_or_mount_side_effects(self) -> None:
+        old = {
+            "share": "//nas/groupware",
+            "user_id": "user",
+            "paths": ["old"],
+        }
+        state = {"views": {}, "corpus_views": {"oc6": {"groupware": old}}}
+        args = SimpleNamespace(
+            slot="oc6",
+            user_id="user",
+            share="//nas/groupware",
+            path=["new"],
+            require_content_ready=True,
+            expected_runtime_desired_digest="stale",
+        )
+        resolve = Mock()
+        observe = Mock()
+        persist = Mock()
+        prepare = Mock()
+        with (
+            patch.object(replace_view.nas_views, "load_views_state", return_value=state),
+            patch.object(
+                replace_view.legacy,
+                "_groupware_runtime_desired_digest",
+                return_value="current",
+            ),
+            patch.object(replace_view.observation, "_resolve_runtime", resolve),
+            patch.object(
+                replace_view.observation,
+                "observe_groupware_runtime",
+                observe,
+            ),
+            patch.object(replace_view, "_persist", persist),
+            patch.object(replace_view.mount_tx, "prepare_transaction", prepare),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "current_desired_digest_mismatch"):
+                replace_view._replace(args, Path("C:/state"))
+
+        resolve.assert_not_called()
+        observe.assert_not_called()
+        persist.assert_not_called()
+        prepare.assert_not_called()
 
 
 class CommandContractTests(unittest.TestCase):
@@ -723,6 +897,78 @@ class CommandContractTests(unittest.TestCase):
         self.assertIn("reason=unexpected_error", output.getvalue())
         self.assertIn("recovery_status=failed", output.getvalue())
         self.assertNotIn("secret", output.getvalue())
+
+    def test_groupware_status_digest_is_the_replace_cas_digest(self) -> None:
+        record_digest = "sha256:" + "a" * 64
+        runtime_digest = "sha256:" + "b" * 64
+        state = {
+            "views": {},
+            "corpus_views": {
+                "oc6": {
+                    "groupware": {
+                        "share": "//nas/groupware",
+                        "user_id": "user",
+                        "paths": ["new"],
+                        "desired_digest": record_digest,
+                    }
+                }
+            },
+        }
+        desired = SimpleNamespace(
+            desired_digest=runtime_digest,
+            runtime_profile_digest="sha256:" + "c" * 64,
+            requested_paths=("new",),
+            effective_paths=("new",),
+        )
+        output = io.StringIO()
+        mounted = (
+            0,
+            "",
+            [{"target": "mounted", "fstype": "none", "options": "ro"}],
+        )
+        with (
+            patch.object(nas_view, "load_views_state", return_value=state),
+            patch.object(
+                nas_view,
+                "_groupware_runtime_desired_status",
+                return_value=desired,
+            ),
+            patch.object(
+                nas_view,
+                "effective_granted_paths",
+                return_value=["new"],
+            ),
+            patch.object(
+                nas_view,
+                "_record_master_mode",
+                return_value=nas_view._MASTER_MODE_PER_SLOT,
+            ),
+            patch.object(nas_view, "_findmnt_one", return_value=mounted),
+            patch.object(
+                nas_view,
+                "_view_grant_evidence",
+                return_value=("yes", [], True, True),
+            ),
+            patch.object(nas_view, "_read_fstab", return_value=""),
+            patch.object(nas_view, "fstab_boot_entry_present", return_value=True),
+            patch.object(nas_view, "_is_root", return_value=False),
+            patch.object(nas_view, "failed_cifs_mount_units", return_value=([], None)),
+            patch.object(nas_view, "managed_fstab_mount_targets", return_value=[]),
+            contextlib.redirect_stdout(output),
+        ):
+            self.assertEqual(
+                nas_view._groupware_runtime_desired_digest("oc6", Path("C:/state")),
+                runtime_digest,
+            )
+            self.assertEqual(
+                nas_view.cmd_nas_view_status(SimpleNamespace(state_root="C:/state")),
+                0,
+            )
+
+        status = output.getvalue()
+        self.assertIn(f"view_1_record_desired_digest={record_digest}", status)
+        self.assertIn(f"view_1_desired_digest={runtime_digest}", status)
+        self.assertEqual(status.count("view_1_desired_digest="), 1)
 
 
 if __name__ == "__main__":
