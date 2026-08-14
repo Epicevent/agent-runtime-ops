@@ -142,6 +142,8 @@ class McpServerTests(unittest.TestCase):
             }
         )
         self.assertEqual(response["result"]["protocolVersion"], "2025-06-18")
+        self.assertIn("existing user-only root pane", response["result"]["instructions"])
+        self.assertIn("never type into the root pane", response["result"]["instructions"])
         self.assertIn("one MCP tool at a time", response["result"]["instructions"])
         self.assertIn("runtime binding", response["result"]["instructions"])
         self.assertIn("live image truth", response["result"]["instructions"])
