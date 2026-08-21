@@ -100,12 +100,23 @@ class FailedCifsMountUnitsTest(unittest.TestCase):
         self.assertEqual(error, "boom")
 
 
-def _run_restore(*, readiness: dict, mount_all_rc: int = 0, nas_wait_seconds: float = 42.0):
-    records = {"views": {"oc1": {"user_id": "7362168", "share": "//192.168.0.222/kakao-work", "package": "p"}}}
+def _run_restore(
+    *, readiness: dict, mount_all_rc: int = 0, nas_wait_seconds: float = 42.0,
+    managed_entries: list[dict[str, str]] | None = None,
+    workspace_results: list[tuple[str, bool, str]] | None = None,
+    records: dict | None = None,
+):
+    state = records if records is not None else {
+        "views": {"oc1": {"user_id": "7362168", "share": "//192.168.0.222/kakao-work", "package": "p"}}
+    }
     stdout = io.StringIO()
     with (
         patch("agent_runtime_ops.commands.nas_view._is_root", return_value=True),
-        patch("agent_runtime_ops.commands.nas_view.load_views_state", return_value=records),
+        patch("agent_runtime_ops.commands.nas_view.load_views_state", return_value=state),
+        patch(
+            "agent_runtime_ops.commands.nas_view._read_managed_fstab_entries",
+            return_value=managed_entries or [],
+        ),
         patch("agent_runtime_ops.commands.nas_view.wait_for_nas_ready", return_value=readiness) as wait,
         patch(
             "agent_runtime_ops.commands.nas_view._run_text",
@@ -120,6 +131,10 @@ def _run_restore(*, readiness: dict, mount_all_rc: int = 0, nas_wait_seconds: fl
         patch("agent_runtime_ops.commands.nas_view._apply_binds", return_value=(True, "ok", 13)),
         patch("agent_runtime_ops.commands.nas_view.save_views_state") as save_state,
         patch("agent_runtime_ops.commands.nas_view._append_action_log"),
+        patch(
+            "agent_runtime_ops.commands.nas_view.restore_managed_workspace_binds",
+            return_value=workspace_results or [],
+        ),
         contextlib.redirect_stdout(stdout),
     ):
         rc = cmd_nas_view_restore(SimpleNamespace(state_root="/unused", nas_wait_seconds=nas_wait_seconds))
@@ -148,6 +163,27 @@ class RestoreWaitsForNasTest(unittest.TestCase):
         rc, output, _, _, _ = _run_restore(readiness={"192.168.0.222": True}, mount_all_rc=32)
         self.assertEqual(rc, 1, output)
         self.assertIn("cifs_mount_all=rc=32", output)
+        self.assertIn("view_restore_status=fail", output)
+
+    def test_managed_workspace_host_is_included_and_result_is_reported(self) -> None:
+        rc, output, wait, _, _ = _run_restore(
+            readiness={"10.10.10.2": True},
+            managed_entries=[{"source": "//10.10.10.2/OC20"}],
+            workspace_results=[("oc20", True, "restored source=//10.10.10.2/OC20")],
+            records={"views": {}},
+        )
+        self.assertEqual(rc, 0, output)
+        self.assertEqual(wait.call_args.args[0], ["10.10.10.2"])
+        self.assertIn("view_count=0", output)
+        self.assertIn("workspace_restore target=oc20 status=ok", output)
+
+    def test_workspace_restore_failure_fails_loudly(self) -> None:
+        rc, output, _, _, _ = _run_restore(
+            readiness={"192.168.0.222": True},
+            workspace_results=[("oc20", False, "managed_workspace_source_not_rw_cifs")],
+        )
+        self.assertEqual(rc, 1, output)
+        self.assertIn("workspace_restore target=oc20 status=fail", output)
         self.assertIn("view_restore_status=fail", output)
 
 

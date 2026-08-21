@@ -804,11 +804,14 @@ install_boot_restore_unit() {
 Description=agent-runtime-ops NAS mounts and slot view restore after boot
 Wants=network-online.target
 After=network-online.target remote-fs.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
 ExecStart=$BIN_LINK nas view restore --nas-wait-seconds 600
 TimeoutStartSec=900
+Restart=on-failure
+RestartSec=60
 
 [Install]
 WantedBy=multi-user.target

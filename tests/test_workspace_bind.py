@@ -3,9 +3,10 @@ from __future__ import annotations
 from pathlib import Path, PurePosixPath
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from agent_runtime_ops.domain.runtime_checks import _workspace_bind_stamp_ok
-from agent_runtime_ops.domain.workspace_bind import choose_workspace_assignment
+from agent_runtime_ops.domain.workspace_bind import choose_workspace_assignment, restore_managed_workspace_binds
 from agent_runtime_ops.host.fstab import (
     read_managed_workspace_binds,
     remove_managed_workspace_bind_entry,
@@ -100,6 +101,87 @@ class WorkspaceBindStampTest(unittest.TestCase):
         )
         self.assertTrue(ok)
         self.assertEqual(detail, "binds=0")
+
+
+class RestoreManagedWorkspaceBindsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.entry = {
+            "slot": "oc5",
+            "source": "/home/oc5/nas_rw/10.10.10.2/OC5",
+            "target": "/home/oc5/workspace",
+        }
+        self.source_row = _rw_row(self.entry["source"])
+        self.target_row = _rw_row(self.entry["target"])
+
+    def test_already_correct_bind_is_idempotent(self) -> None:
+        with (
+            patch("agent_runtime_ops.domain.workspace_bind.read_managed_workspace_binds", return_value=[self.entry]),
+            patch(
+                "agent_runtime_ops.domain.workspace_bind.findmnt_one",
+                side_effect=[(0, None, [self.source_row]), (0, None, [self.target_row])],
+            ),
+            patch("agent_runtime_ops.domain.workspace_bind.bind_mount") as bind_mount,
+        ):
+            results = restore_managed_workspace_binds()
+        self.assertEqual(results, [("oc5", True, "already_bound source=//10.10.10.2/OC5")])
+        bind_mount.assert_not_called()
+
+    def test_missing_bind_is_restored_and_verified(self) -> None:
+        with (
+            patch("agent_runtime_ops.domain.workspace_bind.read_managed_workspace_binds", return_value=[self.entry]),
+            patch(
+                "agent_runtime_ops.domain.workspace_bind.findmnt_one",
+                side_effect=[
+                    (0, None, [self.source_row]),
+                    (1, "not mounted", []),
+                    (0, None, [self.target_row]),
+                ],
+            ),
+            patch("agent_runtime_ops.domain.workspace_bind.workspace_local_entry_count", return_value=0),
+            patch("agent_runtime_ops.domain.workspace_bind.bind_mount", return_value=(True, "ok")) as bind_mount,
+        ):
+            results = restore_managed_workspace_binds()
+        self.assertEqual(results, [("oc5", True, "restored source=//10.10.10.2/OC5")])
+        bind_mount.assert_called_once_with(Path(self.entry["source"]), Path(self.entry["target"]))
+
+    def test_missing_source_fails_without_mutation(self) -> None:
+        with (
+            patch("agent_runtime_ops.domain.workspace_bind.read_managed_workspace_binds", return_value=[self.entry]),
+            patch("agent_runtime_ops.domain.workspace_bind.findmnt_one", return_value=(1, "not mounted", [])),
+            patch("agent_runtime_ops.domain.workspace_bind.bind_mount") as bind_mount,
+        ):
+            results = restore_managed_workspace_binds()
+        self.assertFalse(results[0][1])
+        self.assertIn("managed_workspace_source_not_rw_cifs", results[0][2])
+        bind_mount.assert_not_called()
+
+    def test_occupied_workspace_is_not_replaced(self) -> None:
+        occupied = {**self.target_row, "source": "/dev/nvme0n1p2"}
+        with (
+            patch("agent_runtime_ops.domain.workspace_bind.read_managed_workspace_binds", return_value=[self.entry]),
+            patch(
+                "agent_runtime_ops.domain.workspace_bind.findmnt_one",
+                side_effect=[(0, None, [self.source_row]), (0, None, [occupied])],
+            ),
+            patch("agent_runtime_ops.domain.workspace_bind.bind_mount") as bind_mount,
+        ):
+            results = restore_managed_workspace_binds()
+        self.assertEqual(results, [("oc5", False, "workspace_occupied source=/dev/nvme0n1p2")])
+        bind_mount.assert_not_called()
+
+    def test_local_workspace_data_is_not_hidden(self) -> None:
+        with (
+            patch("agent_runtime_ops.domain.workspace_bind.read_managed_workspace_binds", return_value=[self.entry]),
+            patch(
+                "agent_runtime_ops.domain.workspace_bind.findmnt_one",
+                side_effect=[(0, None, [self.source_row]), (1, "not mounted", [])],
+            ),
+            patch("agent_runtime_ops.domain.workspace_bind.workspace_local_entry_count", return_value=2),
+            patch("agent_runtime_ops.domain.workspace_bind.bind_mount") as bind_mount,
+        ):
+            results = restore_managed_workspace_binds()
+        self.assertEqual(results, [("oc5", False, "workspace_local_data_present count=2")])
+        bind_mount.assert_not_called()
 
 
 if __name__ == "__main__":
