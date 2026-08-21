@@ -95,6 +95,14 @@ def test_install_normalizes_generated_runtime_trees_before_candidate_attestation
     )
 
 
+def test_boot_restore_retries_failed_nas_and_workspace_restore() -> None:
+    unit = _function("install_boot_restore_unit")
+    assert "StartLimitIntervalSec=0" in unit
+    assert "Restart=on-failure" in unit
+    assert "RestartSec=60" in unit
+    assert "TimeoutStartSec=900" in unit
+
+
 def test_svcops_attestations_are_bounded_minimal_and_prune_is_last() -> None:
     runner = _function("run_cli_as_ops")
     candidate = _function("attest_candidate_cli_as_ops")

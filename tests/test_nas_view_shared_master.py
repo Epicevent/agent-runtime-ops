@@ -518,10 +518,12 @@ class SharedMasterAssignTest(unittest.TestCase):
         with (
             patch("agent_runtime_ops.commands.nas_view._is_root", return_value=True),
             patch("agent_runtime_ops.commands.nas_view.load_views_state", return_value=views),
+            patch("agent_runtime_ops.commands.nas_view._read_managed_fstab_entries", return_value=[]),
             patch("agent_runtime_ops.commands.nas_view._restore_lock", return_value=contextlib.nullcontext()),
             patch("agent_runtime_ops.commands.nas_view.wait_for_nas_ready", return_value={}),
             patch("agent_runtime_ops.commands.nas_view._run_text", return_value=SimpleNamespace(returncode=0)),
             patch("agent_runtime_ops.commands.nas_view._restore_views", return_value=0),
+            patch("agent_runtime_ops.commands.nas_view.restore_managed_workspace_binds", return_value=[]),
             patch("agent_runtime_ops.commands.nas_view.save_views_state") as save,
         ):
             rc = cmd_nas_view_restore(SimpleNamespace(state_root="/unused", nas_wait_seconds=0))

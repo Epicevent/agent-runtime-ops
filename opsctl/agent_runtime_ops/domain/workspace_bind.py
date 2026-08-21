@@ -3,10 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..host.fstab import (
+    read_managed_workspace_binds,
     remove_managed_workspace_bind_entry,
     write_managed_workspace_bind_entry,
 )
-from ..host.mounts import bind_mount, findmnt_one, findmnt_under, simple_umount
+from ..host.mounts import bind_mount, findmnt_one, findmnt_under, is_readonly_mount, simple_umount
 from ..nas import nas_rw_root, parse_cifs_mount_source, share_is_writable, workspace_root
 from .workspace_probe import workspace_local_entry_count
 
@@ -155,3 +156,97 @@ def reconcile_workspace_bind(slot: str) -> tuple[bool, str]:
         ok, detail = clear_workspace_bind(slot)
         return ok, f"auto_clear {detail}"
     return True, "manual_assign_required multiple_rw_mounts"
+
+
+def restore_managed_workspace_binds() -> list[tuple[str, bool, str]]:
+    """Restore the live workspace views already stamped in fstab.
+
+    This is deliberately narrower than ``reconcile_workspace_bind``: boot
+    recovery must reproduce recorded intent, never clear or rewrite it merely
+    because a nofail CIFS mount has not returned yet. Each row is
+    ``(slot, ok, detail)`` and every stamped slot is attempted.
+    """
+    binds = read_managed_workspace_binds()
+    slot_counts: dict[str, int] = {}
+    for entry in binds:
+        slot = entry.get("slot", "")
+        slot_counts[slot] = slot_counts.get(slot, 0) + 1
+
+    results: list[tuple[str, bool, str]] = []
+    for entry in binds:
+        slot = entry.get("slot", "")
+        if not slot or slot_counts.get(slot) != 1:
+            results.append((slot or "unknown", False, "managed_workspace_bind_ambiguous"))
+            continue
+
+        source = Path(entry.get("source", ""))
+        target = Path(entry.get("target", ""))
+        expected_target = workspace_root(slot)
+        root = nas_rw_root(slot).resolve(strict=False)
+        resolved_source = source.resolve(strict=False)
+        if target != expected_target:
+            results.append((slot, False, f"managed_workspace_target_mismatch target={target}"))
+            continue
+        if root not in resolved_source.parents:
+            results.append((slot, False, f"managed_workspace_source_outside_nas_rw source={source}"))
+            continue
+
+        src_rc, src_error, src_rows = findmnt_one(source)
+        if (
+            src_rc != 0
+            or len(src_rows) != 1
+            or src_rows[0].get("target") != str(source)
+            or src_rows[0].get("fstype") != "cifs"
+            or is_readonly_mount(src_rows[0])
+        ):
+            detail = src_error or f"source={source}"
+            results.append((slot, False, f"managed_workspace_source_not_rw_cifs {detail}"))
+            continue
+
+        expected_remote = src_rows[0].get("source") or ""
+        current = _workspace_current_row(slot)
+        if current is not None:
+            if (
+                current.get("target") == str(target)
+                and current.get("source") == expected_remote
+                and current.get("fstype") == "cifs"
+                and not is_readonly_mount(current)
+            ):
+                results.append((slot, True, f"already_bound source={expected_remote}"))
+            else:
+                results.append(
+                    (
+                        slot,
+                        False,
+                        f"workspace_occupied source={current.get('source') or 'unknown'}",
+                    )
+                )
+            continue
+
+        try:
+            hidden_count = workspace_local_entry_count(target)
+        except OSError as exc:
+            results.append((slot, False, f"workspace_local_preflight_failed errno={exc.errno}"))
+            continue
+        if hidden_count:
+            results.append((slot, False, f"workspace_local_data_present count={hidden_count}"))
+            continue
+
+        mounted, mount_detail = bind_mount(source, target)
+        if not mounted:
+            results.append((slot, False, f"bind_mount_failed={mount_detail}"))
+            continue
+        verify_rc, verify_error, verify_rows = findmnt_one(target)
+        verified = (
+            verify_rc == 0
+            and len(verify_rows) == 1
+            and verify_rows[0].get("target") == str(target)
+            and verify_rows[0].get("source") == expected_remote
+            and verify_rows[0].get("fstype") == "cifs"
+            and not is_readonly_mount(verify_rows[0])
+        )
+        if not verified:
+            results.append((slot, False, f"bind_verify_failed={verify_error or 'state_mismatch'}"))
+            continue
+        results.append((slot, True, f"restored source={expected_remote}"))
+    return results

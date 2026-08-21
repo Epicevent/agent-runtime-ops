@@ -20,6 +20,7 @@ from ..domain.groupware_runtime_observation import (
 )
 from ..domain.nas_credentials import migrate_customer_credential_to_root
 from ..domain.nas_mounts import write_managed_fstab_entry as _write_managed_fstab_entry
+from ..domain.workspace_bind import restore_managed_workspace_binds
 from ..domain.nas_views import (
     PRIMARY_CORPUS,
     ViewPlan,
@@ -1055,10 +1056,11 @@ def cmd_nas_view_restore(args: argparse.Namespace) -> int:
     state_root = _state_root(args)
     views = load_views_state(state_root)
     records = list(iter_view_records(views))
+    managed_entries = _read_managed_fstab_entries()
     print(f"view_count={len(records)}")
     boot_failed = 0
     with _restore_lock():
-        if records:
+        if records or managed_entries:
             # After a power cut the server usually boots before the NAS answers —
             # wait for SMB, then remount every fstab CIFS entry that lost the boot
             # race (mount -a is idempotent: already-mounted entries are skipped).
@@ -1066,6 +1068,11 @@ def cmd_nas_view_restore(args: argparse.Namespace) -> int:
             for _slot, _corpus, record in records:
                 try:
                     hosts.append(parse_smb_share(record.get("share", "")).host)
+                except ValueError:
+                    continue
+            for entry in managed_entries:
+                try:
+                    hosts.append(parse_smb_share(entry.get("source", "")).host)
                 except ValueError:
                     continue
             wait_seconds = float(getattr(args, "nas_wait_seconds", 600.0))
@@ -1079,6 +1086,11 @@ def cmd_nas_view_restore(args: argparse.Namespace) -> int:
                 boot_failed += 1
             print(f"cifs_mount_all={'ok' if proc.returncode == 0 else 'rc=' + str(proc.returncode)}")
         failed = _restore_views(state_root, records)
+        workspace_results = restore_managed_workspace_binds()
+        for slot, restored, detail in workspace_results:
+            print(f"workspace_restore target={slot} status={'ok' if restored else 'fail'} {detail}")
+            if not restored:
+                boot_failed += 1
         if records:
             try:
                 save_views_state(state_root, views)
