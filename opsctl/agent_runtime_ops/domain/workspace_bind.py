@@ -8,6 +8,7 @@ from ..host.fstab import (
 )
 from ..host.mounts import bind_mount, findmnt_one, findmnt_under, simple_umount
 from ..nas import nas_rw_root, parse_cifs_mount_source, share_is_writable, workspace_root
+from .workspace_probe import workspace_local_entry_count
 
 
 def rw_cifs_mounts(slot: str) -> list[dict[str, str]]:
@@ -107,6 +108,13 @@ def assign_workspace_bind(slot: str, source_mountpoint: Path) -> tuple[bool, str
         return False, f"assign_source_not_mounted={source_mountpoint}"
     target = workspace_root(slot)
     current = _workspace_current_row(slot)
+    if current is None:
+        try:
+            hidden_count = workspace_local_entry_count(target)
+        except OSError as exc:
+            return False, f"workspace_local_preflight_failed errno={exc.errno}"
+        if hidden_count:
+            return False, f"workspace_local_data_present count={hidden_count}"
     if current is not None:
         if current.get("source") == src_rows[0].get("source"):
             write_managed_workspace_bind_entry(slot, source_mountpoint, target)

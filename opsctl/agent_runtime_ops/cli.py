@@ -45,6 +45,7 @@ from .commands.nas import (
     cmd_nas_workspace_assign,
     cmd_nas_probe,
     cmd_nas_workspace_status,
+    cmd_nas_workspace_write_probe,
     cmd_nas_policy_check,
     cmd_nas_remove,
     cmd_nas_request,
@@ -714,6 +715,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="fleet-wide live workspace reality per slot: bound share + writable mounts (read-only)",
     )
     nas_workspace_status.set_defaults(func=cmd_nas_workspace_status)
+    nas_workspace_write_probe = nas_sub.add_parser(
+        "workspace-write-probe",
+        help="create+fsync+remove a temp file as the runtime identity (TARGET or --all)",
+    )
+    workspace_probe_group = nas_workspace_write_probe.add_mutually_exclusive_group(required=True)
+    workspace_probe_group.add_argument("slot", metavar="target", nargs="?")
+    workspace_probe_group.add_argument("--all", action="store_true")
+    nas_workspace_write_probe.set_defaults(func=cmd_nas_workspace_write_probe)
     nas_probe = nas_sub.add_parser(
         "probe",
         help="mounted != connected: timed real-I/O probe of every cifs mount + SMB port per NAS host (read-only)",
