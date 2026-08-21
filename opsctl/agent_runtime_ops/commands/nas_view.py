@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import os
 import sqlite3
 import stat
 import sys
 import time
+from functools import wraps
 from pathlib import Path
 
 from ..domain.actions import append_action_log as _append_action_log
@@ -47,6 +47,7 @@ from ..domain.nas_views import (
     validate_user_id,
     view_root,
 )
+from ..domain.runtime_backup import runtime_host_mutation_lock
 
 from ..host.account_files import (
     read_password_from_stdin,
@@ -208,6 +209,21 @@ def _require_root(command: str) -> bool:
         return True
     print(f"error: run as root/admin: sudo /usr/local/bin/opsctl nas view {command} ...", file=sys.stderr)
     return False
+
+
+def _serialized_view_mutation(command):
+    @wraps(command)
+    def locked(args):
+        if not _is_root():
+            return command(args)
+        state_root = _state_root(args)
+        with runtime_host_mutation_lock(state_root):
+            from .groupware_view_replace import recover_pending
+
+            recover_pending(state_root)
+            return command(args)
+
+    return locked
 
 
 def _ensure_hidden_dirs(slot: str, corpus: str = PRIMARY_CORPUS) -> None:
@@ -459,6 +475,7 @@ def _apply_binds(plan: ViewPlan) -> tuple[bool, str, int]:
     return True, "ok", bound_rooms
 
 
+@_serialized_view_mutation
 def cmd_nas_view_assign(args: argparse.Namespace) -> int:
     if not _require_root("assign"):
         return 2
@@ -638,6 +655,7 @@ def cmd_nas_view_assign(args: argparse.Namespace) -> int:
     return 0
 
 
+@_serialized_view_mutation
 def cmd_nas_view_detach(args: argparse.Namespace) -> int:
     if not _require_root("detach"):
         return 2
@@ -740,7 +758,12 @@ def cmd_nas_view_status(args: argparse.Namespace) -> int:
         print(f"{prefix}_package={record.get('package', '')}")
         # Preserve the applied view identity so web consumers can bind a
         # kernel receipt to this exact read-only status snapshot.
-        print(f"{prefix}_desired_digest={record.get('desired_digest', '')}")
+        record_desired_digest = record.get("desired_digest", "")
+        print(f"{prefix}_record_desired_digest={record_desired_digest}")
+        if corpus != "groupware":
+            # Preserve the v1 key and field order for corpora without a
+            # separate runtime-observation desired contract.
+            print(f"{prefix}_desired_digest={record_desired_digest}")
         print(f"{prefix}_paths_json={json.dumps(status_record.get('paths') or [], ensure_ascii=False, separators=(',', ':'))}")
         if corpus == "groupware":
             try:
@@ -1024,40 +1047,17 @@ def _read_fstab() -> str:
         return ""
 
 
-@contextlib.contextmanager
-def _restore_lock(lock_path: Path = Path("/run/agent-runtime-ops-nas-restore.lock")):
-    """Serialize concurrent restores — the boot unit and a legacy @reboot cron
-    line may fire together, and two restores rebuilding the same entry binds
-    would tear each other down mid-flight. Degrades to unserialized where
-    flock is unavailable (non-Linux test runs)."""
-    try:
-        import fcntl
-    except ImportError:
-        yield
-        return
-    try:
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        lock_path.touch(exist_ok=True)
-        handle = lock_path.open("r+")
-    except OSError:
-        yield
-        return
-    try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        yield
-    finally:
-        handle.close()
-
-
 def cmd_nas_view_restore(args: argparse.Namespace) -> int:
     if not _require_root("restore"):
         return 2
     state_root = _state_root(args)
-    views = load_views_state(state_root)
-    records = list(iter_view_records(views))
-    print(f"view_count={len(records)}")
     boot_failed = 0
-    with _restore_lock():
+    with runtime_host_mutation_lock(state_root):
+        from .groupware_view_replace import recover_pending
+
+        views = load_views_state(state_root)
+        records = list(iter_view_records(views))
+        print(f"view_count={len(records)}")
         if records:
             # After a power cut the server usually boots before the NAS answers —
             # wait for SMB, then remount every fstab CIFS entry that lost the boot
@@ -1078,7 +1078,10 @@ def cmd_nas_view_restore(args: argparse.Namespace) -> int:
             if proc.returncode != 0:
                 boot_failed += 1
             print(f"cifs_mount_all={'ok' if proc.returncode == 0 else 'rc=' + str(proc.returncode)}")
-        failed = _restore_views(state_root, records)
+        boot_restored = recover_pending(state_root, boot_restore_ready=True)
+        views = load_views_state(state_root)
+        records = list(iter_view_records(views))
+        failed = 0 if boot_restored else _restore_views(state_root, records)
         if records:
             try:
                 save_views_state(state_root, views)

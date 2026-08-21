@@ -204,6 +204,9 @@ def apply_desired_slot(
 ) -> int:
     try:
         with runtime_host_mutation_lock(state_root):
+            from ..commands.groupware_view_replace import recover_pending
+
+            recover_pending(state_root)
             with runtime_transaction_lock(state_root, desired.slot):
                 if pre_apply_admission is not None:
                     pre_apply_admission()

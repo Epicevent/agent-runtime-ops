@@ -518,7 +518,14 @@ class SharedMasterAssignTest(unittest.TestCase):
         with (
             patch("agent_runtime_ops.commands.nas_view._is_root", return_value=True),
             patch("agent_runtime_ops.commands.nas_view.load_views_state", return_value=views),
-            patch("agent_runtime_ops.commands.nas_view._restore_lock", return_value=contextlib.nullcontext()),
+            patch(
+                "agent_runtime_ops.commands.nas_view.runtime_host_mutation_lock",
+                return_value=contextlib.nullcontext(),
+            ),
+            patch(
+                "agent_runtime_ops.commands.groupware_view_replace.recover_pending",
+                return_value=False,
+            ),
             patch("agent_runtime_ops.commands.nas_view.wait_for_nas_ready", return_value={}),
             patch("agent_runtime_ops.commands.nas_view._run_text", return_value=SimpleNamespace(returncode=0)),
             patch("agent_runtime_ops.commands.nas_view._restore_views", return_value=0),
@@ -544,6 +551,7 @@ class SharedMasterAssignTest(unittest.TestCase):
             "paths": ["groupware/approval/example", "mails/seung23"],
             "rooms_missing_media": ["mails/seung23"],
             "master_mode": "shared_policy_mount", "master_path": master.as_posix(),
+            "desired_digest": "sha256:" + "a" * 64,
         }
         records = {"views": {}, "corpus_views": {"oc3": {"groupware": record}}}
         fstab = f"{SHARE} {master.as_posix()} cifs credentials=/not-output,rw 0 0\n"
@@ -569,12 +577,29 @@ class SharedMasterAssignTest(unittest.TestCase):
             patch("agent_runtime_ops.commands.nas_view._read_fstab", return_value=fstab),
             patch("agent_runtime_ops.commands.nas_view._is_root", return_value=False),
             patch("agent_runtime_ops.commands.nas_view.failed_cifs_mount_units", return_value=([], None)),
+            patch(
+                "agent_runtime_ops.commands.nas_view._groupware_runtime_desired_status",
+                return_value=SimpleNamespace(
+                    desired_digest="sha256:" + "b" * 64,
+                    runtime_profile_digest="sha256:" + "c" * 64,
+                    requested_paths=("groupware/approval/example", "mails/seung23"),
+                    effective_paths=("groupware/approval/example",),
+                ),
+            ),
             patch("agent_runtime_ops.commands.nas_view._view_grant_evidence", side_effect=evidence),
             contextlib.redirect_stdout(output),
         ):
             rc = cmd_nas_view_status(SimpleNamespace(state_root="/unused"))
         self.assertEqual(rc, 0, output.getvalue())
         self.assertIn('view_1_paths_json=["groupware/approval/example"]', output.getvalue())
+        self.assertIn(
+            "view_1_record_desired_digest=sha256:" + "a" * 64,
+            output.getvalue(),
+        )
+        self.assertIn(
+            "view_1_desired_digest=sha256:" + "b" * 64,
+            output.getvalue(),
+        )
         self.assertEqual(observed_records[0]["paths"], ["groupware/approval/example"])
         self.assertEqual(record["paths"], ["groupware/approval/example", "mails/seung23"])
 

@@ -208,6 +208,9 @@ def cmd_rollback(args: argparse.Namespace) -> int:
             # opened.  The exact identity is revalidated again under both locks.
             require_exact_pending_rollback(state_root, args.slot, exact_expected)
             with existing_runtime_host_mutation_lock(state_root):
+                from .groupware_view_replace import recover_pending
+
+                recover_pending(state_root)
                 with existing_runtime_transaction_lock(state_root, args.slot):
                     backup_dir, _ = require_exact_pending_rollback(
                         state_root,
@@ -358,6 +361,9 @@ def cmd_rollback(args: argparse.Namespace) -> int:
         return 0 if succeeded else 1
     try:
         with runtime_host_mutation_lock(state_root):
+            from .groupware_view_replace import recover_pending
+
+            recover_pending(state_root)
             with runtime_transaction_lock(state_root, args.slot):
                 return _cmd_rollback_locked(args, state_root)
     except Exception as exc:

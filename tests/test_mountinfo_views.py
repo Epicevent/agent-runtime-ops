@@ -69,6 +69,13 @@ class ParseMountinfoLinesTest(unittest.TestCase):
         rows = parse_mountinfo_lines(MOUNTINFO, "/home/node/nas_docs")
         self.assertEqual({row["propagation"] for row in rows}, {"slave"})
 
+    def test_mount_identity_and_parent_graph_fields_are_preserved(self) -> None:
+        rows = parse_mountinfo_lines(MOUNTINFO, "/home/node/nas_docs")
+        row = next(item for item in rows if item["mount_id"] == "905")
+        self.assertEqual(row["parent_id"], "903")
+        self.assertEqual(row["major_minor"], "0:59")
+        self.assertEqual(row["root"], "/users/함석헌_대표이사_7362168")
+
 
 if __name__ == "__main__":
     unittest.main()

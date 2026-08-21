@@ -193,6 +193,7 @@ class StatusBootSectionTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertEqual(code, 1)
         grant_prefixes = (
+            "view_1_record_desired_digest=",
             "view_1_grant_evidence_applicable=",
             "view_1_grant_evidence_count=",
             "view_1_grant_evidence_json=",

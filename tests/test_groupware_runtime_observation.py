@@ -91,6 +91,11 @@ def resolved() -> ResolvedRuntime:
         ("//nas.example/groupware[/groupware/mails/example]",),
         DIGEST_A,
         DIGEST_B,
+        {
+            "share": "//nas.example/groupware",
+            "paths": ["groupware/mails/example"],
+            "rooms_missing_media": [],
+        },
     )
 
 
@@ -124,13 +129,43 @@ def observe_with(
     host_observed: bool = True,
     host_target: str = "/home/oc16/nas_docs/groupware/groupware_mails_example",
     mountinfo_calls: list[tuple[int, str]] | None = None,
+    closing_record_matches: bool = True,
 ) -> RuntimeObservation:
+    runtime = runtime or resolved()
     expected_source = "//nas.example/groupware[/groupware/mails/example]"
-    host_rows = []
-    container_rows = []
+    host_rows = [
+        {
+            "mount_id": "100",
+            "parent_id": "1",
+            "major_minor": "0:100",
+            "root": "/",
+            "target": "/home/oc16/nas_docs/groupware",
+            "source": "/run/agent-runtime-ops/groupware-view",
+            "fstype": "none",
+            "options": "ro,nosuid,nodev",
+            "propagation": "shared:100",
+        }
+    ]
+    container_rows = [
+        {
+            "mount_id": "200",
+            "parent_id": "2",
+            "major_minor": "0:100",
+            "root": "/",
+            "target": "/workspace/nas_docs/groupware",
+            "source": "/run/agent-runtime-ops/groupware-view",
+            "fstype": "none",
+            "options": "ro,nosuid,nodev",
+            "propagation": "master:100",
+        }
+    ]
     if host_present:
         host_rows.append(
             {
+                "mount_id": "101",
+                "parent_id": "100",
+                "major_minor": "0:101",
+                "root": "/groupware/mails/example",
                 "target": host_target,
                 "source": (
                     expected_source
@@ -139,28 +174,46 @@ def observe_with(
                 ),
                 "fstype": "cifs",
                 "options": f"{'ro' if host_readonly else 'rw'},nosuid,nodev",
+                "propagation": "private",
             }
         )
     if container_present:
         container_rows.append(
             {
+                "mount_id": "201",
+                "parent_id": "200",
+                "major_minor": "0:101",
+                "root": "/groupware/mails/example",
                 "target": "/workspace/nas_docs/groupware/groupware_mails_example",
                 "source": expected_source,
                 "fstype": "cifs",
                 "options": "ro,nosuid,nodev",
+                "propagation": "private",
             }
         )
     def mountinfo(pid: int, target: str):
         if mountinfo_calls is not None:
             mountinfo_calls.append((pid, target))
         if pid == 1:
-            return (0, "", host_rows) if host_observed else (1, "unavailable", [])
-        return 0, "", container_rows
+            selected = [
+                row
+                for row in host_rows
+                if row["target"] == target
+                or row["target"].startswith(target.rstrip("/") + "/")
+            ]
+            return (0, "", selected) if host_observed else (1, "unavailable", [])
+        selected = [
+            row
+            for row in container_rows
+            if row["target"] == target
+            or row["target"].startswith(target.rstrip("/") + "/")
+        ]
+        return 0, "", selected
 
     with (
         patch(
             "agent_runtime_ops.domain.groupware_runtime_observation._resolve_runtime",
-            return_value=runtime or resolved(),
+            return_value=runtime,
         ),
         patch(
             "agent_runtime_ops.domain.groupware_runtime_observation._service_principal",
@@ -173,6 +226,23 @@ def observe_with(
         patch(
             "agent_runtime_ops.domain.groupware_runtime_observation.mountinfo_under",
             side_effect=mountinfo,
+        ),
+        patch(
+            "agent_runtime_ops.domain.groupware_runtime_observation.load_views_state",
+            return_value={
+                "corpus_views": {
+                    "oc16": {
+                        "groupware": (
+                            runtime.view_record
+                            if closing_record_matches
+                            else {
+                                **runtime.view_record,
+                                "paths": ["groupware/approval/example"],
+                            }
+                        )
+                    }
+                }
+            },
         ),
     ):
         return observe_groupware_runtime("oc16")
@@ -321,6 +391,20 @@ class GroupwareRuntimeObservationTests(unittest.TestCase):
         self.assertEqual(facts["container_mount_verified_count"], "1")
         self.assertEqual(facts["bounded_probe_open_read_count"], "1")
 
+    def test_state_generation_change_during_probe_fails_closed(self) -> None:
+        value = observe_with(
+            {
+                "index": 0,
+                "list_ok": True,
+                "open_read_ok": True,
+                "errno": None,
+                "representative": "regular_file",
+            },
+            closing_record_matches=False,
+        )
+        self.assertEqual(value.status, "unknown")
+        self.assertEqual(value.reason_code, "runtime_observer_contract_mismatch")
+
     def test_enabled_observation_policy_claims_and_dispatches_once_on_submit(
         self,
     ) -> None:
@@ -465,6 +549,7 @@ class GroupwareRuntimeObservationTests(unittest.TestCase):
             aliases=runtime.aliases,
             expected_sources=runtime.expected_sources,
             desired_digest=runtime.desired_digest,
+            view_record=runtime.view_record,
         )
         with (
             patch(
@@ -692,6 +777,23 @@ class GroupwareRuntimeObservationTests(unittest.TestCase):
         self.assertNotIn("groupware/mails/example", text)
         self.assertNotIn("0123456789ab", text)
         self.assertNotIn("argv", text)
+
+    def test_unknown_observation_cannot_publish_healthy_failure_class(self) -> None:
+        value = observe_with(
+            {
+                "index": 0,
+                "list_ok": True,
+                "open_read_ok": True,
+                "errno": None,
+                "representative": "regular_file",
+            },
+            closing_record_matches=False,
+        )
+        self.assertEqual(value.status, "unknown")
+        self.assertEqual(
+            dict(value.public_facts())["failure_class"],
+            "OBSERVER_CONTRACT_MISMATCH",
+        )
 
     def test_worker_persists_raw_and_public_receipts(self) -> None:
         handlers = OperationHandlerRegistry((GroupwareRuntimeObservationHandler(),))
