@@ -130,6 +130,25 @@ Hermes면 다음이 PASS여야 한다.
 PASS live_backend_http_smoke_ok url=http://127.0.0.1:<port>/ status=200
 ```
 
+### 4. Writable workspace 실제 쓰기 확인
+
+마운트 옵션과 그룹 비트만으로 쓰기 성공을 단정하지 않는다. 도구가 runtime 서비스
+계정(`ocN_rt`)으로 임시 파일을 생성하고 fsync한 뒤 즉시 삭제해야 완료다. 파일명은
+무작위이며 `O_EXCL|O_NOFOLLOW`로 만들고, 실패해도 root 부모가 잔여 파일을 정리한다.
+
+```bash
+sudo /usr/local/bin/opsctl nas workspace-write-probe oc17
+sudo /usr/local/bin/opsctl nas workspace-write-probe --all
+```
+
+출력의 `mutates=temporary_file_create_fsync_remove`는 영구 데이터를 만들 의도가 없지만
+실제 쓰기 권한을 증명하기 위해 짧게 파일을 생성한다는 뜻이다. 이 검사는 비밀값이나
+기존 파일 내용을 읽지 않는다.
+
+`workspace-assign`은 아직 마운트되지 않은 로컬 workspace에 항목이 있으면
+`workspace_local_data_present`로 거부한다. bind가 로컬 작업물을 가리는 사고를 막기 위한
+preflight이므로, 내용을 이관하거나 명시적으로 정리한 뒤 다시 실행한다.
+
 ## 운영자가 credential을 알고 있는 경우
 
 실험용 NAS를 바로 붙여야 하거나 운영자가 NAS username/password를 알고 있는 경우다.

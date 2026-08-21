@@ -25,6 +25,7 @@ from ..domain.workspace_bind import (
     workspace_status_has_signal as _workspace_status_has_signal,
     workspace_status_row as _workspace_status_row,
 )
+from ..domain.workspace_probe import probe_workspace_write as _probe_workspace_write
 from ..domain.nas_mounts import write_managed_fstab_entry as _write_managed_fstab_entry
 from ..domain.nas_requests import move_request, safe_request_file
 from ..host.account_files import (
@@ -421,6 +422,61 @@ def cmd_nas_workspace_status(args: argparse.Namespace) -> int:
             print(f"ws_{index}_rw_{rw_index}={source}")
     print("workspace_status=ok")
     return 0
+
+
+def cmd_nas_workspace_write_probe(args: argparse.Namespace) -> int:
+    """Prove writable workspace access as each target's runtime identity."""
+    if not _is_root():
+        print("error: run as root/admin: sudo /usr/local/bin/opsctl nas workspace-write-probe TARGET|--all", file=sys.stderr)
+        return 2
+    state_root = _state_root(args)
+    if args.all:
+        targets = sorted({bind["slot"] for bind in _read_managed_workspace_binds()})
+    else:
+        try:
+            targets = [load_runtime_target(args.slot, state_root).slot]
+        except Exception as exc:
+            print(f"target={args.slot}")
+            print("workspace_write_probe_status=fail")
+            print(f"reason={exc}")
+            return 1
+    failures = 0
+    print("mutates=temporary_file_create_fsync_remove")
+    print("secret_value_printed=no")
+    print(f"probe_count={len(targets)}")
+    for index, slot in enumerate(targets, start=1):
+        path = Path("/home") / slot / "workspace"
+        rc, error, rows = _findmnt_one(path)
+        reason = ""
+        ok = False
+        source = "none"
+        if rc != 0 or not rows:
+            reason = error or "workspace_not_mounted"
+        else:
+            row = rows[0]
+            source = row.get("source") or "unknown"
+            try:
+                share = parse_smb_share(source)
+                if row.get("fstype") != "cifs":
+                    reason = "workspace_not_cifs"
+                elif not _share_is_writable(share):
+                    reason = "workspace_source_not_writable_class"
+                elif _is_readonly_mount(row):
+                    reason = "workspace_mounted_readonly"
+                else:
+                    ok, reason = _probe_workspace_write(path, f"{slot}_rt")
+            except ValueError as exc:
+                reason = f"workspace_source_invalid {exc}"
+        if not ok:
+            failures += 1
+        print(f"probe_{index}_target={slot}")
+        print(f"probe_{index}_source={source}")
+        print(f"probe_{index}_write={'yes' if ok else 'no'}")
+        print(f"probe_{index}_cleanup={'yes' if ok else 'best_effort'}")
+        print(f"probe_{index}_reason={reason}")
+    print(f"probe_write_ok={len(targets) - failures}/{len(targets)}")
+    print(f"workspace_write_probe_status={'ok' if failures == 0 else 'fail'}")
+    return 0 if failures == 0 else 1
 
 
 def cmd_nas_probe(args: argparse.Namespace) -> int:
