@@ -453,7 +453,9 @@ def _attest_openclaw_model_change(desired, container: str) -> tuple[bool, str]:
     return True, f"config={config_detail}; selftest={contract[2] or 'ok'}"
 
 
-def _set_model_openclaw(desired, provider_raw: str, model: str) -> tuple[str, list[str], str, str, str, str]:
+def _set_model_openclaw(
+    desired, provider_raw: str, model: str, *, recover_unverified_current: bool = False
+) -> tuple[str, list[str], str, str, str, str]:
     """Change the slot's default model with the product's OWN ``models set`` command, run inside
     the live gateway container (``docker exec``). This preserves the canonical
     ``agents.defaults.models`` entry, provider-plugin repair, and load-time validation that a raw
@@ -472,9 +474,12 @@ def _set_model_openclaw(desired, provider_raw: str, model: str) -> tuple[str, li
     new_ref = build_model_ref(provider_raw, model)
     before_ok, before_detail = _attest_openclaw_model_change(desired, container)
     if not before_ok:
-        raise ValueError(
-            f"refusing model change because current state is not verified-good: {before_detail}"
-        )
+        if not recover_unverified_current:
+            raise ValueError(
+                f"refusing model change because current state is not verified-good: {before_detail}"
+            )
+        if not desired.slot.startswith("dev-"):
+            raise ValueError("unverified-current recovery is restricted to dev-* targets")
     verified_snapshot = capture_openclaw_config_snapshot(config_path)
     if verified_snapshot != snapshot_before_attestation:
         raise ValueError("config changed while establishing the verified rollback baseline")
@@ -487,7 +492,7 @@ def _set_model_openclaw(desired, provider_raw: str, model: str) -> tuple[str, li
                 restore_openclaw_config_snapshot(config_path, verified_snapshot)
                 rollback = "restored"
             restored_ok, restored_detail = _attest_openclaw_model_change(desired, container)
-            if not restored_ok:
+            if not restored_ok and not recover_unverified_current:
                 raise ValueError(f"restored state failed attestation: {restored_detail}")
             rollback += "_verified"
         except Exception as rollback_exc:
@@ -504,7 +509,7 @@ def _set_model_openclaw(desired, provider_raw: str, model: str) -> tuple[str, li
         try:
             restore_openclaw_config_snapshot(config_path, verified_snapshot)
             restored_ok, restored_detail = _attest_openclaw_model_change(desired, container)
-            if not restored_ok:
+            if not restored_ok and not recover_unverified_current:
                 raise ValueError(f"restored state failed attestation: {restored_detail}")
         except Exception as rollback_exc:
             raise ValueError(
@@ -534,7 +539,12 @@ def cmd_runtime_set_model(args: argparse.Namespace) -> int:
             provider = provider_raw
             provider_runtime = provider_raw
             config_path, diff_lines, previous_ref, new_ref, previous_source, container = _set_model_openclaw(
-                desired, provider_raw, model
+                desired,
+                provider_raw,
+                model,
+                recover_unverified_current=bool(
+                    getattr(args, "recover_unverified_current", False)
+                ),
             )
         else:
             provider = runtime_provider_id(provider_raw)

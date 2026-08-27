@@ -354,6 +354,11 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_set_model.add_argument("slot", metavar="target")
     runtime_set_model.add_argument("--provider", required=True)
     runtime_set_model.add_argument("--model", required=True)
+    runtime_set_model.add_argument(
+        "--recover-unverified-current",
+        action="store_true",
+        help="dev-only recovery when the current provider model can no longer attest",
+    )
     runtime_set_model.set_defaults(func=cmd_runtime_set_model)
     runtime_config_sanitize = runtime_sub.add_parser("config-sanitize")
     runtime_config_sanitize.add_argument("slot", metavar="target")

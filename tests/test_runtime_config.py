@@ -609,7 +609,7 @@ class OpenClawSetModelTests(unittest.TestCase):
     """openclaw set-model applies the change with the product's OWN `models set` inside the live
     container (docker exec), then shows a before/after diff of the on-disk config."""
 
-    def _run(self, *, initial, models_set, container=("c123", "instance_label"), provider="google", model="gemini-3.5-flash", attest=None):
+    def _run(self, *, initial, models_set, container=("c123", "instance_label"), provider="google", model="gemini-3.5-flash", attest=None, target="oc1", recover=False):
         store = {"cfg": initial}
         calls: list[tuple[str, str]] = []
         output = io.StringIO()
@@ -627,7 +627,7 @@ class OpenClawSetModelTests(unittest.TestCase):
             patch("agent_runtime_ops.commands.runtime_config.is_root", return_value=True),
             patch(
                 "agent_runtime_ops.commands.runtime_config._load_config_target",
-                return_value=SimpleNamespace(slot="oc1", family="openclaw", route=object(), runtime_profile="openclaw-customer", image_spec={}),
+                return_value=SimpleNamespace(slot=target, family="openclaw", route=object(), runtime_profile="openclaw-customer", image_spec={}),
             ),
             patch("agent_runtime_ops.commands.runtime_config.load_profile", return_value=object()),
             patch("agent_runtime_ops.commands.runtime_config.find_gateway_container", return_value=container),
@@ -650,7 +650,7 @@ class OpenClawSetModelTests(unittest.TestCase):
             contextlib.redirect_stdout(output),
         ):
             rc = cmd_runtime_set_model(
-                argparse.Namespace(slot="oc1", provider=provider, model=model, state_root="/srv/openclaw-ops")
+                argparse.Namespace(slot=target, provider=provider, model=model, state_root="/srv/openclaw-ops", recover_unverified_current=recover)
             )
         return rc, output.getvalue(), store["cfg"], calls
 
@@ -694,6 +694,35 @@ class OpenClawSetModelTests(unittest.TestCase):
         self.assertEqual(rc, 1, text)
         self.assertEqual(calls, [])
         self.assertIn("current state is not verified-good", text)
+
+    def test_dev_recovery_allows_unverified_current_and_attests_candidate(self) -> None:
+        results = iter([(False, "current model retired"), (True, "candidate verified")])
+
+        def apply(store, _container, ref):
+            store["cfg"] = {"agents": {"defaults": {"model": ref}}}
+            return True, "exit=0"
+
+        rc, text, cfg, calls = self._run(
+            initial={"agents": {"defaults": {"model": "google/gemini-2.5-flash"}}},
+            models_set=apply,
+            attest=lambda *_args: next(results),
+            target="dev-oc",
+            recover=True,
+        )
+        self.assertEqual(rc, 0, text)
+        self.assertEqual(calls, [("c123", "google/gemini-3.5-flash")])
+        self.assertEqual(cfg["agents"]["defaults"]["model"], "google/gemini-3.5-flash")
+
+    def test_recovery_is_rejected_for_customer_target(self) -> None:
+        rc, text, _cfg, calls = self._run(
+            initial={"agents": {"defaults": {"model": "google/gemini-2.5-flash"}}},
+            models_set=lambda *_a: (True, "must not run"),
+            attest=lambda *_args: (False, "current model retired"),
+            recover=True,
+        )
+        self.assertEqual(rc, 1, text)
+        self.assertEqual(calls, [])
+        self.assertIn("restricted to dev-*", text)
 
     def test_preserves_product_written_config_without_schema_reach_in(self) -> None:
         def apply(store, _container, ref):
