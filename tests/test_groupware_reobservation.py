@@ -38,6 +38,10 @@ MODULE = "agent_runtime_ops.root_actions.groupware_reobservation"
 PEER = BrokerPeerIdentity(uid=1002, gid=1002, pid=4242)
 
 
+def test_slot_cap_reserves_the_cutoff_inclusive_fifth_quarter_hour() -> None:
+    assert MAX_GROUPWARE_SLOTS_PER_CYCLE == 6
+
+
 def _binding(
     slot: str,
     index: int,
@@ -405,7 +409,10 @@ def test_install_contract_is_fixed_read_only_oneshot_and_persistent_timer() -> N
     assert "ProtectSystem=strict" in function
     assert "ReadOnlyPaths=$STATE_ROOT $CURRENT_LINK" in function
     assert "RestrictAddressFamilies=AF_UNIX" in function
-    assert "OnCalendar=*-*-* *:00:00 UTC" in function
+    assert "After=agent-runtime-root-action-broker-standalone.service" in function
+    assert "After=agent-runtime-root-action-broker.service" not in function
+    assert "OnCalendar=*-*-* *:00/15:00 UTC" in function
+    assert 'After=$(basename "$BOOT_RESTORE_UNIT_FILE")' in function
     assert "Persistent=true" in function
     assert "RandomizedDelaySec" not in function
     assert "systemctl enable --now" in function
@@ -422,5 +429,11 @@ def test_install_contract_is_fixed_read_only_oneshot_and_persistent_timer() -> N
     )
     assert "GROUPWARE_REOBSERVATION_SERVICE_FILE" in check
     assert "GROUPWARE_REOBSERVATION_TIMER_FILE" in check
+    assert (
+        "grep -Fxq 'After=agent-runtime-root-action-broker-standalone.service'"
+    ) in check
+    assert 'grep -Fxq "After=$(basename "$BOOT_RESTORE_UNIT_FILE")"' in check
+    assert "groupware reobservation service broker ordering is stale" in check
+    assert "groupware reobservation timer NAS restore ordering is stale" in check
     assert "groupware reobservation timer is not enabled" in check
     assert "groupware reobservation timer is not active" in check
