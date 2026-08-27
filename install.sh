@@ -34,6 +34,13 @@ MANIFEST="${AGENT_RUNTIME_OPS_MANIFEST:-$INSTALL_ROOT/.agent-runtime-ops-manifes
 ACTIVATION_TRANSACTION_DIR="$INSTALL_ROOT/.activation-transaction.pending"
 ACTIVATION_CANDIDATE_DIR="$INSTALL_ROOT/.activation-candidate.prepare"
 ACTIVATION_HELPER_BLOB=""
+RESTORED_CLI_RESULT=""
+RESTORED_BROKER_RESULT=""
+LEGACY_RESTRICTIVE_UMASK_BASELINE_REF="443c5fdaac231a1c62d4a927ca93e19d055e400a"
+LEGACY_RESTRICTIVE_UMASK_SOURCE_PROJECTION_SHA256="c615067ad8d61a09f116bd9f9e22d949d45b9603af8de184fd90718ebf27765e"
+LEGACY_RESTRICTIVE_UMASK_SOURCE_FILE_COUNT=322
+LEGACY_RESTRICTIVE_UMASK_SOURCE_DIR_COUNT=41
+LEGACY_RESTRICTIVE_UMASK_SOURCE_BYTE_COUNT=2881364
 REPO_URL="${AGENT_RUNTIME_OPS_REPO_URL:-https://github.com/Epicevent/agent-runtime-ops.git}"
 REPO_REF="${AGENT_RUNTIME_OPS_REF:-}"
 SUDOERS_FILE="${AGENT_RUNTIME_OPS_SUDOERS_FILE:-/etc/sudoers.d/agent-runtime-ops}"
@@ -515,8 +522,8 @@ root_action_broker_process_attested() {
 
 read_root_action_broker_systemd_tuple() {
   local service_name="$1"
-  local output line load_state active_state sub_state main_pid job
-  local seen_load=0 seen_active=0 seen_sub=0 seen_pid=0 seen_job=0
+  local output line load_state active_state sub_state main_pid job unit_file_state
+  local seen_load=0 seen_active=0 seen_sub=0 seen_pid=0 seen_job=0 seen_unit=0
   output="$(
     /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_POST_RESTART_COMMAND_TIMEOUT_SECONDS" \
       systemctl show \
@@ -525,6 +532,7 @@ read_root_action_broker_systemd_tuple() {
         --property=SubState \
         --property=MainPID \
         --property=Job \
+        --property=UnitFileState \
         "$service_name"
   )" || return 1
   while IFS= read -r line; do
@@ -554,6 +562,11 @@ read_root_action_broker_systemd_tuple() {
         job="${line#Job=}"
         seen_job=1
         ;;
+      UnitFileState=*)
+        [[ "$seen_unit" -eq 0 ]] || return 1
+        unit_file_state="${line#UnitFileState=}"
+        seen_unit=1
+        ;;
       *) return 1 ;;
     esac
   done <<<"$output"
@@ -561,11 +574,18 @@ read_root_action_broker_systemd_tuple() {
     && "$seen_active" -eq 1 \
     && "$seen_sub" -eq 1 \
     && "$seen_pid" -eq 1 \
-    && "$seen_job" -eq 1 ]] || return 1
+    && "$seen_job" -eq 1 \
+    && "$seen_unit" -eq 1 ]] || return 1
   [[ "$load_state" =~ ^[a-z][a-z-]*$ \
     && "$active_state" =~ ^[a-z][a-z-]*$ \
     && "$sub_state" =~ ^[a-z][a-z0-9-]*$ \
     && "$main_pid" =~ ^[0-9]{1,10}$ ]] || return 1
+  if [[ "$load_state" == not-found ]]; then
+    [[ -z "$unit_file_state" || "$unit_file_state" == not-found ]] || return 1
+    unit_file_state=absent
+  else
+    [[ "$unit_file_state" =~ ^[a-z][a-z-]*$ ]] || return 1
+  fi
   printf 'LoadState=%s\n' "$load_state"
   printf 'ActiveState=%s\n' "$active_state"
   printf 'SubState=%s\n' "$sub_state"
@@ -575,16 +595,18 @@ read_root_action_broker_systemd_tuple() {
   else
     printf 'JobPresent=yes\n'
   fi
+  printf 'UnitFileState=%s\n' "$unit_file_state"
 }
 
 root_action_broker_terminal_tuple_attested() {
   local service_name="$1"
   local expected_load_state="$2"
+  local expected_unit_file_state="$3"
   local tuple
   local -a tuple_fields=()
   tuple="$(read_root_action_broker_systemd_tuple "$service_name")" || return 1
   mapfile -t tuple_fields <<<"$tuple"
-  [[ "${#tuple_fields[@]}" -eq 5 ]] || return 1
+  [[ "${#tuple_fields[@]}" -eq 6 ]] || return 1
   case "$expected_load_state" in
     loaded|not-found)
       [[ "${tuple_fields[0]}" == "LoadState=$expected_load_state" ]] || return 1
@@ -598,19 +620,49 @@ root_action_broker_terminal_tuple_attested() {
   [[ "${tuple_fields[1]}" == ActiveState=inactive \
     && "${tuple_fields[2]}" == SubState=dead \
     && "${tuple_fields[3]}" == MainPID=0 \
-    && "${tuple_fields[4]}" == JobPresent=no ]]
+    && "${tuple_fields[4]}" == JobPresent=no \
+    && "${tuple_fields[5]}" == "UnitFileState=$expected_unit_file_state" ]]
 }
 
 root_action_broker_inactive_attested() {
-  root_action_broker_terminal_tuple_attested "$1" loaded
+  root_action_broker_terminal_tuple_attested "$1" loaded "$2"
 }
 
 root_action_broker_absent_attested() {
-  root_action_broker_terminal_tuple_attested "$1" not-found
+  root_action_broker_terminal_tuple_attested "$1" not-found absent
 }
 
 root_action_broker_quiesced_attested() {
-  root_action_broker_terminal_tuple_attested "$1" loaded-or-not-found
+  local service_name="$1"
+  local tuple
+  local -a tuple_fields=()
+  tuple="$(read_root_action_broker_systemd_tuple "$service_name")" || return 1
+  mapfile -t tuple_fields <<<"$tuple"
+  [[ "${#tuple_fields[@]}" -eq 6 \
+    && "${tuple_fields[1]}" == ActiveState=inactive \
+    && "${tuple_fields[2]}" == SubState=dead \
+    && "${tuple_fields[3]}" == MainPID=0 \
+    && "${tuple_fields[4]}" == JobPresent=no ]] || return 1
+  [[ "${tuple_fields[0]}:${tuple_fields[5]}" == \
+      LoadState=loaded:UnitFileState=disabled \
+    || "${tuple_fields[0]}:${tuple_fields[5]}" == \
+      LoadState=not-found:UnitFileState=absent ]]
+}
+
+root_action_broker_active_tuple_attested() {
+  local service_name="$1"
+  local expected_unit_file_state="$2"
+  local tuple
+  local -a tuple_fields=()
+  tuple="$(read_root_action_broker_systemd_tuple "$service_name")" || return 1
+  mapfile -t tuple_fields <<<"$tuple"
+  [[ "${#tuple_fields[@]}" -eq 6 \
+    && "${tuple_fields[0]}" == LoadState=loaded \
+    && "${tuple_fields[1]}" == ActiveState=active \
+    && "${tuple_fields[2]}" == SubState=running \
+    && "${tuple_fields[3]}" =~ ^MainPID=[1-9][0-9]{0,9}$ \
+    && "${tuple_fields[4]}" == JobPresent=no \
+    && "${tuple_fields[5]}" == "UnitFileState=$expected_unit_file_state" ]]
 }
 
 restart_root_action_broker_for_release() {
@@ -655,19 +707,29 @@ wait_for_root_action_broker_pinned_release() {
 
 attest_quiesced_root_action_broker_state() {
   local helper="$1"
-  local broker_state service_name
+  local broker_state broker_unit_file_state service_name
   broker_state="$(
     run_activation_transaction "$helper" show --field broker_state
   )" || return 1
   service_name="$(
     run_activation_transaction "$helper" show --field broker_service_name
   )" || return 1
+  broker_unit_file_state="$(
+    run_activation_transaction "$helper" show --field broker_unit_file_state
+  )" || return 1
   case "$broker_state" in
-    active|inactive|absent)
+    active|inactive)
+      [[ "$broker_unit_file_state" == enabled \
+        || "$broker_unit_file_state" == disabled ]] || return 1
+      root_action_broker_quiesced_attested "$service_name"
+      ;;
+    absent)
+      [[ "$broker_unit_file_state" == absent ]] || return 1
       root_action_broker_quiesced_attested "$service_name"
       ;;
     unavailable)
-      ! command -v systemctl >/dev/null 2>&1
+      [[ "$broker_unit_file_state" == unavailable ]] \
+        && ! command -v systemctl >/dev/null 2>&1
       ;;
     *) return 1 ;;
   esac
@@ -680,7 +742,8 @@ quiesce_root_action_broker_for_publication() {
 install_root_action_broker_contract() {
   local release_dir="$1"
   local helper="$2"
-  local broker_state service_name
+  local broker_state desired_state desired_unit_file_state activation_phase
+  local candidate_commit service_name
   # Resolve the trusted reader by its production account name at install time.
   # Numeric IDs are host facts and must never be embedded in the release.
   getent passwd "$ROOT_ACTION_TRUSTED_ACCOUNT" >/dev/null || return 1
@@ -697,15 +760,25 @@ install_root_action_broker_contract() {
   broker_state="$(
     run_activation_transaction "$helper" show --field broker_state
   )" || return 1
+  desired_state="$(
+    run_activation_transaction "$helper" show --field broker_desired_state
+  )" || return 1
+  desired_unit_file_state="$(
+    run_activation_transaction "$helper" show --field broker_desired_unit_file_state
+  )" || return 1
+  activation_phase="$(
+    run_activation_transaction "$helper" show --field broker_activation_phase
+  )" || return 1
   service_name="$(
     run_activation_transaction "$helper" show --field broker_service_name
   )" || return 1
   [[ "$service_name" == "$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")" ]] || return 1
   attest_quiesced_root_action_broker_state "$helper" || return 1
   run_activation_transaction "$helper" publish-broker || return 1
-  case "$broker_state" in
+  case "$desired_state" in
     unavailable)
-      ! command -v systemctl >/dev/null 2>&1 || return 1
+      [[ "$desired_unit_file_state" == unavailable ]] \
+        && ! command -v systemctl >/dev/null 2>&1 || return 1
       ;;
     active|inactive|absent)
       command -v systemctl >/dev/null 2>&1 || return 1
@@ -716,48 +789,129 @@ install_root_action_broker_contract() {
       ;;
     *) return 1 ;;
   esac
-  case "$broker_state" in
-    active)
+  case "$desired_unit_file_state" in
+    enabled)
+      if [[ "$desired_state" == active \
+        && "$activation_phase" == candidate_bound ]]; then
+        # Keep the rebuilt candidate disabled until the durable at-most-one
+        # start-dispatch marker exists.  A reboot before that marker therefore
+        # cannot start either the legacy broker or the candidate implicitly.
+        root_action_broker_inactive_attested "$service_name" disabled || return 1
+      else
+        /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+          systemctl enable "$service_name" >/dev/null || return 1
+      fi
+      ;;
+    disabled)
       /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
-        systemctl restart "$service_name" >/dev/null \
-        || return 1
-      wait_for_root_action_broker_pinned_release "$service_name" "$release_dir" \
-        || return 1
-      info "root_action_broker_update=active_restarted_release_verified" || return 1
+        systemctl disable "$service_name" >/dev/null || return 1
+      ;;
+    absent) [[ "$desired_state" == absent ]] || return 1 ;;
+    unavailable) [[ "$desired_state" == unavailable ]] || return 1 ;;
+    *) return 1 ;;
+  esac
+  case "$desired_state" in
+    active)
+      if [[ "$activation_phase" == candidate_bound ]]; then
+        root_action_broker_inactive_attested \
+          "$service_name" disabled || return 1
+        candidate_commit="$(
+          run_activation_transaction "$helper" show --field candidate_commit
+        )" || return 1
+        run_activation_transaction "$helper" commit-broker-start \
+          --expected-commit "$candidate_commit" \
+          --expected-candidate-release "$release_dir" \
+          --expected-service-name "$service_name" >/dev/null || return 1
+        /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+          systemctl enable "$service_name" >/dev/null || return 1
+        /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+          systemctl start "$service_name" >/dev/null || return 1
+        wait_for_root_action_broker_pinned_release "$service_name" "$release_dir" \
+          || return 1
+        root_action_broker_active_tuple_attested \
+          "$service_name" "$desired_unit_file_state" || return 1
+        run_activation_transaction "$helper" mark-broker-active \
+          --expected-commit "$candidate_commit" \
+          --expected-candidate-release "$release_dir" \
+          --expected-service-name "$service_name" >/dev/null || return 1
+        info "root_action_broker_update=carried_active_intent_candidate_started_once_verified" \
+          || return 1
+      elif [[ "$activation_phase" == none ]]; then
+        [[ "$broker_state" == active ]] || return 1
+        /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+          systemctl restart "$service_name" >/dev/null || return 1
+        wait_for_root_action_broker_pinned_release "$service_name" "$release_dir" \
+          || return 1
+        root_action_broker_active_tuple_attested \
+          "$service_name" "$desired_unit_file_state" || return 1
+        info "root_action_broker_update=active_restarted_release_verified" || return 1
+      else
+        return 1
+      fi
       ;;
     inactive|absent)
-      root_action_broker_inactive_attested "$service_name" || return 1
+      if [[ "$desired_state" == inactive ]]; then
+        root_action_broker_inactive_attested \
+          "$service_name" "$desired_unit_file_state" || return 1
+      else
+        root_action_broker_absent_attested "$service_name" || return 1
+      fi
       ;;
     unavailable) ;;
     *) return 1 ;;
   esac
-  # An inactive broker remains a separate ratified activation boundary. An
-  # already-active broker must move with self-update so old code can be pruned.
+  # Report the exact candidate state rather than the historical generic
+  # deferred string: a carried active intent is consumed only after the pinned
+  # candidate is running and attested above.
   info "root_action_broker_unit=$ROOT_ACTION_BROKER_SERVICE_FILE" || return 1
-  info "root_action_broker_activation=deferred_not_enabled_or_started" || return 1
+  case "$desired_state" in
+    active) info "root_action_broker_activation=active_candidate_verified" || return 1 ;;
+    inactive) info "root_action_broker_activation=inactive_disabled" || return 1 ;;
+    absent) info "root_action_broker_activation=absent" || return 1 ;;
+    unavailable) info "root_action_broker_activation=systemd_unavailable" || return 1 ;;
+    *) return 1 ;;
+  esac
 }
 
 attest_candidate_root_action_broker_state() {
   local release_dir="$1"
   local helper="$2"
   local expected_state="$3"
-  local journal_state service_name
+  local journal_state desired_state desired_unit_file_state activation_phase service_name
   journal_state="$(
     run_activation_transaction "$helper" show --field broker_state
   )" || return 1
   [[ "$journal_state" == "$expected_state" ]] || return 1
+  desired_state="$(
+    run_activation_transaction "$helper" show --field broker_desired_state
+  )" || return 1
+  desired_unit_file_state="$(
+    run_activation_transaction "$helper" show --field broker_desired_unit_file_state
+  )" || return 1
+  activation_phase="$(
+    run_activation_transaction "$helper" show --field broker_activation_phase
+  )" || return 1
   service_name="$(
     run_activation_transaction "$helper" show --field broker_service_name
   )" || return 1
-  case "$journal_state" in
+  case "$desired_state" in
     active)
-      root_action_broker_pinned_release_attested "$service_name" "$release_dir"
+      root_action_broker_pinned_release_attested "$service_name" "$release_dir" \
+        && root_action_broker_active_tuple_attested \
+          "$service_name" "$desired_unit_file_state" \
+        && [[ "$activation_phase" == none \
+          || "$activation_phase" == active_attested ]]
       ;;
-    inactive|absent)
-      root_action_broker_inactive_attested "$service_name"
+    inactive)
+      root_action_broker_inactive_attested \
+        "$service_name" "$desired_unit_file_state"
+      ;;
+    absent)
+      root_action_broker_absent_attested "$service_name"
       ;;
     unavailable)
-      ! command -v systemctl >/dev/null 2>&1
+      [[ "$desired_unit_file_state" == unavailable ]] \
+        && ! command -v systemctl >/dev/null 2>&1
       ;;
     *) return 1 ;;
   esac
@@ -1330,6 +1484,9 @@ cleanup_abandoned_activation_staging() {
     recovered_completion=absent) ;;
     recovered_completion_acknowledged=yes) return 2 ;;
     recovered_completion_cleaned=yes) return 2 ;;
+    broker_reactivation_intent=ready) ;;
+    broker_reactivation_intent=adoption_claimed) ;;
+    broker_reactivation_intent=revoked) return 2 ;;
     *) return 1 ;;
   esac
   output="$(
@@ -1344,17 +1501,96 @@ cleanup_abandoned_activation_staging() {
   [[ -z "$output" ]] || return 1
 }
 
+revoke_carried_broker_reactivation() {
+  local expected_commit="$1"
+  local expected_previous_release="$2"
+  local expected_service_name="$3"
+  local expected_origin_sha256="$4"
+  local src commit helper carrier_commit previous_release service_name origin_sha256
+  local revoke_output retire_output
+  require_root
+  validate_activation_path_strings
+  require_full_sha "$expected_commit"
+  [[ "$expected_previous_release" =~ ^/[A-Za-z0-9._/-]+$ ]] \
+    || die "expected previous release is not a fixed absolute path"
+  [[ "$expected_service_name" =~ ^[A-Za-z0-9_.@-]+\.service$ ]] \
+    || die "expected broker service name is invalid"
+  [[ "$expected_origin_sha256" =~ ^[0-9a-f]{64}$ ]] \
+    || die "expected broker reactivation origin digest is invalid"
+  src="$(repo_root)" \
+    || die "broker reactivation revocation requires an exact local source tree"
+  validate_install_root
+  command -v git >/dev/null || die "missing revocation prerequisite: git"
+  command -v python3 >/dev/null || die "missing revocation prerequisite: python3"
+  command -v flock >/dev/null || die "missing revocation prerequisite: flock"
+  require_ops_account
+  helper="$src/scripts/activation_transaction.py"
+  [[ -f "$helper" && ! -L "$helper" ]] \
+    || die "missing fixed activation transaction helper"
+  commit="$(source_commit "$src")"
+  require_full_sha "$commit"
+  ACTIVATION_HELPER_BLOB="$(
+    verify_activation_helper_identity "$src" "$commit" "$helper"
+  )" || die "activation helper does not match the exact source commit"
+  with_install_lock
+  carrier_commit="$(
+    run_activation_transaction "$helper" show-recovered --field candidate_commit
+  )" || die "no exact carried broker reactivation intent is available"
+  previous_release="$(
+    run_activation_transaction "$helper" show-recovered --field previous_release
+  )" || die "carried broker reactivation previous release is unavailable"
+  service_name="$(
+    run_activation_transaction "$helper" show-recovered --field broker_service_name
+  )" || die "carried broker reactivation service is unavailable"
+  origin_sha256="$(
+    run_activation_transaction "$helper" show-recovered \
+      --field broker_reactivation_origin_sha256
+  )" || die "carried broker reactivation origin is unavailable"
+  require_full_sha "$carrier_commit"
+  [[ "$origin_sha256" =~ ^[0-9a-f]{64}$ ]] \
+    || die "carried broker reactivation origin digest is invalid"
+  [[ "$carrier_commit" == "$expected_commit" \
+    && "$previous_release" == "$expected_previous_release" \
+    && "$service_name" == "$expected_service_name" \
+    && "$origin_sha256" == "$expected_origin_sha256" ]] \
+    || die "carried broker reactivation intent does not match reviewed bindings"
+  revoke_output="$(
+    run_activation_transaction "$helper" revoke-broker-reactivation \
+      --expected-commit "$expected_commit" \
+      --expected-previous-release "$expected_previous_release" \
+      --expected-service-name "$expected_service_name" \
+      --expected-origin-sha256 "$expected_origin_sha256"
+  )" || die "carried broker reactivation revocation failed"
+  case "$revoke_output" in
+    broker_reactivation_revocation=recorded|\
+    broker_reactivation_revocation=preserved) ;;
+    *) die "carried broker reactivation revocation returned an invalid result" ;;
+  esac
+  retire_output="$(
+    run_activation_transaction "$helper" ack-recovered \
+      --expected-commit "$expected_commit"
+  )" || die "revoked broker reactivation intent could not be retired"
+  [[ "$retire_output" == broker_reactivation_intent=revoked ]] \
+    || die "revoked broker reactivation intent returned an invalid retirement result"
+  info "broker_reactivation_revocation=retired"
+  info "broker_reactivation_failed_candidate=$expected_commit"
+}
+
 restore_broker_service_from_transaction() {
   local helper="$1"
   local previous_release="$2"
-  local broker_state service_name
+  local broker_state broker_unit_file_state service_name
   broker_state="$(
     run_activation_transaction "$helper" show --field broker_state
   )" || return 1
   service_name="$(
     run_activation_transaction "$helper" show --field broker_service_name
   )" || return 1
+  broker_unit_file_state="$(
+    run_activation_transaction "$helper" show --field broker_unit_file_state
+  )" || return 1
   if [[ "$broker_state" == unavailable ]]; then
+    [[ "$broker_unit_file_state" == unavailable ]] || return 1
     ! command -v systemctl >/dev/null 2>&1 || return 1
     return 0
   fi
@@ -1362,16 +1598,31 @@ restore_broker_service_from_transaction() {
   [[ -x /usr/bin/timeout ]] || return 1
   /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
     systemctl daemon-reload >/dev/null || return 1
+  case "$broker_unit_file_state" in
+    enabled)
+      /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+        systemctl enable "$service_name" >/dev/null || return 1
+      ;;
+    disabled)
+      /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+        systemctl disable "$service_name" >/dev/null || return 1
+      ;;
+    absent) [[ "$broker_state" == absent ]] || return 1 ;;
+    *) return 1 ;;
+  esac
   case "$broker_state" in
     active)
       [[ -n "$previous_release" ]] || return 1
       restart_root_action_broker_for_release "$service_name" "$previous_release" \
         || return 1
+      root_action_broker_active_tuple_attested \
+        "$service_name" "$broker_unit_file_state" || return 1
       ;;
     inactive)
       /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
         systemctl stop "$service_name" >/dev/null || return 1
-      root_action_broker_inactive_attested "$service_name" || return 1
+      root_action_broker_inactive_attested \
+        "$service_name" "$broker_unit_file_state" || return 1
       ;;
     absent)
       quiesce_root_action_broker_for_transaction "$helper" || return 1
@@ -1381,9 +1632,57 @@ restore_broker_service_from_transaction() {
   esac
 }
 
+restore_broker_service_after_baseline_validation() {
+  local helper="$1"
+  local previous_release="$2"
+  local broker_state desired_state desired_unit_file_state service_name candidate_commit
+  RESTORED_BROKER_RESULT=""
+  broker_state="$(
+    run_activation_transaction "$helper" show --field broker_state
+  )" || return 1
+  desired_state="$(
+    run_activation_transaction "$helper" show --field broker_desired_state
+  )" || return 1
+  desired_unit_file_state="$(
+    run_activation_transaction "$helper" show --field broker_desired_unit_file_state
+  )" || return 1
+  case "$RESTORED_CLI_RESULT" in
+    restored_exact_but_preexisting_unrunnable|\
+    restored_admissible_preexisting_runnable_unexecuted)
+      if [[ "$desired_state" == active ]]; then
+        # Only the measured production active+enabled intent has a typed carry
+        # contract.  Never fall through to legacy root-code restart for another
+        # active unit-file state.
+        [[ "$desired_unit_file_state" == enabled ]] || return 1
+        service_name="$(
+          run_activation_transaction "$helper" show --field broker_service_name
+        )" || return 1
+        command -v systemctl >/dev/null 2>&1 || return 1
+        [[ -x /usr/bin/timeout ]] || return 1
+        /usr/bin/timeout --kill-after=1 \
+          "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+          systemctl daemon-reload >/dev/null || return 1
+        root_action_broker_inactive_attested "$service_name" disabled || return 1
+        candidate_commit="$(
+          run_activation_transaction "$helper" show --field candidate_commit
+        )" || return 1
+        run_activation_transaction "$helper" defer-broker-reactivation \
+          --expected-commit "$candidate_commit" \
+          --expected-previous-release "$previous_release" \
+          --expected-service-name "$service_name" >/dev/null || return 1
+        RESTORED_BROKER_RESULT="restored_unit_active_intent_carried_candidate_only"
+        return 0
+      fi
+      ;;
+  esac
+  restore_broker_service_from_transaction "$helper" "$previous_release" \
+    || return 1
+  RESTORED_BROKER_RESULT="restored_recorded_$broker_state"
+}
+
 quiesce_root_action_broker_for_transaction() {
   local helper="$1"
-  local broker_state service_name tuple
+  local broker_state broker_unit_file_state service_name tuple
   local -a tuple_fields=()
   broker_state="$(
     run_activation_transaction "$helper" show --field broker_state
@@ -1391,28 +1690,52 @@ quiesce_root_action_broker_for_transaction() {
   service_name="$(
     run_activation_transaction "$helper" show --field broker_service_name
   )" || return 1
+  broker_unit_file_state="$(
+    run_activation_transaction "$helper" show --field broker_unit_file_state
+  )" || return 1
   case "$broker_state" in
     unavailable)
-      ! command -v systemctl >/dev/null 2>&1
+      [[ "$broker_unit_file_state" == unavailable ]] \
+        && ! command -v systemctl >/dev/null 2>&1
       return
       ;;
-    active|inactive|absent) ;;
+    active|inactive)
+      [[ "$broker_unit_file_state" == enabled \
+        || "$broker_unit_file_state" == disabled ]] || return 1
+      ;;
+    absent)
+      [[ "$broker_unit_file_state" == absent ]] || return 1
+      ;;
     *) return 1 ;;
   esac
   command -v systemctl >/dev/null 2>&1 || return 1
   [[ -x /usr/bin/timeout ]] || return 1
-  # LoadState is orthogonal to process/job state.  In particular a unit whose
-  # configuration was removed can remain active or queued for restart.  Only
-  # the complete inactive tuple is already safe; every other loaded/not-found
-  # tuple is stopped before any transaction-owned filesystem mutation.
-  if root_action_broker_quiesced_attested "$service_name"; then
-    return 0
-  fi
+  # LoadState is orthogonal to process/job state.  Read one coherent tuple,
+  # accept only its exact terminal variants, and otherwise use that same
+  # snapshot to decide the bounded disable/stop sequence.
   tuple="$(read_root_action_broker_systemd_tuple "$service_name")" || return 1
   mapfile -t tuple_fields <<<"$tuple"
-  [[ "${#tuple_fields[@]}" -eq 5 ]] || return 1
+  [[ "${#tuple_fields[@]}" -eq 6 ]] || return 1
+  if [[ "${tuple_fields[1]}" == ActiveState=inactive \
+    && "${tuple_fields[2]}" == SubState=dead \
+    && "${tuple_fields[3]}" == MainPID=0 \
+    && "${tuple_fields[4]}" == JobPresent=no ]] \
+    && [[ "${tuple_fields[0]}:${tuple_fields[5]}" == \
+        LoadState=loaded:UnitFileState=disabled \
+      || "${tuple_fields[0]}:${tuple_fields[5]}" == \
+        LoadState=not-found:UnitFileState=absent ]]; then
+    return 0
+  fi
   case "${tuple_fields[0]}" in
     LoadState=loaded|LoadState=not-found) ;;
+    *) return 1 ;;
+  esac
+  case "${tuple_fields[5]}" in
+    UnitFileState=enabled)
+      /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
+        systemctl disable "$service_name" >/dev/null || return 1
+      ;;
+    UnitFileState=disabled|UnitFileState=absent) ;;
     *) return 1 ;;
   esac
   /usr/bin/timeout --kill-after=1 "$ROOT_ACTION_MUTATION_COMMAND_TIMEOUT_SECONDS" \
@@ -1430,10 +1753,16 @@ recover_and_attest_activation_baseline() {
   local previous_release="$3"
   quiesce_root_action_broker_before_recovery "$helper" || return 1
   run_activation_transaction "$helper" recover || return 1
-  restore_broker_service_from_transaction "$helper" "$previous_release" || return 1
   if [[ -n "$previous_release" ]]; then
-    attest_restored_cli_as_ops "$previous_release" "$expected_commit" || return 1
+    attest_restored_cli_or_exact_preexisting_legacy \
+      "$previous_release" "$expected_commit" || return 1
+  else
+    RESTORED_CLI_RESULT="first_install_absent"
   fi
+  restore_broker_service_after_baseline_validation \
+    "$helper" "$previous_release" || return 1
+  info "ops_cli_restoration=$RESTORED_CLI_RESULT"
+  info "broker_restoration=$RESTORED_BROKER_RESULT"
   run_activation_transaction "$helper" finalize --expect baseline || return 1
 }
 
@@ -1459,7 +1788,56 @@ recover_pending_activation_transaction() {
     || cleanup_rc="$?"
   [[ "$cleanup_rc" -eq 2 ]] \
     || die "activation baseline recovered but durable completion acknowledgement failed"
-  info "activation_recovery=previous_identity_restored"
+  info "activation_recovery=journaled_managed_baseline_restored"
+  info "activation_recovery_cli_state=$RESTORED_CLI_RESULT"
+  info "activation_recovery_broker_state=$RESTORED_BROKER_RESULT"
+  return 0
+}
+
+resume_committed_candidate_broker_activation() {
+  local helper="$1"
+  local expected_commit="$2"
+  local phase candidate_commit candidate_release service_name desired_state desired_unit_state
+  if [[ ! -e "$ACTIVATION_TRANSACTION_DIR" \
+    && ! -L "$ACTIVATION_TRANSACTION_DIR" ]]; then
+    return 1
+  fi
+  phase="$(
+    run_activation_transaction "$helper" show --field broker_activation_phase
+  )" || return 1
+  case "$phase" in
+    start_dispatch_committed|active_attested) ;;
+    *) return 1 ;;
+  esac
+  candidate_commit="$(
+    run_activation_transaction "$helper" show --field candidate_commit
+  )" || return 2
+  [[ "$candidate_commit" == "$expected_commit" ]] || return 2
+  candidate_release="$(
+    run_activation_transaction "$helper" show --field candidate_release
+  )" || return 2
+  service_name="$(
+    run_activation_transaction "$helper" show --field broker_service_name
+  )" || return 2
+  desired_state="$(
+    run_activation_transaction "$helper" show --field broker_desired_state
+  )" || return 2
+  desired_unit_state="$(
+    run_activation_transaction "$helper" show --field broker_desired_unit_file_state
+  )" || return 2
+  [[ "$desired_state" == active && "$desired_unit_state" == enabled ]] || return 2
+  root_action_broker_pinned_release_attested \
+    "$service_name" "$candidate_release" || return 2
+  root_action_broker_active_tuple_attested \
+    "$service_name" "$desired_unit_state" || return 2
+  if [[ "$phase" == start_dispatch_committed ]]; then
+    run_activation_transaction "$helper" mark-broker-active \
+      --expected-commit "$candidate_commit" \
+      --expected-candidate-release "$candidate_release" \
+      --expected-service-name "$service_name" >/dev/null || return 2
+  fi
+  run_activation_transaction "$helper" finalize --expect candidate || return 2
+  info "broker_reactivation_resume=exact_candidate_active_attested_and_finalized"
   return 0
 }
 
@@ -1469,7 +1847,8 @@ activate_release() {
   local previous_release="$3"
   local helper="$4"
   local broker_state="$5"
-  local release_name service_name unit_source broker_state_now
+  local broker_unit_file_state="$6"
+  local release_name service_name unit_source broker_state_now broker_unit_file_state_now
   release_name="$(basename "$release_dir")" || return 1
   service_name="$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")" || return 1
   unit_source="$release_dir/systemd/agent-runtime-root-action-broker.service"
@@ -1542,9 +1921,10 @@ EOF
   fi
   run_trusted_activation_helper "$helper" fsync-tree \
     --releases-dir "$RELEASES_DIR" --path "$release_dir" || return 1
-  broker_state_now="$(capture_root_action_broker_state "$previous_release")" \
-    || return 1
-  if [[ "$broker_state_now" != "$broker_state" ]]; then
+  read -r broker_state_now broker_unit_file_state_now \
+    < <(capture_root_action_broker_snapshot "$previous_release") || return 1
+  if [[ "$broker_state_now" != "$broker_state" \
+    || "$broker_unit_file_state_now" != "$broker_unit_file_state" ]]; then
     cleanup_abandoned_activation_staging "$helper" "$commit" || true
     return 1
   fi
@@ -1557,6 +1937,7 @@ EOF
     --previous-release "$previous_release" \
     --broker-service-name "$service_name" \
     --broker-state "$broker_state_now" \
+    --broker-unit-file-state "$broker_unit_file_state_now" \
     || return 1
   quiesce_root_action_broker_for_publication "$helper" || return 1
   cleanup_abandoned_activation_staging "$helper" "$commit" || return 1
@@ -1730,6 +2111,28 @@ run_cli_as_ops() {
       "$cli" "$@"
 }
 
+path_is_not_executable_as_ops() {
+  local path="$1"
+  /usr/bin/timeout --kill-after=1 "$OPS_CLI_ATTESTATION_COMMAND_TIMEOUT_SECONDS" \
+    runuser -u "$OPS_USER" -- env -i \
+      HOME="$OPS_HOME" \
+      USER="$OPS_USER" \
+      LOGNAME="$OPS_USER" \
+      PATH=/usr/local/bin:/usr/bin:/bin \
+      /usr/bin/test ! -x "$path"
+}
+
+path_is_executable_as_ops() {
+  local path="$1"
+  /usr/bin/timeout --kill-after=1 "$OPS_CLI_ATTESTATION_COMMAND_TIMEOUT_SECONDS" \
+    runuser -u "$OPS_USER" -- env -i \
+      HOME="$OPS_HOME" \
+      USER="$OPS_USER" \
+      LOGNAME="$OPS_USER" \
+      PATH=/usr/local/bin:/usr/bin:/bin \
+      /usr/bin/test -x "$path"
+}
+
 validate_update_status_output() {
   local output="$1"
   local expected_ref="$2"
@@ -1848,6 +2251,962 @@ attest_restored_cli_as_ops() {
   [[ -x "$MCP_BIN_LINK" ]] || return 1
 }
 
+legacy_baseline_requires_exact_admission() {
+  local release_dir="$1"
+  local legacy_identity_rc=0
+  /usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/python3 -I - \
+    "$release_dir" "$LEGACY_RESTRICTIVE_UMASK_BASELINE_REF" <<'PY' \
+    || legacy_identity_rc="$?"
+import os
+import re
+import stat
+import sys
+
+release_raw, legacy_ref = sys.argv[1:]
+release_name = os.path.basename(os.path.normpath(release_raw))
+legacy_named = release_name.startswith(f"{legacy_ref}.")
+manifest = os.path.join(release_raw, ".agent-runtime-ops-manifest")
+
+
+def fail_closed() -> None:
+    raise SystemExit(2)
+
+
+try:
+    before = os.lstat(manifest)
+except OSError:
+    fail_closed()
+if (
+    not stat.S_ISREG(before.st_mode)
+    or stat.S_ISLNK(before.st_mode)
+    or before.st_nlink != 1
+    or before.st_size <= 0
+    or before.st_size > 256 * 1024
+):
+    fail_closed()
+try:
+    descriptor = os.open(manifest, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+except OSError:
+    fail_closed()
+try:
+    opened = os.fstat(descriptor)
+    before_identity = (
+        before.st_dev,
+        before.st_ino,
+        before.st_mode,
+        before.st_nlink,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    )
+    opened_identity = (
+        opened.st_dev,
+        opened.st_ino,
+        opened.st_mode,
+        opened.st_nlink,
+        opened.st_size,
+        opened.st_mtime_ns,
+        opened.st_ctime_ns,
+    )
+    if opened_identity != before_identity:
+        fail_closed()
+    payload = os.read(descriptor, before.st_size + 1)
+    if len(payload) != before.st_size:
+        fail_closed()
+    after = os.lstat(manifest)
+    after_identity = (
+        after.st_dev,
+        after.st_ino,
+        after.st_mode,
+        after.st_nlink,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    )
+    if after_identity != opened_identity:
+        fail_closed()
+finally:
+    os.close(descriptor)
+try:
+    text = payload.decode("utf-8", errors="strict")
+except UnicodeDecodeError:
+    fail_closed()
+source_refs = [
+    line.removeprefix("source_commit=")
+    for line in text.splitlines()
+    if line.startswith("source_commit=")
+]
+if len(source_refs) != 1 or re.fullmatch(r"[0-9a-f]{40}", source_refs[0]) is None:
+    raise SystemExit(2)
+if legacy_named:
+    raise SystemExit(0 if source_refs == [legacy_ref] else 2)
+if source_refs[0] == legacy_ref:
+    raise SystemExit(2)
+raise SystemExit(1)
+PY
+  return "$legacy_identity_rc"
+}
+
+exact_preexisting_legacy_cli_baseline_identity() {
+  local release_dir="$1"
+  local expected_ref="$2"
+  local mode_profile="$3"
+  local ops_gid
+  ops_gid="$(/usr/bin/id -g "$OPS_USER")" || return 1
+  [[ "$ops_gid" =~ ^[0-9]+$ ]] || return 1
+  /usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/python3 -I - \
+    "$release_dir" "$RELEASES_DIR" "$CURRENT_LINK" \
+    "$BIN_LINK" "$MCP_BIN_LINK" "$GEMINI_BIN_LINK" "$MANIFEST" \
+    "$STATE_ROOT/ops-update.yaml" "$REPO_URL" "$expected_ref" \
+    "$mode_profile" "$ops_gid" \
+    "$OPS_USER" "$OPS_GROUP" "$INSTALL_ROOT" "$STATE_ROOT" "$GEMINI_HOME" \
+    "$LEGACY_RESTRICTIVE_UMASK_BASELINE_REF" \
+    "$LEGACY_RESTRICTIVE_UMASK_SOURCE_PROJECTION_SHA256" \
+    "$LEGACY_RESTRICTIVE_UMASK_SOURCE_FILE_COUNT" \
+    "$LEGACY_RESTRICTIVE_UMASK_SOURCE_DIR_COUNT" \
+    "$LEGACY_RESTRICTIVE_UMASK_SOURCE_BYTE_COUNT" <<'PY' \
+    || return 1
+import hashlib
+import json
+import os
+import re
+import stat
+import sys
+
+(
+    release_raw,
+    releases_raw,
+    current_raw,
+    opsctl_raw,
+    mcp_raw,
+    gemini_raw,
+    manifest_link_raw,
+    policy_raw,
+    expected_repo,
+    expected_ref,
+    mode_profile,
+    ops_gid_raw,
+    ops_user,
+    ops_group,
+    install_root,
+    state_root,
+    gemini_home,
+    legacy_ref,
+    expected_source_projection,
+    expected_source_files_raw,
+    expected_source_dirs_raw,
+    expected_source_bytes_raw,
+) = sys.argv[1:]
+if mode_profile not in ("restrictive", "runnable"):
+    raise SystemExit(1)
+generated_dir_mode = 0o700 if mode_profile == "restrictive" else 0o755
+generated_data_mode = 0o600 if mode_profile == "restrictive" else 0o644
+generated_exec_mode = 0o700 if mode_profile == "restrictive" else 0o755
+release = os.path.realpath(release_raw)
+releases = os.path.realpath(releases_raw)
+ops_gid = int(ops_gid_raw)
+expected_source_files = int(expected_source_files_raw)
+expected_source_dirs = int(expected_source_dirs_raw)
+expected_source_bytes = int(expected_source_bytes_raw)
+if os.path.dirname(release) != releases:
+    raise SystemExit(1)
+
+
+def lstat(path: str) -> os.stat_result:
+    try:
+        return os.lstat(path)
+    except OSError as exc:
+        raise SystemExit(1) from exc
+
+
+def same_instance(left: os.stat_result, right: os.stat_result) -> bool:
+    return (
+        left.st_dev,
+        left.st_ino,
+        left.st_uid,
+        left.st_gid,
+        left.st_mode,
+        left.st_nlink,
+        left.st_size,
+        left.st_mtime_ns,
+        left.st_ctime_ns,
+    ) == (
+        right.st_dev,
+        right.st_ino,
+        right.st_uid,
+        right.st_gid,
+        right.st_mode,
+        right.st_nlink,
+        right.st_size,
+        right.st_mtime_ns,
+        right.st_ctime_ns,
+    )
+
+
+def read_regular(path: str, mode: int, maximum: int) -> str:
+    before = lstat(path)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or stat.S_ISLNK(before.st_mode)
+        or before.st_uid != 0
+        or before.st_gid != ops_gid
+        or stat.S_IMODE(before.st_mode) != mode
+        or before.st_nlink != 1
+        or before.st_size <= 0
+        or before.st_size > maximum
+    ):
+        raise SystemExit(1)
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise SystemExit(1) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if not same_instance(before, opened):
+            raise SystemExit(1)
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(65536, maximum + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > maximum:
+                raise SystemExit(1)
+        after = lstat(path)
+        if not same_instance(opened, after):
+            raise SystemExit(1)
+    finally:
+        os.close(descriptor)
+    try:
+        return b"".join(chunks).decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise SystemExit(1) from exc
+
+
+def require_symlink(path: str, target: str) -> None:
+    before = lstat(path)
+    if (
+        not stat.S_ISLNK(before.st_mode)
+        or before.st_uid != 0
+        or before.st_gid != ops_gid
+        or before.st_nlink != 1
+    ):
+        raise SystemExit(1)
+    try:
+        observed_target = os.readlink(path)
+    except OSError as exc:
+        raise SystemExit(1) from exc
+    after = lstat(path)
+    if not same_instance(before, after) or observed_target != target:
+        raise SystemExit(1)
+
+
+def read_regular_bytes(path: str, mode: int, maximum: int) -> bytes:
+    before = lstat(path)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or stat.S_ISLNK(before.st_mode)
+        or before.st_uid != 0
+        or before.st_gid != ops_gid
+        or stat.S_IMODE(before.st_mode) != mode
+        or before.st_nlink != 1
+        or before.st_size < 0
+        or before.st_size > maximum
+    ):
+        raise SystemExit(1)
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise SystemExit(1) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if not same_instance(before, opened):
+            raise SystemExit(1)
+        chunks = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(65536, maximum + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > maximum:
+                raise SystemExit(1)
+        if not same_instance(opened, lstat(path)):
+            raise SystemExit(1)
+    finally:
+        os.close(descriptor)
+    return b"".join(chunks)
+
+
+def require_generated_dir(path: str, exact_mode: int | None = None) -> None:
+    value = lstat(path)
+    if (
+        not stat.S_ISDIR(value.st_mode)
+        or stat.S_ISLNK(value.st_mode)
+        or value.st_uid != 0
+        or value.st_gid != ops_gid
+        or value.st_nlink < 2
+        or (stat.S_IMODE(value.st_mode) & 0o022) != 0
+        or (
+            exact_mode is not None
+            and stat.S_IMODE(value.st_mode) != exact_mode
+        )
+    ):
+        raise SystemExit(1)
+
+
+def validate_source_projection() -> str:
+    rows = []
+    source_files = 0
+    source_dirs = 0
+    source_bytes = 0
+    generated_roots = {
+        ".venv": generated_dir_mode,
+        "agent-clis/gemini-cli/node_modules": generated_dir_mode,
+        "build": None,
+        "opsctl/agent_runtime_ops.egg-info": None,
+    }
+
+    def visit(directory: str, relative: str) -> None:
+        nonlocal source_files, source_dirs, source_bytes
+        try:
+            entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
+        except OSError as exc:
+            raise SystemExit(1) from exc
+        for entry in entries:
+            child_relative = entry.name if not relative else f"{relative}/{entry.name}"
+            if not relative and entry.name == ".agent-runtime-ops-manifest":
+                continue
+            if child_relative in generated_roots:
+                require_generated_dir(entry.path, generated_roots[child_relative])
+                continue
+            if entry.name == "__pycache__":
+                require_generated_dir(entry.path)
+                continue
+            value = lstat(entry.path)
+            if stat.S_ISDIR(value.st_mode) and not stat.S_ISLNK(value.st_mode):
+                if (
+                    value.st_uid != 0
+                    or value.st_gid != ops_gid
+                    or stat.S_IMODE(value.st_mode) != 0o755
+                ):
+                    raise SystemExit(1)
+                rows.append("\0".join(("D", child_relative, "0755")))
+                source_dirs += 1
+                visit(entry.path, child_relative)
+                if not same_instance(value, lstat(entry.path)):
+                    raise SystemExit(1)
+                continue
+            expected_mode = 0o755 if child_relative == "install.sh" else 0o644
+            payload = read_regular_bytes(entry.path, expected_mode, 4 * 1024 * 1024)
+            source_bytes += len(payload)
+            if source_bytes > 16 * 1024 * 1024:
+                raise SystemExit(1)
+            rows.append(
+                "\0".join(
+                    (
+                        "F",
+                        child_relative,
+                        f"{expected_mode:04o}",
+                        hashlib.sha256(payload).hexdigest(),
+                    )
+                )
+            )
+            source_files += 1
+
+    visit(release, "")
+    rows.sort()
+    if (
+        source_files != expected_source_files
+        or source_dirs != expected_source_dirs
+        or source_bytes != expected_source_bytes
+    ):
+        raise SystemExit(1)
+    observed = hashlib.sha256("\0".join(rows).encode("utf-8")).hexdigest()
+    if observed != expected_source_projection:
+        raise SystemExit(1)
+    return observed
+
+
+release_meta = lstat(release)
+if (
+    not stat.S_ISDIR(release_meta.st_mode)
+    or stat.S_ISLNK(release_meta.st_mode)
+    or release_meta.st_uid != 0
+    or release_meta.st_gid != ops_gid
+    or stat.S_IMODE(release_meta.st_mode) != 0o755
+):
+    raise SystemExit(1)
+require_symlink(current_raw, f"releases/{os.path.basename(release)}")
+require_symlink(manifest_link_raw, "current/.agent-runtime-ops-manifest")
+opsctl_wrapper = read_regular(opsctl_raw, 0o755, 256 * 1024)
+mcp_wrapper = read_regular(mcp_raw, 0o755, 256 * 1024)
+gemini_wrapper = read_regular(gemini_raw, 0o755, 256 * 1024)
+expected_opsctl_wrapper = (
+    "#!/usr/bin/env bash\n"
+    "set -euo pipefail\n"
+    f'exec "{current_raw}/.venv/bin/opsctl" "$@"\n'
+)
+expected_mcp_wrapper = (
+    "#!/usr/bin/env bash\n"
+    "set -euo pipefail\n"
+    f'exec "{current_raw}/.venv/bin/agent-runtime-ops-mcp" "$@"\n'
+)
+if opsctl_wrapper != expected_opsctl_wrapper or mcp_wrapper != expected_mcp_wrapper:
+    raise SystemExit(1)
+expected_gemini_wrapper = (
+    "#!/usr/bin/env bash\n"
+    "set -euo pipefail\n"
+    "# agent-runtime-ops managed gemini wrapper\n"
+    f'OPS_USER="{ops_user}"\n'
+    f'GEMINI_ENV="${{AGENT_RUNTIME_GEMINI_ENV:-{gemini_home}/.env}}"\n'
+    'if [[ -r "$GEMINI_ENV" ]]; then\n'
+    "  set -a\n"
+    "  # shellcheck disable=SC1090\n"
+    '  . "$GEMINI_ENV"\n'
+    "  set +a\n"
+    "fi\n"
+    'if [[ "$(id -un 2>/dev/null || true)" == "$OPS_USER" ]]; then\n'
+    '  export GEMINI_CLI_TRUST_WORKSPACE="${GEMINI_CLI_TRUST_WORKSPACE:-true}"\n'
+    "  skip_agent_runtime_mcp_default=0\n"
+    '  for arg in "$@"; do\n'
+    '    case "$arg" in\n'
+    "      --)\n"
+    "        break\n"
+    "        ;;\n"
+    "      mcp|extensions|extension|skills|skill|hooks|hook|gemma)\n"
+    "        skip_agent_runtime_mcp_default=1\n"
+    "        ;;\n"
+    "    esac\n"
+    "  done\n"
+    "  has_allowed_mcp=0\n"
+    '  for arg in "$@"; do\n'
+    '    case "$arg" in\n'
+    "      --allowed-mcp-server-names|--allowed-mcp-server-names=*)\n"
+    "        has_allowed_mcp=1\n"
+    "        ;;\n"
+    "    esac\n"
+    "  done\n"
+    '  if [[ "$skip_agent_runtime_mcp_default" -eq 0 '
+    '&& "$has_allowed_mcp" -eq 0 ]]; then\n'
+    '    set -- --allowed-mcp-server-names agent-runtime-ops "$@"\n'
+    "  fi\n"
+    "fi\n"
+    f'exec "{current_raw}/agent-clis/gemini-cli/node_modules/.bin/gemini" "$@"\n'
+)
+if gemini_wrapper != expected_gemini_wrapper:
+    raise SystemExit(1)
+release_manifest = os.path.join(release, ".agent-runtime-ops-manifest")
+manifest_text = read_regular(release_manifest, 0o644, 256 * 1024)
+manifest_lines = manifest_text.splitlines()
+manifest_rows = {}
+manifest_keys = []
+for line in manifest_lines:
+    key, separator, value = line.partition("=")
+    if not separator or key in manifest_rows:
+        raise SystemExit(1)
+    manifest_rows[key] = value
+    manifest_keys.append(key)
+previous_ref = manifest_rows.get("source_commit", "")
+if previous_ref != legacy_ref or re.fullmatch(r"[0-9a-f]{40}", previous_ref) is None:
+    raise SystemExit(1)
+if not os.path.basename(release).startswith(f"{previous_ref}."):
+    raise SystemExit(1)
+expected_manifest_keys = [
+    "source_commit",
+    "source_summary",
+    "installed_at",
+    "installed_dir",
+    "install_root",
+    "ops_user",
+    "ops_group",
+    "state_root",
+    "opsctl",
+    "mcp",
+    "source_path",
+]
+if manifest_keys != expected_manifest_keys:
+    raise SystemExit(1)
+required_manifest = {
+    "source_summary": (
+        "Merge pull request #71 from Epicevent/"
+        "codex/kwrag-legacy-backup-collision-recovery "
+    ),
+    "installed_dir": release,
+    "install_root": install_root,
+    "ops_user": ops_user,
+    "ops_group": ops_group,
+    "state_root": state_root,
+    "opsctl": opsctl_raw,
+    "mcp": mcp_raw,
+}
+if any(manifest_rows.get(key) != value for key, value in required_manifest.items()):
+    raise SystemExit(1)
+if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[^\n]+", manifest_rows["installed_at"]) is None:
+    raise SystemExit(1)
+source_path = manifest_rows["source_path"]
+if not os.path.isabs(source_path) or os.path.normpath(source_path) != source_path:
+    raise SystemExit(1)
+
+source_projection = validate_source_projection()
+
+venv = os.path.join(release, ".venv")
+venv_meta = lstat(venv)
+if (
+    not stat.S_ISDIR(venv_meta.st_mode)
+    or stat.S_ISLNK(venv_meta.st_mode)
+    or venv_meta.st_uid != 0
+    or venv_meta.st_gid != ops_gid
+    or stat.S_IMODE(venv_meta.st_mode) != generated_dir_mode
+):
+    raise SystemExit(1)
+venv_bin = os.path.join(venv, "bin")
+venv_bin_meta = lstat(venv_bin)
+if (
+    not stat.S_ISDIR(venv_bin_meta.st_mode)
+    or stat.S_ISLNK(venv_bin_meta.st_mode)
+    or venv_bin_meta.st_uid != 0
+    or venv_bin_meta.st_gid != ops_gid
+    or venv_bin_meta.st_nlink < 2
+    or stat.S_IMODE(venv_bin_meta.st_mode) != generated_dir_mode
+):
+    raise SystemExit(1)
+venv_opsctl = os.path.join(venv, "bin", "opsctl")
+def require_console_entrypoint(path: str, import_target: str) -> str:
+    payload = read_regular(path, 0o755, 64 * 1024)
+    shebang, separator, body = payload.partition("\n")
+    if not separator or re.fullmatch(
+        rf"#!{re.escape(venv)}/bin/python(?:3(?:\.[0-9]+)?)?", shebang
+    ) is None:
+        raise SystemExit(1)
+    distlib_template = (
+        "# -*- coding: utf-8 -*-\n"
+        "import re\n"
+        "import sys\n"
+        f"from {import_target} import main\n"
+        "if __name__ == '__main__':\n"
+        "    sys.argv[0] = re.sub(r'(-script\\.pyw|\\.exe)?$', '', sys.argv[0])\n"
+        "    sys.exit(main())\n"
+    )
+    legacy_template = (
+        "import sys\n"
+        f"from {import_target} import main\n"
+        "if __name__ == '__main__':\n"
+        "    if sys.argv[0].endswith('.exe'):\n"
+        "        sys.argv[0] = sys.argv[0][:-4]\n"
+        "    sys.exit(main())\n"
+    )
+    if body not in (distlib_template, legacy_template):
+        raise SystemExit(1)
+    return payload
+
+
+venv_opsctl_text = require_console_entrypoint(
+    venv_opsctl, "agent_runtime_ops.cli"
+)
+venv_mcp = os.path.join(venv, "bin", "agent-runtime-ops-mcp")
+venv_mcp_text = require_console_entrypoint(
+    venv_mcp, "agent_runtime_ops.mcp_server"
+)
+gemini_cli_root = os.path.join(release, "agent-clis", "gemini-cli")
+gemini_link = os.path.join(gemini_cli_root, "node_modules", ".bin", "gemini")
+require_symlink(gemini_link, "../@google/gemini-cli/bundle/gemini.js")
+gemini_package = os.path.join(
+    gemini_cli_root, "node_modules", "@google", "gemini-cli", "package.json"
+)
+gemini_package_text = read_regular(
+    gemini_package, generated_data_mode, 256 * 1024
+)
+try:
+    gemini_package_data = json.loads(gemini_package_text)
+except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    raise SystemExit(1) from exc
+if (
+    not isinstance(gemini_package_data, dict)
+    or gemini_package_data.get("name") != "@google/gemini-cli"
+    or gemini_package_data.get("version") != "0.45.2"
+    or gemini_package_data.get("bin") != {"gemini": "bundle/gemini.js"}
+):
+    raise SystemExit(1)
+gemini_bundle = os.path.join(
+    gemini_cli_root,
+    "node_modules",
+    "@google",
+    "gemini-cli",
+    "bundle",
+    "gemini.js",
+)
+gemini_bundle_bytes = read_regular_bytes(
+    gemini_bundle, generated_exec_mode, 16 * 1024 * 1024
+)
+if not gemini_bundle_bytes.startswith(b"#!/usr/bin/env node\n"):
+    raise SystemExit(1)
+
+policy_text = read_regular(policy_raw, 0o640, 256 * 1024)
+if (
+    "\r" in policy_text
+    or not policy_text.endswith("\n")
+    or policy_text.count("\n") != 10
+):
+    raise SystemExit(1)
+policy_lines = policy_text.splitlines()
+timestamp_scalar = r"'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}'"
+
+
+implicit_non_string_patterns = tuple(
+    re.compile(pattern, re.X)
+    for pattern in (
+        r"""^(?:yes|Yes|YES|no|No|NO
+                 |true|True|TRUE|false|False|FALSE
+                 |on|On|ON|off|Off|OFF)$""",
+        r"""^(?:[-+]?(?:[0-9][0-9_]*)\.[0-9_]*(?:[eE][-+][0-9]+)?
+                 |\.[0-9][0-9_]*(?:[eE][-+][0-9]+)?
+                 |[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\.[0-9_]*
+                 |[-+]?\.(?:inf|Inf|INF)
+                 |\.(?:nan|NaN|NAN))$""",
+        r"""^(?:[-+]?0b[0-1_]+
+                 |[-+]?0[0-7_]+
+                 |[-+]?(?:0|[1-9][0-9_]*)
+                 |[-+]?0x[0-9a-fA-F_]+
+                 |[-+]?[1-9][0-9_]*(?::[0-5]?[0-9])+)$""",
+        r"^(?:~|null|Null|NULL)$",
+        r"""^(?:[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]
+                 |[0-9][0-9][0-9][0-9] -[0-9][0-9]? -[0-9][0-9]?
+                  (?:[Tt]|[ \t]+)[0-9][0-9]?
+                  :[0-9][0-9] :[0-9][0-9] (?:\.[0-9]*)?
+                  (?:[ \t]*(?:Z|[-+][0-9][0-9]?(?::[0-9][0-9])?))?)$""",
+        r"^(?:<<|=)$",
+    )
+)
+
+
+def approved_by_allows_block_plain(value: str) -> bool:
+    if not value or value[0] == " " or value[-1] == " ":
+        return False
+    if any(character in "\n\x85\u2028\u2029" for character in value):
+        return False
+    if value.startswith("---") or value.startswith("..."):
+        return False
+    for index, character in enumerate(value):
+        codepoint = ord(character)
+        if not (
+            0x20 <= codepoint <= 0x7E
+            or 0xA0 <= codepoint <= 0xD7FF
+            or 0xE000 <= codepoint <= 0xFFFD
+            or 0x10000 <= codepoint < 0x10FFFF
+        ) or character == "\ufeff":
+            return False
+        preceded_by_whitespace = index == 0 or value[index - 1] in " \t\r\n\x85\u2028\u2029"
+        followed_by_whitespace = index + 1 == len(value) or value[index + 1] in " \t\r\n\x85\u2028\u2029"
+        if index == 0:
+            if character in "#,[]{}&*!|>'\"%@`":
+                return False
+            if character in "?:" and followed_by_whitespace:
+                return False
+            if character == "-" and followed_by_whitespace:
+                return False
+        elif character == ":" and followed_by_whitespace:
+            return False
+        elif character == "#" and preceded_by_whitespace:
+            return False
+    return not any(pattern.fullmatch(value) for pattern in implicit_non_string_patterns)
+
+
+double_quote_escape_values = {
+    "0": "\0",
+    "a": "\x07",
+    "b": "\x08",
+    "t": "\t",
+    "n": "\n",
+    "v": "\x0b",
+    "f": "\x0c",
+    "r": "\r",
+    "e": "\x1b",
+    '"': '"',
+    "\\": "\\",
+    "N": "\x85",
+    "_": "\xa0",
+    "L": "\u2028",
+    "P": "\u2029",
+}
+double_quote_escape_codes = {
+    value: code for code, value in double_quote_escape_values.items()
+}
+
+
+def decode_canonical_double_quoted(token: str) -> str | None:
+    if len(token) < 2 or not token.startswith('"') or not token.endswith('"'):
+        return None
+    value = []
+    index = 1
+    while index < len(token) - 1:
+        character = token[index]
+        if character == '"':
+            return None
+        if character != "\\":
+            value.append(character)
+            index += 1
+            continue
+        index += 1
+        if index >= len(token) - 1:
+            return None
+        escape = token[index]
+        if escape in double_quote_escape_values:
+            value.append(double_quote_escape_values[escape])
+            index += 1
+            continue
+        widths = {"x": 2, "u": 4, "U": 8}
+        width = widths.get(escape)
+        if width is None or index + width >= len(token) - 1:
+            return None
+        digits = token[index + 1:index + 1 + width]
+        if re.fullmatch(f"[0-9A-F]{{{width}}}", digits) is None:
+            return None
+        codepoint = int(digits, 16)
+        if codepoint > 0x10FFFF:
+            return None
+        value.append(chr(codepoint))
+        index += 1 + width
+    return "".join(value)
+
+
+def canonical_double_quoted(value: str) -> str:
+    encoded = []
+    for character in value:
+        codepoint = ord(character)
+        if character in double_quote_escape_codes:
+            encoded.append("\\" + double_quote_escape_codes[character])
+        elif (
+            character not in ('"', "\\", "\x85", "\u2028", "\u2029", "\ufeff")
+            and (
+                0x20 <= codepoint <= 0x7E
+                or 0xA0 <= codepoint <= 0xD7FF
+                or 0xE000 <= codepoint <= 0xFFFD
+                or 0x10000 <= codepoint < 0x10FFFF
+            )
+        ):
+            encoded.append(character)
+        elif codepoint <= 0xFF:
+            encoded.append(f"\\x{codepoint:02X}")
+        elif codepoint <= 0xFFFF:
+            encoded.append(f"\\u{codepoint:04X}")
+        else:
+            encoded.append(f"\\U{codepoint:08X}")
+    return '"' + "".join(encoded) + '"'
+
+
+def approved_by_allows_single_quoted(value: str) -> bool:
+    previous_space = False
+    previous_break = False
+    break_space = False
+    space_break = False
+    special_characters = False
+    for character in value:
+        codepoint = ord(character)
+        if not (character == "\n" or 0x20 <= codepoint <= 0x7E):
+            if not (
+                character == "\x85"
+                or 0xA0 <= codepoint <= 0xD7FF
+                or 0xE000 <= codepoint <= 0xFFFD
+                or 0x10000 <= codepoint < 0x10FFFF
+            ) or character == "\ufeff":
+                special_characters = True
+        if character == " ":
+            break_space = break_space or previous_break
+            previous_space = True
+            previous_break = False
+        elif character in "\n\x85\u2028\u2029":
+            space_break = space_break or previous_space
+            previous_space = False
+            previous_break = True
+        else:
+            previous_space = False
+            previous_break = False
+    return not (break_space or space_break or special_characters)
+
+
+def canonical_approved_by_scalar(token: str) -> bool:
+    if token == "''":
+        value = ""
+    elif token.startswith('"'):
+        value = decode_canonical_double_quoted(token)
+        if value is None:
+            return False
+    elif token.startswith("'") and token.endswith("'"):
+        value = token[1:-1].replace("''", "'")
+        if "'" + value.replace("'", "''") + "'" != token:
+            return False
+    else:
+        value = token
+    single_quoted = approved_by_allows_single_quoted(value)
+    # When single quoting is allowed, PyYAML renders line breaks as a
+    # multiline scalar.  No equivalent one-line token is canonical for this
+    # exact ten-line writer projection.  Special whitespace combinations that
+    # disable single quoting are instead emitted as canonical double quotes.
+    if any(character in "\n\x85\u2028\u2029" for character in value) and single_quoted:
+        return False
+    if approved_by_allows_block_plain(value):
+        expected = value
+    elif single_quoted:
+        expected = "'" + value.replace("'", "''") + "'"
+    else:
+        expected = canonical_double_quoted(value)
+    return token == expected
+
+
+if len(policy_lines) != 10:
+    raise SystemExit(1)
+expected_policy_lines = (
+    "meta:",
+    "  schema_version: 1",
+    None,
+    "  scope: private_server_state",
+    "updates:",
+    "  agent-runtime-ops:",
+    f"    repo_url: {expected_repo}",
+    f"    approved_ref: {expected_ref}",
+    None,
+    None,
+)
+if any(
+    expected is not None and observed != expected
+    for observed, expected in zip(policy_lines, expected_policy_lines)
+):
+    raise SystemExit(1)
+if re.fullmatch(f"  updated_at: {timestamp_scalar}", policy_lines[2]) is None:
+    raise SystemExit(1)
+if re.fullmatch(f"    approved_at: {timestamp_scalar}", policy_lines[8]) is None:
+    raise SystemExit(1)
+approved_by_prefix = "    approved_by: "
+if not policy_lines[9].startswith(approved_by_prefix) or not canonical_approved_by_scalar(
+    policy_lines[9][len(approved_by_prefix):]
+):
+    raise SystemExit(1)
+identity_paths = (
+    release,
+    current_raw,
+    opsctl_raw,
+    mcp_raw,
+    gemini_raw,
+    manifest_link_raw,
+    release_manifest,
+    venv,
+    venv_bin,
+    venv_opsctl,
+    venv_mcp,
+    gemini_link,
+    gemini_package,
+    gemini_bundle,
+    policy_raw,
+)
+identity_rows = []
+identity_rows.append(mode_profile)
+for path in identity_paths:
+    value = lstat(path)
+    identity_rows.append(
+        ":".join(
+            str(item)
+            for item in (
+                value.st_dev,
+                value.st_ino,
+                value.st_uid,
+                value.st_gid,
+                value.st_mode,
+                value.st_nlink,
+                value.st_size,
+                value.st_mtime_ns,
+                value.st_ctime_ns,
+            )
+        )
+    )
+identity_rows.extend(
+    hashlib.sha256(value.encode("utf-8")).hexdigest()
+    for value in (
+        opsctl_wrapper,
+        mcp_wrapper,
+        gemini_wrapper,
+        manifest_text,
+        source_projection,
+        venv_opsctl_text,
+        venv_mcp_text,
+        gemini_package_text,
+        policy_text,
+    )
+)
+identity_rows.append(hashlib.sha256(gemini_bundle_bytes).hexdigest())
+identity_rows.extend((os.readlink(current_raw), os.readlink(manifest_link_raw)))
+print(hashlib.sha256("\0".join(identity_rows).encode("utf-8")).hexdigest())
+PY
+}
+
+attest_exact_preexisting_unrunnable_cli_baseline() {
+  local release_dir="$1"
+  local expected_ref="$2"
+  local before_identity after_identity
+  before_identity="$(
+    exact_preexisting_legacy_cli_baseline_identity \
+      "$release_dir" "$expected_ref" restrictive
+  )" || return 1
+  [[ "$before_identity" =~ ^[0-9a-f]{64}$ ]] || return 1
+  path_is_not_executable_as_ops "$release_dir/.venv/bin/opsctl" \
+    >/dev/null 2>&1 || return 1
+  after_identity="$(
+    exact_preexisting_legacy_cli_baseline_identity \
+      "$release_dir" "$expected_ref" restrictive
+  )" || return 1
+  [[ "$after_identity" == "$before_identity" ]]
+}
+
+attest_exact_preexisting_runnable_cli_baseline_without_execution() {
+  local release_dir="$1"
+  local expected_ref="$2"
+  local before_identity after_probe_identity
+  before_identity="$(
+    exact_preexisting_legacy_cli_baseline_identity \
+      "$release_dir" "$expected_ref" runnable
+  )" || return 1
+  [[ "$before_identity" =~ ^[0-9a-f]{64}$ ]] || return 1
+  path_is_executable_as_ops "$release_dir/.venv/bin/opsctl" \
+    >/dev/null 2>&1 || return 1
+  after_probe_identity="$(
+    exact_preexisting_legacy_cli_baseline_identity \
+      "$release_dir" "$expected_ref" runnable
+  )" || return 1
+  [[ "$after_probe_identity" == "$before_identity" ]]
+}
+
+attest_restored_cli_or_exact_preexisting_legacy() {
+  local release_dir="$1"
+  local expected_ref="$2"
+  local legacy_admission_rc=0
+  RESTORED_CLI_RESULT=""
+  if legacy_baseline_requires_exact_admission "$release_dir"; then
+    if attest_exact_preexisting_unrunnable_cli_baseline \
+      "$release_dir" "$expected_ref"; then
+      RESTORED_CLI_RESULT="restored_exact_but_preexisting_unrunnable"
+      return 0
+    fi
+    if attest_exact_preexisting_runnable_cli_baseline_without_execution \
+      "$release_dir" "$expected_ref"; then
+      RESTORED_CLI_RESULT="restored_admissible_preexisting_runnable_unexecuted"
+      return 0
+    fi
+    return 1
+  else
+    legacy_admission_rc="$?"
+  fi
+  [[ "$legacy_admission_rc" -eq 1 ]] || return 1
+  if attest_restored_cli_as_ops "$release_dir" "$expected_ref"; then
+    RESTORED_CLI_RESULT="svcops_verified"
+    return 0
+  fi
+  return 1
+}
+
 capture_previous_active_release() {
   local expected_ref="$1"
   local previous_release releases_real
@@ -1872,30 +3231,33 @@ capture_previous_active_release() {
     || die "current release resolves outside the releases directory"
   [[ -d "$previous_release" && ! -L "$previous_release" ]] \
     || die "current release target is not a fixed release directory"
-  attest_restored_cli_as_ops "$previous_release" "$expected_ref" \
-    || die "previous active svcops CLI identity is not restorable"
+  attest_restored_cli_or_exact_preexisting_legacy \
+    "$previous_release" "$expected_ref" \
+    || die "previous active CLI is neither svcops-verifiable nor an exact admissible legacy baseline"
+  printf 'previous_active_cli_state=%s\n' "$RESTORED_CLI_RESULT" >&2
   printf '%s\n' "$previous_release"
 }
 
-capture_root_action_broker_state() {
+capture_root_action_broker_snapshot() {
   local previous_release="$1"
-  local service_name tuple load_state active_state sub_state main_pid job_present
+  local service_name tuple load_state active_state sub_state main_pid job_present unit_file_state
   local -a tuple_fields=()
   if ! command -v systemctl >/dev/null 2>&1; then
-    printf 'unavailable\n'
+    printf 'unavailable unavailable\n'
     return 0
   fi
   service_name="$(basename "$ROOT_ACTION_BROKER_SERVICE_FILE")"
   tuple="$(read_root_action_broker_systemd_tuple "$service_name")" \
     || die "root-action broker pre-activation systemd tuple probe failed"
   mapfile -t tuple_fields <<<"$tuple"
-  [[ "${#tuple_fields[@]}" -eq 5 ]] \
+  [[ "${#tuple_fields[@]}" -eq 6 ]] \
     || die "root-action broker pre-activation systemd tuple is malformed"
   load_state="${tuple_fields[0]#LoadState=}"
   active_state="${tuple_fields[1]#ActiveState=}"
   sub_state="${tuple_fields[2]#SubState=}"
   main_pid="${tuple_fields[3]#MainPID=}"
   job_present="${tuple_fields[4]#JobPresent=}"
+  unit_file_state="${tuple_fields[5]#UnitFileState=}"
   case "$load_state" in
     loaded|not-found) ;;
     *) die "root-action broker pre-activation load state is not admissible: $load_state" ;;
@@ -1904,21 +3266,27 @@ capture_root_action_broker_state() {
     loaded:active:running:no)
       [[ "$main_pid" =~ ^[1-9][0-9]{0,9}$ ]] \
         || die "active root-action broker has an invalid MainPID"
+      [[ "$unit_file_state" == enabled || "$unit_file_state" == disabled ]] \
+        || die "active root-action broker unit-file state is not admissible"
       [[ -n "$previous_release" ]] \
         || die "active root-action broker has no previous active release"
       root_action_broker_release_attested "$service_name" "$previous_release" \
         || die "previous root-action broker release is not exactly attested"
-      printf 'active\n'
+      printf 'active %s\n' "$unit_file_state"
       ;;
     loaded:inactive:dead:no)
       [[ "$main_pid" == 0 ]] \
         || die "inactive root-action broker still has a MainPID"
-      printf 'inactive\n'
+      [[ "$unit_file_state" == enabled || "$unit_file_state" == disabled ]] \
+        || die "inactive root-action broker unit-file state is not admissible"
+      printf 'inactive %s\n' "$unit_file_state"
       ;;
     not-found:inactive:dead:no)
       [[ "$main_pid" == 0 ]] \
         || die "absent root-action broker still has a MainPID"
-      printf 'absent\n'
+      [[ "$unit_file_state" == absent ]] \
+        || die "absent root-action broker unit-file state is not exact"
+      printf 'absent absent\n'
       ;;
     *)
       die "root-action broker pre-activation state is transient or unsafe: $load_state/$active_state/$sub_state"
@@ -1930,9 +3298,11 @@ activate_and_attest_cli_or_restore() {
   local commit="$2"
   local previous_release="$3"
   local broker_state="$4"
-  local helper="$5"
+  local broker_unit_file_state="$5"
+  local helper="$6"
   local activation_rc=0
-  activate_release "$release_dir" "$commit" "$previous_release" "$helper" "$broker_state" \
+  activate_release "$release_dir" "$commit" "$previous_release" "$helper" \
+    "$broker_state" "$broker_unit_file_state" \
     || activation_rc="$?"
   if [[ "$activation_rc" -eq 0 ]]; then
     attest_active_cli_as_ops "$release_dir" "$commit" || activation_rc="$?"
@@ -1941,9 +3311,12 @@ activate_and_attest_cli_or_restore() {
     if [[ -e "$ACTIVATION_TRANSACTION_DIR" || -L "$ACTIVATION_TRANSACTION_DIR" ]]; then
       recover_and_attest_activation_baseline \
         "$helper" "$commit" "$previous_release" \
-        || die "activation failed and durable previous identity restoration failed"
+        || die "activation failed and durable journaled-baseline recovery failed"
+    else
+      RESTORED_CLI_RESULT="unchanged_prepublication"
+      RESTORED_BROKER_RESULT="unchanged_prepublication"
     fi
-    die "post-activation svcops CLI attestation failed; previous active identity restored"
+    die "post-activation svcops CLI attestation failed; baseline_cli_state=$RESTORED_CLI_RESULT; baseline_broker_state=$RESTORED_BROKER_RESULT"
   fi
   info "ops_cli_post_activation=svcops_verified"
 }
@@ -1954,7 +3327,7 @@ install_root_action_broker_or_restore() {
   local previous_release="$3"
   local broker_state="$4"
   local helper="$5"
-  local broker_install_rc=0 journal_state
+  local broker_install_rc=0 journal_state activation_phase
   journal_state="$(
     run_activation_transaction "$helper" show --field broker_state
   )" || broker_install_rc="$?"
@@ -1975,9 +3348,17 @@ install_root_action_broker_or_restore() {
       || die "broker installed but activation transaction finalization failed"
     return 0
   fi
+  activation_phase="$(
+    run_activation_transaction "$helper" show --field broker_activation_phase
+  )" || die "root-action broker setup failed and activation phase is unavailable"
+  case "$activation_phase" in
+    start_dispatch_committed|active_attested)
+      die "root-action broker start dispatch was committed; transaction preserved and start will not be redispatched"
+      ;;
+  esac
   recover_and_attest_activation_baseline "$helper" "$commit" "$previous_release" \
-    || die "root-action broker setup failed and durable previous identity restoration failed"
-  die "root-action broker setup failed; previous active identity restored"
+    || die "root-action broker setup failed and durable journaled-baseline recovery failed"
+  die "root-action broker setup failed; baseline_cli_state=$RESTORED_CLI_RESULT; baseline_broker_state=$RESTORED_BROKER_RESULT"
 }
 
 register_codex_mcp() {
@@ -1996,7 +3377,8 @@ register_codex_mcp() {
 install_package() {
   local src commit summary release_name tmp_release release_dir
   local activation_helper previous_active_release previous_broker_state
-  local activation_cleanup_rc=0
+  local previous_broker_unit_file_state
+  local activation_cleanup_rc=0 activation_resume_rc=0
   require_root
   validate_activation_path_strings
   if ! src="$(repo_root)"; then
@@ -2033,8 +3415,15 @@ install_package() {
     verify_activation_helper_identity "$src" "$commit" "$activation_helper"
   )" || die "activation helper does not match the exact source commit"
   with_install_lock
+  resume_committed_candidate_broker_activation \
+    "$activation_helper" "$commit" || activation_resume_rc="$?"
+  case "$activation_resume_rc" in
+    0) die "committed candidate broker activation finalized; rerun install to continue" ;;
+    1) ;;
+    *) die "committed candidate broker activation is not exactly active; transaction preserved and start was not redispatched" ;;
+  esac
   if recover_pending_activation_transaction "$activation_helper" "$commit"; then
-    die "pending activation recovered to the previous identity; rerun install to begin a new activation"
+    die "pending activation recovered its journaled managed baseline; rerun install to begin a new activation"
   fi
   cleanup_abandoned_activation_staging "$activation_helper" "$commit" \
     || activation_cleanup_rc="$?"
@@ -2044,7 +3433,9 @@ install_package() {
     *) die "unsafe or unremovable activation staging residue" ;;
   esac
   previous_active_release="$(capture_previous_active_release "$commit")"
-  previous_broker_state="$(capture_root_action_broker_state "$previous_active_release")"
+  read -r previous_broker_state previous_broker_unit_file_state \
+    < <(capture_root_action_broker_snapshot "$previous_active_release") \
+    || die "root-action broker pre-activation snapshot failed"
   ensure_base_packages
   require_commands
   summary="$(source_summary "$src")"
@@ -2077,7 +3468,7 @@ install_package() {
 
   activate_and_attest_cli_or_restore \
     "$release_dir" "$commit" "$previous_active_release" \
-    "$previous_broker_state" "$activation_helper"
+    "$previous_broker_state" "$previous_broker_unit_file_state" "$activation_helper"
   install_root_action_broker_or_restore \
     "$release_dir" "$commit" "$previous_active_release" \
     "$previous_broker_state" "$activation_helper"
@@ -2224,10 +3615,15 @@ case "${1:-install}" in
   install)
     install_package
     ;;
+  revoke-broker-reactivation)
+    [[ "$#" -eq 5 ]] \
+      || die "usage: sudo bash install.sh revoke-broker-reactivation EXPECTED_COMMIT EXPECTED_PREVIOUS_RELEASE EXPECTED_SERVICE EXPECTED_ORIGIN_SHA256"
+    revoke_carried_broker_reactivation "$2" "$3" "$4" "$5"
+    ;;
   --check|check)
     check_install
     ;;
   *)
-    die "usage: sudo bash install.sh [install|--check]"
+    die "usage: sudo bash install.sh [install|revoke-broker-reactivation EXPECTED_COMMIT EXPECTED_PREVIOUS_RELEASE EXPECTED_SERVICE EXPECTED_ORIGIN_SHA256|--check]"
     ;;
 esac

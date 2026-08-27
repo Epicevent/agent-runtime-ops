@@ -175,35 +175,137 @@ was active, inactive, absent, or unavailable. Unsafe pre-state (including a
 dangling managed symlink, hard link, special node, wrong owner, or unexpected
 type) is rejected before the journal or a managed entry is written.
 
+One compatibility admission exists for the exact historical
+`443c5fdaac231a1c62d4a927ca93e19d055e400a` release. That installer inherited a
+caller `umask 077` into its generated `.venv`, so an otherwise exact root-owned
+baseline can have `.venv` mode `0700` and be unexecutable by `svcops`. The
+successor does not chmod or otherwise repair that active baseline in place. It
+requires the exact tracked-source projection (322 files, 41 directories,
+2,881,364 bytes, digest-bound to the 443 commit), release manifest, policy
+approval, global wrapper bytes, exact generated console-entrypoint templates,
+Gemini launcher/package coordinates, root ownership, links, and a narrowly
+admitted generated-mode profile. Both the observed restrictive profile
+(`.venv` directories `0700`, selected Gemini data `0600`, selected Gemini
+executable `0700`) and the historical normal-umask profile (`0755`, `0644`, and
+`0755`, respectively) must pass that same complete no-follow identity check
+before the successor installer invokes any legacy CLI or Gemini payload during
+admission. Only then does a fixed `/usr/bin/test` under the `svcops` identity
+classify the inner CLI. An exact restrictive
+baseline must be non-executable and is recorded as
+`restored_exact_but_preexisting_unrunnable`; an exact runnable baseline is
+recorded as `restored_admissible_preexisting_runnable_unexecuted`. Neither
+legacy profile executes its interpreter, site-packages, or Gemini payload during
+admission. Probe errors, mixed profiles, or identity drift fail closed before
+the successor installer invokes those legacy payloads. This admission guarantee
+does not assert that the updater bootstrap, an already-running broker, another
+timer, or another administrator cannot have executed old code outside this
+installer's admission path. The approval file must also match the complete canonical
+`ops-update.yaml` schema emitted by the update-policy writer; duplicate, missing,
+unknown, or trailing malformed YAML is rejected rather than ignored after the
+required repo/ref rows. The selected generated files and Gemini bundle are no-follow read and
+content-hashed into the before/after identity. This is an exact preservation
+check of the observed root-controlled legacy payload, not a claim that every
+generated `.venv` or `node_modules` byte belongs to the Git tree. The newly
+materialized candidate is the only compatibility-path code executed as `svcops`:
+it must be rebuilt from the approved Git tree and pass the normal pre-activation
+CLI/Gemini attestation.
+
+If later activation fails, transaction recovery restores the journal-bound
+managed entrypoints, `current`, manifest link, and prior broker unit. The
+selected legacy release payload is not stored in the transaction; it is freshly
+revalidated against the admissible 443 profile after filesystem restoration and
+before any broker-state restoration. This is root-controlled continuity, not a
+retrospective claim that the legacy site-packages tree was canonically
+reproduced from Git.
+
 If the installer is interrupted after any publication or broker transition,
 the pending transaction remains under the install root. The next invocation
 must use the exact same commit-bound helper. Under the install lock it restores
-the complete previous identity, restores and attests the prior broker state,
-re-attests the previous CLI as `svcops`, durably retires the transaction, and
-then stops. It never continues into a new activation in that invocation; the
-operator reruns the installer only after recovery has completed. A failed first
-install converges to the exact all-absent baseline.
+the journaled managed paths, freshly revalidates the admissible unchanged 443
+profile without executing its payload, then restores and attests the safe broker
+state. It records either `restored_exact_but_preexisting_unrunnable` or
+`restored_admissible_preexisting_runnable_unexecuted`. Because those historical
+profiles do not bind the complete broker interpreter and site-packages closure,
+recovery of a transaction that recorded the production `active`/`enabled`
+broker deliberately leaves the restored unit inactive **and disabled**; it never
+restarts root-privileged legacy code. Other legacy active/unit-file combinations
+fail closed with the pending transaction preserved rather than inventing a new
+availability policy. The durable transaction keeps baseline state (`inactive`/`disabled`)
+separate from the previously measured candidate target (`active`/`enabled`). An
+exact origin record binds that carried target to the recovered manifest digest,
+failed candidate commit, previous release, service name, and baseline unit
+digest. Inactive, absent, and unavailable recorded states retain their normal
+exact restoration checks. A first-install absent baseline instead targets an
+installed but inactive and disabled candidate unit.
+
+Recovery finalizes the baseline into the existing root-owned acknowledged
+transaction identity and stops the installer invocation. The next invocation
+may adopt the carried target only for the same exact approved commit and only
+after the live baseline again proves inactive, disabled, and byte-identical.
+Adoption first atomically renames the carrier's intent marker to a claimed
+identity. Revocation and adoption therefore cannot both report success; a kill
+before the new pending journal is published leaves a replayable claimed carrier,
+not an unowned or silently revoked intent.
+The transaction helper is an installer-internal surface: supported begin,
+cleanup, recovery, publication, acknowledgement, and revocation calls all run
+under the installer's existing exclusive install lock. Concurrent direct helper
+invocation outside that lock is not an admitted operation contract.
+The rebuilt candidate unit remains disabled through publication. The helper
+then durably commits an at-most-one start-dispatch marker before the installer
+enables or starts the service. Only the immutable candidate release may be
+started, and its stable PID, exact argv/environment release, active/running
+tuple, empty systemd job, and enabled unit state are attested before the active
+marker and candidate finalization. A retry that sees a committed dispatch is
+attest-only: it never dispatches `start` again. If the candidate is not already
+exactly active, that retry fails closed with the transaction preserved.
+
+An explicit revocation is also transaction-bound. It must name the exact commit,
+previous release, service, and origin manifest digest before the carried target
+can be retired. An out-of-band `systemctl disable` or `start` is neither a
+revocation nor continuation authority; drift is rejected rather than silently
+changing the carried intent. The v2 transaction schema intentionally fails
+closed on a v1 pending/recovered directory; such residue must be resolved under
+its exact source helper instead of being guessed or migrated by the new helper.
+The supported operator surface is `sudo bash install.sh
+revoke-broker-reactivation EXPECTED_COMMIT EXPECTED_PREVIOUS_RELEASE
+EXPECTED_SERVICE EXPECTED_ORIGIN_SHA256` from an exact trusted source checkout.
+The four arguments are the reviewed carrier identity, not caller-selected
+authority. The installer validates their grammar, acquires the same persistent
+lock, reads the root-controlled carrier, requires every observed value to equal
+the reviewed arguments, atomically records revocation, and retires only that
+exact carrier. Missing, stale, or mismatched bindings fail before the revocation
+write. A corrected successor may then install against the measured
+inactive/disabled baseline; revocation deliberately discards the old active
+target rather than transferring authority to an unrelated commit.
 
 Recovery finalization uses a distinct root-owned `recovered.complete` identity.
 The next installer validates its exact commit-bound manifest, payload digests,
 live baseline, and zero staging residue before acknowledging it. A killed
 acknowledgement remains restartable under an `acknowledged` or `retired`
-identity. Every invocation that observes one of these recovery identities stops
-before package installation or a new activation.
+identity. The invocation that creates or retires that acknowledgement stops
+before package installation or a new activation. A later fresh invocation may
+continue only when an exact acknowledged active-intent carrier validates and is
+atomically transferred into the new pending transaction described above.
 
 The broker service state admitted before release construction is measured again
 under the install lock immediately before the journal is created. A change from
 active, inactive, or absent during that interval aborts before publication; the
 stale state is never written into the transaction as recovery authority.
-An already-active broker is then stopped and attested inactive before `current`
-can move. The candidate broker unit pins both its condition and `ExecStart` to
+An already-active broker is disabled, stopped, and attested inactive before
+`current` can move, so reboot cannot execute the legacy unit during recovery.
+On a successful carried-intent retry, the journaled target causes the newly
+installed candidate broker - never the legacy broker - to be started and
+attested before candidate finalization. The candidate broker unit pins both
+its condition and `ExecStart` to
 the immutable candidate release rather than the mutable `current` link, and its
 running process is checked on one stable `MainPID`: the environment release and
 the exact three-element argv (`python`, `-m`, broker module) must agree, and the
-PID is re-read unchanged before candidate finalization. Recovery restores
-`current` and the previous unit before it
-restarts an originally active broker, so no broker restart can cross the
-publication window under a false release identity.
+PID is re-read unchanged before candidate finalization. Ordinary recovery can
+restore an active broker only after the normal CLI identity is verified. The
+exceptional 443 compatibility profiles instead carry the target while keeping
+the legacy broker inactive and disabled as described above, so no unbound legacy
+broker execution crosses the publication window. Pending, candidate-bound, or
+dispatch-committed releases are never eligible for pruning.
 
 An entry whose live identity already equals the candidate identity is not
 replaced. This preserves the inode of the manifest symlink when its baseline
